@@ -75,7 +75,14 @@ $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
 $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM:
 	sh tools/fetch-freedos.sh $(FREEDOS)
 
-dos.img: $(BUILD)/fat32lba.bin tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM
+# Rebuild C: when EXTRA names another folder or anything in it changes.
+EXTRA_FILES := $(if $(EXTRA),$(shell find $(EXTRA) -type f 2>/dev/null))
+$(BUILD)/extra.stamp: FORCE | $(BUILD)
+	@echo '$(EXTRA)' | cmp -s - $@ || echo '$(EXTRA)' > $@
+FORCE:
+
+dos.img: $(BUILD)/fat32lba.bin tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
+         $(BUILD)/extra.stamp $(EXTRA_FILES)
 	python3 tools/mkdisk.py $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
 	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
 	    $(if $(EXTRA),$(wildcard $(EXTRA)/*))
@@ -145,5 +152,5 @@ run-efi-app: esp.img
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
-.PHONY: all iso efi esp run run-iso run-efi run-efi-app clean
+.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app clean
 -include $(OBJS:.o=.d)

@@ -47,7 +47,12 @@ as GRUB would. Load options go to the kernel (`debug=2`, `nopae`); `debug`
 alone pauses before leaving the firmware. A small ESP may need a smaller C:
 (`make efi DISK_MB=34`).
 
-Options: `EXTRA=dir` copies a directory's files into C:\, `DISK_MB=` sets
+Adding programs: put them in a folder (e.g. `games/POP/...`) and build with
+`EXTRA=games`; its contents land in C:\ (here C:\POP). `make esp EXTRA=games`
+or `make iso EXTRA=games` rebuild C: and the image that carries it (esp.img and
+vmdos.iso hold their own copy of dos.img). By hand: `mcopy -s -i dos.img@@1M POP ::/`.
+
+Options: `EXTRA=dir` copies a directory's contents into C:\, `DISK_MB=` sets
 the size of C: (34 or more), `FREEDOS=dir` uses your own KERNEL.SYS and
 COMMAND.COM. Kernel command line `debug=2` or `debug=3` logs ports and
 interrupts to COM1.
