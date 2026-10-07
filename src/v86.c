@@ -94,7 +94,10 @@ static struct regs *deliver(struct regs *r)
     if (dpmi_route_rm_irqs < 0) dpmi_route_rm_irqs = !strstr(cmdline, "norouteirq");
     int vec = vpic_pending();
     if (vec < 0) {
-        if (!pm && mouse_callback_due()) mouse_start_callback(r);
+        if (mouse_callback_due()) {
+            if (!pm) mouse_start_callback(r);
+            else return dpmi_rm_iret_call(r, 0xF000, mouse_begin_callback());   /* DOS/4GW games */
+        }
         return r;
     }
     vpic_ack(vec);
@@ -119,6 +122,11 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
+    if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
+        AX(r) = (u16)speed_api(BX(r));
+        BX(r) = 0x564D;
+        return;
+    }
     /* The mouse driver too, unless a DOS mouse driver has taken INT 33h
        (DOS leaves unused vectors on a bare IRET). */
     if (n == 0x33 && (tgt == bios_stub_entry(0x33) || rd8(tgt) == 0xCF)) {

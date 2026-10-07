@@ -157,6 +157,14 @@ void mouse_start_callback(struct regs *r)
     r->eip = rd16(MOUSE_CB_PTR);
 }
 
+/* For a DPMI client in protected mode: the callback runs on a real-mode
+   excursion (dpmi.c); returns the stub's offset in F000h. */
+u16 mouse_begin_callback(void)
+{
+    in_callback = 1;
+    return rd16(MOUSE_CB_PTR);
+}
+
 /* TRAP 0x34 in mouse_cb: load the event registers. */
 void mouse_cb_regs(struct regs *r)
 {

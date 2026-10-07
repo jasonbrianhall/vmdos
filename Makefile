@@ -84,13 +84,16 @@ $(BUILD)/extra.stamp: FORCE | $(BUILD)
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 FORCE:
 
+$(BUILD)/VMSPEED.COM: dos/vmspeed.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
          $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
-	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS \
+	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
 # grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).

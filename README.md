@@ -76,9 +76,10 @@ menuentry "FreeDOS (vmdos)" {
 ```
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):
-`speed=N` on the kernel command line runs the guest at N percent of full
-speed (`speed=2`, `speed=0.5`; `KARGS="speed=2"` for the ISO), and
-Ctrl+Alt+F11 / Ctrl+Alt+F12 step it slower / faster at any time.
+`VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,
+`VMSPEED` alone shows it; it's in C:\), Ctrl+F11 / Ctrl+F12 step it slower /
+faster while a program runs (shown at the top right), and `speed=N` on the
+kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
 C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
@@ -94,7 +95,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   `usb=off` on the command line skips USB.
 - Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
   MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
-  the program's event handler (0Ch/14h). The pointer is drawn over text and
+  the program's event handler (0Ch/14h; for DOS extenders' programs too,
+  run from protected mode through their real-mode callback). The pointer is drawn over text and
   mode 13h by the renderer. A DOS mouse driver you load (CTMOUSE) takes over.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
   `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
@@ -109,6 +111,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   area. Client memory appears at linear
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
+- VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
+  4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
+  0800h maps it), scan line length, display start, palette (4F00h-4F09h).
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
   or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses:
   single-plane access mapped directly, latch copies and the rest emulated),
@@ -130,7 +135,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- Mode X's 240-line timing, VESA, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, VBE 3.0 / VBE protected-mode interface, VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout

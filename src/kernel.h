@@ -140,6 +140,10 @@ void vdev_tick(void);                         /* from the real timer IRQ */
 void vkbd_real_scancode(u8 sc);               /* from the real keyboard IRQ */
 void speed_init(void);                        /* speed= (slowdown) */
 void speed_throttle(void);                    /* after each timer tick */
+u32 speed_api(u32 pm);                        /* INT 2Fh AX=5653h */
+void video_osd(const char *msg);              /* a note at the top right for 2 s */
+void video_vbe_window(struct regs *r);        /* VESA bank switch (4F05h / WinFuncPtr) */
+int video_vram_range(u32 p, u32 n);           /* inside the VESA framebuffer? */
 int vkbd_read_data(void);                     /* guest's port 60h read */
 void vkbd_refill(void);
 u32 vpit_clock(void);
@@ -169,6 +173,8 @@ void mouse_update(void);
 void mouse_int33(struct regs *r);
 int mouse_callback_due(void);
 void mouse_start_callback(struct regs *r);
+u16 mouse_begin_callback(void);               /* for a client in PM: the stub's offset */
+struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip);
 void mouse_cb_regs(struct regs *r);
 void mouse_cb_done(void);
 int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);

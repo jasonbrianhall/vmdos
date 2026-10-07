@@ -89,6 +89,10 @@ static u8 crtc_idx, seq_idx, gc_idx, atc_idx, atc_flip, misc_out = 0x67;
 static u8 seq[8], gc[16], atc[21];
 static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 static u32 pal[256];
+
+/* VESA BIOS state (see the VBE section) */
+static int vbe_on;
+static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int full_redraw = 1, last_layout_mode = -1;
 
 static const u8 ega_atc[16] = { 0, 1, 2, 3, 4, 5, 0x14, 7, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F };
@@ -163,7 +167,7 @@ static void modex_check(void);
 /* Graphics mode size in pixels. */
 static int gfx_w(void) { return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320; }
 static int gfx_h(void) { return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200; }
-int video_gfx_height(void) { return is_text(video_mode) ? 200 : gfx_h(); }
+int video_gfx_height(void) { return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h(); }
 
 /* CGA colour select (port 3D9h, INT 10h AH=0Bh): background (or the
    640x200 foreground), palette and intensity, as attribute-palette entries. */
@@ -192,9 +196,11 @@ static void sync_cursor_crtc(void)
     crtc[0x0F] = (u8)off;
 }
 
+static void vbe_off(void);
 void video_set_mode(int mode, int clear)
 {
     mode &= 0x7F;
+    vbe_off();
     video_mode = mode;
     text_cols = (mode == 0 || mode == 1 || mode == 4 || mode == 5 || mode == 0x0D || mode == 0x13) ? 40 : 80;
     text_rows = 25;
@@ -267,7 +273,7 @@ static void layout(void)
     if (g_w > fb_w) { g_w = fb_w; g_h = fb_w * 3 / 4; }
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
-    u32 w = is_text(video_mode) ? 320 : (u32)gfx_w();
+    u32 w = vbe_on ? vbe_w : is_text(video_mode) ? 320 : (u32)gfx_w();
     for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * w / g_w);
 }
 
@@ -570,6 +576,284 @@ static void refresh_fallback(void)
     outb(0x3D4, 0x0F); outb(0x3D5, (u8)off);
 }
 
+
+/* ---------------- VESA BIOS (VBE 2.0) ----------------
+   4 MB of video memory in kernel RAM, identity-mapped and open to the
+   guest: protected-mode programs use it as the linear framebuffer at its
+   real address (DPMI 0800h hands that back), real-mode ones through the
+   A000h window, which function 05h (or the WinFuncPtr far call) maps onto
+   a 64 KB bank. 8-bit modes use the VGA DAC; 15/16/32-bit ones are direct
+   colour. Tables live in the BIOS segment at F000:C000. */
+#define VRAM_SIZE (4u << 20)
+#define VBE_DATA 0xFC000u
+static u8 *vram, *vshadow;
+static u32 vbe_bank;
+static u16 vbe_cur;
+static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
+    { 0x100, 640, 400, 8 }, { 0x101, 640, 480, 8 }, { 0x103, 800, 600, 8 }, { 0x105, 1024, 768, 8 },
+    { 0x110, 640, 480, 15 }, { 0x111, 640, 480, 16 }, { 0x112, 640, 480, 32 },
+    { 0x113, 800, 600, 15 }, { 0x114, 800, 600, 16 }, { 0x115, 800, 600, 32 },
+    { 0x116, 1024, 768, 15 }, { 0x117, 1024, 768, 16 }, { 0x118, 1024, 768, 32 },
+};
+#define N_VMODES (int)(sizeof vmodes / sizeof vmodes[0])
+
+static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
+
+static void vbe_init(void)
+{
+    vram = phys_alloc(VRAM_SIZE);
+    vshadow = phys_alloc(VRAM_SIZE);
+    set_user((u32)(uintptr_t)vram, VRAM_SIZE, 1);
+    static const char *const str[4] = { "vmdos VBE", "vmdos", "vmdos SVGA", "1.0" };
+    for (int i = 0; i < 4; i++) {
+        u32 a = VBE_DATA + i * 0x20;
+        for (int j = 0; str[i][j]; j++) wr8(a + j, (u8)str[i][j]);
+        wr8(a + 0x1F, 0);
+    }
+    for (int i = 0; i < N_VMODES; i++) wr16(VBE_DATA + 0x80 + i * 2, vmodes[i].no);
+    wr16(VBE_DATA + 0x80 + N_VMODES * 2, 0xFFFF);
+}
+
+/* DPMI 0800h: the framebuffer is mapped already, at its own address. */
+int video_vram_range(u32 p, u32 n) { return vram && p >= (u32)(uintptr_t)vram && p + n <= (u32)(uintptr_t)vram + VRAM_SIZE; }
+
+static void vbe_off(void)
+{
+    if (!vbe_on) return;
+    vbe_on = 0;
+    map_window(guest_phys(0xA0000));
+}
+
+static void vbe_map_bank(u32 b)
+{
+    vbe_bank = b;
+    map_window((u32)(uintptr_t)vram + b * 65536);
+}
+
+static int vbe_find(u32 no)
+{
+    for (int i = 0; i < N_VMODES; i++) if (vmodes[i].no == (no & 0x1FF)) return i;
+    return -1;
+}
+
+static void vbe_mode_info(int m, u32 a)
+{
+    memset(gptr(a), 0, 256);
+    u32 bpp = vmodes[m].bpp, B = vbe_bytespp(bpp), pitch = vmodes[m].w * B;
+    wr16(a + 0x00, 0x9F);                       /* supported, TTY, colour, graphics, LFB */
+    wr8(a + 0x02, 7);                           /* window A: exists, readable, writable */
+    wr16(a + 0x04, 64); wr16(a + 0x06, 64);     /* granularity, size (KB) */
+    wr16(a + 0x08, 0xA000);
+    wr16(a + 0x0C, rd16(0xF0226)); wr16(a + 0x0E, 0xF000);   /* WinFuncPtr */
+    wr16(a + 0x10, (u16)pitch);
+    wr16(a + 0x12, vmodes[m].w); wr16(a + 0x14, vmodes[m].h);
+    wr8(a + 0x16, 8); wr8(a + 0x17, 16); wr8(a + 0x18, 1);
+    wr8(a + 0x19, (u8)bpp); wr8(a + 0x1A, 1);
+    wr8(a + 0x1B, bpp == 8 ? 4 : 6);            /* packed pixel / direct colour */
+    u32 pages = VRAM_SIZE / (pitch * vmodes[m].h);
+    wr8(a + 0x1D, (u8)(pages > 256 ? 255 : pages - 1));
+    wr8(a + 0x1E, 1);
+    static const u8 masks[3][8] = { { 5, 10, 5, 5, 5, 0, 1, 15 }, { 5, 11, 6, 5, 5, 0, 0, 0 }, { 8, 16, 8, 8, 8, 0, 8, 24 } };
+    if (bpp != 8) memcpy(gptr(a + 0x1F), masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2], 8);
+    wr32(a + 0x28, (u32)(uintptr_t)vram);       /* PhysBasePtr */
+    wr16(a + 0x32, (u16)pitch);                 /* VBE 3: linear bytes per line */
+}
+
+static void vbe_set(int m, int clear)
+{
+    video_set_mode(0x13, 0);                    /* VGA state, default 256-colour palette */
+    video_mode = vmodes[m].no;
+    vbe_cur = vmodes[m].no;
+    vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
+    vbe_pitch = vbe_w * vbe_bytespp(vbe_bpp);
+    vbe_start = 0;
+    vbe_on = 1;
+    if (clear) memset(vram, 0, VRAM_SIZE);
+    vbe_map_bank(0);
+    full_redraw = 1;
+    last_layout_mode = -1;
+    kprintf("video: VESA mode %x, %ux%u, %u bpp\n", vbe_cur, vbe_w, vbe_h, vbe_bpp);
+}
+
+/* BH=0: set window BL to bank DX; BH=1: get it (INT 10h 4F05h and WinFuncPtr). */
+void video_vbe_window(struct regs *r)
+{
+    if (BL(r) != 0) { AX(r) = 0x014F; return; }
+    if (BH(r) == 1) { DX(r) = (u16)vbe_bank; AX(r) = 0x004F; return; }
+    if ((u32)DX(r) * 65536 >= VRAM_SIZE) { AX(r) = 0x014F; return; }
+    if (vbe_on) vbe_map_bank(DX(r)); else vbe_bank = DX(r);
+    AX(r) = 0x004F;
+}
+
+static void vbe_call(struct regs *r)
+{
+    u32 es_di = LIN(r->v86_es, DI(r));
+    switch (AL(r)) {
+    case 0x00: {
+        int v2 = rd32(es_di) == 0x32454256u;     /* "VBE2" */
+        memset(gptr(es_di + 4), 0, v2 ? 508 : 252);
+        wr32(es_di, 0x41534556u);                /* "VESA" */
+        wr16(es_di + 4, 0x0200);
+        wr32(es_di + 6, 0xF0000000u | (VBE_DATA & 0xFFFF));
+        wr32(es_di + 0x0A, 0);
+        wr32(es_di + 0x0E, 0xF0000000u | ((VBE_DATA + 0x80) & 0xFFFF));
+        wr16(es_di + 0x12, VRAM_SIZE >> 16);
+        if (v2) {
+            wr16(es_di + 0x14, 0x0100);
+            for (int i = 1; i < 4; i++) wr32(es_di + 0x12 + i * 4, 0xF0000000u | ((VBE_DATA + i * 0x20) & 0xFFFF));
+        }
+        AX(r) = 0x004F; return; }
+    case 0x01: {
+        int m = vbe_find(CX(r));
+        if (m < 0) { AX(r) = 0x014F; return; }
+        vbe_mode_info(m, es_di);
+        AX(r) = 0x004F; return; }
+    case 0x02: {
+        u16 bx = BX(r);
+        if ((bx & 0x1FF) < 0x100) { video_set_mode(bx & 0x7F, !(bx & 0x8000)); AX(r) = 0x004F; return; }
+        int m = vbe_find(bx);
+        if (m < 0) { AX(r) = 0x014F; return; }
+        vbe_set(m, !(bx & 0x8000));
+        AX(r) = 0x004F; return; }
+    case 0x03: BX(r) = vbe_on ? vbe_cur : (u16)video_mode; AX(r) = 0x004F; return;
+    case 0x05: video_vbe_window(r); return;
+    case 0x06: {
+        if (!vbe_on) { AX(r) = 0x014F; return; }
+        u32 B = vbe_bytespp(vbe_bpp);
+        if (BL(r) == 0 || BL(r) == 2) {
+            u32 p = BL(r) == 0 ? CX(r) * B : (CX(r) + B - 1) / B * B;
+            if (p < vbe_w * B || p * vbe_h > VRAM_SIZE) { AX(r) = 0x024F; return; }
+            vbe_pitch = p;
+            full_redraw = 1;
+        }
+        u32 pitch = BL(r) == 3 ? (VRAM_SIZE / vbe_h) / B * B : vbe_pitch;
+        if (pitch > 0x7FFF) pitch = 0x7FFF / B * B;
+        BX(r) = (u16)pitch; CX(r) = (u16)(pitch / B);
+        DX(r) = (u16)(VRAM_SIZE / pitch > 0xFFFF ? 0xFFFF : VRAM_SIZE / pitch);
+        AX(r) = 0x004F; return; }
+    case 0x07: {
+        if (!vbe_on) { AX(r) = 0x014F; return; }
+        u32 B = vbe_bytespp(vbe_bpp);
+        if ((BL(r) & 0x7F) == 0) {
+            u32 st = DX(r) * vbe_pitch + CX(r) * B;
+            if (st + vbe_pitch * vbe_h > VRAM_SIZE) { AX(r) = 0x014F; return; }
+            vbe_start = st;
+        } else if (BL(r) == 1) {
+            BH(r) = 0; CX(r) = (u16)(vbe_start % vbe_pitch / B); DX(r) = (u16)(vbe_start / vbe_pitch);
+        }
+        AX(r) = 0x004F; return; }
+    case 0x08:
+        if (BL(r) <= 1) { BH(r) = 6; AX(r) = 0x004F; } else AX(r) = 0x014F;   /* 6-bit DAC only */
+        return;
+    case 0x09: {
+        u32 n = CX(r), first = DX(r);
+        if ((BL(r) & 0x7F) == 0)
+            for (u32 i = 0; i < n && first + i < 256; i++) {
+                vga_dac[first + i][0] = rd8(es_di + i * 4 + 2) & 63;
+                vga_dac[first + i][1] = rd8(es_di + i * 4 + 1) & 63;
+                vga_dac[first + i][2] = rd8(es_di + i * 4) & 63;
+            }
+        else if (BL(r) == 1)
+            for (u32 i = 0; i < n && first + i < 256; i++) {
+                wr8(es_di + i * 4 + 2, vga_dac[first + i][0]); wr8(es_di + i * 4 + 1, vga_dac[first + i][1]);
+                wr8(es_di + i * 4, vga_dac[first + i][2]); wr8(es_di + i * 4 + 3, 0);
+            }
+        else { AX(r) = 0x014F; return; }
+        palette_dirty = 1;
+        AX(r) = 0x004F; return; }
+    }
+    dbg(1, "VESA function %02x not supported\n", AL(r));
+    AX(r) = 0x014F;
+}
+
+static u32 pack8(u32 r8, u32 g8, u32 b8)
+{
+    return (r8 >> (8 - rsz)) << rpos | (g8 >> (8 - gsz)) << gpos | (b8 >> (8 - bsz)) << bpos;
+}
+
+static void refresh_vbe(void)
+{
+    static u32 line[4096];
+    static u32 cvt[4096];
+    u32 w = vbe_w, h = vbe_h, B = vbe_bytespp(vbe_bpp), rowb = w * B;
+    int px = 0, py = -100;
+    u16 ma, mxr;
+    if (!mouse_pointer(&px, &py, &ma, &mxr)) py = -100;
+    int moved = px != sh_ptr_x || py != sh_ptr_y;
+    u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
+    for (u32 y = 0; y < h; y++) {
+        u32 off = vbe_start + y * vbe_pitch;
+        if (off + rowb > VRAM_SIZE) break;
+        const u8 *src = vram + off;
+        u8 *sh = vshadow + y * rowb;
+        int in_new = (int)y >= py && (int)y < py + 16, in_old = (int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16;
+        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb)) continue;
+        memcpy(sh, src, rowb);
+        u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
+        if (y1 == y0) continue;
+        for (u32 x = 0; x < w; x++) {
+            u32 c;
+            if (B == 1) c = pal[src[x]];
+            else if (B == 2) {
+                u32 v = ((const u16 *)src)[x];
+                if (vbe_bpp == 15) c = pack8((v >> 7) & 0xF8, (v >> 2) & 0xF8, (v << 3) & 0xF8);
+                else c = pack8((v >> 8) & 0xF8, (v >> 3) & 0xFC, (v << 3) & 0xF8);
+            } else {
+                u32 v = ((const u32 *)src)[x];
+                c = pack8((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            }
+            cvt[x] = c;
+        }
+        if (in_new) {
+            const char *a = arrow[y - py];
+            for (int i = 0; a[i] && px + i < (int)w; i++)
+                if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
+        }
+        for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
+        put_row(line, g_w, g_x, y0);
+        for (u32 yy = y0 + 1; yy < y1; yy++) copy_row(g_x, g_w, y0, yy);
+    }
+    sh_ptr_x = px; sh_ptr_y = py;
+}
+
+/* ---------------- on-screen note (speed changes) ---------------- */
+static char osd_msg[32];
+static u32 osd_until;
+
+void video_osd(const char *msg)
+{
+    int i = 0;
+    for (; msg[i] && i < 31; i++) osd_msg[i] = msg[i];
+    osd_msg[i] = 0;
+    osd_until = ticks + 2000;
+}
+
+static void draw_osd(void)
+{
+    static u32 line[40 * 8 * 2];
+    if (!osd_msg[0]) return;
+    if ((int32_t)(ticks - osd_until) >= 0) {        /* expired: redraw what it covered */
+        osd_msg[0] = 0;
+        full_redraw = 1;
+        last_layout_mode = -1;
+        return;
+    }
+    int n = 0;
+    while (osd_msg[n]) n++;
+    int s = fb_w >= 1280 ? 2 : 1, w = (n + 2) * 8 * s;
+    u32 fg = pack(63, 63, 63), bg = pack(0, 0, 42);
+    u32 x0 = fb_w > (u32)w + 8 ? fb_w - w - 8 : 0;
+    for (int y = 0; y < 20 * s; y++) {
+        int gy = y / s - 2;
+        for (int x = 0; x < w; x++) {
+            int c = x / (8 * s) - 1, bit = (x / s) & 7;
+            int on = c >= 0 && c < n && gy >= 0 && gy < 16 && (font8x16[(u8)osd_msg[c] * 16 + gy] & (0x80 >> bit));
+            line[x] = on ? fg : bg;
+        }
+        put_row(line, w, x0, 8 + y);
+    }
+}
+
 void video_refresh(void)
 {
     static int busy;
@@ -590,8 +874,10 @@ void video_refresh(void)
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
         refresh_text((const u16 *)gptr(text_base + start * 2), cur);
-    } else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
+    } else if (vbe_on) refresh_vbe();
+    else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
+    draw_osd();
     busy = 0;
 }
 
@@ -617,6 +903,7 @@ void video_text_fallback(void) { text_fallback = 1; }
 
 void video_init(void)
 {
+    vbe_init();
     if (!fb && !bochs_vbe()) {
         kprintf("no linear framebuffer: using VGA text mode\n");
         text_fallback = 1;
@@ -968,7 +1255,7 @@ void video_int10(struct regs *r)
     case 0x1A:
         if (AL(r) == 0) { AL(r) = 0x1A; BX(r) = 0x0008; }
         break;
-    case 0x4F: AX(r) = 0x014F; break;          /* VESA BIOS: not yet */
+    case 0x4F: vbe_call(r); break;             /* VESA BIOS */
     default:
         dbg(1, "INT 10h AX=%04x unsupported\n", AX(r));
     }

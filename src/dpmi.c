@@ -663,6 +663,7 @@ static struct regs *int31(struct ctx *c)
     case 0x0604: SET16(ebx, 0); SET16(ecx, 4096); break;
     case 0x0800: { u32 p = rBX << 16 | rCX, n = rSI << 16 | rDI;
         if (p < 0x100000) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* below 1 MiB: as is */
+        if (video_vram_range(p, n)) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* VESA LFB: mapped as is */
         void *m = map_mmio64_user(p, n);
         if (!m) { err(c, 0x8021); break; }
         u32 l = (u32)(uintptr_t)m;
@@ -722,6 +723,20 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
     return visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
+}
+
+/* Run a real-mode routine that ends with IRET (the mouse driver's event
+   callback) for a client in protected mode; it resumes as it was. */
+struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip)
+{
+    struct ctx c;
+    get_ctx(r, &c);
+    if (!client) return r;
+    xpush(X_REFLECT_HW, &c);
+    struct ctx rm;
+    rm_from_pm(&rm, &c);
+    rm.vif = 0;
+    return go_real(&rm, cs, ip, 1);
 }
 
 struct regs *dpmi_reflect_irq(struct regs *r, int vec)

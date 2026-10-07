@@ -59,6 +59,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw rm_retf                       ; 0220
         dw pm_defint                     ; 0222  default PM interrupt handlers, 4 bytes apart
         dw dpmi_intstub                  ; 0224  "INT n" for reflected interrupts (n patched)
+        dw vbe_bank                      ; 0226  VESA window function (far call)
 
 ; ---- stubs ----
 dummy:  iret
@@ -82,6 +83,10 @@ xms_entry:                       ; XMS driver entry (far call); starts with a sh
         nop
         nop
 .go:    TRAP 0x43
+        retf
+
+vbe_bank:                        ; VESA WinFuncPtr: BH=0 set / 1 get, DX = bank
+        TRAP 0x46
         retf
 
 int33:  TRAP 0x33                ; mouse driver (in the monitor)

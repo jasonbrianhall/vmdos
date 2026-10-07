@@ -211,7 +211,8 @@ static void kq_put(u8 v)
    Old games time themselves by the CPU. After each 1 ms timer tick the
    monitor waits, so the guest runs only a slice of every millisecond:
    speed= on the command line (percent of full speed, e.g. speed=5 or
-   speed=0.3), Ctrl+Alt+F11 slower, Ctrl+Alt+F12 faster. */
+   speed=0.3), Ctrl+F11 slower and Ctrl+F12 faster (as in DOSBox), or
+   VMSPEED.COM (INT 2Fh AX=5653h, BX = permille, 0 to ask). */
 static const u16 speed_steps[] = { 1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 700, 1000 };   /* permille */
 #define N_SPEED (sizeof speed_steps / sizeof speed_steps[0])
 static u32 speed_pm = 1000;
@@ -222,6 +223,21 @@ static void speed_set(u32 pm, const char *why)
     if (pm > 1000) pm = 1000;
     speed_pm = pm;
     kprintf("speed: %u.%u%% of full (%s)\n", pm / 10, pm % 10, why);
+    char msg[32] = "Speed ";
+    int n = 6;
+    if (pm / 10 >= 100) msg[n++] = '0' + pm / 1000;
+    if (pm / 10 >= 10) msg[n++] = '0' + pm / 100 % 10;
+    msg[n++] = '0' + pm / 10 % 10;
+    if (pm % 10) { msg[n++] = '.'; msg[n++] = '0' + pm % 10; }
+    msg[n++] = '%'; msg[n] = 0;
+    video_osd(msg);
+}
+
+/* INT 2Fh AX=5653h: BX = permille to set (0: just ask); AX = current. */
+u32 speed_api(u32 pm)
+{
+    if (pm) speed_set(pm, "VMSPEED");
+    return speed_pm;
 }
 
 void speed_init(void)
@@ -262,7 +278,7 @@ void speed_throttle(void)
     last = pit_clock();
 }
 
-/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+Alt+F11/F12 stay here. */
+/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+F11/F12 stay here. */
 void vkbd_real_scancode(u8 sc)
 {
     static int ctrl, alt;
@@ -272,7 +288,8 @@ void vkbd_real_scancode(u8 sc)
         if (k == 0x1D) ctrl = !up;
         else if (k == 0x38) alt = !up;
     }
-    if (ctrl && alt && (k == 0x57 || k == 0x58)) {
+    (void)alt;
+    if (ctrl && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
         return;
     }
