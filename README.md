@@ -21,6 +21,10 @@ make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img (OVMF takes ~40 s to read
 make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
 
+QEMU targets: `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
+(default pa: PulseAudio/PipeWire; wav records vmdos.wav), `USB=1` for a USB
+keyboard, `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
+
 ### UEFI without GRUB
 
 Copy `vmdos.efi` and `dos.img` into one folder of the EFI system partition,
@@ -80,9 +84,11 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
-- XMS 3.0 in the monitor (don't load HIMEM): HMA, so `DOS=HIGH` and FreeCOM's
-  XMS swapping work (about 619 KB free for programs); 32 MB of extended memory
-  (`xms=MB` to change).
+- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
+  `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
+  first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh
+  hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH and FreeCOM's XMS swapping work:
+  about 620 KB free for programs.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
@@ -94,8 +100,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- EGA/planar modes and Mode X, VESA, EMS, DPMI, mouse, UMBs (offered over
-  XMS but FreeDOS doesn't ask for them yet), SB16 (16-bit)
+- EGA/planar modes and Mode X, VESA, EMS, DPMI, mouse, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
@@ -113,6 +118,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
+| `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).

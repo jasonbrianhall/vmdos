@@ -82,17 +82,25 @@ $(BUILD)/extra.stamp: FORCE | $(BUILD)
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 FORCE:
 
-dos.img: $(BUILD)/fat32lba.bin tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
+$(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/VMXMS.SYS tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
          $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
-	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
+	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
 # grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).
 GRUB_MKRESCUE ?= $(firstword $(shell command -v grub-mkrescue grub2-mkrescue 2>/dev/null))
 
 iso: vmdos.iso
-vmdos.iso: vmdos.elf dos.img grub.cfg
+# KARGS: kernel command line for the ISO's GRUB entry (e.g. KARGS="debug=2 audio=ac97").
+$(BUILD)/grub.cfg: grub.cfg FORCE | $(BUILD)
+	@sed 's|multiboot /boot/vmdos.elf.*|multiboot /boot/vmdos.elf $(KARGS)|' $< > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+
+vmdos.iso: vmdos.elf dos.img $(BUILD)/grub.cfg
 	@test -n "$(GRUB_MKRESCUE)" || { echo "grub-mkrescue / grub2-mkrescue not found."; \
 	  echo "  Debian/Ubuntu: sudo apt install grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools"; \
 	  echo "  Fedora:        sudo dnf install grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools"; \
@@ -100,7 +108,7 @@ vmdos.iso: vmdos.elf dos.img grub.cfg
 	rm -rf $(BUILD)/iso && mkdir -p $(BUILD)/iso/boot/grub
 	cp vmdos.elf $(BUILD)/iso/boot/
 	gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz
-	cp grub.cfg $(BUILD)/iso/boot/grub/
+	cp $(BUILD)/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
 	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
 
 # ---- UEFI application (gnu-efi): efi/loader.c with the kernel embedded ----
@@ -139,7 +147,20 @@ esp.img: vmdos.efi dos.img tools/mkdisk.py
 OVMF     ?= $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd))
 QDISPLAY ?=
 QEMU_MEM ?= 512
-QEMU_ARGS ?= -m $(QEMU_MEM) -serial stdio $(QDISPLAY)
+# Sound card QEMU gives the machine: SOUND=hda (default), ac97, sb (a real SB16
+# for vmdos to play through), or none. AUDIODEV: pa (PulseAudio / PipeWire),
+# alsa, sdl, or wav (writes vmdos.wav).
+SOUND    ?= hda
+AUDIODEV ?= pa
+comma    := ,
+QAUDIO   := -audiodev $(if $(filter wav,$(AUDIODEV)),wav$(comma)path=vmdos.wav,$(AUDIODEV)),id=snd0
+QSOUND_hda  := $(QAUDIO) -device intel-hda -device hda-duplex,audiodev=snd0
+QSOUND_ac97 := $(QAUDIO) -device AC97,audiodev=snd0
+QSOUND_sb   := $(QAUDIO) -device sb16,audiodev=snd0
+QSOUND_none :=
+# USB=1: keyboard on an xHCI controller instead of PS/2 (as on many UEFI PCs).
+QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd)
+QEMU_ARGS ?= -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
 
 run: vmdos.elf dos.img
 	qemu-system-i386 -kernel vmdos.elf -initrd dos.img $(QEMU_ARGS)
