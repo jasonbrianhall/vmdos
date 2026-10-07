@@ -207,7 +207,77 @@ static void kq_put(u8 v)
     kq_tail = n;
 }
 
-void vkbd_real_scancode(u8 sc) { kq_put(sc); }
+/* ---------------- slowdown, like MoSlo ----------------
+   Old games time themselves by the CPU. After each 1 ms timer tick the
+   monitor waits, so the guest runs only a slice of every millisecond:
+   speed= on the command line (percent of full speed, e.g. speed=5 or
+   speed=0.3), Ctrl+Alt+F11 slower, Ctrl+Alt+F12 faster. */
+static const u16 speed_steps[] = { 1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 700, 1000 };   /* permille */
+#define N_SPEED (sizeof speed_steps / sizeof speed_steps[0])
+static u32 speed_pm = 1000;
+
+static void speed_set(u32 pm, const char *why)
+{
+    if (pm < 1) pm = 1;
+    if (pm > 1000) pm = 1000;
+    speed_pm = pm;
+    kprintf("speed: %u.%u%% of full (%s)\n", pm / 10, pm % 10, why);
+}
+
+void speed_init(void)
+{
+    char *p = strstr(cmdline, "speed=");
+    if (!p) return;
+    u32 v = 0, frac = 0;
+    for (p += 6; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+    if (*p == '.' && p[1] >= '0' && p[1] <= '9') frac = p[1] - '0';
+    speed_set(v * 10 + frac, "command line");
+}
+
+static void speed_step(int dir)
+{
+    unsigned i = 0;
+    while (i < N_SPEED - 1 && speed_steps[i] < speed_pm) i++;    /* nearest step at or above */
+    if (dir > 0 && speed_steps[i] == speed_pm && i < N_SPEED - 1) i++;
+    else if (dir < 0 && i > 0) i--;
+    speed_set(speed_steps[i], dir > 0 ? "faster" : "slower");
+}
+
+/* Called at the end of a timer tick that interrupted the guest: wait in
+   proportion to how long the guest has run since the last wait (so the
+   share is right however regularly ticks arrive), with interrupts on so
+   the monitor's clock, keyboard and sound go on meanwhile. */
+void speed_throttle(void)
+{
+    static u32 last;
+    u32 now = pit_clock();
+    if (speed_pm >= 1000) { last = now; return; }
+    u32 ran = now - last;
+    if (ran > 1193 * 20) ran = 1193 * 20;
+    u32 wait = ran * (1000 - speed_pm) / speed_pm;
+    if (wait > 1193 * 200) wait = 1193 * 200;
+    sti();
+    while (pit_clock() - now < wait) __asm__ volatile("pause");
+    __asm__ volatile("cli");
+    last = pit_clock();
+}
+
+/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+Alt+F11/F12 stay here. */
+void vkbd_real_scancode(u8 sc)
+{
+    static int ctrl, alt;
+    u8 k = sc & 0x7F;
+    int up = sc & 0x80;
+    if (sc != 0xE0) {
+        if (k == 0x1D) ctrl = !up;
+        else if (k == 0x38) alt = !up;
+    }
+    if (ctrl && alt && (k == 0x57 || k == 0x58)) {
+        if (!up) speed_step(k == 0x58 ? 1 : -1);
+        return;
+    }
+    kq_put(sc);
+}
 
 void vkbd_refill(void)
 {

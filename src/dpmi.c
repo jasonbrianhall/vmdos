@@ -118,9 +118,11 @@ static __attribute__((unused)) u32 d_limit(u64 d)
 }
 static int d_big(u64 d) { return (d >> 54) & 1; }
 
+extern u64 gdt[];
 static u64 *desc_of(u32 sel)
 {
     sel &= 0xFFFF;
+    if ((sel & ~3u) == 0x40) return &gdt[8];       /* selector 0040h: the BIOS data area */
     if (!(sel & 4) || !ldt) return 0;
     u32 i = IDX(sel);
     return i < LDT_N && ldt_used[i] ? &ldt[i] : 0;
@@ -671,6 +673,7 @@ static struct regs *int31(struct ctx *c)
     case 0x0E00: SET16(eax, 0x45); break;
     case 0x0E01: break;
     case 0x0A00: err(c, 0x8001); break;            /* vendor API: none (DOS/4GW asks; harmless) */
+    case 0x0506: case 0x0507: err(c, 0x8001); break;   /* DPMI 1.0 page attributes: not offered */
     default:
         dbg(1, "DPMI function %04x not supported\n", fn);
         err(c, 0x8001);

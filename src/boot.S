@@ -37,6 +37,9 @@ gdt:
     .quad 0                      # 0x18 TSS, filled in by cpu.c
     .quad 0                      # 0x20 LDT (DPMI clients), filled in by dpmi.c
     .quad 0                      # 0x28 espfix stack segment (see isr_return)
+    .quad 0                      # 0x30
+    .quad 0                      # 0x38
+    .quad 0x0000F2000400FFFF     # 0x40 BIOS data area (400h) for DPMI clients, as DPMI hosts provide
 gdt_ptr:
     .word gdt_ptr - gdt - 1
     .long gdt

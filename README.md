@@ -75,6 +75,11 @@ menuentry "FreeDOS (vmdos)" {
 }
 ```
 
+Slowdown for games that time themselves by the CPU (as MoSlo does):
+`speed=N` on the kernel command line runs the guest at N percent of full
+speed (`speed=2`, `speed=0.5`; `KARGS="speed=2"` for the ISO), and
+Ctrl+Alt+F11 / Ctrl+Alt+F12 step it slower / faster at any time.
+
 C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
 dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
@@ -100,7 +105,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   menus, keyboard, mouse, Sound Blaster effects and music), PMODE/W. Clients run at ring 3 with LDT descriptors;
   INT 31h descriptor, memory, interrupt, real-mode call/callback, DOS
   memory, physical-mapping and virtual-IF services; protected-mode hardware
-  interrupt and exception handlers. Client memory appears at linear
+  interrupt and exception handlers; selector 0040h for the BIOS data
+  area. Client memory appears at linear
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
@@ -110,7 +116,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   every access to A000h faults and the instruction is emulated against the
   four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
   and read modes; the screen honours the CRTC start/offset, pel panning and
-  line compare. INT 10h draws pixels and text in all of them.
+  line compare. INT 10h draws pixels and text in all of them, with the
+  program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,

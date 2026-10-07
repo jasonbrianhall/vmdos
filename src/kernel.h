@@ -138,6 +138,8 @@ u32 port_in(u16 port, int size);
 void port_out(u16 port, u32 val, int size);
 void vdev_tick(void);                         /* from the real timer IRQ */
 void vkbd_real_scancode(u8 sc);               /* from the real keyboard IRQ */
+void speed_init(void);                        /* speed= (slowdown) */
+void speed_throttle(void);                    /* after each timer tick */
 int vkbd_read_data(void);                     /* guest's port 60h read */
 void vkbd_refill(void);
 u32 vpit_clock(void);

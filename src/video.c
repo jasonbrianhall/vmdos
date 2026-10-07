@@ -760,7 +760,16 @@ static void gfx_char(int row, int col, u8 ch, u8 color)
     int bpp = is_ega(video_mode) ? 4 : gfx_bpp();
     if (!bpp) return;
     int h = char_h();
-    const u8 *g = h == 8 ? font8x8 + ch * 8 : font8x16 + ch * 16 + (h == 14 ? 1 : 0);
+    /* The glyphs, as a BIOS finds them: CGA modes take 0-127 from the ROM
+       and 128-255 from the table at INT 1Fh (programs such as Willy the Worm
+       put their own there); the others use the table at INT 43h. Our
+       default INT 43h table is 8x8, so the 14/16-line modes use the
+       built-in 8x16 font unless a program pointed INT 43h elsewhere. */
+    const u8 *g;
+    u32 v1f = LIN(rd16(0x1F * 4 + 2), rd16(0x1F * 4)), v43 = LIN(rd16(0x43 * 4 + 2), rd16(0x43 * 4));
+    if (is_cga(video_mode)) g = ch < 128 ? font8x8 + ch * 8 : v1f ? gptr(v1f + (ch - 128) * 8) : font8x8 + ch * 8;
+    else if (v43 && (h == 8 || v43 != 0xFB000)) g = gptr(v43 + ch * h);
+    else g = h == 8 ? font8x8 + ch * 8 : font8x16 + ch * 16 + (h == 14 ? 1 : 0);
     u8 fg = bpp == 8 ? color : (u8)(color & ((1 << bpp) - 1)) | (color & 0x80);
     for (int y = 0; y < h; y++)
         for (int x = 0; x < 8; x++) {

@@ -438,6 +438,7 @@ void kmain(u32 magic, struct mb_info *mb)
               "(GRUB: module /boot/dos.img dos.img; QEMU: -initrd dos.img).");
 
     vdev_init();
+    speed_init();
     bios_init();
     if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
     sound_init();
