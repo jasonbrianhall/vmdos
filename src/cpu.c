@@ -31,33 +31,44 @@ void *phys_alloc(u32 bytes)
 /* ---------------- paging ----------------
    Linear 0..0x10FFFF: the guest's 1 MiB + HMA (user pages, backed by guest_ram).
    Linear 0x110000 up to the top of RAM: identity (kernel, heap, boot modules).
-   The framebuffer: identity.  LOW_ALIAS: physical 0..1 MiB (real VGA text). */
+   The framebuffer: identity if below 4 GiB, else a window under LOW_ALIAS.
+   LOW_ALIAS: physical 0..1 MiB (real VGA text).
+   PAE (Pentium Pro and later) when available, so a framebuffer above 4 GiB
+   can be mapped; plain 2-level paging on a 386/486. */
 #define LOW_ALIAS 0xFF000000u
-static u32 *page_dir;
+static u32 *page_dir;                 /* non-PAE: the page directory */
+static u64 *pdpt;                     /* PAE: 4 entries, then 4 page directories */
+static u64 *pae_pd[4];
+static int pae;
 static u8 *guest_ram;
 static int paging_on;
 
-static u32 *pt_for(u32 lin)
+static void *pt_for(u32 lin)
 {
-    u32 *pde = &page_dir[lin >> 22];
-    if (!(*pde & 1)) {
-        u32 *pt = phys_alloc(4096);
-        *pde = (u32)(uintptr_t)pt | 7;
+    if (pae) {
+        u64 *pde = &pae_pd[lin >> 30][(lin >> 21) & 511];
+        if (!(*pde & 1)) *pde = (u32)(uintptr_t)phys_alloc(4096) | 7;
+        return (void *)(uintptr_t)(u32)(*pde & ~0xFFFull);
     }
-    return (u32 *)(uintptr_t)(*pde & ~0xFFFu);
+    u32 *pde = &page_dir[lin >> 22];
+    if (!(*pde & 1)) *pde = (u32)(uintptr_t)phys_alloc(4096) | 7;
+    return (void *)(uintptr_t)(*pde & ~0xFFFu);
 }
 
-void map_page(u32 lin, u32 phys, u32 flags)
+static void map_page64(u32 lin, u64 phys, u32 flags)
 {
-    pt_for(lin)[(lin >> 12) & 1023] = (phys & ~0xFFFu) | flags;
+    if (pae) ((u64 *)pt_for(lin))[(lin >> 12) & 511] = (phys & ~0xFFFull) | flags;
+    else ((u32 *)pt_for(lin))[(lin >> 12) & 1023] = ((u32)phys & ~0xFFFu) | flags;
 }
 
-static void map_range(u32 lin, u32 phys, u32 len, u32 flags)
+void map_page(u32 lin, u32 phys, u32 flags) { map_page64(lin, phys, flags); }
+
+static void map_range(u32 lin, u64 phys, u32 len, u32 flags)
 {
     u32 off = lin & 0xFFF;
     lin -= off; phys -= off; len += off;
     for (u32 i = 0; i < len; i += 4096) {
-        map_page(lin + i, phys + i, flags);
+        map_page64(lin + i, phys + i, flags);
         if (lin + i + 4096 == 0) break;
     }
 }
@@ -77,23 +88,57 @@ void set_a20(int on)
 
 void *phys_low(u32 phys) { return (void *)(uintptr_t)(LOW_ALIAS + phys); }
 
-static u32 fb_phys, fb_len;
+static int cpu_has_pae(void)
+{
+    u32 a, b;
+    __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                     : "=&r"(a), "=&r"(b));
+    if (!((a ^ b) & 0x200000)) return 0;          /* no CPUID: 386 or early 486 */
+    u32 eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    return (edx >> 6) & 1;
+}
+
+static u64 fb_phys;
+static u32 fb_len, fb_lin;
+static u32 mod_lo, mod_hi;
 
 static void paging_init(void)
 {
-    page_dir = phys_alloc(4096);
+    pae = cpu_has_pae() && !strstr(cmdline, "nopae");
+    if (pae) {
+        pdpt = phys_alloc(4096);
+        for (int i = 0; i < 4; i++) {
+            pae_pd[i] = phys_alloc(4096);
+            pdpt[i] = (u32)(uintptr_t)pae_pd[i] | 1;
+        }
+    } else page_dir = phys_alloc(4096);
     guest_ram = phys_alloc(GUEST_TOP);
     for (u32 a = 0; a < 0x100000; a += 4096) map_page(a, (u32)(uintptr_t)guest_ram + a, 7);
     set_a20(1);
     map_range(0x110000, 0x110000, ram_top - 0x110000, 3);
+    if (mod_hi > ram_top) map_range(mod_lo, mod_lo, mod_hi - mod_lo, 3);
     map_range(LOW_ALIAS, 0, GUEST_TOP, 3);
-    if (fb_len) map_range(fb_phys, fb_phys, fb_len, 3);
-    __asm__ volatile("mov %0,%%cr3" ::"r"(page_dir));
+    if (fb_len) {
+        if (fb_phys + fb_len <= 0x100000000ull && (u32)fb_phys >= GUEST_TOP) fb_lin = (u32)fb_phys;
+        else {
+            fb_lin = (LOW_ALIAS - fb_len - 0x400000u) & ~0x3FFFFFu;
+            if (fb_lin < ram_top || (fb_phys >> 32 && !pae)) { fb_lin = 0; fb_len = 0; }
+        }
+        if (fb_len) map_range(fb_lin, fb_phys, fb_len, 3);
+    }
     u32 cr0;
+    if (pae) {
+        u32 cr4;
+        __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+        __asm__ volatile("mov %0,%%cr4" ::"r"(cr4 | 0x20));
+        __asm__ volatile("mov %0,%%cr3" ::"r"(pdpt));
+    } else __asm__ volatile("mov %0,%%cr3" ::"r"(page_dir));
     __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
     cr0 |= 0x80000000u;
     __asm__ volatile("mov %0,%%cr0; jmp 1f; 1:" ::"r"(cr0) : "memory");
     paging_on = 1;
+    kprintf("paging on (%s)\n", pae ? "PAE" : "32-bit");
 }
 
 /* Map more MMIO later (e.g. a Bochs VBE framebuffer found by PCI scan). */
@@ -215,37 +260,65 @@ void kmain(u32 magic, struct mb_info *mb)
     if (d) debug_level = d[6] - '0';
     kprintf("cmdline: %s\n", cmdline);
 
-    u32 used_end = (u32)(uintptr_t)__kernel_end;
+    /* Ranges the heap must avoid: the kernel, the modules, the boot information. */
+    struct { u32 lo, hi; } ex[16];
+    int nex = 0;
+#define EXCL(a, b) do { if (nex < 16 && (b) > (a)) { ex[nex].lo = (a) & ~4095u; ex[nex].hi = ((b) + 4095) & ~4095u; nex++; } } while (0)
+    EXCL((u32)(uintptr_t)__kernel_start, (u32)(uintptr_t)__kernel_end);
+    EXCL((u32)(uintptr_t)mb, (u32)(uintptr_t)mb + sizeof *mb);
+    if (mb->flags & 64) EXCL(mb->mmap_addr, mb->mmap_addr + mb->mmap_length);
     u32 mod_start = 0, mod_end = 0;
     if ((mb->flags & 8) && mb->mods_count) {
         struct mb_mod *m = (struct mb_mod *)(uintptr_t)mb->mods_addr;
         mod_start = m[0].start; mod_end = m[0].end;
-        for (u32 i = 0; i < mb->mods_count; i++)
-            if (m[i].end > used_end) used_end = m[i].end;
+        EXCL(mb->mods_addr, mb->mods_addr + mb->mods_count * 16);
+        for (u32 i = 0; i < mb->mods_count && i < 8; i++) EXCL(m[i].start, m[i].end);
         kprintf("module: %x-%x (%u KiB)\n", mod_start, mod_end, (mod_end - mod_start) >> 10);
+        mod_lo = mod_start & ~4095u; mod_hi = (mod_end + 4095) & ~4095u;
     }
+    for (int i = 0; i < nex; i++)                 /* sort by start */
+        for (int j = i + 1; j < nex; j++)
+            if (ex[j].lo < ex[i].lo) { u32 t = ex[i].lo; ex[i].lo = ex[j].lo; ex[j].lo = t;
+                                       t = ex[i].hi; ex[i].hi = ex[j].hi; ex[j].hi = t; }
 
-    /* Choose the heap: the RAM region holding (or following) the kernel and modules. */
-    used_end = (used_end + 4095) & ~4095u;
+    /* The heap: the largest free stretch of RAM between 1 MiB+64K and 4 GiB. */
+    struct { u32 b, t; } rgn[128];
+    int nr = 0;
     if (mb->flags & 64) {
         u8 *p = (u8 *)(uintptr_t)mb->mmap_addr, *e = p + mb->mmap_length;
-        for (; p < e; p += *(u32 *)p + 4) {
+        for (; p < e && nr < 128; p += *(u32 *)p + 4) {
             u64 b = *(u64 *)(p + 4), l = *(u64 *)(p + 12);
-            u32 type = *(u32 *)(p + 20);
-            if (type != 1 || b >= 0x100000000ull) continue;
+            if (*(u32 *)(p + 20) != 1 || b >= 0xFFFFF000ull) continue;
             u64 top = b + l;
-            if (top > 0x100000000ull) top = 0x100000000ull - 4096;
-            if (top > ram_top) ram_top = (u32)top;
-            u32 s = b > used_end ? (u32)b : used_end;
-            if (top > s && (u32)top - s > alloc_end - alloc_next) { alloc_next = s; alloc_end = (u32)top; }
+            if (top > 0xFFFFF000ull) top = 0xFFFFF000ull;
+            rgn[nr].b = (u32)b; rgn[nr].t = (u32)top; nr++;
         }
     } else {
-        ram_top = 0x100000 + mb->mem_upper * 1024;
-        alloc_next = used_end; alloc_end = ram_top;
+        rgn[0].b = 0x100000; rgn[0].t = 0x100000 + mb->mem_upper * 1024; nr = 1;
     }
-    alloc_end &= ~4095u;
-    kprintf("RAM top %u MiB, heap %x-%x\n", ram_top >> 20, alloc_next, alloc_end);
+    for (int r = 0; r < nr; r++) {
+        u32 lo = (rgn[r].b + 4095) & ~4095u, hi = rgn[r].t & ~4095u;
+        if (hi > ram_top) ram_top = hi;
+        if (lo < GUEST_TOP) lo = (GUEST_TOP + 4095) & ~4095u;
+        for (int i = 0; i <= nex && lo < hi; i++) {
+            u32 end = i < nex && ex[i].lo < hi ? ex[i].lo : hi;
+            if (end > lo && end - lo > alloc_end - alloc_next) { alloc_next = lo; alloc_end = end; }
+            if (i < nex && ex[i].hi > lo) lo = ex[i].hi;
+        }
+    }
+    kprintf("RAM top %u MiB, heap %x-%x (%u MiB)\n", ram_top >> 20, alloc_next, alloc_end,
+            (alloc_end - alloc_next) >> 20);
     if (alloc_end <= alloc_next + (2u << 20)) panic("not enough memory");
+
+    int have_fb = 0;
+    struct mb_info fbi = *mb;
+    if ((mb->flags & (1 << 12)) && mb->fb_type == 1) {
+        fb_phys = mb->fb_addr;
+        fb_len = mb->fb_pitch * mb->fb_height;
+        have_fb = 1;
+    } else if (mb->flags & (1 << 12)) {
+        kprintf("framebuffer type %u (not a linear RGB framebuffer)\n", mb->fb_type);
+    }
 
     if (mod_start) {
         if (mod_start < GUEST_TOP) {      /* below 1 MiB+64K: move it out of the guest's way */
@@ -258,24 +331,15 @@ void kmain(u32 magic, struct mb_info *mb)
         disk_size = mod_end - mod_start;
     }
 
-    int have_fb = 0;
-    struct mb_info fbi = *mb;
-    if ((mb->flags & (1 << 12)) && mb->fb_type == 1 && mb->fb_addr < 0x100000000ull) {
-        fb_phys = (u32)mb->fb_addr;
-        fb_len = mb->fb_pitch * mb->fb_height;
-        have_fb = 1;
-    } else if (mb->flags & (1 << 12)) {
-        kprintf("framebuffer type %u at %x:%x (unusable)\n", mb->fb_type,
-                (u32)(mb->fb_addr >> 32), (u32)mb->fb_addr);
-    }
-
     paging_init();
     tables_init();
     pic_init();
     pit_init();
 
-    if (have_fb)
-        video_framebuffer(fbi.fb_addr, fbi.fb_pitch, fbi.fb_width, fbi.fb_height, fbi.fb_bpp,
+    if (have_fb && !fb_len)
+        kprintf("framebuffer at %x:%08x can't be mapped (needs PAE)\n", (u32)(fbi.fb_addr >> 32), (u32)fbi.fb_addr);
+    else if (have_fb)
+        video_framebuffer(fb_lin, fbi.fb_pitch, fbi.fb_width, fbi.fb_height, fbi.fb_bpp,
                           fbi.rpos, fbi.rsz, fbi.gpos, fbi.gsz, fbi.bpos, fbi.bsz);
     video_init();
 

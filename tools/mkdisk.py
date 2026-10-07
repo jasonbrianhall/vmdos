@@ -3,8 +3,10 @@
 FreeDOS FAT32 (LBA) boot sector, then copy files into its root.
 Needs mkfs.fat (dosfstools) and mcopy (mtools).
 
-  mkdisk.py OUT.img SIZE_MB BOOTSECTOR.bin FILE... [DIR/...]
-Files are copied to the root; a directory is copied recursively."""
+  mkdisk.py [--type=0C] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
+Files are copied to the root; a directory is copied recursively; SRC=DEST
+puts a file at DEST (directories are created). BOOTSECTOR "-" leaves the
+mkfs.fat boot code; --type sets the partition type (EF: EFI system partition)."""
 import os, struct, subprocess, sys
 
 START = 2048                      # first partition sector (1 MiB aligned)
@@ -20,7 +22,11 @@ def chs(lba, heads=255, spt=63):
 
 
 def main():
-    out, size_mb, bootbin, files = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4:]
+    args = sys.argv[1:]
+    ptype = 0x0C
+    while args and args[0].startswith("--type="):
+        ptype = int(args.pop(0)[7:], 16)
+    out, size_mb, bootbin, files = args[0], int(args[1]), args[2], args[3:]
     total = size_mb * 2048
     plen = total - START
     if plen < 66600 * 1:          # FAT32 wants >= 65525 clusters
@@ -30,7 +36,7 @@ def main():
 
     mbr = bytearray(512)
     mbr[0:2] = b"\xCD\x18"        # no MBR code: INT 18h
-    e = bytes([0x80]) + chs(START) + bytes([0x0C]) + chs(total - 1) + struct.pack("<II", START, plen)
+    e = bytes([0x80]) + chs(START) + bytes([ptype]) + chs(total - 1) + struct.pack("<II", START, plen)
     mbr[446:462] = e
     mbr[510:512] = b"\x55\xAA"
     with open(out, "r+b") as f:
@@ -40,20 +46,32 @@ def main():
                     "--offset", str(START), "-D", "0x80", "-n", "VMDOS", "-i", "766D646F",
                     out, str(plen // 2)], check=True, stdout=subprocess.DEVNULL)
 
-    code = open(bootbin, "rb").read()
-    assert len(code) == 512 and code[0] == 0xEB and code[1] == 0x58, "unexpected boot sector"
-    with open(out, "r+b") as f:
-        f.seek(START * 512)
-        old = f.read(512)
-        new = code[0:3] + old[3:0x5A] + code[0x5A:510] + b"\x55\xAA"
-        for sec in (START, START + 6):            # boot sector and its backup
-            f.seek(sec * 512)
-            f.write(new)
+    if bootbin != "-":
+        code = open(bootbin, "rb").read()
+        assert len(code) == 512 and code[0] == 0xEB and code[1] == 0x58, "unexpected boot sector"
+        with open(out, "r+b") as f:
+            f.seek(START * 512)
+            old = f.read(512)
+            new = code[0:3] + old[3:0x5A] + code[0x5A:510] + b"\x55\xAA"
+            for sec in (START, START + 6):            # boot sector and its backup
+                f.seek(sec * 512)
+                f.write(new)
 
     img = "%s@@%d" % (out, START * 512)
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    made = set()
     for p in files:
-        if os.path.isdir(p):
+        if "=" in p:
+            src, dest = p.split("=", 1)
+            parts = dest.strip("/").split("/")
+            for i in range(1, len(parts)):
+                d = "/".join(parts[:i])
+                if d not in made:
+                    subprocess.run(["mmd", "-i", img, "::/" + d], env=env,
+                                   stderr=subprocess.DEVNULL)
+                    made.add(d)
+            subprocess.run(["mcopy", "-o", "-i", img, src, "::/" + "/".join(parts)], check=True, env=env)
+        elif os.path.isdir(p):
             subprocess.run(["mcopy", "-s", "-o", "-i", img, p, "::/"], check=True, env=env)
         else:
             subprocess.run(["mcopy", "-o", "-i", img, p, "::/" + os.path.basename(p).upper()],

@@ -5,3 +5,5 @@ vmdos.iso
 dos.img
 *.o
 *.d
+esp.img
+vmdos.efi

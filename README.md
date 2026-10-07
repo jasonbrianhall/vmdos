@@ -8,13 +8,42 @@ unmodified, with drive C: a FAT32 RAM disk loaded as a boot module.
 ## Build and run
 
 ```
-sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools \
+sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf
 make            # vmdos.elf + dos.img (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
-make run        # QEMU, BIOS
-make run-efi    # QEMU, UEFI (OVMF), from vmdos.iso
-make iso        # vmdos.iso, hybrid BIOS/UEFI; dd it to a USB stick
+make efi        # vmdos.efi + dos.img: a UEFI application, no GRUB needed
+make esp        # esp.img: FAT32 disk with EFI/BOOT/BOOTX64.EFI + dos.img; dd it to a USB stick
+make iso        # vmdos.iso (GRUB), hybrid BIOS/UEFI
+make run        # QEMU, BIOS (-kernel)
+make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img (OVMF takes ~40 s to read dos.img without KVM)
+make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
+
+### UEFI without GRUB
+
+Copy `vmdos.efi` and `dos.img` into one folder of the EFI system partition,
+e.g. `/boot/efi/EFI/vmdos/`, then either add a firmware boot entry:
+
+```
+sudo efibootmgr -c -d /dev/nvme0n1 -p 1 -L vmdos -l '\EFI\vmdos\vmdos.efi'
+```
+
+or chainload it from GRUB:
+
+```
+menuentry "FreeDOS (vmdos.efi)" {
+    insmod part_gpt
+    insmod fat
+    insmod chain
+    search --no-floppy --file --set=root /EFI/vmdos/vmdos.efi
+    chainloader /EFI/vmdos/vmdos.efi
+}
+```
+
+The loader puts the 32-bit kernel at 4 MiB, leaves long mode and enters it
+as GRUB would. Load options go to the kernel (`debug=2`, `nopae`); `debug`
+alone pauses before leaving the firmware. A small ESP may need a smaller C:
+(`make efi DISK_MB=34`).
 
 Options: `EXTRA=dir` copies a directory's files into C:\, `DISK_MB=` sets
 the size of C: (34 or more), `FREEDOS=dir` uses your own KERNEL.SYS and
@@ -36,19 +65,20 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 
 ## What works
 
-- FreeDOS 1.x kernel and FreeCOM to the `C:\>` prompt, on BIOS and UEFI.
+- FreeDOS 1.x kernel and FreeCOM to the `C:\>` prompt: GRUB on BIOS or UEFI,
+  or `vmdos.efi` straight from the UEFI firmware.
 - BIOS: INT 10h (text modes, mode 13h, DAC/palette), 11h, 12h, 13h (CHS and
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
-- Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp),
-  or Bochs VBE under QEMU `-kernel`.
+- Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
+  above 4 GiB too, via PAE), or Bochs VBE under QEMU `-kernel`.
 
 ## Not yet
 
 - USB keyboards (PS/2 only; many UEFI machines need USB).
 - Sound (SBPRO), EGA/planar modes and Mode X, VESA, XMS/EMS, DPMI,
-  mouse, saving C: to a real disk, framebuffers above 4 GiB.
+  mouse, saving C: to a real disk.
 
 ## Layout
 
@@ -61,6 +91,7 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 | `src/bios.c`, `src/bios.asm` | BIOS data area, IVT, services; F000h stub segment |
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
 | `boot/boot32lb.asm` | FreeDOS FAT32 LBA boot sector (from the FreeDOS kernel, GPL) |
+| `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).
