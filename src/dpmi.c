@@ -670,6 +670,7 @@ static struct regs *int31(struct ctx *c)
     case 0x0902: c->eax = (c->eax & ~0xFFu) | (u8)c->vif; break;
     case 0x0E00: SET16(eax, 0x45); break;
     case 0x0E01: break;
+    case 0x0A00: err(c, 0x8001); break;            /* vendor API: none (DOS/4GW asks; harmless) */
     default:
         dbg(1, "DPMI function %04x not supported\n", fn);
         err(c, 0x8001);

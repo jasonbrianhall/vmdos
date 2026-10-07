@@ -158,6 +158,7 @@ static int is_cga(int m) { return m >= 4 && m <= 6; }
 static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x12; }   /* 16-colour planar */
 static void planar_check(void);
 static void ega_check(void);
+static void modex_check(void);
 
 /* Graphics mode size in pixels. */
 static int gfx_w(void) { return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320; }
@@ -326,48 +327,40 @@ static const char *const arrow[16] = {
 static int sh_ptr_y = -100, sh_ptr_x;
 
 /* ---------------- unchained 256-colour (planar) VGA ----------------
-   With chain-4 off (Mode X/Y, DOOM), video memory is four 64 KB planes and
-   the map mask (sequencer 2) picks which ones a CPU write goes to. The
-   guest's A0000h window is mapped onto one plane's pages; when the mask
-   selects several, pages written meanwhile (PTE dirty bits) are copied to
-   the others when the mask changes or the screen is drawn. Reads come from
-   the plane the window shows. */
-static int planar_on, mapped_plane = -1;
-static int bcast_src = -1;
-static u8 bcast_mask;
+   With chain-4 off (Mode X/Y, DOOM), video memory is four 64 KB planes: the
+   map mask (sequencer 2) picks the planes a write goes to, the read map
+   (graphics controller 4) the one a read comes from. With one plane in the
+   map mask and plain writes, the guest's A0000h window is mapped straight
+   onto a plane: the written one, read-write, or, when the program last
+   changed the read map to another plane (DOOM's I_ReadScreen reads all
+   four that way), the read one, read-only, so writes fault and are
+   emulated. Anything else (several planes, write modes 1-3 such as DOOM's
+   latch copies of its status bar, set/reset, a bit mask, a logical
+   function) leaves the window unmapped and every access is emulated as in
+   the 16-colour modes. */
+static int planar_on, mapped_plane = -1, mapped_ro, modex_trap, readmap_last;
 
-static void map_window(u32 phys)
+static void map_window_flags(u32 phys, u32 flags)
 {
-    for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, 7);
-    tlb_flush();
-    for (u32 i = 0; i < 16; i++) page_dirty(0xA0000 + i * 4096, 1);
+    for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, flags);
     tlb_flush();
 }
-
-static void bcast_flush(int keep)
-{
-    if (bcast_src < 0) return;
-    int any = 0;
-    for (u32 i = 0; i < 16; i++) {
-        if (!page_dirty(0xA0000 + i * 4096, 1)) continue;
-        any = 1;
-        for (int q = 0; q < 4; q++)
-            if (q != bcast_src && (bcast_mask & (1 << q)))
-                memcpy(planes + q * 65536 + i * 4096, planes + bcast_src * 65536 + i * 4096, 4096);
-    }
-    if (any) tlb_flush();
-    if (!keep) bcast_src = -1;
-}
+static void map_window(u32 phys) { map_window_flags(phys, 7); }
 
 static void apply_map_mask(void)
 {
     if (!planar_on) return;
-    bcast_flush(0);
+    modex_check();
+    if (modex_trap) return;
     u8 m = seq[2] & 15;
-    int p = 0;
-    while (p < 3 && m && !(m & (1 << p))) p++;
-    if (p != mapped_plane) { map_window((u32)(uintptr_t)planes + p * 65536); mapped_plane = p; }
-    if (m & (m - 1)) { bcast_src = p; bcast_mask = m; }
+    int wp = 0, rp = gc[4] & 3;
+    while (wp < 3 && !(m & (1 << wp))) wp++;
+    int p = wp, ro = 0;
+    if (wp != rp && readmap_last) { p = rp; ro = 1; }
+    if (p != mapped_plane || ro != mapped_ro) {
+        map_window_flags((u32)(uintptr_t)planes + p * 65536, ro ? 5 : 7);
+        mapped_plane = p; mapped_ro = ro;
+    }
 }
 
 static void planar_check(void)
@@ -383,9 +376,10 @@ static void planar_check(void)
         full_redraw = 1;
         dbg(1, "video: unchained 256-colour (planar)\n");
     } else if (!want && planar_on) {
-        bcast_flush(0);
         map_window(guest_phys(0xA0000));
         planar_on = 0;
+        modex_trap = 0;
+        mapped_ro = 0;
         mapped_plane = -1;
         full_redraw = 1;
     }
@@ -413,7 +407,22 @@ static void ega_check(void)
     }
 }
 
-int vga16_window(u32 lin) { return ega_on && lin >= 0xA0000 && lin < 0xB0000; }
+int vga16_window(u32 lin) { return (ega_on || modex_trap || (planar_on && mapped_ro)) && lin >= 0xA0000 && lin < 0xB0000; }
+
+/* Unchained 256-colour: emulate unless writes go plainly to one plane. */
+static void modex_check(void)
+{
+    u8 m = seq[2] & 15;
+    int want = planar_on && ((m & (m - 1)) || !m || (gc[5] & 0x0B) || (gc[1] & 15) || (gc[3] & 0x1F) ||
+                             gc[8] != 0xFF);
+    if (want && !modex_trap) {
+        for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0);
+        tlb_flush();
+        modex_trap = 1;
+        mapped_plane = -1;
+        mapped_ro = 0;
+    } else if (!want && modex_trap) modex_trap = 0;   /* apply_map_mask maps the window */
+}
 
 u8 vga16_read(u32 lin)
 {
@@ -516,7 +525,6 @@ static void refresh_gfx(void)
     static u8 ovr[640];
     static u8 rowbuf[640];
     int w = gfx_w(), h = gfx_h();
-    if (planar_on) bcast_flush(1);
     int px = 0, py = -100;
     u16 ma, mxr;
     if (mouse_pointer(&px, &py, &ma, &mxr)) { if (w == 320) px /= 2; } else py = -100;
@@ -663,7 +671,7 @@ void video_port_out(u16 port, u8 v)
     case 0x3C5:
         seq[seq_idx & 7] = v;
         if ((seq_idx & 7) == 4) planar_check();
-        else if ((seq_idx & 7) == 2) apply_map_mask();
+        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); }
         return;
     case 0x3C6: dac_mask = v; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
@@ -674,7 +682,11 @@ void video_port_out(u16 port, u8 v)
         palette_dirty = 1;
         return;
     case 0x3CE: gc_idx = v; return;
-    case 0x3CF: gc[gc_idx & 15] = v; return;
+    case 0x3CF:
+        gc[gc_idx & 15] = v;
+        if ((gc_idx & 15) == 4) readmap_last = 1;
+        apply_map_mask();
+        return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
         crtc[crtc_idx & 31] = v;

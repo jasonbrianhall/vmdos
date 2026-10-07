@@ -104,7 +104,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
-  or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses),
+  or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses:
+  single-plane access mapped directly, latch copies and the rest emulated),
   and the EGA/VGA 16-colour modes 0Dh, 0Eh, 10h, 12h. In the 16-colour modes
   every access to A000h faults and the instruction is emulated against the
   four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
@@ -122,7 +123,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- Mode X's 240-line timing, VGA write modes in Mode X (latch copies), VESA, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
