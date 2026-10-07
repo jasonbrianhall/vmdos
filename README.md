@@ -63,7 +63,9 @@ menuentry "FreeDOS (vmdos)" {
 }
 ```
 
-C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
+C: lives in RAM: changes are lost at power-off. Give a machine or VM at least
+256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
+dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
 
 ## What works
 

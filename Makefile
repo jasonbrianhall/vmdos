@@ -130,7 +130,8 @@ esp.img: vmdos.efi dos.img tools/mkdisk.py
 
 OVMF     ?= $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd))
 QDISPLAY ?=
-QEMU_ARGS ?= -m 128 -serial stdio $(QDISPLAY)
+QEMU_MEM ?= 512
+QEMU_ARGS ?= -m $(QEMU_MEM) -serial stdio $(QDISPLAY)
 
 run: vmdos.elf dos.img
 	qemu-system-i386 -kernel vmdos.elf -initrd dos.img $(QEMU_ARGS)
