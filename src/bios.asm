@@ -47,6 +47,17 @@ vectors:
         dw xms_entry                     ; 0206
         dw mouse_cb                      ; 0208
 mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handler
+        dw dpmi_entry                    ; 020E  DPMI: real-to-protected switch entry
+        dw dpmi_rmret                    ; 0210  return from a real-mode excursion
+        dw dpmi_raw_rm2pm                ; 0212  raw switch, real -> protected
+        dw dpmi_cb0                      ; 0214  real-mode callbacks, 4 bytes apart
+        dw pm_hwret                      ; 0216  protected-mode stubs (HOST_CS = F000h base)
+        dw pm_excret                     ; 0218
+        dw pm_cbret                      ; 021A
+        dw pm_raw_pm2rm                  ; 021C
+        dw pm_retf                       ; 021E  state save/restore: nothing to do
+        dw rm_retf                       ; 0220
+        dw pm_defint                     ; 0222  default PM interrupt handlers, 4 bytes apart
 
 ; ---- stubs ----
 dummy:  iret
@@ -86,6 +97,47 @@ mouse_cb:                        ; entered like an interrupt when a mouse event 
         pop ds
         popa
         iret
+
+; ---- DPMI host stubs (the host itself is in the monitor, dpmi.c) ----
+dpmi_entry:                      ; far-called by the client to enter protected mode
+        TRAP 0x54                ; save the caller's state
+        mov ah, 0x62             ; current PSP -> BX
+        int 0x21
+        TRAP 0x55                ; build the client, continue in protected mode
+dpmi_rmret:
+        TRAP 0x50
+dpmi_raw_rm2pm:
+        TRAP 0x56
+rm_retf:
+        retf
+align 4
+dpmi_cb0:
+%assign i 0
+%rep 16
+        TRAP 0x60 + i
+        nop
+        nop
+  %assign i i+1
+%endrep
+pm_hwret:
+        TRAP 0x51
+pm_excret:
+        TRAP 0x52
+pm_cbret:
+        TRAP 0x53
+pm_raw_pm2rm:
+        TRAP 0x57
+pm_retf:
+        retf                     ; the host code segment matches the client's bitness
+align 4
+pm_defint:
+%assign i 0
+%rep 256
+        TRAP 0x58
+        db i
+        nop
+  %assign i i+1
+%endrep
 
 int06:  TRAP 0x06               ; invalid opcode nobody handles: stop with a report
         iret

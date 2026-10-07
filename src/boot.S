@@ -35,6 +35,8 @@ gdt:
     .quad 0x00CF9A000000FFFF     # 0x08 code
     .quad 0x00CF92000000FFFF     # 0x10 data
     .quad 0                      # 0x18 TSS, filled in by cpu.c
+    .quad 0                      # 0x20 LDT (DPMI clients), filled in by dpmi.c
+    .quad 0                      # 0x28 espfix stack segment (see isr_return)
 gdt_ptr:
     .word gdt_ptr - gdt - 1
     .long gdt
@@ -130,9 +132,11 @@ isr_common:
     mov  %ax, %fs
     mov  %ax, %gs
     cld
-    push %esp
+    mov  %esp, %eax
+    sub  $32, %esp               # slack: the frame handed back may start lower
+    push %eax                    # (a v86 frame is 16 bytes longer than a PM one)
     call isr_dispatch
-    add  $4, %esp
+    mov  %eax, %esp              # isr_dispatch returns the frame to resume
 isr_return:
     pop  %gs
     pop  %fs
@@ -140,7 +144,22 @@ isr_return:
     pop  %ds
     popa
     add  $8, %esp
+    cmpl $0, %ss:espfix_on       # back to a 16-bit stack segment at ring 3? (DS is the client's now)
+    jne  1f
     iret
+    # IRET to a 16-bit SS restores only SP: the high half of ESP keeps the
+    # kernel's. So IRET from a stack whose high half is the client's own
+    # (Linux's espfix): SS 0x28 is based so that espfix_esp lands on the frame.
+1:  movl $0, %ss:espfix_on
+    lss  %ss:espfix_ptr, %esp
+    iret
+
+.section .data
+.global espfix_on, espfix_ptr
+espfix_on:  .long 0
+espfix_ptr: .long 0              # ESP
+            .word 0x28           # SS
+.section .text
 
 # v86_enter(struct regs *r): load a v86 frame and go.
 .global v86_enter

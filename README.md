@@ -72,8 +72,8 @@ menuentry "FreeDOS (vmdos)" {
 }
 ```
 
-C: lives in RAM: changes are lost at power-off. Give a machine or VM at least
-256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
+C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
+Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
 dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
 
 ## What works
@@ -93,6 +93,15 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh
   hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH and FreeCOM's XMS swapping work:
   about 620 KB free for programs.
+- DPMI 0.9 host in the monitor, for DOS extenders: DOS/4GW (DOOM runs: demo,
+  menus, keyboard), PMODE/W. Clients run at ring 3 with LDT descriptors;
+  INT 31h descriptor, memory, interrupt, real-mode call/callback, DOS
+  memory, physical-mapping and virtual-IF services; protected-mode hardware
+  interrupt and exception handlers. Client memory appears at linear
+  2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
+  now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
+- Unchained 256-colour VGA (Mode X/Y, as DOOM uses): four planes, map mask,
+  page flipping via the CRTC start address.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
@@ -104,7 +113,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- DPMI (DOS/4GW games such as DOOM.EXE), EGA/planar modes and Mode X, VESA, EMS, SB16 (16-bit)
+- EGA 16-colour modes, Mode X's 240-line timing, VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
@@ -123,6 +132,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
+| `src/dpmi.c` | DPMI host |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 

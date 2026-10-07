@@ -73,7 +73,7 @@ static void dump(struct regs *r, const char *why)
 }
 
 /* Wait (real HLT) until the guest has an interrupt it will take. */
-static void wait_for_irq(void)
+void wait_for_irq(void)
 {
     for (;;) {
         vkbd_refill();
@@ -82,17 +82,23 @@ static void wait_for_irq(void)
     }
 }
 
-static void deliver(struct regs *r)
+/* Deliver a pending virtual IRQ; returns the frame to resume (a DPMI
+   client's protected-mode handler may mean a mode switch). */
+static struct regs *deliver(struct regs *r)
 {
     vkbd_refill();
-    if (!vif) return;
+    if (!vif) return r;
+    int pm = !(r->eflags & EFL_VM);
     int vec = vpic_pending();
     if (vec < 0) {
-        if (mouse_callback_due()) mouse_start_callback(r);
-        return;
+        if (!pm && mouse_callback_due()) mouse_start_callback(r);
+        return r;
     }
     vpic_ack(vec);
+    if (dpmi_pm_hooked(vec)) return dpmi_hw_interrupt(r, vec);
+    if (pm) return dpmi_reflect_irq(r, vec);
     v86_reflect(r, vec);
+    return r;
 }
 
 static void do_int(struct regs *r, int n, u16 ip0)
@@ -108,6 +114,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
         bios_service(r, 0x2F, 0);
         return;
     }
+    if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     /* The mouse driver too, unless a DOS mouse driver has taken INT 33h
        (DOS leaves unused vectors on a bare IRET). */
     if (n == 0x33 && (tgt == bios_stub_entry(0x33) || rd8(tgt) == 0xCF)) {
@@ -184,10 +191,28 @@ static void gp_handler(struct regs *r)
         do_int(r, n, ip0);
         return; }
     case 0xCC: IP(r) = ip; v86_reflect(r, 3); return;               /* INT3 */
+    case 0x0F: {
+        u8 op2 = rd8(LIN(r->cs, ip));
+        if (op2 == 0x06) { IP(r) = ip + 1; return; }               /* CLTS: as EMM386, ignored */
+        if (op2 == 0x20 || op2 == 0x22) {                           /* MOV r32, CRn / CRn, r32 */
+            u8 m = rd8(LIN(r->cs, ip + 1));
+            if ((m >> 6) == 3) {
+                if (op2 == 0x20) {
+                    u32 v = 0;
+                    if (((m >> 3) & 7) == 0) { __asm__ volatile("mov %%cr0,%0" : "=r"(v)); v &= 0x8005003F; }
+                    u32 *g[8] = { &r->eax, &r->ecx, &r->edx, &r->ebx, &r->esp, &r->ebp, &r->esi, &r->edi };
+                    *g[m & 7] = v;
+                }
+                IP(r) = ip + 2;
+                return;
+            }
+        }
+        break; }
     case 0xCE: IP(r) = ip; if (r->eflags & EFL_OF) v86_reflect(r, 4); return;
     case 0xF4:                                                      /* HLT */
         if ((r->cs & 0xFFFF) == 0xF000 && ip0 < 0x8000) {
             int res = bios_service(r, rd8(LIN(r->cs, ip)), 1);
+            if (res == BIOS_SWITCH) return;                  /* r is gone: mode switch */
             if (res == BIOS_DONE) iret16(r, 0);
             else if (res == BIOS_DONEF) iret16(r, EFL_CF | EFL_ZF);
             else if (res == BIOS_CONT) IP(r) = ip + 1;
@@ -233,9 +258,10 @@ static void gp_handler(struct regs *r)
 
 static u32 refresh_div;
 
-void isr_dispatch(struct regs *r)
+struct regs *isr_dispatch(struct regs *r)
 {
     int from_v86 = (r->eflags & EFL_VM) != 0;
+    int from_pm = !from_v86 && (r->cs & 3) == 3;     /* a DPMI client */
     u32 vec = r->vec;
 
     if (vec >= 0x20) {
@@ -269,6 +295,10 @@ void isr_dispatch(struct regs *r)
         goto out;
     }
 
+    if (from_pm) {
+        r = dpmi_exception(r);
+        goto out;
+    }
     if (!from_v86) {
         u32 cr2;
         __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
@@ -288,7 +318,13 @@ void isr_dispatch(struct regs *r)
         dump(r, "exception in the DOS guest");
     }
 out:
-    if (from_v86) deliver(r);
+    {
+        struct regs *sw = dpmi_take_switch();
+        if (sw) r = sw;
+    }
+    if (from_v86 || from_pm) r = deliver(r);
+    dpmi_espfix(r);
+    return r;
 }
 
 void guest_start(void)

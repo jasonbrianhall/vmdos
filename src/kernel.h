@@ -95,6 +95,12 @@ extern volatile u32 ticks;                    /* real timer ticks (TICK_HZ) */
 u32 pit_clock(void);                          /* 1.193182 MHz monotonic clock (wraps) */
 void *phys_alloc(u32 bytes);                  /* page-aligned, zeroed */
 u32 phys_free(void);                          /* bytes left in the heap */
+void *phys_try_alloc(u32 bytes);              /* like phys_alloc, NULL when out */
+void set_user(u32 lin, u32 len, int user);    /* ring 3 access to these pages */
+void *map_mmio64_user(u64 phys, u32 len);
+u32 guest_phys(u32 lin);                      /* physical page behind guest linear lin */
+void tlb_flush(void);
+int page_dirty(u32 lin, int clear);           /* PTE dirty bit (cleared if clear) */
 void map_page(u32 lin, u32 phys, u32 flags);
 void set_a20(int on);
 extern int a20_on;
@@ -117,7 +123,7 @@ extern int vif;                               /* the guest's virtual IF */
 void v86_push16(struct regs *r, u16 v);
 u16 v86_pop16(struct regs *r);
 void v86_reflect(struct regs *r, int vec);    /* deliver INT vec into the guest */
-void isr_dispatch(struct regs *r);
+struct regs *isr_dispatch(struct regs *r);    /* returns the frame to resume */
 void guest_start(void) __attribute__((noreturn));
 
 /* ---- vdev.c: virtual PIC, PIT, keyboard controller, misc ports ---- */
@@ -141,6 +147,7 @@ void bios_init(void);
 #define BIOS_CONT 1     /* continue executing the stub after the trap */
 #define BIOS_RETRY 2    /* nothing yet: wait for an interrupt and run again */
 #define BIOS_DONEF 3    /* like BIOS_DONE, but CF and ZF are results for the caller */
+#define BIOS_SWITCH 4   /* the guest changed mode (DPMI): leave the old frame alone */
 int bios_service(struct regs *r, int id, int via_stub);
 void bios_boot(struct regs *r);
 u32 bios_stub_entry(int vec);                 /* linear address of IVT default for vec */
@@ -163,6 +170,17 @@ void mouse_cb_regs(struct regs *r);
 void mouse_cb_done(void);
 int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);
 
+/* ---- dpmi.c: DPMI 0.9 host ---- */
+void dpmi_detect(struct regs *r);             /* INT 2Fh AX=1687h */
+int dpmi_rm_trap(struct regs *r, int id);     /* v86-side stubs; BIOS_* */
+struct regs *dpmi_exception(struct regs *r);  /* any fault from a protected-mode client */
+struct regs *dpmi_take_switch(void);          /* frame of a mode switch, or NULL */
+int dpmi_pm_hooked(int vec);
+struct regs *dpmi_hw_interrupt(struct regs *r, int vec);
+struct regs *dpmi_reflect_irq(struct regs *r, int vec);
+void wait_for_irq(void);
+void dpmi_espfix(struct regs *r);
+
 /* ---- sound.c ---- */
 void sound_init(void);
 void sound_tick(void);                        /* every timer tick */
@@ -183,4 +201,5 @@ void video_framebuffer(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp,
                        u8 rpos, u8 rsz, u8 gpos, u8 gsz, u8 bpos, u8 bsz);
 void video_text_fallback(void);
 void video_int10(struct regs *r);
+void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;

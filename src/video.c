@@ -140,6 +140,7 @@ static int text_cols = 80, text_rows = 25;
 static u32 text_base = 0xB8000;
 
 static int is_text(int m) { return m <= 3 || m == 7; }
+static void planar_check(void);
 
 static void sync_cursor_crtc(void)
 {
@@ -173,6 +174,10 @@ void video_set_mode(int mode, int clear)
     wr8(BDA + 0x88, 0x09);
     wr8(BDA + 0x89, 0x11);
     memset(crtc, 0, sizeof crtc);
+    seq[2] = 0x0F;                                 /* all planes */
+    seq[4] = mode == 0x13 ? 0x0E : 0x02;           /* chain-4 in mode 13h */
+    crtc[0x13] = text_cols == 40 && is_text(mode) ? 0x14 : 0x28;
+    planar_check();
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
     if (clear) {
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
@@ -269,11 +274,85 @@ static const char *const arrow[16] = {
     "122222221", "1222211111", "1221221", "121 1221", "11  1221", "1    1221", "     1221", "      11" };
 static int sh_ptr_y = -100, sh_ptr_x;
 
+/* ---------------- unchained 256-colour (planar) VGA ----------------
+   With chain-4 off (Mode X/Y, DOOM), video memory is four 64 KB planes and
+   the map mask (sequencer 2) picks which ones a CPU write goes to. The
+   guest's A0000h window is mapped onto one plane's pages; when the mask
+   selects several, pages written meanwhile (PTE dirty bits) are copied to
+   the others when the mask changes or the screen is drawn. Reads come from
+   the plane the window shows. */
+static u8 *planes;                 /* 4 x 64 KiB */
+static int planar_on, mapped_plane = -1;
+static int bcast_src = -1;
+static u8 bcast_mask;
+
+static void map_window(u32 phys)
+{
+    for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, 7);
+    tlb_flush();
+    for (u32 i = 0; i < 16; i++) page_dirty(0xA0000 + i * 4096, 1);
+    tlb_flush();
+}
+
+static void bcast_flush(int keep)
+{
+    if (bcast_src < 0) return;
+    int any = 0;
+    for (u32 i = 0; i < 16; i++) {
+        if (!page_dirty(0xA0000 + i * 4096, 1)) continue;
+        any = 1;
+        for (int q = 0; q < 4; q++)
+            if (q != bcast_src && (bcast_mask & (1 << q)))
+                memcpy(planes + q * 65536 + i * 4096, planes + bcast_src * 65536 + i * 4096, 4096);
+    }
+    if (any) tlb_flush();
+    if (!keep) bcast_src = -1;
+}
+
+static void apply_map_mask(void)
+{
+    if (!planar_on) return;
+    bcast_flush(0);
+    u8 m = seq[2] & 15;
+    int p = 0;
+    while (p < 3 && m && !(m & (1 << p))) p++;
+    if (p != mapped_plane) { map_window((u32)(uintptr_t)planes + p * 65536); mapped_plane = p; }
+    if (m & (m - 1)) { bcast_src = p; bcast_mask = m; }
+}
+
+static void planar_check(void)
+{
+    int want = video_mode == 0x13 && !(seq[4] & 8);
+    if (want && !planar_on) {
+        if (!planes) planes = phys_alloc(4 * 65536);
+        /* what the chained screen showed: byte a went to plane a & 3, offset a >> 2 */
+        for (u32 a = 0; a < 64000; a++) planes[(a & 3) * 65536 + (a >> 2)] = rd8(0xA0000 + a);
+        planar_on = 1;
+        mapped_plane = -1;
+        apply_map_mask();
+        full_redraw = 1;
+        dbg(1, "video: unchained 256-colour (planar)\n");
+    } else if (!want && planar_on) {
+        bcast_flush(0);
+        map_window(guest_phys(0xA0000));
+        planar_on = 0;
+        mapped_plane = -1;
+        full_redraw = 1;
+    }
+}
+
 static void refresh_13h(void)
 {
     static u32 line[4096];
     static u8 ovr[320];
+    static u8 rowbuf[320];
     const u8 *src = gptr(0xA0000);
+    u32 start = 0, pitch = 320;
+    if (planar_on) {
+        bcast_flush(1);
+        start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]);
+        pitch = crtc[0x13] ? crtc[0x13] * 2u : 80;
+    }
     int px = 0, py = -100;
     u16 ma, mxr;
     if (mouse_pointer(&px, &py, &ma, &mxr)) px /= 2; else py = -100;
@@ -281,6 +360,11 @@ static void refresh_13h(void)
     u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
     for (int y = 0; y < 200; y++) {
         const u8 *s = src + y * 320;
+        if (planar_on) {
+            u32 o = start + y * pitch;
+            for (int x = 0; x < 320; x++) rowbuf[x] = planes[(x & 3) * 65536 + ((o + (x >> 2)) & 0xFFFF)];
+            s = rowbuf;
+        }
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
         if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(s, shadow_gfx + y * 320, 320)) continue;
         memcpy(shadow_gfx + y * 320, s, 320);
@@ -406,7 +490,11 @@ void video_port_out(u16 port, u8 v)
         return;
     case 0x3C2: misc_out = v; return;
     case 0x3C4: seq_idx = v; return;
-    case 0x3C5: seq[seq_idx & 7] = v; return;
+    case 0x3C5:
+        seq[seq_idx & 7] = v;
+        if ((seq_idx & 7) == 4) planar_check();
+        else if ((seq_idx & 7) == 2) apply_map_mask();
+        return;
     case 0x3C6: dac_mask = v; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
     case 0x3C8: dac_widx = v; dac_wc = 0; return;
@@ -619,4 +707,11 @@ void video_int10(struct regs *r)
     default:
         dbg(1, "INT 10h AX=%04x unsupported\n", AX(r));
     }
+}
+
+/* Text for the user from the monitor (e.g. why a DPMI client was stopped). */
+void video_puts(const char *s)
+{
+    if (!is_text(video_mode)) video_set_mode(3, 1);
+    while (*s) teletype((u8)*s++, rd8(BDA + 0x62), 7);
 }

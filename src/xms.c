@@ -28,7 +28,10 @@ void xms_init(void)
     if (want > 3072) want = 3072;
     u32 bytes = want << 20;
     if (bytes > avail) bytes = avail & ~0xFFFFFu;
-    if (bytes) pool = phys_alloc(bytes);
+    if (bytes) {
+        pool = phys_alloc(bytes);
+        set_user((u32)(uintptr_t)pool, bytes, 1);   /* DPMI clients use locked blocks by address */
+    }
     pool_kb = bytes >> 10;
     kprintf("XMS: %u KiB extended memory, HMA, %u KiB of UMBs\n", pool_kb, (UMB_END - UMB_START) / 64);
 }
@@ -221,3 +224,5 @@ void xms_call(struct regs *r)
     dbg(1, "XMS function %02x not implemented\n", fn);
     fail(r, 0x80);
 }
+
+u8 *xms_pool_range(u32 *len) { *len = pool_kb * 1024; return pool; }

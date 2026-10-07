@@ -1,8 +1,10 @@
-/* Linked at 4 MiB: linear 0..1 MiB+64 KiB belongs to the v86 guest. */
+/* Linked at 16 MiB. Linear 0..1 MiB+64 KiB belongs to the v86 guest, and
+   2..16 MiB is where DPMI clients' memory blocks appear: DOS/4GW's DOS/16M
+   core keeps 24-bit linear addresses in places. */
 ENTRY(_start)
 SECTIONS
 {
-    . = 4M;
+    . = 16M;
     __kernel_start = .;
     .text : ALIGN(4K) {
         KEEP(*(.multiboot))

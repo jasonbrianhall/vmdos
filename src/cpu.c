@@ -31,6 +31,15 @@ void *phys_alloc(u32 bytes)
 
 u32 phys_free(void) { return alloc_end - alloc_next; }
 
+void *phys_try_alloc(u32 bytes)
+{
+    bytes = (bytes + 4095) & ~4095u;
+    if (!bytes || bytes > alloc_end - alloc_next) return 0;
+    return phys_alloc(bytes);
+}
+
+#define LOW_END 0x1000000u           /* linear below this: guest + DPMI window, not identity */
+
 /* ---------------- paging ----------------
    Linear 0..0x10FFFF: the guest's 1 MiB + HMA (user pages, backed by guest_ram).
    Linear 0x110000 up to the top of RAM: identity (kernel, heap, boot modules).
@@ -92,6 +101,20 @@ void set_a20(int on)
 
 void *phys_low(u32 phys) { return (void *)(uintptr_t)(LOW_ALIAS + phys); }
 
+/* Where the guest's own page for linear address lin is. */
+u32 guest_phys(u32 lin) { return (u32)(uintptr_t)guest_ram + lin; }
+
+void tlb_flush(void) { flush_tlb(); }
+
+/* The page table's dirty bit for lin; cleared if clear. */
+int page_dirty(u32 lin, int clear)
+{
+    int d;
+    if (pae) { u64 *e = &((u64 *)pt_for(lin))[(lin >> 12) & 511]; d = (*e >> 6) & 1; if (clear) *e &= ~0x40ull; }
+    else { u32 *e = &((u32 *)pt_for(lin))[(lin >> 12) & 1023]; d = (*e >> 6) & 1; if (clear) *e &= ~0x40u; }
+    return d;
+}
+
 static int cpu_has_pae(void)
 {
     u32 a, b;
@@ -120,7 +143,7 @@ static void paging_init(void)
     guest_ram = phys_alloc(GUEST_TOP);
     for (u32 a = 0; a < 0x100000; a += 4096) map_page(a, (u32)(uintptr_t)guest_ram + a, 7);
     set_a20(1);
-    map_range(0x110000, 0x110000, ram_top - 0x110000, 3);
+    map_range(LOW_END, LOW_END, ram_top - LOW_END, 3);
     if (mod_hi > ram_top) map_range(mod_lo, mod_lo, mod_hi - mod_lo, 3);
     map_range(LOW_ALIAS, 0, GUEST_TOP, 3);
     if (fb_len) {
@@ -151,6 +174,23 @@ void map_mmio(u32 phys, u32 len)
 {
     map_range(phys, phys, len, 3 | 0x10);         /* PCD: uncached */
     flush_tlb();
+}
+
+/* Let ring 3 (DPMI clients) at these pages, or not. */
+void set_user(u32 lin, u32 len, int user)
+{
+    for (u32 a = lin & ~0xFFFu; a < lin + len; a += 4096) {
+        if (pae) { u64 *e = &((u64 *)pt_for(a))[(a >> 12) & 511]; *e = user ? *e | 4 : *e & ~4ull; }
+        else { u32 *e = &((u32 *)pt_for(a))[(a >> 12) & 1023]; *e = user ? *e | 4 : *e & ~4u; }
+    }
+    flush_tlb();
+}
+
+void *map_mmio64_user(u64 phys, u32 len)
+{
+    void *p = map_mmio64(phys, len);
+    if (p) set_user((u32)(uintptr_t)p, len, 1);
+    return p;
 }
 
 /* MMIO anywhere: identity below 4 GiB, else a window below the framebuffer's. */
@@ -322,7 +362,7 @@ void kmain(u32 magic, struct mb_info *mb)
     for (int r = 0; r < nr; r++) {
         u32 lo = (rgn[r].b + 4095) & ~4095u, hi = rgn[r].t & ~4095u;
         if (hi > ram_top) ram_top = hi;
-        if (lo < GUEST_TOP) lo = (GUEST_TOP + 4095) & ~4095u;
+        if (lo < LOW_END) lo = LOW_END;              /* below 16 MiB: the guest and DPMI window */
         for (int i = 0; i <= nex && lo < hi; i++) {
             u32 end = i < nex && ex[i].lo < hi ? ex[i].lo : hi;
             if (end > lo && end - lo > alloc_end - alloc_next) { alloc_next = lo; alloc_end = end; }
@@ -344,7 +384,7 @@ void kmain(u32 magic, struct mb_info *mb)
     }
 
     if (mod_start) {
-        if (mod_start < GUEST_TOP) {      /* below 1 MiB+64K: move it out of the guest's way */
+        if (mod_start < LOW_END) {        /* below 16 MiB: move it out of the guest's / DPMI's way */
             u8 *p = phys_alloc(mod_end - mod_start);
             memcpy(p, (void *)(uintptr_t)mod_start, mod_end - mod_start);
             mod_end = (u32)(uintptr_t)p + (mod_end - mod_start);
