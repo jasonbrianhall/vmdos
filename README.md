@@ -90,7 +90,8 @@ to vmdos.efi (it loads every `*.ISO` there, up to 7), or add
 `module /boot/vmdos/game.iso game.iso` lines after dos.img in GRUB.
 
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
-load options); the log shows every INT 33h call and event-handler call.
+load options); the log shows every INT 33h call, event-handler call and
+command sent to the PS/2 mouse port.
 
 C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
@@ -107,7 +108,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
   MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
   the program's event handler (0Ch/14h; for DOS extenders' programs too,
-  run from protected mode through their real-mode callback). The pointer is drawn over text and
+  run from protected mode through their real-mode callback), and a PS/2
+  mouse on the virtual keyboard controller (IRQ 12 packets) for programs
+  with their own mouse code. The pointer is drawn over text and
   mode 13h by the renderer. A DOS mouse driver you load (CTMOUSE) takes over.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
   `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded

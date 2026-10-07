@@ -198,6 +198,63 @@ void speaker_mix(int32_t *lr, int frames)
 static u8 kq[64];
 static u8 kq_head, kq_tail;
 static u8 kbd_obuf, kbd_full, kbd_cmd;
+static u8 kbd_aux;                    /* the byte in the output buffer is from the mouse */
+static u8 ccb = 0x47;                 /* command byte: kbd + aux IRQs, system flag, translate */
+
+/* The PS/2 mouse port (aux device), for programs with their own mouse code:
+   commands through D4h, 3-byte packets on IRQ 12 made from the real mouse's
+   motion (the INT 33h driver in mouse.c gets the same motion). */
+static u8 mq[64];
+static u8 mq_head, mq_tail;
+static u8 aux_stream, aux_param;      /* reporting on; command waiting for its parameter */
+static int aux_dx, aux_dy, aux_b, aux_moved;
+static u32 aux_since;                 /* when the unread mouse byte arrived */
+
+static void mq_put(u8 v)
+{
+    u8 n = (mq_tail + 1) % sizeof mq;
+    if (n == mq_head) return;
+    mq[mq_tail] = v;
+    mq_tail = n;
+}
+
+/* From mouse_input(): motion in counts (dy positive = down) and buttons. */
+void vaux_motion(int dx, int dy, int b)
+{
+    if (!aux_stream) return;
+    aux_dx += dx; aux_dy += dy; aux_b = b & 7;
+    aux_moved = 1;
+}
+
+static void aux_packet(void)
+{
+    int dx = aux_dx, dy = -aux_dy;                  /* PS/2: y up */
+    if (dx > 255) dx = 255;
+    if (dx < -256) dx = -256;
+    if (dy > 255) dy = 255;
+    if (dy < -256) dy = -256;
+    aux_dx -= dx; aux_dy += dy;
+    mq_put((u8)(0x08 | aux_b | (dx < 0 ? 0x10 : 0) | (dy < 0 ? 0x20 : 0)));
+    mq_put((u8)dx);
+    mq_put((u8)dy);
+    if (!aux_dx && !aux_dy) aux_moved = 0;
+}
+
+static void aux_data(u8 v)
+{
+    if (mouse_log()) kprintf("mouse: PS/2 mouse port command %02x%s\n", v, aux_param ? " (parameter)" : "");
+    if (aux_param) { aux_param = 0; mq_put(0xFA); return; }    /* sample rate / resolution value */
+    mq_put(0xFA);
+    switch (v) {
+    case 0xFF: aux_stream = 0; mq_put(0xAA); mq_put(0x00); break;      /* reset: self-test passed, ID 0 */
+    case 0xF6: case 0xF5: aux_stream = 0; break;                         /* defaults / disable */
+    case 0xF4: aux_stream = 1; aux_dx = aux_dy = 0; break;               /* enable reporting */
+    case 0xF3: case 0xE8: aux_param = 1; break;                          /* rate / resolution follow */
+    case 0xF2: mq_put(0x00); break;                                      /* ID: standard mouse */
+    case 0xE9: mq_put((u8)(aux_stream ? 0x20 : 0)); mq_put(2); mq_put(100); break;   /* status */
+    case 0xEB: aux_packet(); break;                                      /* read data */
+    }
+}
 
 static void kq_put(u8 v)
 {
@@ -298,15 +355,29 @@ void vkbd_real_scancode(u8 sc)
 
 void vkbd_refill(void)
 {
-    if (kbd_full || kq_head == kq_tail || vpic_in_service(1)) return;
+    if (kbd_full && kbd_aux && ticks - aux_since > 250) kbd_full = 0;   /* nobody reads the mouse: don't block the keyboard */
+    if (kbd_full) return;
+    if (aux_moved && mq_head == mq_tail && !(ccb & 0x20)) aux_packet();
+    if (mq_head != mq_tail && !vpic_in_service(12)) {
+        kbd_obuf = mq[mq_head];
+        mq_head = (mq_head + 1) % sizeof mq;
+        kbd_full = 1; kbd_aux = 1;
+        aux_since = ticks;
+        if (ccb & 2) vpic_raise(12);
+        return;
+    }
+    if (kq_head == kq_tail || vpic_in_service(1)) return;
     kbd_obuf = kq[kq_head];
     kq_head = (kq_head + 1) % sizeof kq;
-    kbd_full = 1;
+    kbd_full = 1; kbd_aux = 0;
     vpic_raise(1);
 }
 
 int vkbd_read_data(void)
 {
+    /* reading the byte takes back its interrupt request, as the 8042's
+       line drops (a program polling with IRQs masked doesn't see it twice) */
+    if (kbd_full) { if (kbd_aux) ps.irr &= ~(1 << 4); else pm.irr &= ~(1 << 1); }
     kbd_full = 0;
     return kbd_obuf;
 }
@@ -314,13 +385,16 @@ int vkbd_read_data(void)
 static void kbd_command(u8 v)
 {
     switch (v) {
-    case 0xD1: case 0x60: kbd_cmd = v; break;
+    case 0xD1: case 0x60: case 0xD3: case 0xD4: kbd_cmd = v; break;
     case 0xDD: set_a20(0); break;
     case 0xDF: set_a20(1); break;
-    case 0x20: kbd_obuf = 0x45; kbd_full = 1; break;
-    case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; break;
-    case 0xAA: kbd_obuf = 0x55; kbd_full = 1; break;
-    case 0xAB: kbd_obuf = 0x00; kbd_full = 1; break;
+    case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; break;
+    case 0xA7: ccb |= 0x20; break;                  /* mouse port off */
+    case 0xA8: ccb &= ~0x20; break;                 /* mouse port on */
+    case 0xA9: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;   /* mouse port test: OK */
+    case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; kbd_aux = 0; break;
+    case 0xAA: kbd_obuf = 0x55; kbd_full = 1; kbd_aux = 0; break;
+    case 0xAB: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;
     case 0xFE: reboot();
     }
 }
@@ -328,7 +402,9 @@ static void kbd_command(u8 v)
 static void kbd_data(u8 v)
 {
     if (kbd_cmd == 0xD1) { set_a20((v & 2) != 0); kbd_cmd = 0; return; }
-    if (kbd_cmd == 0x60) { kbd_cmd = 0; return; }
+    if (kbd_cmd == 0x60) { ccb = v; kbd_cmd = 0; return; }
+    if (kbd_cmd == 0xD4) { kbd_cmd = 0; aux_data(v); return; }     /* to the mouse */
+    if (kbd_cmd == 0xD3) { kbd_cmd = 0; mq_put(v); return; }       /* as if from the mouse */
     if (v == 0xEE) kq_put(0xEE);
     else if (v == 0xFF) { kq_put(0xFA); kq_put(0xAA); }
     else if (v == 0xF2) { kq_put(0xFA); kq_put(0xAB); kq_put(0x41); }
@@ -351,7 +427,7 @@ static u8 in8(u16 port)
         if ((pit_clock() / 18) & 1) v |= 0x10;
         if (pit_out2()) v |= 0x20;
         return v; }
-    case 0x64: return (kbd_full ? 1 : 0) | 0x14;
+    case 0x64: return (kbd_full ? 1 : 0) | (kbd_full && kbd_aux ? 0x20 : 0) | 0x14;
     case 0x70: return cmos_index;
     case 0x71: outb(0x70, cmos_index & 0x7F); return inb(0x71);
     case 0x92: return a20_on ? 2 : 0;

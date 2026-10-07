@@ -33,6 +33,7 @@ void mouse_input(int dx, int dy, int b)
     raw_dy += dy;
     raw_buttons = b & 7;
     have_input = 1;
+    vaux_motion(dx, dy, b);
 }
 
 /* ---------------- PS/2 mouse on the real 8042 ---------------- */
