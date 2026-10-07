@@ -28,7 +28,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o xms.o mouse.o dpmi.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -71,6 +71,8 @@ vmdos.elf: $(OBJS) src/linker.ld
 
 $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
 	nasm -f bin -i boot/ $< -o $@
+$(BUILD)/fat16.bin: boot/boot.asm boot/magic.mac | $(BUILD)
+	nasm -f bin -DISFAT16 -i boot/ $< -o $@
 
 $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM:
 	sh tools/fetch-freedos.sh $(FREEDOS)
@@ -85,9 +87,9 @@ FORCE:
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-dos.img: $(BUILD)/fat32lba.bin $(BUILD)/VMXMS.SYS tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
          $(BUILD)/extra.stamp
-	python3 tools/mkdisk.py $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
+	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
 	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
@@ -160,7 +162,9 @@ QSOUND_sb   := $(QAUDIO) -device sb16,audiodev=snd0
 QSOUND_none :=
 # USB=1: keyboard and mouse on an xHCI controller (as on many UEFI PCs).
 QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device usb-mouse)
-QEMU_ARGS ?= -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
+# KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
+ACCEL ?= -accel kvm -accel tcg
+QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
 
 run: vmdos.elf dos.img
 	qemu-system-i386 -kernel vmdos.elf -initrd dos.img $(QEMU_ARGS)

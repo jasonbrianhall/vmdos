@@ -3,11 +3,16 @@
 FreeDOS FAT32 (LBA) boot sector, then copy files into its root.
 Needs mkfs.fat (dosfstools) and mcopy (mtools).
 
-  mkdisk.py [--type=0C] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
+  mkdisk.py [--type=0C] [--boot16=FAT16BOOT.bin] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
 Files are copied to the root; a directory is copied recursively; SRC=DEST
 puts a file at DEST (directories are created); --contents=DIR copies
 everything inside DIR to the root. BOOTSECTOR "-" leaves the
-mkfs.fat boot code; --type sets the partition type (EF: EFI system partition)."""
+mkfs.fat boot code; --type sets the partition type (EF: EFI system partition).
+
+With --boot16, disks up to 2 GiB are FAT16 with 8-32 KiB clusters and that
+boot sector: FreeDOS walks a file's cluster chain on every seek, which with
+FAT32's 512-byte clusters (all a small FAT32 disk can have) makes seeking in
+a big file (DOOM's WAD) very slow. Otherwise FAT32 with BOOTSECTOR."""
 import os, struct, subprocess, sys
 
 START = 2048                      # first partition sector (1 MiB aligned)
@@ -24,14 +29,31 @@ def chs(lba, heads=255, spt=63):
 
 def main():
     args = sys.argv[1:]
-    ptype = 0x0C
-    while args and args[0].startswith("--type="):
-        ptype = int(args.pop(0)[7:], 16)
+    ptype, boot16 = None, None
+    while args and args[0].startswith("--"):
+        a = args.pop(0)
+        if a.startswith("--type="): ptype = int(a[7:], 16)
+        elif a.startswith("--boot16="): boot16 = a[9:]
+        else: sys.exit("mkdisk: unknown option " + a)
     out, size_mb, bootbin, files = args[0], int(args[1]), args[2], args[3:]
     total = size_mb * 2048
     plen = total - START
-    if plen < 66600 * 1:          # FAT32 wants >= 65525 clusters
-        sys.exit("mkdisk: %d MiB is too small for FAT32 (use 34 or more)" % size_mb)
+    fat16 = boot16 is not None and plen < 4 * 1024 * 1024 - 8192
+    if fat16:
+        spc = 16                  # 8 KiB clusters; more on bigger disks (FAT16 has < 65525 clusters)
+        while plen // spc > 65000: spc *= 2
+        while spc > 1 and plen // spc < 4200: spc //= 2
+        if plen // spc < 4200:
+            sys.exit("mkdisk: %d MiB is too small" % size_mb)
+        if ptype is None: ptype = 0x0E           # FAT16, LBA
+        bootbin, spc_fat, bpb_end = boot16, ["-F", "16", "-s", str(spc)], 0x3E
+    else:
+        if plen < 66600 * 1:          # FAT32 wants >= 65525 clusters
+            sys.exit("mkdisk: %d MiB is too small for FAT32 (use 34 or more)" % size_mb)
+        spc = 1
+        while spc < 64 and plen // (spc * 2) >= 66600 and spc < 8: spc *= 2   # up to 4 KiB clusters
+        if ptype is None: ptype = 0x0C
+        spc_fat, bpb_end = ["-F", "32", "-s", str(spc)], 0x5A
     with open(out, "wb") as f:
         f.truncate(total * 512)
 
@@ -43,18 +65,18 @@ def main():
     with open(out, "r+b") as f:
         f.write(mbr)
 
-    subprocess.run(["mkfs.fat", "-F", "32", "-S", "512", "-s", "1", "-h", str(START),
+    subprocess.run(["mkfs.fat"] + spc_fat + ["-S", "512", "-h", str(START),
                     "--offset", str(START), "-D", "0x80", "-n", "VMDOS", "-i", "766D646F",
                     out, str(plen // 2)], check=True, stdout=subprocess.DEVNULL)
 
     if bootbin != "-":
         code = open(bootbin, "rb").read()
-        assert len(code) == 512 and code[0] == 0xEB and code[1] == 0x58, "unexpected boot sector"
+        assert len(code) == 512 and code[0] == 0xEB and code[1] == bpb_end - 2, "unexpected boot sector"
         with open(out, "r+b") as f:
             f.seek(START * 512)
             old = f.read(512)
-            new = code[0:3] + old[3:0x5A] + code[0x5A:510] + b"\x55\xAA"
-            for sec in (START, START + 6):            # boot sector and its backup
+            new = code[0:3] + old[3:bpb_end] + code[bpb_end:510] + b"\x55\xAA"
+            for sec in ((START,) if fat16 else (START, START + 6)):   # FAT32 keeps a backup
                 f.seek(sec * 512)
                 f.write(new)
 

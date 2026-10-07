@@ -106,6 +106,7 @@ void set_a20(int on);
 extern int a20_on;
 extern int usb_ready;
 void *phys_low(u32 phys);                     /* pointer to physical memory below 1 MiB */
+void *isa_dma_buffer(u32 *phys);              /* 64 KiB of RAM below 16 MiB, 64 KiB aligned (0: none) */
 void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
@@ -201,5 +202,18 @@ void video_framebuffer(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp,
                        u8 rpos, u8 rsz, u8 gpos, u8 gsz, u8 bpos, u8 bsz);
 void video_text_fallback(void);
 void video_int10(struct regs *r);
+/* mememu.c: emulate the instruction that touched trapped video memory */
+struct emu_cpu {
+    u32 *gpr[8];                              /* eax ecx edx ebx esp ebp esi edi */
+    u32 *eip, *eflags;
+    u32 seg_base[6];                          /* es cs ss ds fs gs */
+    int code32;                               /* 32-bit code segment */
+};
+int mem_emulate(struct emu_cpu *e);
+int vga16_window(u32 lin);                    /* video.c: 16-colour planar window */
+u8 vga16_read(u32 lin);
+void vga16_write(u32 lin, u8 v);
+int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
+int video_gfx_height(void);                   /* graphics mode height (200 in text modes) */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;

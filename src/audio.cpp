@@ -475,7 +475,7 @@ static uint16_t sb_base = 0x220;
 static int sb_dma = 1;
 static uint32_t sb_rate;                     // what the time constant gives
 #define SB_RING 16384                        // bytes (frames): 0.74 s at 22 kHz
-static uint8_t sb_ring[SB_RING] __attribute__((aligned(65536)));   // in one 64 KB DMA page
+static uint8_t* sb_ring;                     // in one 64 KB DMA page below 16 MB (cpu.c reserves it)
 static uint32_t sb_write;                    // next frame we will write
 static uint32_t sb_ahead;                    // desired latency in frames
 static uint32_t sb_phase;                    // 48 kHz -> sb_rate resampling
@@ -527,8 +527,9 @@ static bool sb_init(const char* cmdline) {
     sb_out(0xE1);                                     // DSP version
     int major = sb_in(), minor = sb_in();
     if (major < 2) return false;                      // the SB 1.x has no auto-init DMA
-    uintptr_t phys = (uintptr_t)sb_ring;
-    if (phys + SB_RING > 0x1000000) return false;     // ISA DMA reaches the first 16 MB only
+    uint32_t phys;
+    sb_ring = (uint8_t*)isa_dma_buffer(&phys);        // ISA DMA reaches the first 16 MB only
+    if (!sb_ring) return false;
 
     // Mixer (SB Pro and later): mono output, filter on, voice and master full.
     if (major >= 3) {
@@ -536,7 +537,7 @@ static bool sb_init(const char* cmdline) {
         outb(sb_base + 4, 0x04); outb(sb_base + 5, 0xFF);
         outb(sb_base + 4, 0x22); outb(sb_base + 5, 0xFF);
     }
-    memset(sb_ring, 0x80, sizeof sb_ring);            // silence is 128
+    memset(sb_ring, 0x80, SB_RING);            // silence is 128
 
     // DMA: single mode, auto-init, memory to device, over the whole ring.
     int ch = sb_dma;

@@ -333,6 +333,14 @@ struct regs *isr_dispatch(struct regs *r)
 
     switch (vec) {
     case 13: gp_handler(r); break;
+    case 14: {                                        /* the 16-colour VGA window */
+        u32 cr2;
+        __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
+        struct emu_cpu e = { { &r->eax, &r->ecx, &r->edx, &r->ebx, &r->esp, &r->ebp, &r->esi, &r->edi },
+                             &r->eip, &r->eflags,
+                             { r->v86_es << 4, r->cs << 4, r->ss << 4, r->v86_ds << 4, r->v86_fs << 4, r->v86_gs << 4 }, 0 };
+        if (!vga16_fault(&e, cr2)) dump(r, "page fault in the DOS guest");
+        break; }
     case 0: case 1: case 5: case 6: case 7:          /* real-mode style: guest's own vector */
         v86_reflect(r, vec);
         break;

@@ -21,7 +21,8 @@ make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img (OVMF takes ~40 s to read
 make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
 
-QEMU targets: `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
+QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
+is many times slower; `ACCEL=` overrides). `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
 (default pa: PulseAudio/PipeWire; wav records vmdos.wav), `USB=1` for a USB
 keyboard and mouse, `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
 
@@ -57,7 +58,9 @@ or `make iso EXTRA=games` rebuild C: and the image that carries it (esp.img and
 vmdos.iso hold their own copy of dos.img). By hand: `mcopy -s -i dos.img@@1M POP ::/`.
 
 Options: `EXTRA=dir` copies a directory's contents into C:\, `DISK_MB=` sets
-the size of C: (34 or more), `FREEDOS=dir` uses your own KERNEL.SYS and
+the size of C: (8 or more; FAT16 with 8 KB clusters up to 2 GB, since
+FreeDOS walks the cluster chain on every seek and DOOM's WAD on 512-byte
+FAT32 clusters took minutes to load), `FREEDOS=dir` uses your own KERNEL.SYS and
 COMMAND.COM. Kernel command line `debug=2` or `debug=3` logs ports and
 interrupts to COM1.
 
@@ -100,12 +103,18 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   interrupt and exception handlers. Client memory appears at linear
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
-- Unchained 256-colour VGA (Mode X/Y, as DOOM uses): four planes, map mask,
-  page flipping via the CRTC start address.
+- Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
+  or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses),
+  and the EGA/VGA 16-colour modes 0Dh, 0Eh, 10h, 12h. In the 16-colour modes
+  every access to A000h faults and the instruction is emulated against the
+  four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
+  and read modes; the screen honours the CRTC start/offset, pel panning and
+  line compare. INT 10h draws pixels and text in all of them.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
   `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
+  A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
@@ -117,7 +126,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   DMX's DMA-buffer setup and hangs. Debug with `debug=2` (5 s heartbeat of
   IRQ/vIF/DPMI state); `norouteirq` stops routing real-mode IRQs to
   protected-mode handlers.
-- EGA 16-colour modes, Mode X's 240-line timing, VESA, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, VGA write modes in Mode X (latch copies), VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
@@ -130,13 +139,14 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/vdev.c` | virtual PIC, PIT, keyboard controller, A20, CMOS |
 | `src/bios.c`, `src/bios.asm` | BIOS data area, IVT, services; F000h stub segment |
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
-| `boot/boot32lb.asm` | FreeDOS FAT32 LBA boot sector (from the FreeDOS kernel, GPL) |
+| `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
 | `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/dpmi.c` | DPMI host |
+| `src/mememu.c` | instruction emulator for the trapped 16-colour VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 

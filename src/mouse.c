@@ -87,13 +87,13 @@ static void clamp(void)
     if (my > ymax) my = ymax;
 }
 
-static int granular_x(void) { return (video_mode <= 1 || video_mode == 0x13) ? 2 : 1; }
+static int granular_x(void) { return (video_mode <= 1 || video_mode == 4 || video_mode == 5 || video_mode == 0x0D || video_mode == 0x13) ? 2 : 1; }
 
 static void reset_ranges(void)
 {
     xmin = ymin = 0;
     xmax = 639;
-    ymax = 199;
+    ymax = video_gfx_height() - 1;
     mx = (xmax + 1) / 2; my = (ymax + 1) / 2;
 }
 

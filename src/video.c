@@ -1,6 +1,6 @@
-/* The guest's display: VGA text (B800h) and mode 13h (A000h) kept in guest
-   memory, drawn onto the boot framebuffer (GRUB / GOP / Bochs VBE), plus the
-   VGA registers and INT 10h. */
+/* The guest's display: VGA text (B800h), CGA graphics (modes 4-6, B800h) and
+   mode 13h (A000h) kept in guest memory, drawn onto the boot framebuffer
+   (GRUB / GOP / Bochs VBE), plus the VGA registers and INT 10h. */
 #include "kernel.h"
 #include "font437.h"
 
@@ -96,10 +96,22 @@ static const u8 cga16[16][3] = {
     { 0, 0, 0 }, { 0, 0, 42 }, { 0, 42, 0 }, { 0, 42, 42 }, { 42, 0, 0 }, { 42, 0, 42 }, { 42, 21, 0 }, { 42, 42, 42 },
     { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 }, { 63, 21, 21 }, { 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 } };
 
-static void default_palette(int graphics256)
+/* kind 0: the EGA 64-colour palette (400-line text, modes 10h, 12h);
+   1: the 256-colour default (13h); 2: the CGA-compatible palette of the
+   200-line modes (4, 5, 6, 0Dh, 0Eh), where attribute bit 4 is intensity. */
+static void default_palette(int kind)
 {
+    int graphics256 = kind == 1;
     memset(vga_dac, 0, sizeof vga_dac);
-    if (!graphics256) {
+    if (kind == 2) {
+        for (int i = 0; i < 64; i++) {
+            int in = (i & 0x10) ? 21 : 0;
+            vga_dac[i][0] = ((i >> 2) & 1) * 42 + in;
+            vga_dac[i][1] = (i & 0x17) == 6 ? 21 : ((i >> 1) & 1) * 42 + in;
+            vga_dac[i][2] = (i & 1) * 42 + in;
+        }
+        for (int i = 0; i < 16; i++) atc[i] = (u8)((i & 7) | (i & 8 ? 0x10 : 0));
+    } else if (!graphics256) {
         for (int i = 0; i < 64; i++) {
             vga_dac[i][0] = ((i >> 2) & 1) * 42 + ((i >> 5) & 1) * 21;
             vga_dac[i][1] = ((i >> 1) & 1) * 42 + ((i >> 4) & 1) * 21;
@@ -132,6 +144,7 @@ static void default_palette(int graphics256)
         for (int i = 0; i < 16; i++) atc[i] = i;
     }
     atc[0x10] = graphics256 ? 0x41 : 0x0C;   /* mode control: blink on in text */
+    atc[0x11] = 0; atc[0x12] = 0x0F; atc[0x13] = 0; atc[0x14] = 0;
     palette_dirty = 1;
 }
 
@@ -139,8 +152,35 @@ static void default_palette(int graphics256)
 static int text_cols = 80, text_rows = 25;
 static u32 text_base = 0xB8000;
 
+static u8 *planes;                 /* 4 x 64 KiB: unchained 256-colour and 16-colour modes */
 static int is_text(int m) { return m <= 3 || m == 7; }
+static int is_cga(int m) { return m >= 4 && m <= 6; }
+static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x12; }   /* 16-colour planar */
 static void planar_check(void);
+static void ega_check(void);
+
+/* Graphics mode size in pixels. */
+static int gfx_w(void) { return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320; }
+static int gfx_h(void) { return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200; }
+int video_gfx_height(void) { return is_text(video_mode) ? 200 : gfx_h(); }
+
+/* CGA colour select (port 3D9h, INT 10h AH=0Bh): background (or the
+   640x200 foreground), palette and intensity, as attribute-palette entries. */
+static u8 cga_sel;
+static void cga_color_select(u8 v)
+{
+    cga_sel = v;
+    wr8(BDA + 0x66, v);
+#define CGA_ATTR(c) ((u8)(((c) & 7) | ((c) & 8 ? 0x10 : 0)))
+    if (video_mode == 6) { atc[0] = 0; atc[1] = CGA_ATTR(v & 15); }
+    else if (is_cga(video_mode)) {
+        static const u8 cols[3][3] = { { 2, 4, 6 }, { 3, 5, 7 }, { 3, 4, 7 } };   /* palette 0, 1, mode 5 */
+        int set = video_mode == 5 ? 2 : (v & 0x20) ? 1 : 0, hi = (v & 0x10) ? 8 : 0;
+        atc[0] = CGA_ATTR(v & 15);
+        for (int i = 0; i < 3; i++) atc[1 + i] = CGA_ATTR(cols[set][i] + hi);
+    }
+    palette_dirty = 1;
+}
 
 static void sync_cursor_crtc(void)
 {
@@ -161,6 +201,8 @@ void video_set_mode(int mode, int clear)
     wr8(BDA + 0x49, (u8)mode);
     wr16(BDA + 0x4A, (u16)text_cols);
     wr16(BDA + 0x4C, is_text(mode) ? (text_cols == 40 ? 0x800 : 0x1000) : (mode == 0x13 ? 0xFA00 : 0x4000));
+    if (mode == 0x12) text_rows = 30;
+    else if (mode == 0x10) text_rows = 25;
     wr16(BDA + 0x4E, 0);
     for (int i = 0; i < 8; i++) wr16(BDA + 0x50 + i * 2, 0);
     wr16(BDA + 0x60, 0x0607);
@@ -169,30 +211,38 @@ void video_set_mode(int mode, int clear)
     wr8(BDA + 0x65, mode == 0x13 ? 0x0E : 0x29);
     wr8(BDA + 0x66, 0x30);
     wr8(BDA + 0x84, (u8)(text_rows - 1));
-    wr16(BDA + 0x85, mode == 0x13 ? 8 : 16);
+    wr16(BDA + 0x85, mode == 0x10 ? 14 : mode == 0x12 || is_text(mode) ? 16 : 8);
     wr8(BDA + 0x87, (rd8(BDA + 0x87) & 0x7F) | (clear ? 0 : 0x80) | 0x60);
     wr8(BDA + 0x88, 0x09);
     wr8(BDA + 0x89, 0x11);
     memset(crtc, 0, sizeof crtc);
+    memset(gc, 0, sizeof gc);
+    gc[6] = is_text(mode) || is_cga(mode) ? 0x0E : 0x05;   /* memory map: B800h / A000h 64K */
+    gc[7] = 0x0F; gc[8] = 0xFF;                    /* colour don't care, bit mask */
     seq[2] = 0x0F;                                 /* all planes */
-    seq[4] = mode == 0x13 ? 0x0E : 0x02;           /* chain-4 in mode 13h */
-    crtc[0x13] = text_cols == 40 && is_text(mode) ? 0x14 : 0x28;
+    seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) ? 0x06 : 0x02;   /* chain-4 in mode 13h */
+    crtc[0x13] = text_cols == 40 && (is_text(mode) || mode == 0x0D) ? 0x14 : 0x28;
+    crtc[0x18] = 0xFF; crtc[0x07] = 0x10; crtc[0x09] = 0x40;    /* line compare off */
     planar_check();
+    ega_check();
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
     if (clear) {
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
+        else if (is_cga(mode)) memset(gptr(0xB8000), 0, 0x8000);
+        else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
         else memset(gptr(0xA0000), 0, 0x10000);
     }
-    default_palette(!is_text(mode));
+    default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
+    if (is_cga(mode)) cga_color_select(mode == 6 ? 0x3F : 0x30);
     full_redraw = 1;
     last_layout_mode = -1;
-    if (!is_text(mode) && mode != 0x13) kprintf("video mode %02x: not drawn yet\n", mode);
+    if (!is_text(mode) && !is_cga(mode) && !is_ega(mode) && mode != 0x13) kprintf("video mode %02x: not drawn yet\n", mode);
     else dbg(1, "video mode %02x\n", mode);
 }
 
 /* ---------------- drawing ---------------- */
 static u16 shadow_text[132 * 60];
-static u8 shadow_gfx[64000];
+static u8 shadow_gfx[640 * 480];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
 static int t_scale, t_ox, t_oy;
@@ -216,7 +266,8 @@ static void layout(void)
     if (g_w > fb_w) { g_w = fb_w; g_h = fb_w * 3 / 4; }
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
-    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * 320 / g_w);
+    u32 w = is_text(video_mode) ? 320 : (u32)gfx_w();
+    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * w / g_w);
 }
 
 static void draw_cell(int col, int row, u16 cell, int cursor)
@@ -281,7 +332,6 @@ static int sh_ptr_y = -100, sh_ptr_x;
    selects several, pages written meanwhile (PTE dirty bits) are copied to
    the others when the mask changes or the screen is drawn. Reads come from
    the plane the window shows. */
-static u8 *planes;                 /* 4 x 64 KiB */
 static int planar_on, mapped_plane = -1;
 static int bcast_src = -1;
 static u8 bcast_mask;
@@ -341,42 +391,160 @@ static void planar_check(void)
     }
 }
 
-static void refresh_13h(void)
+/* ---------------- 16-colour planar modes (0Dh, 0Eh, 10h, 12h) ----------------
+   The A000h window is left unmapped: each access faults and the instruction
+   is emulated (mememu.c) against the four planes through the VGA's logic:
+   latches, write modes 0-3, set/reset, rotate and function, bit mask, map
+   mask; read modes 0 and 1. */
+static int ega_on, ega_dirty;
+static u8 latch[4];
+
+static void ega_check(void)
+{
+    int want = is_ega(video_mode);
+    if (want && !ega_on) {
+        if (!planes) planes = phys_alloc(4 * 65536);
+        for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0);
+        tlb_flush();
+        ega_on = 1;
+    } else if (!want && ega_on) {
+        map_window(guest_phys(0xA0000));
+        ega_on = 0;
+    }
+}
+
+int vga16_window(u32 lin) { return ega_on && lin >= 0xA0000 && lin < 0xB0000; }
+
+u8 vga16_read(u32 lin)
+{
+    u32 o = (lin - 0xA0000) & 0xFFFF;
+    for (int p = 0; p < 4; p++) latch[p] = planes[p * 65536 + o];
+    if (!(gc[5] & 8)) return latch[gc[4] & 3];
+    u8 r = 0;                                      /* read mode 1: colour compare */
+    for (int p = 0; p < 4; p++)
+        if (gc[7] & (1 << p)) r |= latch[p] ^ ((gc[2] & (1 << p)) ? 0xFF : 0);
+    return (u8)~r;
+}
+
+void vga16_write(u32 lin, u8 v)
+{
+    u32 o = (lin - 0xA0000) & 0xFFFF;
+    int mode = gc[5] & 3, rot = gc[3] & 7, fn = (gc[3] >> 3) & 3;
+    u8 mask = gc[8], mm = seq[2] & 15;
+    ega_dirty = 1;
+    if (rot) v = (u8)((v >> rot) | (v << (8 - rot)));
+    if (mode == 3) { mask &= v; }
+    for (int p = 0; p < 4; p++) {
+        if (!(mm & (1 << p))) continue;
+        u8 d;
+        if (mode == 1) { planes[p * 65536 + o] = latch[p]; continue; }
+        if (mode == 0) d = (gc[1] & (1 << p)) ? ((gc[0] & (1 << p)) ? 0xFF : 0) : v;
+        else if (mode == 2) d = (v & (1 << p)) ? 0xFF : 0;
+        else d = (gc[0] & (1 << p)) ? 0xFF : 0;
+        switch (fn) {
+        case 1: d &= latch[p]; break;
+        case 2: d |= latch[p]; break;
+        case 3: d ^= latch[p]; break;
+        }
+        planes[p * 65536 + o] = (u8)((d & mask) | (latch[p] & ~mask));
+    }
+}
+
+/* A fault on the window: emulate the instruction. */
+int vga16_fault(struct emu_cpu *e, u32 cr2)
+{
+    if (!vga16_window(cr2)) return 0;
+    if (mem_emulate(e)) return 1;
+    u32 a = e->seg_base[1] + *e->eip;
+    kprintf("vga16: can't emulate %02x %02x %02x %02x %02x at %x (address %x)\n",
+            rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), a, cr2);
+    return 0;
+}
+
+static int ega_bpr(void) { return video_mode == 0x0D ? 40 : 80; }   /* BIOS drawing: bytes per row */
+
+/* One row of the screen as DAC indices: CRTC start and offset, pel panning,
+   line compare, the attribute controller. */
+static void ega_row(int y, u8 *out, int w)
+{
+    u32 start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]), pitch = crtc[0x13] * 2u;
+    int pan = atc[0x13] & 7;
+    int lc = crtc[0x18] | (crtc[0x07] & 0x10) << 4 | (crtc[0x09] & 0x40) << 3;
+    if (video_mode == 0x0D || video_mode == 0x0E) lc >>= 1;   /* double-scanned 200-line modes */
+    u32 o;
+    if (y > lc) { o = (y - lc - 1) * pitch; if (atc[0x10] & 0x20) pan = 0; }
+    else o = start + y * pitch;
+    u8 cs = (u8)((atc[0x14] & 0x0C) << 4);
+    for (int x = 0; x < w; x++) {
+        int px = x + pan;
+        u32 a = (o + (px >> 3)) & 0xFFFF;
+        int b = 7 - (px & 7);
+        int idx = ((planes[a] >> b) & 1) | ((planes[65536 + a] >> b) & 1) << 1 |
+                  ((planes[131072 + a] >> b) & 1) << 2 | ((planes[196608 + a] >> b) & 1) << 3;
+        u8 v = atc[idx & atc[0x12]];
+        out[x] = (atc[0x10] & 0x80) ? (u8)(cs | (atc[0x14] & 3) << 4 | (v & 15)) : (u8)(cs | (v & 0x3F));
+    }
+}
+
+/* One row of the graphics screen as DAC indices. */
+static void fetch_row(int y, u8 *out)
+{
+    int w = gfx_w();
+    if (video_mode == 0x13) {
+        if (planar_on) {
+            u32 start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]), pitch = crtc[0x13] ? crtc[0x13] * 2u : 80;
+            u32 o = start + y * pitch;
+            for (int x = 0; x < 320; x++) out[x] = planes[(x & 3) * 65536 + ((o + (x >> 2)) & 0xFFFF)];
+        } else memcpy(out, gptr(0xA0000 + y * 320), 320);
+        return;
+    }
+    if (is_cga(video_mode)) {                     /* even rows at B800:0000, odd at B800:2000 */
+        const u8 *b = gptr(0xB8000 + (y & 1) * 0x2000 + (y >> 1) * 80);
+        if (video_mode == 6)
+            for (int x = 0; x < w; x++) out[x] = atc[(b[x >> 3] >> (7 - (x & 7))) & 1] & 0x3F;
+        else
+            for (int x = 0; x < w; x++) out[x] = atc[(b[x >> 2] >> (6 - 2 * (x & 3))) & 3] & 0x3F;
+        return;
+    }
+    if (is_ega(video_mode)) { ega_row(y, out, w); return; }
+    memset(out, 0, w);
+}
+
+static void refresh_gfx(void)
 {
     static u32 line[4096];
-    static u8 ovr[320];
-    static u8 rowbuf[320];
-    const u8 *src = gptr(0xA0000);
-    u32 start = 0, pitch = 320;
-    if (planar_on) {
-        bcast_flush(1);
-        start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]);
-        pitch = crtc[0x13] ? crtc[0x13] * 2u : 80;
-    }
+    static u8 ovr[640];
+    static u8 rowbuf[640];
+    int w = gfx_w(), h = gfx_h();
+    if (planar_on) bcast_flush(1);
     int px = 0, py = -100;
     u16 ma, mxr;
-    if (mouse_pointer(&px, &py, &ma, &mxr)) px /= 2; else py = -100;
+    if (mouse_pointer(&px, &py, &ma, &mxr)) { if (w == 320) px /= 2; } else py = -100;
     int moved = px != sh_ptr_x || py != sh_ptr_y;
+    if (is_ega(video_mode)) {                      /* nothing new in the planes or registers */
+        static u8 last_regs[32 + 21];
+        int regs_changed = memcmp(last_regs, crtc, 32) || memcmp(last_regs + 32, atc, 21);
+        if (!ega_dirty && !full_redraw && !moved && !regs_changed) return;
+        memcpy(last_regs, crtc, 32); memcpy(last_regs + 32, atc, 21);
+        ega_dirty = 0;
+    }
     u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
-    for (int y = 0; y < 200; y++) {
-        const u8 *s = src + y * 320;
-        if (planar_on) {
-            u32 o = start + y * pitch;
-            for (int x = 0; x < 320; x++) rowbuf[x] = planes[(x & 3) * 65536 + ((o + (x >> 2)) & 0xFFFF)];
-            s = rowbuf;
-        }
+    for (int y = 0; y < h; y++) {
+        fetch_row(y, rowbuf);
+        u8 *sh = shadow_gfx + y * w;
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(s, shadow_gfx + y * 320, 320)) continue;
-        memcpy(shadow_gfx + y * 320, s, 320);
-        for (u32 x = 0; x < g_w; x++) line[x] = pal[s[xmap[x]]];
+        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w)) continue;
+        memcpy(sh, rowbuf, w);
+        for (u32 x = 0; x < g_w; x++) line[x] = pal[rowbuf[xmap[x]]];
         if (in_new) {
             memset(ovr, 0, sizeof ovr);
             const char *a = arrow[y - py];
-            for (int i = 0; a[i] && px + i < 320; i++) ovr[px + i] = a[i] == '1' ? 1 : a[i] == '2' ? 2 : 0;
+            for (int i = 0; a[i] && px + i < w; i++) ovr[px + i] = a[i] == '1' ? 1 : a[i] == '2' ? 2 : 0;
             for (u32 x = 0; x < g_w; x++)
                 if (ovr[xmap[x]]) line[x] = ovr[xmap[x]] == 1 ? black : white;
         }
-        u32 y0 = g_y + y * g_h / 200, y1 = g_y + (y + 1) * g_h / 200;
+        u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
+        if (y1 == y0) continue;
         put_row(line, g_w, g_x, y0);
         for (u32 yy = y0 + 1; yy < y1; yy++) copy_row(g_x, g_w, y0, yy);
     }
@@ -414,7 +582,7 @@ void video_refresh(void)
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
         refresh_text((const u16 *)gptr(text_base + start * 2), cur);
-    } else if (video_mode == 0x13) refresh_13h();
+    } else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
     busy = 0;
 }
@@ -454,6 +622,7 @@ u32 video_port_in(u16 port)
     case 0x3C0: return atc_idx;
     case 0x3C1: return atc[atc_idx % 21];
     case 0x3C2: return 0x10;
+    case 0x3D9: return cga_sel;
     case 0x3C4: return seq_idx;
     case 0x3C5: return seq[seq_idx & 7];
     case 0x3C6: return dac_mask;
@@ -489,6 +658,7 @@ void video_port_out(u16 port, u8 v)
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
+    case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
         seq[seq_idx & 7] = v;
@@ -519,15 +689,72 @@ static u32 cell_addr(int page, int row, int col)
     return text_base + page * rd16(BDA + 0x4C) + (row * text_cols + col) * 2;
 }
 
+/* Byte-oriented graphics modes (4, 5, 6, 13h): where pixel row y starts and
+   bits per pixel. */
+static int gfx_bpp(void) { return video_mode == 0x13 ? 8 : video_mode == 6 ? 1 : is_cga(video_mode) ? 2 : 0; }
+static u32 gfx_row_addr(int y)
+{
+    if (video_mode == 0x13) return 0xA0000 + y * 320;
+    return 0xB8000 + (y & 1) * 0x2000 + (y >> 1) * 80;
+}
+
+static void put_pixel(int x, int y, u8 c)
+{
+    if (x < 0 || y < 0 || x >= gfx_w() || y >= gfx_h()) return;
+    if (is_ega(video_mode)) {
+        u32 a = (u32)(y * ega_bpr() + (x >> 3));
+        u8 bit = (u8)(0x80 >> (x & 7));
+        ega_dirty = 1;
+        for (int p = 0; p < 4; p++) {
+            u8 *b = &planes[p * 65536 + a];
+            if (c & 0x80) { if (c & (1 << p)) *b ^= bit; }
+            else if (c & (1 << p)) *b |= bit;
+            else *b &= (u8)~bit;
+        }
+        return;
+    }
+    int bpp = gfx_bpp();
+    if (!bpp) return;
+    u32 a = gfx_row_addr(y);
+    if (bpp == 8) { wr8(a + x, (c & 0x80) ? rd8(a + x) ^ (c & 0x7F) : c); return; }
+    int per = 8 / bpp, sh = (per - 1 - x % per) * bpp;
+    u8 m = (u8)(((1 << bpp) - 1) << sh), v = (u8)((c << sh) & m);
+    a += x / per;
+    u8 b = rd8(a);
+    wr8(a, (c & 0x80) ? b ^ v : (u8)((b & ~m) | v));
+}
+
+static u8 get_pixel(int x, int y)
+{
+    if (x < 0 || y < 0 || x >= gfx_w() || y >= gfx_h()) return 0;
+    if (is_ega(video_mode)) {
+        u32 a = (u32)(y * ega_bpr() + (x >> 3));
+        u8 v = 0;
+        for (int p = 0; p < 4; p++) if (planes[p * 65536 + a] & (0x80 >> (x & 7))) v |= (u8)(1 << p);
+        return v;
+    }
+    int bpp = gfx_bpp();
+    if (!bpp) return 0;
+    u32 a = gfx_row_addr(y);
+    if (bpp == 8) return rd8(a + x);
+    int per = 8 / bpp, sh = (per - 1 - x % per) * bpp;
+    return (rd8(a + x / per) >> sh) & ((1 << bpp) - 1);
+}
+
+static int char_h(void) { return is_ega(video_mode) ? rd16(BDA + 0x85) : 8; }
+
 static void gfx_char(int row, int col, u8 ch, u8 color)
 {
-    if (video_mode != 0x13) return;
-    const u8 *g = font8x8 + ch * 8;
-    for (int y = 0; y < 8; y++)
+    int bpp = is_ega(video_mode) ? 4 : gfx_bpp();
+    if (!bpp) return;
+    int h = char_h();
+    const u8 *g = h == 8 ? font8x8 + ch * 8 : font8x16 + ch * 16 + (h == 14 ? 1 : 0);
+    u8 fg = bpp == 8 ? color : (u8)(color & ((1 << bpp) - 1)) | (color & 0x80);
+    for (int y = 0; y < h; y++)
         for (int x = 0; x < 8; x++) {
-            u32 a = 0xA0000 + (row * 8 + y) * 320 + col * 8 + x;
-            if (color & 0x80) { if (g[y] & (0x80 >> x)) wr8(a, rd8(a) ^ (color & 0x7F)); }
-            else wr8(a, (g[y] & (0x80 >> x)) ? color : 0);
+            int on = g[y] & (0x80 >> x);
+            if (color & 0x80) { if (on) put_pixel(col * 8 + x, row * h + y, fg); }
+            else put_pixel(col * 8 + x, row * h + y, on ? fg : 0);
         }
 }
 
@@ -538,14 +765,31 @@ static void scroll(int up, int lines, u8 attr, int r0, int c0, int r1, int c1, i
     if (r0 > r1 || c0 > c1) return;
     int h = r1 - r0 + 1;
     if (lines == 0 || lines > h) lines = h;
-    if (video_mode == 0x13) {
+    if (is_ega(video_mode)) {                      /* a character column is one byte per plane */
+        int ch = char_h(), bpr = ega_bpr();
+        ega_dirty = 1;
+        for (int i = 0; i < h * ch; i++) {
+            int dy = up ? r0 * ch + i : r1 * ch + ch - 1 - i;
+            int sy = up ? dy + lines * ch : dy - lines * ch;
+            int in = up ? sy <= r1 * ch + ch - 1 : sy >= r0 * ch;
+            for (int p = 0; p < 4; p++) {
+                u8 *d = planes + p * 65536 + dy * bpr + c0;
+                if (in) memmove(d, planes + p * 65536 + sy * bpr + c0, c1 - c0 + 1);
+                else memset(d, (attr & (1 << p)) ? 0xFF : 0, c1 - c0 + 1);
+            }
+        }
+        return;
+    }
+    int bpp = gfx_bpp();
+    if (bpp) {                                     /* a character column is bpp bytes wide */
+        u8 fill = bpp == 8 ? attr : bpp == 2 ? (u8)((attr & 3) * 0x55) : (attr & 1) ? 0xFF : 0;
         for (int i = 0; i < h * 8; i++) {
             int dy = up ? r0 * 8 + i : r1 * 8 + 7 - i;
             int sy = up ? dy + lines * 8 : dy - lines * 8;
             int in = up ? sy <= r1 * 8 + 7 : sy >= r0 * 8;
-            u8 *d = gptr(0xA0000 + dy * 320 + c0 * 8);
-            if (in) memmove(d, gptr(0xA0000 + sy * 320 + c0 * 8), (c1 - c0 + 1) * 8);
-            else memset(d, attr, (c1 - c0 + 1) * 8);
+            u8 *d = gptr(gfx_row_addr(dy) + c0 * bpp);
+            if (in) memmove(d, gptr(gfx_row_addr(sy) + c0 * bpp), (c1 - c0 + 1) * bpp);
+            else memset(d, fill, (c1 - c0 + 1) * bpp);
         }
         return;
     }
@@ -633,15 +877,15 @@ void video_int10(struct regs *r)
             } else gfx_char(row, col, AL(r), BL(r));
         }
         break; }
-    case 0x0C:
-        if (video_mode == 0x13 && CX(r) < 320 && DX(r) < 200) {
-            u32 a = 0xA0000 + DX(r) * 320 + CX(r);
-            wr8(a, (AL(r) & 0x80) ? rd8(a) ^ (AL(r) & 0x7F) : AL(r));
-        }
+    case 0x0B:                                    /* CGA palette: BH=0 background/border, 1 palette */
+        if (BH(r) == 0) {
+            if (is_cga(video_mode)) cga_color_select((u8)((cga_sel & 0x20) | (BL(r) & 0x1F)));
+            else atc[0x11] = BL(r) & 15;
+        } else if (BH(r) == 1 && is_cga(video_mode))
+            cga_color_select((u8)((cga_sel & 0x1F) | ((BL(r) & 1) ? 0x20 : 0)));
         break;
-    case 0x0D:
-        AL(r) = (video_mode == 0x13 && CX(r) < 320 && DX(r) < 200) ? rd8(0xA0000 + DX(r) * 320 + CX(r)) : 0;
-        break;
+    case 0x0C: put_pixel(CX(r), DX(r), AL(r)); break;
+    case 0x0D: AL(r) = get_pixel(CX(r), DX(r)); break;
     case 0x0E: teletype(AL(r), rd8(BDA + 0x62), BL(r)); break;
     case 0x0F: AL(r) = (u8)video_mode | (rd8(BDA + 0x87) & 0x80); AH(r) = (u8)text_cols; BH(r) = rd8(BDA + 0x62); break;
     case 0x10:

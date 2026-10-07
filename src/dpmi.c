@@ -882,7 +882,20 @@ struct regs *dpmi_exception(struct regs *r)
     if (!client) panic("protected-mode fault without a DPMI client (vector %u at %x:%x)", r->vec, r->cs, r->eip);
     switch (r->vec) {
     case 13: return pm_gp(&c, r->err);
-    case 8: case 10: case 11: case 12: case 14: case 17: return pm_fault(&c, r->vec, r->err);
+    case 14: {                                        /* the 16-colour VGA window? */
+        u32 cr2;
+        __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
+        if (vga16_window(cr2)) {
+            int pm = c.pm;
+            struct emu_cpu e = { { &c.eax, &c.ecx, &c.edx, &c.ebx, &c.esp, &c.ebp, &c.esi, &c.edi }, &c.eip, &c.eflags,
+                                 { pm ? sel_base(c.es) : c.es << 4, pm ? sel_base(c.cs) : c.cs << 4,
+                                   pm ? sel_base(c.ss) : c.ss << 4, pm ? sel_base(c.ds) : c.ds << 4,
+                                   pm ? sel_base(c.fs) : c.fs << 4, pm ? sel_base(c.gs) : c.gs << 4 },
+                                 pm && sel_big(c.cs) };
+            if (vga16_fault(&e, cr2)) return resume(&c);
+        }
+        return pm_fault(&c, 14, r->err); }
+    case 8: case 10: case 11: case 12: case 17: return pm_fault(&c, r->vec, r->err);
     case 16:
         if (exc_vec[16].sel) return pm_fault(&c, 16, 0);
         __asm__ volatile("fnclex");

@@ -38,7 +38,8 @@ void *phys_try_alloc(u32 bytes)
     return phys_alloc(bytes);
 }
 
-#define LOW_END 0x1000000u           /* linear below this: guest + DPMI window, not identity */
+#define LOW_END 0x1000000u
+#define ISA_DMA_LEN 0x10000u           /* linear below this: guest + DPMI window, not identity */
 
 /* ---------------- paging ----------------
    Linear 0..0x10FFFF: the guest's 1 MiB + HMA (user pages, backed by guest_ram).
@@ -129,6 +130,14 @@ static int cpu_has_pae(void)
 static u64 fb_phys;
 static u32 fb_len, fb_lin;
 static u32 mod_lo, mod_hi;
+static u32 isa_dma_phys;              /* 64 KiB of RAM below 16 MiB for ISA DMA (a real Sound Blaster) */
+
+/* The ISA DMA buffer, mapped through LOW_ALIAS (which reaches 16 MiB). */
+void *isa_dma_buffer(u32 *phys)
+{
+    *phys = isa_dma_phys;
+    return isa_dma_phys ? phys_low(isa_dma_phys) : 0;
+}
 
 static void paging_init(void)
 {
@@ -146,6 +155,7 @@ static void paging_init(void)
     map_range(LOW_END, LOW_END, ram_top - LOW_END, 3);
     if (mod_hi > ram_top) map_range(mod_lo, mod_lo, mod_hi - mod_lo, 3);
     map_range(LOW_ALIAS, 0, GUEST_TOP, 3);
+    if (isa_dma_phys >= GUEST_TOP) map_range(LOW_ALIAS + isa_dma_phys, isa_dma_phys, ISA_DMA_LEN, 3);
     if (fb_len) {
         if (fb_phys + fb_len <= 0x100000000ull && (u32)fb_phys >= GUEST_TOP) fb_lin = (u32)fb_phys;
         else {
@@ -369,6 +379,23 @@ void kmain(u32 magic, struct mb_info *mb)
             if (i < nex && ex[i].hi > lo) lo = ex[i].hi;
         }
     }
+    /* 64 KiB below 16 MiB for ISA DMA: the highest free one in 1-16 MiB (out
+       of the guest's way: nothing else uses physical 1-16 MiB once the
+       module is moved), else in conventional memory above 128 KiB. */
+    for (int pass = 0; pass < 2 && !isa_dma_phys; pass++) {
+        u32 floor = pass ? 0x20000 : 0x100000, ceil = pass ? 0x90000 : LOW_END;
+        for (int r = 0; r < nr && !isa_dma_phys; r++) {
+            u32 lo = rgn[r].b < floor ? floor : rgn[r].b, hi = rgn[r].t > ceil ? ceil : rgn[r].t;
+            if (hi < lo + ISA_DMA_LEN) continue;
+            for (u32 a = (hi - ISA_DMA_LEN) & ~(ISA_DMA_LEN - 1); a >= lo && a + ISA_DMA_LEN <= hi; a -= ISA_DMA_LEN) {
+                int clash = 0;
+                for (int i = 0; i < nex; i++) if (a < ex[i].hi && ex[i].lo < a + ISA_DMA_LEN) clash = 1;
+                if (!clash) { isa_dma_phys = a; break; }
+                if (a < ISA_DMA_LEN) break;
+            }
+        }
+    }
+    dbg(1, "ISA DMA buffer at %x\n", isa_dma_phys);
     kprintf("RAM top %u MiB, heap %x-%x (%u MiB)\n", ram_top >> 20, alloc_next, alloc_end,
             (alloc_end - alloc_next) >> 20);
     if (alloc_end <= alloc_next + (2u << 20)) panic("not enough memory");
