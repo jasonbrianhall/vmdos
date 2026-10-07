@@ -1,0 +1,4 @@
+SHSUCDX (MSCDEX replacement) by Jason Hood, unmodified, from
+https://github.com/adoxa/shsucd (commit 5ea0787, Jan 2025), zlib-style
+licence (LICENSE.txt). vmdos builds SHSUCDX.COM from it and puts it in C:\
+to give its CD-ROM images (VMCD.SYS) drive letters.

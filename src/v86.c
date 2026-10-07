@@ -122,6 +122,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
+    if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;

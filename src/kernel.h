@@ -139,6 +139,8 @@ void port_out(u16 port, u32 val, int size);
 void vdev_tick(void);                         /* from the real timer IRQ */
 void vkbd_real_scancode(u8 sc);               /* from the real keyboard IRQ */
 void speed_init(void);                        /* speed= (slowdown) */
+void cd_add(u8 *data, u32 size, const char *name);   /* cd.c: a CD-ROM image */
+void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */
 void speed_throttle(void);                    /* after each timer tick */
 u32 speed_api(u32 pm);                        /* INT 2Fh AX=5653h */
 void video_osd(const char *msg);              /* a note at the top right for 2 s */
@@ -175,6 +177,7 @@ void mouse_int33(struct regs *r);
 int mouse_callback_due(void);
 void mouse_start_callback(struct regs *r);
 u16 mouse_begin_callback(void);               /* for a client in PM: the stub's offset */
+int mouse_log(void);                          /* "mouselog" on the command line */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip);
 int dpmi_reflected_buffer(struct regs *r, u32 *lin);   /* PM ES:EDI of a reflected INT */
 void mouse_cb_regs(struct regs *r);

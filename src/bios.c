@@ -302,6 +302,9 @@ static int int15(struct regs *r)
         set_cf(r, 0);
         return BIOS_DONEF;
     }
+    {
+        if (AH(r) == 0xC2 && mouse_log()) kprintf("mouse: INT 15h AX=%04x BX=%04x (PS/2 BIOS mouse: not supported)\n", AX(r), BX(r));
+    }
     dbg(2, "INT 15h AX=%04x unsupported\n", AX(r));
     AH(r) = 0x86;
     set_cf(r, 1);

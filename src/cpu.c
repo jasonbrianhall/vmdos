@@ -316,6 +316,8 @@ struct mb_info {
 } __attribute__((packed));
 
 struct mb_mod { u32 start, end, string, reserved; };
+static struct { u32 start, end; char name[64]; } cdmod[8];
+static int n_cdmod;
 
 void kmain(u32 magic, struct mb_info *mb)
 {
@@ -346,6 +348,15 @@ void kmain(u32 magic, struct mb_info *mb)
         mod_start = m[0].start; mod_end = m[0].end;
         EXCL(mb->mods_addr, mb->mods_addr + mb->mods_count * 16);
         for (u32 i = 0; i < mb->mods_count && i < 8; i++) EXCL(m[i].start, m[i].end);
+        /* the others are CD images: note them (names too) before anything is allocated */
+        for (u32 i = 1; i < mb->mods_count && i < 8; i++) {
+            cdmod[n_cdmod].start = m[i].start; cdmod[n_cdmod].end = m[i].end;
+            const char *nm = m[i].string ? (const char *)(uintptr_t)m[i].string : "image.iso";
+            int j = 0;
+            for (; nm[j] && j < 63; j++) cdmod[n_cdmod].name[j] = nm[j];
+            cdmod[n_cdmod].name[j] = 0;
+            n_cdmod++;
+        }
         kprintf("module: %x-%x (%u KiB)\n", mod_start, mod_end, (mod_end - mod_start) >> 10);
         mod_lo = mod_start & ~4095u; mod_hi = (mod_end + 4095) & ~4095u;
     }
@@ -418,6 +429,16 @@ void kmain(u32 magic, struct mb_info *mb)
             mod_start = (u32)(uintptr_t)p;
         }
         disk_image = (u8 *)(uintptr_t)mod_start;
+        for (int i = 0; i < n_cdmod; i++) {
+            u32 a = cdmod[i].start, n = cdmod[i].end - cdmod[i].start;
+            if (a < LOW_END) {                   /* below 16 MiB: move it, as dos.img */
+                u8 *p = phys_try_alloc(n);
+                if (!p) { kprintf("cd: no room to move %s\n", cdmod[i].name); continue; }
+                memcpy(p, (void *)(uintptr_t)a, n);
+                a = (u32)(uintptr_t)p;
+            }
+            cd_add((u8 *)(uintptr_t)a, n, cdmod[i].name);
+        }
         disk_size = mod_end - mod_start;
     }
 

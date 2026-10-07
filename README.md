@@ -81,6 +81,17 @@ Slowdown for games that time themselves by the CPU (as MoSlo does):
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
+CD-ROM images: `ISO="game.iso disc2.iso"` with `make run`, `make iso` /
+`run-efi` or `make esp` (no spaces in the names). Each ISO becomes a CD drive
+(D:, E:, ... by SHSUCDX); `VMCD` lists the images and `VMCD 1 2` puts image 2
+in drive 1, for the next disc of a game. They are held in RAM (the QEMU
+targets add their size to `QEMU_MEM`). On a real machine: copy the ISOs next
+to vmdos.efi (it loads every `*.ISO` there, up to 7), or add
+`module /boot/vmdos/game.iso game.iso` lines after dos.img in GRUB.
+
+Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
+load options); the log shows every INT 33h call and event-handler call.
+
 C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
 dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
@@ -158,6 +169,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-colour VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
-| `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
+| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM images: monitor side, VMCD.SYS driver, VMCD.COM |
+| `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
+| `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).

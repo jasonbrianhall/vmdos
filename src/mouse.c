@@ -148,6 +148,8 @@ int mouse_callback_due(void)
 
 void mouse_start_callback(struct regs *r)
 {
+    static int n;
+    if (mouse_log() && n++ < 10) kprintf("mouse: event handler %04x:%04x called, events %x\n", handler_seg, handler_off, pending_cond & handler_mask);
     in_callback = 1;
     v86_push16(r, (u16)((r->eflags & 0x0DD5) | 2 | (vif ? EFL_IF : 0)));
     v86_push16(r, (u16)r->cs);
@@ -161,6 +163,8 @@ void mouse_start_callback(struct regs *r)
    excursion (dpmi.c); returns the stub's offset in F000h. */
 u16 mouse_begin_callback(void)
 {
+    static int n;
+    if (mouse_log() && n++ < 10) kprintf("mouse: event handler called (protected-mode program), events %x\n", pending_cond & handler_mask);
     in_callback = 1;
     return rd16(MOUSE_CB_PTR);
 }
@@ -194,9 +198,20 @@ static void soft_reset(void)
     pending_cond = 0;
 }
 
+/* "mouselog" on the command line: what a program asks of the mouse. */
+static int mlog = -1;
+int mouse_log(void) { if (mlog < 0) mlog = !!strstr(cmdline, "mouselog"); return mlog; }
+
 void mouse_int33(struct regs *r)
 {
     mouse_update();
+    if (mouse_log()) {
+        static u32 polls;
+        int poll = AX(r) == 3 || AX(r) == 0x0B || AX(r) == 5 || AX(r) == 6;
+        if (!poll || polls++ < 8)
+            kprintf("mouse: INT 33h AX=%04x BX=%04x CX=%04x DX=%04x ES=%04x%s\n", AX(r), BX(r), CX(r), DX(r),
+                    r->v86_es & 0xFFFF, poll && polls == 8 ? " (no more polls logged)" : "");
+    }
     switch (AX(r)) {
     case 0x00: case 0x21:
         soft_reset();

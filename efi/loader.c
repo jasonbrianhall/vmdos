@@ -1,6 +1,7 @@
 // vmdos.efi: UEFI loader for the 32-bit vmdos kernel.
 //
-// Reads dos.img from the folder vmdos.efi was started from, takes the
+// Reads dos.img (and any *.ISO files, as CD-ROM images) from the folder
+// vmdos.efi was started from, takes the
 // framebuffer from GOP, places the embedded kernel at its link address
 // (16 MiB), exits boot services, leaves long mode (efi/tramp.S) and enters
 // the kernel with Multiboot information, as GRUB would.
@@ -113,6 +114,50 @@ static void* read_file(EFI_HANDLE image, CHAR16* name, UINTN* size) {
     return buf;
 }
 
+// The *.ISO files in folder dir (path with a trailing backslash).
+#define MAX_ISO 7
+static struct { UINT8* data; UINTN size; char name[32]; } isos[MAX_ISO];
+static int n_iso;
+
+static void load_isos(EFI_HANDLE image, CHAR16* dir) {
+    EFI_GUID lip = LOADED_IMAGE_PROTOCOL, sfs = SIMPLE_FILE_SYSTEM_PROTOCOL;
+    EFI_LOADED_IMAGE* li;
+    EFI_FILE_IO_INTERFACE* fs;
+    EFI_FILE_HANDLE root, d;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, image, &lip, (void**)&li))) return;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, li->DeviceHandle, &sfs, (void**)&fs))) return;
+    if (EFI_ERROR(uefi_call_wrapper(fs->OpenVolume, 2, fs, &root))) return;
+    static CHAR16 dpath[512], fpath[600];
+    StrCpy(dpath, dir);
+    UINTN dl = StrLen(dpath);
+    if (dl > 1 && dpath[dl - 1] == L'\\') dpath[dl - 1] = 0;
+    if (dl <= 1) d = root;
+    else if (EFI_ERROR(uefi_call_wrapper(root->Open, 5, root, &d, dpath, EFI_FILE_MODE_READ, 0))) return;
+    static UINT8 buf[1024];
+    for (;;) {
+        UINTN n = sizeof buf;
+        if (EFI_ERROR(uefi_call_wrapper(d->Read, 3, d, &n, buf)) || n == 0) break;
+        EFI_FILE_INFO* fi = (EFI_FILE_INFO*)buf;
+        if (fi->Attribute & EFI_FILE_DIRECTORY) continue;
+        UINTN ln = StrLen(fi->FileName);
+        if (ln < 5) continue;
+        CHAR16* e = fi->FileName + ln - 4;
+        if (!(e[0] == L'.' && (e[1] | 32) == L'i' && (e[2] | 32) == L's' && (e[3] | 32) == L'o')) continue;
+        if (n_iso == MAX_ISO) { Print(L"  (more than %d ISO files: %s skipped)\r\n", MAX_ISO, fi->FileName); continue; }
+        StrCpy(fpath, dir);
+        StrCat(fpath, fi->FileName);
+        Print(L"  CD image:     %s\r\n", fpath);
+        UINTN size = 0;
+        UINT8* data = read_file(image, fpath, &size);
+        if (!data) { Print(L"    can't read it (out of memory below 4 GiB?)\r\n"); continue; }
+        isos[n_iso].data = data; isos[n_iso].size = size;
+        UINTN k = 0;
+        for (; k < ln && k < 31; k++) isos[n_iso].name[k] = fi->FileName[k] < 127 ? (char)fi->FileName[k] : '_';
+        isos[n_iso].name[k] = 0;
+        n_iso++;
+    }
+}
+
 static int usable_after_exit(UINT32 t) {
     return t == EfiConventionalMemory || t == EfiBootServicesCode || t == EfiBootServicesData ||
            t == EfiLoaderCode || t == EfiLoaderData;
@@ -153,6 +198,14 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     UINTN disk_size = 0;
     UINT8* disk = read_file(image, img_path, &disk_size);
     if (!disk) { fail(L"can't read dos.img (it goes in the same folder as vmdos.efi)"); return EFI_NOT_FOUND; }
+
+    {
+        static CHAR16 dir[512];
+        UINTN i = 0;
+        for (; i < cut; i++) dir[i] = img_path[i];
+        dir[i] = 0;
+        load_isos(image, dir);
+    }
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = setup_gop();
     if (!gop) { fail(L"no 32-bit graphics mode (GOP) available"); return EFI_UNSUPPORTED; }
@@ -196,6 +249,11 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
                 fail(L"the firmware put the loader's data where the kernel goes (16 MiB)");
                 return EFI_OUT_OF_RESOURCES;
             }
+        for (int i = 0; i < n_iso; i++)
+            if (overlaps((UINTN)isos[i].data, isos[i].size, KERNEL_BASE, KERNEL_MEM_SIZE)) {
+                fail(L"the firmware put a CD image where the kernel goes (16 MiB)");
+                return EFI_OUT_OF_RESOURCES;
+            }
         UINTN ms = 0, k, ds; UINT32 dv;
         uefi_call_wrapper(st->BootServices->GetMemoryMap, 5, &ms, NULL, &k, &ds, &dv);
         ms += 16 * ds;
@@ -229,7 +287,14 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     copy(cmdline + 10, opts, sizeof opts);
     mbi->flags = (1 << 2) | (1 << 3) | (1 << 12);
     mbi->cmdline = (UINT32)(UINTN)cmdline;
-    mbi->mods_count = 1;
+    for (int i = 0; i < n_iso; i++) {
+        char* nm = modname + 32 * (i + 1);
+        copy(nm, isos[i].name, 32);
+        mod[i + 1].mod_start = (UINT32)(UINTN)isos[i].data;
+        mod[i + 1].mod_end = (UINT32)(UINTN)isos[i].data + (UINT32)isos[i].size;
+        mod[i + 1].string = (UINT32)(UINTN)nm;
+    }
+    mbi->mods_count = 1 + n_iso;
     mbi->mods_addr = (UINT32)(UINTN)mod;
     mbi->fb_addr = gop->Mode->FrameBufferBase;
     mbi->fb_width = gop->Mode->Info->HorizontalResolution;
