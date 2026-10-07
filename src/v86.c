@@ -1,0 +1,276 @@
+/* The virtual-8086 monitor: traps from the guest (#GP on sensitive
+   instructions), interrupt reflection, and virtual IRQ delivery. */
+#include "kernel.h"
+
+extern u8 v86_stack_top[];
+
+int vif;                    /* guest's IF */
+static u32 vflags_hi;       /* guest's IOPL/NT bits as it last set them (CPU detection) */
+
+#define FLAGS_USER 0x0DD5u  /* CF PF AF ZF SF TF DF OF */
+
+static u16 guest_flags16(struct regs *r)
+{
+    return (u16)((r->eflags & FLAGS_USER) | 2 | (vif ? EFL_IF : 0) | vflags_hi);
+}
+
+static void set_guest_flags(struct regs *r, u32 v)
+{
+    r->eflags = (r->eflags & ~FLAGS_USER) | (v & FLAGS_USER);
+    vif = !!(v & EFL_IF);
+    vflags_hi = v & 0x7000;
+}
+
+void v86_push16(struct regs *r, u16 v)
+{
+    SP(r) -= 2;
+    wr16(LIN(r->ss, SP(r)), v);
+}
+
+u16 v86_pop16(struct regs *r)
+{
+    u16 v = rd16(LIN(r->ss, SP(r)));
+    SP(r) += 2;
+    return v;
+}
+
+static void push32(struct regs *r, u32 v) { v86_push16(r, v >> 16); v86_push16(r, (u16)v); }
+static u32 pop32(struct regs *r) { u32 lo = v86_pop16(r); return lo | (u32)v86_pop16(r) << 16; }
+
+void v86_reflect(struct regs *r, int vec)
+{
+    v86_push16(r, guest_flags16(r));
+    v86_push16(r, (u16)r->cs);
+    v86_push16(r, IP(r));
+    r->eflags &= ~(EFL_TF | 0x40000u);
+    vif = 0;
+    r->eip = rd16(vec * 4);
+    r->cs = rd16(vec * 4 + 2);
+}
+
+/* IRET emulation; keep: flag bits whose current value (set by a BIOS
+   service) should survive instead of the stacked ones. */
+static void iret16(struct regs *r, u32 keep)
+{
+    u32 cur = r->eflags;
+    r->eip = v86_pop16(r);
+    r->cs = v86_pop16(r);
+    set_guest_flags(r, v86_pop16(r));
+    r->eflags = (r->eflags & ~keep) | (cur & keep);
+}
+
+static void dump(struct regs *r, const char *why)
+{
+    u32 a = LIN(r->cs, r->eip);
+    panic("%s\nvector %u err %x  CS:IP %04x:%04x  bytes %02x %02x %02x %02x %02x %02x\n"
+          "AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x BP=%04x\n"
+          "SS:SP=%04x:%04x DS=%04x ES=%04x FS=%04x GS=%04x FL=%x",
+          why, r->vec, r->err, r->cs & 0xFFFF, IP(r),
+          rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), rd8(a + 5),
+          AX(r), BX(r), CX(r), DX(r), SI(r), DI(r), BP(r),
+          r->ss & 0xFFFF, SP(r), r->v86_ds & 0xFFFF, r->v86_es & 0xFFFF,
+          r->v86_fs & 0xFFFF, r->v86_gs & 0xFFFF, r->eflags);
+}
+
+/* Wait (real HLT) until the guest has an interrupt it will take. */
+static void wait_for_irq(void)
+{
+    for (;;) {
+        vkbd_refill();
+        if (vif && vpic_pending() >= 0) return;
+        idle_wait();
+    }
+}
+
+static void deliver(struct regs *r)
+{
+    vkbd_refill();
+    if (!vif) return;
+    int vec = vpic_pending();
+    if (vec < 0) return;
+    vpic_ack(vec);
+    v86_reflect(r, vec);
+}
+
+static void do_int(struct regs *r, int n, u16 ip0)
+{
+    u32 tgt = (u32)rd16(n * 4 + 2) << 4 | 0;
+    tgt += rd16(n * 4);
+    dbg(3, "INT %02x AX=%04x BX=%04x CX=%04x DX=%04x from %04x:%04x\n",
+        n, AX(r), BX(r), CX(r), DX(r), r->cs & 0xFFFF, ip0);
+    if (bios_stub_is_direct(n) && tgt == bios_stub_entry(n)) {
+        /* Nobody hooked it: run the BIOS service without a round trip. */
+        if (bios_service(r, n, 0) == BIOS_RETRY) {
+            IP(r) = ip0;
+            vif = 1;
+            wait_for_irq();
+        }
+        return;
+    }
+    v86_reflect(r, n);
+}
+
+static u32 seg_value(struct regs *r, int seg)
+{
+    switch (seg) {
+    case 0: return r->v86_es;
+    case 1: return r->cs;
+    case 2: return r->ss;
+    case 4: return r->v86_fs;
+    case 5: return r->v86_gs;
+    default: return r->v86_ds;
+    }
+}
+
+static void gp_handler(struct regs *r)
+{
+    u16 ip0 = IP(r), ip = ip0;
+    int op32 = 0, a32 = 0, rep = 0, seg = 3;
+    u8 op;
+    for (;;) {
+        op = rd8(LIN(r->cs, ip));
+        ip++;
+        switch (op) {
+        case 0x66: op32 = 1; continue;
+        case 0x67: a32 = 1; continue;
+        case 0xF2: case 0xF3: rep = 1; continue;
+        case 0xF0: continue;
+        case 0x26: seg = 0; continue;
+        case 0x2E: seg = 1; continue;
+        case 0x36: seg = 2; continue;
+        case 0x3E: seg = 3; continue;
+        case 0x64: seg = 4; continue;
+        case 0x65: seg = 5; continue;
+        }
+        break;
+    }
+    int sz = op32 ? 4 : 2;
+    switch (op) {
+    case 0xFA: vif = 0; IP(r) = ip; return;                         /* CLI */
+    case 0xFB: vif = 1; IP(r) = ip; return;                         /* STI */
+    case 0x9C:                                                      /* PUSHF */
+        if (op32) push32(r, (r->eflags & FLAGS_USER) | 2 | (vif ? EFL_IF : 0) | vflags_hi);
+        else v86_push16(r, guest_flags16(r));
+        IP(r) = ip; return;
+    case 0x9D:                                                      /* POPF */
+        set_guest_flags(r, op32 ? pop32(r) : v86_pop16(r));
+        IP(r) = ip; return;
+    case 0xCF:                                                      /* IRET */
+        if (op32) {
+            r->eip = pop32(r) & 0xFFFF;
+            r->cs = pop32(r) & 0xFFFF;
+            set_guest_flags(r, pop32(r));
+        } else iret16(r, 0);
+        return;
+    case 0xCD: {                                                    /* INT n */
+        u8 n = rd8(LIN(r->cs, ip));
+        IP(r) = ip + 1;
+        do_int(r, n, ip0);
+        return; }
+    case 0xCC: IP(r) = ip; v86_reflect(r, 3); return;               /* INT3 */
+    case 0xCE: IP(r) = ip; if (r->eflags & EFL_OF) v86_reflect(r, 4); return;
+    case 0xF4:                                                      /* HLT */
+        if ((r->cs & 0xFFFF) == 0xF000 && ip0 < 0x8000) {
+            int res = bios_service(r, rd8(LIN(r->cs, ip)), 1);
+            if (res == BIOS_DONE) iret16(r, 0);
+            else if (res == BIOS_DONEF) iret16(r, EFL_CF | EFL_ZF);
+            else if (res == BIOS_CONT) IP(r) = ip + 1;
+            else { vif = 1; wait_for_irq(); }
+            return;
+        }
+        IP(r) = ip;
+        wait_for_irq();
+        return;
+    case 0xE4: case 0xE5: case 0xEC: case 0xED: {                   /* IN */
+        u16 port = (op & 8) ? DX(r) : rd8(LIN(r->cs, ip++));
+        int s = (op & 1) ? sz : 1;
+        u32 v = port_in(port, s);
+        if (s == 1) AL(r) = (u8)v; else if (s == 2) AX(r) = (u16)v; else r->eax = v;
+        IP(r) = ip; return; }
+    case 0xE6: case 0xE7: case 0xEE: case 0xEF: {                   /* OUT */
+        u16 port = (op & 8) ? DX(r) : rd8(LIN(r->cs, ip++));
+        int s = (op & 1) ? sz : 1;
+        port_out(port, s == 1 ? AL(r) : s == 2 ? AX(r) : r->eax, s);
+        IP(r) = ip; return; }
+    case 0x6C: case 0x6D: case 0x6E: case 0x6F: {                   /* INS / OUTS */
+        int s = (op & 1) ? sz : 1;
+        int step = (r->eflags & EFL_DF) ? -s : s;
+        u32 count = rep ? (a32 ? r->ecx : CX(r)) : 1;
+        for (; count; count--) {
+            if (op < 0x6E) {
+                u32 a = LIN(r->v86_es, a32 ? r->edi : DI(r));
+                u32 v = port_in(DX(r), s);
+                if (s == 1) wr8(a, v); else if (s == 2) wr16(a, v); else wr32(a, v);
+                if (a32) r->edi += step; else DI(r) += step;
+            } else {
+                u32 a = LIN(seg_value(r, seg), a32 ? r->esi : SI(r));
+                u32 v = s == 1 ? rd8(a) : s == 2 ? rd16(a) : rd32(a);
+                port_out(DX(r), v, s);
+                if (a32) r->esi += step; else SI(r) += step;
+            }
+            if (rep) { if (a32) r->ecx--; else CX(r)--; }
+        }
+        IP(r) = ip; return; }
+    }
+    dump(r, "unhandled instruction in the DOS guest (#GP)");
+}
+
+static u32 refresh_div;
+
+void isr_dispatch(struct regs *r)
+{
+    int from_v86 = (r->eflags & EFL_VM) != 0;
+    u32 vec = r->vec;
+
+    if (vec >= 0x20) {
+        int irq = vec - 0x20;
+        if (irq == 7 || irq == 15) {                 /* spurious? */
+            outb(irq == 7 ? 0x20 : 0xA0, 0x0B);
+            if (!(inb(irq == 7 ? 0x20 : 0xA0) & 0x80)) {
+                if (irq == 15) outb(0x20, 0x20);
+                goto out;
+            }
+        }
+        if (irq == 0) {
+            ticks++;
+            vdev_tick();
+        } else if (irq == 1) {
+            vkbd_real_scancode(inb(0x60));
+        }
+        if (irq >= 8) outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+        if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
+            refresh_div = 0;
+            video_refresh();
+        }
+        goto out;
+    }
+
+    if (!from_v86) {
+        u32 cr2;
+        __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
+        panic("kernel exception %u, error %x, EIP %x, CR2 %x", vec, r->err, r->eip, cr2);
+    }
+
+    switch (vec) {
+    case 13: gp_handler(r); break;
+    case 0: case 1: case 5: case 6: case 7:          /* real-mode style: guest's own vector */
+        v86_reflect(r, vec);
+        break;
+    default:
+        dump(r, "exception in the DOS guest");
+    }
+out:
+    if (from_v86) deliver(r);
+}
+
+void guest_start(void)
+{
+    struct regs *r = (struct regs *)((uintptr_t)v86_stack_top - sizeof(struct regs));
+    memset(r, 0, sizeof *r);
+    r->eflags = EFL_VM | EFL_IF | 2;
+    vif = 1;
+    bios_boot(r);
+    kprintf("starting guest at %04x:%04x\n", r->cs, IP(r));
+    v86_enter(r);
+}

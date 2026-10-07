@@ -1,0 +1,7 @@
+build/
+freedos/
+vmdos.elf
+vmdos.iso
+dos.img
+*.o
+*.d

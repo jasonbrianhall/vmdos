@@ -1,0 +1,445 @@
+/* The guest's BIOS: data area, IVT, and the services behind the bios.asm stubs
+   (INT 08h/09h/11h-17h/1Ah; INT 10h is in video.c). */
+#include "kernel.h"
+
+extern const u8 bios_bin[], bios_bin_end[];
+
+#define BIOS_SEG 0xF000
+#define BIOS_LIN 0xF0000u
+#define FONT16_OFF 0xA000
+#define FONT8_OFF 0xB000
+
+static u32 disk_sectors, disk_cyls;
+#define DISK_HEADS 255
+#define DISK_SPT 63
+
+u32 bios_stub_entry(int vec) { return BIOS_LIN + rd16(BIOS_LIN + vec * 2); }
+int bios_stub_is_direct(int vec) { return (vec >= 0x10 && vec <= 0x17) || vec == 0x1A; }
+
+static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
+static void set_zf(struct regs *r, int z) { if (z) r->eflags |= EFL_ZF; else r->eflags &= ~EFL_ZF; }
+
+/* ---------------- CMOS clock ---------------- */
+static u8 cmos(u8 reg) { outb(0x70, reg); return inb(0x71); }
+static u8 cmos_bcd(u8 reg)     /* the RTC value, as BCD whatever the RTC's own format */
+{
+    u8 v = cmos(reg);
+    if (cmos(0x0B) & 4) v = (u8)(((v / 10) << 4) | (v % 10));
+    return v;
+}
+static int bcd2bin(u8 v) { return (v >> 4) * 10 + (v & 15); }
+static void rtc_wait(void) { for (int i = 0; i < 100000 && (cmos(0x0A) & 0x80); i++) ; }
+
+/* ---------------- keyboard ---------------- */
+static const char kb_norm[] = "\0\x1b" "1234567890-=\b\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
+static const char kb_shift[] = "\0\x1b" "!@#$%^&*()_+\b\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+static const char kb_pad[] = "789-456+1230.";
+static const u8 kb_pad_ctrl[] = { 0x77, 0x8D, 0x84, 0x8E, 0x73, 0x8F, 0x74, 0x90, 0x75, 0x91, 0x76, 0x92, 0x93 };
+
+static int kbuf_put(u16 w)
+{
+    u16 head = rd16(BDA + 0x1A), tail = rd16(BDA + 0x1C);
+    u16 start = rd16(BDA + 0x80), end = rd16(BDA + 0x82);
+    u16 next = tail + 2;
+    if (next >= end) next = start;
+    if (next == head) return 0;
+    wr16(BDA + tail, w);
+    wr16(BDA + 0x1C, next);
+    return 1;
+}
+
+static int kbuf_get(u16 *w, int remove)
+{
+    u16 head = rd16(BDA + 0x1A), tail = rd16(BDA + 0x1C);
+    if (head == tail) return 0;
+    *w = rd16(BDA + head);
+    if (remove) {
+        head += 2;
+        if (head >= rd16(BDA + 0x82)) head = rd16(BDA + 0x80);
+        wr16(BDA + 0x1A, head);
+    }
+    return 1;
+}
+
+static void keyboard_irq(void)
+{
+    static int e0, skip;
+    u8 sc = (u8)vkbd_read_data();
+    if (skip) { skip--; return; }
+    if (sc == 0xE0) { e0 = 1; return; }
+    if (sc == 0xE1) { skip = 5; return; }               /* Pause */
+    if (sc == 0xFA || sc == 0xFE || sc == 0xEE || sc == 0 || sc == 0xFF) return;   /* AAh is also LShift release */
+    int ext = e0; e0 = 0;
+    int rel = sc & 0x80, code = sc & 0x7F;
+    u8 f = rd8(BDA + 0x17), f2 = rd8(BDA + 0x18), f3 = rd8(BDA + 0x96);
+
+    /* modifiers */
+    u8 bit = 0, bit2 = 0, bit3 = 0;
+    switch (code) {
+    case 0x2A: if (ext) return; bit = 0x02; break;
+    case 0x36: if (ext) return; bit = 0x01; break;
+    case 0x1D: bit = 0x04; if (ext) bit3 = 0x04; else bit2 = 0x01; break;
+    case 0x38: bit = 0x08; if (ext) bit3 = 0x08; else bit2 = 0x02; break;
+    }
+    if (bit) {
+        if (rel) { f2 &= ~bit2; f3 &= ~bit3; }
+        else { f2 |= bit2; f3 |= bit3; }
+        if (bit <= 2) { if (rel) f &= ~bit; else f |= bit; }
+        else {                                     /* either Ctrl / either Alt */
+            int held = bit == 4 ? ((f2 & 1) || (f3 & 4)) : ((f2 & 2) || (f3 & 8));
+            if (held) f |= bit; else f &= ~bit;
+        }
+        wr8(BDA + 0x17, f); wr8(BDA + 0x18, f2); wr8(BDA + 0x96, (f3 & ~2) | 0x10 | (ext ? 2 : 0));
+        return;
+    }
+    u8 lockbit = code == 0x3A ? 0x40 : code == 0x45 && !ext ? 0x20 : code == 0x46 && !ext ? 0x10 : 0;
+    if (lockbit) {
+        u8 lb2 = lockbit;
+        if (rel) f2 &= ~lb2;
+        else if (!(f2 & lb2)) { f ^= lockbit; f2 |= lb2; }
+        wr8(BDA + 0x17, f); wr8(BDA + 0x18, f2);
+        return;
+    }
+    if (rel) return;
+
+    int shift = f & 3, ctrl = f & 4, alt = f & 8;
+    u16 w = 0;
+    if (ctrl && alt && code == 0x53) { kprintf("Ctrl+Alt+Del\n"); reboot(); }
+
+    if (code >= 0x3B && code <= 0x44) {                 /* F1..F10 */
+        int i = code - 0x3B;
+        w = (u16)((alt ? 0x68 + i : ctrl ? 0x5E + i : shift ? 0x54 + i : code) << 8);
+    } else if (code == 0x57 || code == 0x58) {          /* F11, F12 */
+        int i = code - 0x57;
+        w = (u16)((alt ? 0x8B : ctrl ? 0x89 : shift ? 0x87 : 0x85) + i) << 8;
+    } else if (code >= 0x47 && code <= 0x53 && code != 0x4A && code != 0x4E) {
+        int i = code - 0x47;
+        int digits = !ext && (!!(f & 0x20) ^ !!shift);
+        if (alt && ext) w = (u16)((code + 0x50) << 8);
+        else if (ctrl) w = (u16)(kb_pad_ctrl[i] << 8 | (ext ? 0xE0 : 0));
+        else if (digits) w = (u16)(code << 8 | (u8)kb_pad[i]);
+        else w = (u16)(code << 8 | (ext ? 0xE0 : 0));
+        if (code == 0x52 && !digits) wr8(BDA + 0x17, f ^ 0x80);
+    } else if (ext && code == 0x1C) {
+        w = ctrl ? 0xE00A : 0xE00D;
+    } else if (ext && code == 0x35) {
+        w = 0xE02F;
+    } else if (ext && code == 0x46) {                   /* Ctrl+Break */
+        wr16(BDA + 0x1A, rd16(BDA + 0x80)); wr16(BDA + 0x1C, rd16(BDA + 0x80));
+        wr8(BDA + 0x71, 0x80);
+        w = 0;
+        kbuf_put(0);
+        return;
+    } else if (code < 0x3A || code == 0x4A || code == 0x4E || code == 0x56) {
+        char c;
+        if (code == 0x4A) c = '-';
+        else if (code == 0x4E) c = '+';
+        else if (code == 0x56) c = shift ? '|' : '\\';
+        else c = shift ? kb_shift[code] : kb_norm[code];
+        if (c >= 'a' && c <= 'z' && (f & 0x40)) c -= 32;
+        else if (c >= 'A' && c <= 'Z' && (f & 0x40)) c += 32;
+        if (alt) {
+            if (code >= 0x02 && code <= 0x0D) w = (u16)((code + 0x76) << 8);
+            else if (code == 0x0F) w = 0xA500;
+            else if (code == 0x1C) w = 0x1C00;
+            else w = (u16)(code << 8);
+        } else if (ctrl) {
+            if ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') w = (u16)(code << 8 | ((c | 0x20) - 'a' + 1));
+            else switch (code) {
+                case 0x1A: w = 0x1A1B; break;
+                case 0x2B: w = 0x2B1C; break;
+                case 0x1B: w = 0x1B1D; break;
+                case 0x07: w = 0x071E; break;
+                case 0x0C: w = 0x0C1F; break;
+                case 0x03: w = 0x0300; break;
+                case 0x0E: w = 0x0E7F; break;
+                case 0x1C: w = 0x1C0A; break;
+                case 0x01: w = 0x011B; break;
+                case 0x0F: w = 0x9400; break;
+                case 0x39: w = 0x3920; break;
+                default: return;
+            }
+        } else if (shift && code == 0x0F) w = 0x0F00;
+        else w = (u16)(code << 8 | (u8)c);
+    } else return;
+    if (!kbuf_put(w)) dbg(1, "keyboard buffer full\n");
+}
+
+static int int16(struct regs *r)
+{
+    u16 w;
+    switch (AH(r)) {
+    case 0x00: case 0x10:
+        if (!kbuf_get(&w, 1)) return BIOS_RETRY;
+        if (AH(r) == 0x00 && (w & 0xFF) == 0xE0 && (w >> 8)) w &= 0xFF00;
+        AX(r) = w;
+        break;
+    case 0x01: case 0x11:
+        if (!kbuf_get(&w, 0)) { set_zf(r, 1); break; }
+        if (AH(r) == 0x01 && (w & 0xFF) == 0xE0 && (w >> 8)) w &= 0xFF00;
+        AX(r) = w;
+        set_zf(r, 0);
+        break;
+    case 0x02: AL(r) = rd8(BDA + 0x17); break;
+    case 0x12: {
+        u8 f2 = rd8(BDA + 0x18), f3 = rd8(BDA + 0x96);
+        AL(r) = rd8(BDA + 0x17);
+        AH(r) = (f2 & 0x73) | (f3 & 0x0C) | ((f2 & 0x04) << 5);
+        break; }
+    case 0x05: AL(r) = kbuf_put(CX(r)) ? 0 : 1; break;
+    case 0x0A: BX(r) = 0x41AB; break;
+    }
+    return BIOS_DONEF;
+}
+
+/* ---------------- disk ---------------- */
+static u8 disk_status;
+
+static int disk_rw(u32 lba, u32 count, u32 buf, int write)
+{
+    if (lba >= disk_sectors || count > disk_sectors - lba) return 0x04;
+    if (buf + count * 512 > GUEST_TOP) return 0x09;
+    u8 *d = disk_image + lba * 512;
+    if (write) memcpy(d, gptr(buf), count * 512);
+    else memcpy(gptr(buf), d, count * 512);
+    return 0;
+}
+
+static int int13(struct regs *r)
+{
+    int st = 0;
+    u8 fn = AH(r);
+    if (DL(r) != 0x80) {                         /* no floppies, one hard disk */
+        if (fn == 0x00) { set_cf(r, 0); AH(r) = 0; return BIOS_DONEF; }
+        if (fn == 0x15 && DL(r) < 0x80) { AH(r) = 0; set_cf(r, 0); return BIOS_DONEF; }
+        AH(r) = DL(r) < 0x80 ? 0x80 : 0x01;
+        set_cf(r, 1);
+        return BIOS_DONEF;
+    }
+    switch (fn) {
+    case 0x00: case 0x04: case 0x0C: case 0x0D: case 0x10: case 0x11: case 0x47: break;
+    case 0x01: AH(r) = disk_status; set_cf(r, disk_status != 0); return BIOS_DONEF;
+    case 0x02: case 0x03: {
+        u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), sec = CL(r) & 63, head = DH(r);
+        if (!sec || head >= DISK_HEADS) { st = 0x04; break; }
+        u32 lba = (cyl * DISK_HEADS + head) * DISK_SPT + sec - 1;
+        st = disk_rw(lba, AL(r), LIN(r->v86_es, BX(r)), fn == 3);
+        if (st) AL(r) = 0;
+        break; }
+    case 0x08: {
+        u32 mc = disk_cyls - 1;
+        CH(r) = (u8)mc;
+        CL(r) = (u8)(((mc >> 2) & 0xC0) | DISK_SPT);
+        DH(r) = DISK_HEADS - 1;
+        DL(r) = 1;
+        break; }
+    case 0x15:
+        AH(r) = 3;
+        CX(r) = (u16)(disk_sectors >> 16);
+        DX(r) = (u16)disk_sectors;
+        set_cf(r, 0);
+        return BIOS_DONEF;
+    case 0x41:
+        if (BX(r) != 0x55AA) { st = 1; break; }
+        BX(r) = 0xAA55; AH(r) = 0x21; CX(r) = 1;
+        set_cf(r, 0);
+        return BIOS_DONEF;
+    case 0x42: case 0x43: case 0x44: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        u16 count = rd16(p + 2);
+        u32 buf = LIN(rd16(p + 6), rd16(p + 4));
+        u32 lba = rd32(p + 8);
+        if (rd32(p + 12)) { st = 0x04; break; }
+        if (fn != 0x44) st = disk_rw(lba, count, buf, fn == 0x43);
+        if (st) wr16(p + 2, 0);
+        break; }
+    case 0x48: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        if (rd16(p) < 26) { st = 1; break; }
+        wr16(p, 26); wr16(p + 2, 2);
+        wr32(p + 4, disk_cyls); wr32(p + 8, DISK_HEADS); wr32(p + 12, DISK_SPT);
+        wr32(p + 16, disk_sectors); wr32(p + 20, 0); wr16(p + 24, 512);
+        break; }
+    default:
+        dbg(1, "INT 13h AH=%02x unsupported\n", fn);
+        st = 1;
+    }
+    disk_status = (u8)st;
+    wr8(BDA + 0x74, (u8)st);
+    AH(r) = (u8)st;
+    set_cf(r, st != 0);
+    return BIOS_DONEF;
+}
+
+/* ---------------- INT 15h ---------------- */
+static int int15(struct regs *r)
+{
+    switch (AH(r)) {
+    case 0x24:
+        switch (AL(r)) {
+        case 0: set_a20(0); AH(r) = 0; break;
+        case 1: set_a20(1); AH(r) = 0; break;
+        case 2: AH(r) = 0; AL(r) = (u8)a20_on; break;
+        case 3: AH(r) = 0; BX(r) = 3; break;
+        default: AH(r) = 0x86; set_cf(r, 1); return BIOS_DONEF;
+        }
+        set_cf(r, 0);
+        return BIOS_DONEF;
+    case 0x4F: set_cf(r, 1); return BIOS_DONEF;           /* keep the scan code */
+    case 0x86: {
+        u32 us = (u32)CX(r) << 16 | DX(r);
+        u32 clocks = us / 1000 * 1193 + (us % 1000) * 1193 / 1000;
+        u32 end = pit_clock() + clocks;
+        while ((int32_t)(pit_clock() - end) < 0) idle_wait();
+        set_cf(r, 0);
+        return BIOS_DONEF; }
+    case 0x88: AX(r) = 0; set_cf(r, 0); return BIOS_DONEF;
+    case 0x90: case 0x91: AH(r) = 0; set_cf(r, 0); return BIOS_DONEF;
+    case 0xC0:
+        r->v86_es = BIOS_SEG;
+        BX(r) = rd16(BIOS_LIN + 0x200);
+        AH(r) = 0;
+        set_cf(r, 0);
+        return BIOS_DONEF;
+    }
+    dbg(2, "INT 15h AX=%04x unsupported\n", AX(r));
+    AH(r) = 0x86;
+    set_cf(r, 1);
+    return BIOS_DONEF;
+}
+
+/* ---------------- INT 1Ah ---------------- */
+static int int1a(struct regs *r)
+{
+    switch (AH(r)) {
+    case 0x00:
+        CX(r) = rd16(BDA + 0x6E); DX(r) = rd16(BDA + 0x6C);
+        AL(r) = rd8(BDA + 0x70); wr8(BDA + 0x70, 0);
+        break;
+    case 0x01: wr16(BDA + 0x6E, CX(r)); wr16(BDA + 0x6C, DX(r)); wr8(BDA + 0x70, 0); break;
+    case 0x02:
+        rtc_wait();
+        CH(r) = cmos_bcd(4); CL(r) = cmos_bcd(2); DH(r) = cmos_bcd(0); DL(r) = 0;
+        break;
+    case 0x04:
+        rtc_wait();
+        CH(r) = cmos_bcd(0x32); CL(r) = cmos_bcd(9); DH(r) = cmos_bcd(8); DL(r) = cmos_bcd(7);
+        if (CH(r) < 0x19 || CH(r) > 0x21) CH(r) = CL(r) >= 0x80 ? 0x19 : 0x20;
+        break;
+    case 0x03: case 0x05: break;                         /* setting the clock: ignored */
+    default: set_cf(r, 1); return BIOS_DONEF;
+    }
+    set_cf(r, 0);
+    return BIOS_DONEF;
+}
+
+int bios_service(struct regs *r, int id, int via_stub)
+{
+    (void)via_stub;
+    switch (id) {
+    case 0x06: {
+        u16 ip = rd16(LIN(r->ss, SP(r))), cs = rd16(LIN(r->ss, SP(r) + 2));
+        u32 a = LIN(cs, ip);
+        panic("invalid opcode at %04x:%04x (%02x %02x %02x %02x) and no handler for INT 6",
+              cs, ip, rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3)); }
+    case 0x08: {
+        u32 t = rd32(BDA + 0x6C) + 1;
+        if (t >= 0x1800B0) { t = 0; wr8(BDA + 0x70, 1); }
+        wr32(BDA + 0x6C, t);
+        return BIOS_CONT; }
+    case 0x09:
+        keyboard_irq();
+        vpic_eoi_irq(1);
+        return BIOS_DONE;
+    case 0x10: video_int10(r); return BIOS_DONEF;
+    case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
+    case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
+    case 0x13: return int13(r);
+    case 0x14: AH(r) = 0x80; return BIOS_DONEF;
+    case 0x15: return int15(r);
+    case 0x16: return int16(r);
+    case 0x17: AH(r) = 0x09; return BIOS_DONEF;
+    case 0x18: panic("No bootable disk (INT 18h)");
+    case 0x19: reboot();
+    case 0x1A: return int1a(r);
+    }
+    return BIOS_DONE;
+}
+
+/* ---------------- setup ---------------- */
+void bios_init(void)
+{
+    memset(gptr(0), 0, GUEST_TOP);
+    memcpy(gptr(BIOS_LIN), bios_bin, bios_bin_end - bios_bin);
+    memcpy(gptr(BIOS_LIN + FONT16_OFF), vga_font16, 4096);
+    memcpy(gptr(BIOS_LIN + FONT8_OFF), vga_font8, 2048);
+    for (int v = 0; v < 256; v++) {
+        wr16(v * 4, rd16(BIOS_LIN + v * 2));
+        wr16(v * 4 + 2, BIOS_SEG);
+    }
+    wr16(0x1E * 4, rd16(BIOS_LIN + 0x202));
+    wr16(0x1F * 4, FONT8_OFF + 1024);
+    wr16(0x43 * 4, FONT8_OFF);
+    wr32(0x41 * 4, 0);
+    wr32(0x46 * 4, 0);
+
+    /* BIOS data area */
+    u16 equip = 0x0020;                                  /* 80x25 colour, no floppies */
+    u32 cr0;
+    __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
+    if (cr0 & 2) equip |= 2;                             /* x87 present (MP set at boot) */
+    wr16(BDA + 0x10, equip);
+    wr16(BDA + 0x13, 640);
+    wr16(BDA + 0x1A, 0x1E); wr16(BDA + 0x1C, 0x1E);
+    wr16(BDA + 0x80, 0x1E); wr16(BDA + 0x82, 0x3E);
+    wr8(BDA + 0x75, 1);                                  /* one hard disk */
+    wr8(BDA + 0x96, 0x10);                               /* 101/102-key keyboard */
+    wr8(BDA + 0x17, 0x20);                               /* Num Lock on */
+
+    rtc_wait();
+    u32 secs = bcd2bin(cmos_bcd(4)) * 3600 + bcd2bin(cmos_bcd(2)) * 60 + bcd2bin(cmos_bcd(0));
+    wr32(BDA + 0x6C, secs * 19663 / 1080);
+
+    video_set_mode(3, 1);
+
+    disk_sectors = disk_size / 512;
+    disk_cyls = disk_sectors / (DISK_HEADS * DISK_SPT);
+    if (disk_cyls > 1024) disk_cyls = 1024;
+    if (!disk_cyls) disk_cyls = 1;
+    kprintf("disk: %u sectors (%u MiB), CHS %u/%u/%u\n", disk_sectors, disk_sectors >> 11,
+            disk_cyls, DISK_HEADS, DISK_SPT);
+}
+
+void bios_boot(struct regs *r)
+{
+    u8 *d = disk_image;
+    if (d[0] == 0x1F && d[1] == 0x8B)
+        panic("dos.img is gzip-compressed. GRUB unpacks modules itself; for QEMU -initrd use the plain image.");
+    if (d[510] != 0x55 || d[511] != 0xAA) panic("dos.img: no boot signature in sector 0");
+
+    u32 vbr = 0;
+    int part = -1;
+    /* A partition table, unless sector 0 is itself a FAT boot sector. */
+    if (memcmp(d + 0x52, "FAT32", 5) && memcmp(d + 0x36, "FAT", 3)) {
+        for (int i = 0; i < 4; i++) {
+            u8 *e = d + 446 + i * 16;
+            u8 t = e[4];
+            if (t == 0x01 || t == 0x04 || t == 0x06 || t == 0x0B || t == 0x0C || t == 0x0E) {
+                if (part < 0 || e[0] == 0x80) { part = i; vbr = *(u32 *)(e + 8); }
+            }
+        }
+        if (part < 0) panic("dos.img: no FAT partition in the partition table");
+        memcpy(gptr(0x600), d, 512);                 /* as an MBR would leave it */
+    }
+    if ((u64)vbr * 512 + 512 > disk_size) panic("dos.img: partition outside the image");
+    memcpy(gptr(0x7C00), d + vbr * 512, 512);
+    if (rd16(0x7DFE) != 0xAA55) panic("dos.img: partition boot sector has no signature");
+    kprintf("booting partition %d at LBA %u\n", part, vbr);
+
+    r->cs = 0; r->eip = 0x7C00;
+    r->ss = 0; r->esp = 0x7C00;
+    r->v86_ds = r->v86_es = r->v86_fs = r->v86_gs = 0;
+    r->edx = 0x80;
+    r->esi = part >= 0 ? 0x7BE + part * 16 : 0;
+    r->ebp = r->esi;
+}
