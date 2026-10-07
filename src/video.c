@@ -691,6 +691,27 @@ void video_vbe_window(struct regs *r)
     AX(r) = 0x004F;
 }
 
+/* The protected-mode interface's routines (4F0Ah): 47h set window,
+   48h set display start (CX:DX = byte offset / 4), 49h set palette. */
+void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
+{
+    if (id == 0x47) {
+        u32 b = edx & 0xFFFF;
+        if ((ebx & 0xFF) == 0 && b * 65536 < VRAM_SIZE) { if (vbe_on) vbe_map_bank(b); else vbe_bank = b; }
+    } else if (id == 0x48) {
+        u32 st = ((edx & 0xFFFF) << 16 | (ecx & 0xFFFF)) << 2;
+        if (vbe_on && st + vbe_pitch * vbe_h <= VRAM_SIZE) vbe_start = st;
+    } else if (id == 0x49 && pal_lin) {
+        u32 n = ecx & 0xFFFF, first = edx & 0xFFFF;
+        for (u32 i = 0; i < n && first + i < 256; i++) {
+            vga_dac[first + i][0] = rd8(pal_lin + i * 4 + 2) & 63;
+            vga_dac[first + i][1] = rd8(pal_lin + i * 4 + 1) & 63;
+            vga_dac[first + i][2] = rd8(pal_lin + i * 4) & 63;
+        }
+        palette_dirty = 1;
+    }
+}
+
 static void vbe_call(struct regs *r)
 {
     u32 es_di = LIN(r->v86_es, DI(r));
@@ -753,6 +774,11 @@ static void vbe_call(struct regs *r)
         AX(r) = 0x004F; return; }
     case 0x08:
         if (BL(r) <= 1) { BH(r) = 6; AX(r) = 0x004F; } else AX(r) = 0x014F;   /* 6-bit DAC only */
+        return;
+    case 0x0A:                                   /* protected-mode interface (bios.asm vbe_pmi) */
+        if (BL(r) != 0) { AX(r) = 0x014F; return; }
+        r->v86_es = 0xF000; DI(r) = rd16(0xF0228); CX(r) = rd16(0xF022A);
+        AX(r) = 0x004F;
         return;
     case 0x09: {
         u32 n = CX(r), first = DX(r);

@@ -852,6 +852,13 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
             int id = rd8(base + ip);
             return dpmi_pm_trap(c, id, rd8(base + ip + 1));
         }
+        if (rd8(base + ip) >= 0x47 && rd8(base + ip) <= 0x49 && rd8(base + ip + 1) == 0xC3) {
+            /* the VESA protected-mode interface (4F0Ah), copied into the program */
+            u32 pal = sel_base(c->es) + (code32(c) ? c->edi : (c->edi & 0xFFFF));
+            video_vbe_pm(rd8(base + ip), c->ebx, c->ecx, c->edx, lin_ok(pal, 4) ? pal : 0);
+            NEXT(ip + 1);
+            return resume(c);
+        }
         NEXT(ip);
         {
             struct ctx k = *c;

@@ -143,6 +143,7 @@ void speed_throttle(void);                    /* after each timer tick */
 u32 speed_api(u32 pm);                        /* INT 2Fh AX=5653h */
 void video_osd(const char *msg);              /* a note at the top right for 2 s */
 void video_vbe_window(struct regs *r);        /* VESA bank switch (4F05h / WinFuncPtr) */
+void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin);   /* VBE PM interface call */
 int video_vram_range(u32 p, u32 n);           /* inside the VESA framebuffer? */
 int vkbd_read_data(void);                     /* guest's port 60h read */
 void vkbd_refill(void);

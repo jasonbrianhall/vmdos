@@ -60,6 +60,8 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw pm_defint                     ; 0222  default PM interrupt handlers, 4 bytes apart
         dw dpmi_intstub                  ; 0224  "INT n" for reflected interrupts (n patched)
         dw vbe_bank                      ; 0226  VESA window function (far call)
+        dw vbe_pmi                       ; 0228  VESA protected-mode interface table (4F0Ah)
+        dw vbe_pmi_end - vbe_pmi         ; 022A  its length
 
 ; ---- stubs ----
 dummy:  iret
@@ -84,6 +86,22 @@ xms_entry:                       ; XMS driver entry (far call); starts with a sh
         nop
 .go:    TRAP 0x43
         retf
+
+; VBE 2.0 protected-mode interface (4F0Ah): offsets of 32-bit routines a
+; program copies and calls near. Each traps to the monitor (HLT is
+; privileged; the monitor knows the "HLT id RET" shape wherever it runs).
+vbe_pmi:
+        dw .win - vbe_pmi                ; set window: BL = 0, DX = bank
+        dw .start - vbe_pmi              ; set display start: CX:DX = address / 4
+        dw .pal - vbe_pmi                ; set palette: CX, DX, ES:EDI
+        dw 0                             ; no ports / memory to grant
+.win:   TRAP 0x47
+        ret
+.start: TRAP 0x48
+        ret
+.pal:   TRAP 0x49
+        ret
+vbe_pmi_end:
 
 vbe_bank:                        ; VESA WinFuncPtr: BH=0 set / 1 get, DX = bank
         TRAP 0x46

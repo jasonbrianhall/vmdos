@@ -113,7 +113,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
-  0800h maps it), scan line length, display start, palette (4F00h-4F09h).
+  0800h maps it), scan line length, display start, palette, and the
+  protected-mode interface (4F00h-4F0Ah).
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
   or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses:
   single-plane access mapped directly, latch copies and the rest emulated),
@@ -135,7 +136,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- Mode X's 240-line timing, VBE 3.0 / VBE protected-mode interface, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, VBE 3.0, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
