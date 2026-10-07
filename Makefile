@@ -80,13 +80,20 @@ dos.img: $(BUILD)/fat32lba.bin tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT
 	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
 	    $(if $(EXTRA),$(wildcard $(EXTRA)/*))
 
+# grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).
+GRUB_MKRESCUE ?= $(firstword $(shell command -v grub-mkrescue grub2-mkrescue 2>/dev/null))
+
 iso: vmdos.iso
 vmdos.iso: vmdos.elf dos.img grub.cfg
+	@test -n "$(GRUB_MKRESCUE)" || { echo "grub-mkrescue / grub2-mkrescue not found."; \
+	  echo "  Debian/Ubuntu: sudo apt install grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools"; \
+	  echo "  Fedora:        sudo dnf install grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools"; \
+	  echo "Or skip GRUB: make efi / make esp"; exit 1; }
 	rm -rf $(BUILD)/iso && mkdir -p $(BUILD)/iso/boot/grub
 	cp vmdos.elf $(BUILD)/iso/boot/
 	gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz
 	cp grub.cfg $(BUILD)/iso/boot/grub/
-	grub-mkrescue -o $@ $(BUILD)/iso 2>/dev/null
+	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
 
 # ---- UEFI application (gnu-efi): efi/loader.c with the kernel embedded ----
 EFI_INC  ?= $(firstword $(wildcard /usr/include/efi))
