@@ -80,6 +80,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
+- XMS 3.0 in the monitor (don't load HIMEM): HMA, so `DOS=HIGH` and FreeCOM's
+  XMS swapping work (about 619 KB free for programs); 32 MB of extended memory
+  (`xms=MB` to change).
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
@@ -91,7 +94,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- EGA/planar modes and Mode X, VESA, XMS/EMS, DPMI, mouse, SB16 (16-bit)
+- EGA/planar modes and Mode X, VESA, EMS, DPMI, mouse, UMBs (offered over
+  XMS but FreeDOS doesn't ask for them yet), SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout

@@ -14,7 +14,7 @@ static u32 disk_sectors, disk_cyls;
 #define DISK_SPT 63
 
 u32 bios_stub_entry(int vec) { return BIOS_LIN + rd16(BIOS_LIN + vec * 2); }
-int bios_stub_is_direct(int vec) { return (vec >= 0x10 && vec <= 0x17) || vec == 0x1A; }
+int bios_stub_is_direct(int vec) { return (vec >= 0x10 && vec <= 0x17) || vec == 0x1A || vec == 0x2F; }
 
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 static void set_zf(struct regs *r, int z) { if (z) r->eflags |= EFL_ZF; else r->eflags &= ~EFL_ZF; }
@@ -362,6 +362,12 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x18: panic("No bootable disk (INT 18h)");
     case 0x19: reboot();
     case 0x1A: return int1a(r);
+    case 0x2F:
+        dbg(2, "BIOS INT 2Fh AX=%04x via %s\n", AX(r), via_stub ? "chain" : "direct");
+        if (AX(r) == 0x4300) AL(r) = 0x80;                     /* XMS driver installed */
+        else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
+        return BIOS_DONE;
+    case 0x43: xms_call(r); return BIOS_CONT;                  /* XMS entry, then RETF */
     }
     return BIOS_DONE;
 }

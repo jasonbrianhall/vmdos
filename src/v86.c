@@ -98,6 +98,13 @@ static void do_int(struct regs *r, int n, u16 ip0)
     tgt += rd16(n * 4);
     dbg(3, "INT %02x AX=%04x BX=%04x CX=%04x DX=%04x from %04x:%04x\n",
         n, AX(r), BX(r), CX(r), DX(r), r->cs & 0xFFFF, ip0);
+    /* XMS lives in the monitor: answer its installation check before the
+       INT 2Fh chain (DOS's own handler ends the chain without passing
+       unknown calls on). */
+    if (n == 0x2F && (AX(r) == 0x4300 || AX(r) == 0x4310)) {
+        bios_service(r, 0x2F, 0);
+        return;
+    }
     if (bios_stub_is_direct(n) && tgt == bios_stub_entry(n)) {
         /* Nobody hooked it: run the BIOS service without a round trip. */
         if (bios_service(r, n, 0) == BIOS_RETRY) {

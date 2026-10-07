@@ -26,6 +26,8 @@ vectors:
         dw irq_slave
   %elif (v >= 0x10 && v <= 0x17) || v == 0x1A
         dw svc_ %+ v
+  %elif v == 0x2F
+        dw int2f
   %elif v == 0x18
         dw int18
   %elif v == 0x19
@@ -40,6 +42,7 @@ vectors:
         dw config_table
         dw diskette_table
         dw stubs_end
+        dw xms_entry                     ; 0206
 
 ; ---- stubs ----
 dummy:  iret
@@ -53,6 +56,17 @@ svc_ %+ v:
 %endrep
 svc_26: TRAP 0x1A
         iret
+
+int2f:  TRAP 0x2F                ; multiplex: XMS installation check / entry point
+        iret
+
+xms_entry:                       ; XMS driver entry (far call); starts with a short
+        jmp short .go            ; jump so other drivers can hook it, as HIMEM's does
+        nop
+        nop
+        nop
+.go:    TRAP 0x43
+        retf
 
 int06:  TRAP 0x06               ; invalid opcode nobody handles: stop with a report
         iret

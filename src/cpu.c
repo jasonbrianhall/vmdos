@@ -29,6 +29,8 @@ void *phys_alloc(u32 bytes)
     return p;
 }
 
+u32 phys_free(void) { return alloc_end - alloc_next; }
+
 /* ---------------- paging ----------------
    Linear 0..0x10FFFF: the guest's 1 MiB + HMA (user pages, backed by guest_ram).
    Linear 0x110000 up to the top of RAM: identity (kernel, heap, boot modules).
@@ -372,6 +374,7 @@ void kmain(u32 magic, struct mb_info *mb)
     bios_init();
     if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
     sound_init();
+    xms_init();
     usb_ready = 1;
     guest_start();
 }

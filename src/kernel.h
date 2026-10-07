@@ -94,6 +94,7 @@ extern volatile u32 ticks;                    /* real timer ticks (TICK_HZ) */
 #define PIT_PER_TICK 1193u
 u32 pit_clock(void);                          /* 1.193182 MHz monotonic clock (wraps) */
 void *phys_alloc(u32 bytes);                  /* page-aligned, zeroed */
+u32 phys_free(void);                          /* bytes left in the heap */
 void map_page(u32 lin, u32 phys, u32 flags);
 void set_a20(int on);
 extern int a20_on;
@@ -144,6 +145,10 @@ int bios_service(struct regs *r, int id, int via_stub);
 void bios_boot(struct regs *r);
 u32 bios_stub_entry(int vec);                 /* linear address of IVT default for vec */
 int bios_stub_is_direct(int vec);
+
+/* ---- xms.c: the XMS 3.0 driver (HMA, extended memory blocks, UMBs) ---- */
+void xms_init(void);
+void xms_call(struct regs *r);
 
 /* ---- sound.c ---- */
 void sound_init(void);
