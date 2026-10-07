@@ -385,9 +385,8 @@ void bios_init(void)
 
     /* BIOS data area */
     u16 equip = 0x0020;                                  /* 80x25 colour, no floppies */
-    u32 cr0;
-    __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
-    if (cr0 & 2) equip |= 2;                             /* x87 present (MP set at boot) */
+    extern u32 fpu_present;
+    if (fpu_present) equip |= 2;
     wr16(BDA + 0x10, equip);
     wr16(BDA + 0x13, 640);
     wr16(BDA + 0x1A, 0x1E); wr16(BDA + 0x1C, 0x1E);

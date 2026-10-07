@@ -28,7 +28,13 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o)
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o \
+              audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
+              sb/opl.o sb/dbopl.o)
+# SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
+# and restores the FPU around it); everything that runs later is integer.
+FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
+LIBGCC   := $(shell $(CC) -m32 -print-libgcc-file-name)
 
 all: vmdos.elf dos.img
 
@@ -41,6 +47,16 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 $(BUILD)/%.o: src/%.cpp | $(BUILD)
 	g++ $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/sb/%.o: src/sb/%.c | $(BUILD)
+	@mkdir -p $(BUILD)/sb
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/sb/gmtables.o $(BUILD)/sb/fpmath.o: $(BUILD)/sb/%.o: src/sb/%.c | $(BUILD)
+	@mkdir -p $(BUILD)/sb
+	$(CC) $(FPFLAGS) -c $< -o $@
+$(BUILD)/sb/%.o: src/sb/%.cpp | $(BUILD)
+	@mkdir -p $(BUILD)/sb
+	g++ $(filter-out -mgeneral-regs-only,$(CXXFLAGS)) -mfpmath=387 -mno-sse -mno-mmx -Wno-unused -Wno-switch -Wno-implicit-fallthrough -c $< -o $@
+
 $(BUILD)/boot.o: src/boot.S | $(BUILD)
 	$(CC) -m32 -DFB_W=$(FB_W) -DFB_H=$(FB_H) -c $< -o $@
 
@@ -51,7 +67,7 @@ $(BUILD)/biosblob.o: src/biosblob.S $(BUILD)/bios.bin
 	$(CC) -m32 -DBIOS_BIN='"$(BUILD)/bios.bin"' -c $< -o $@
 
 vmdos.elf: $(OBJS) src/linker.ld
-	ld -m elf_i386 -T src/linker.ld -o $@ $(OBJS)
+	ld -m elf_i386 -T src/linker.ld -o $@ $(OBJS) $(LIBGCC)
 
 $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
 	nasm -f bin -i boot/ $< -o $@

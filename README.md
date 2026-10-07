@@ -71,6 +71,10 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
+- Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
+  and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
+  Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
+  `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
@@ -78,8 +82,8 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 
 ## Not yet
 
-- Sound (SBPRO), EGA/planar modes and Mode X, VESA, XMS/EMS, DPMI,
-  mouse, saving C: to a real disk.
+- EGA/planar modes and Mode X, VESA, XMS/EMS, DPMI, mouse, SB16 (16-bit)
+  sound, saving C: to a real disk.
 
 ## Layout
 
@@ -94,6 +98,8 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 | `boot/boot32lb.asm` | FreeDOS FAT32 LBA boot sector (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
 | `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
+| `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
+| `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).

@@ -22,6 +22,9 @@ v86_stack:  .skip 64 << 10       # ring-0 stack for traps from the guest (TSS.es
 v86_stack_top:
 
 .section .data
+.global fpu_present
+fpu_present: .long 0
+fpu_sw:   .word 0x5A5A
 .global kernel_stack_top
 kernel_stack_top: .long v86_stack_top
 
@@ -59,6 +62,19 @@ _start:
     mov  %ax, %ss
     mov  %ax, %fs
     mov  %ax, %gs
+    # x87: FNINIT then FNSTSW leaves the status word alone when there's none.
+    mov  %cr0, %eax
+    and  $~((1<<2) | (1<<3)), %eax   # EM, TS off
+    mov  %eax, %cr0
+    fninit
+    fnstsw fpu_sw
+    cmpw $0, fpu_sw
+    jne  5f
+    movl $1, fpu_present
+    or   $((1<<1) | (1<<5)), %eax    # MP; NE (native FPU errors, 486 and later)
+    jmp  6f
+5:  or   $(1<<2), %eax               # EM: no FPU, x87 instructions trap
+6:  mov  %eax, %cr0
     push %edi
     push %esi
     call kmain

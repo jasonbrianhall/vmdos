@@ -371,6 +371,7 @@ void kmain(u32 magic, struct mb_info *mb)
     vdev_init();
     bios_init();
     if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
+    sound_init();
     usb_ready = 1;
     guest_start();
 }

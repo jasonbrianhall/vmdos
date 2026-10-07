@@ -178,6 +178,22 @@ void vdev_tick(void)
     }
 }
 
+/* PC speaker: channel 2 as a square wave while ports 61h bits 0-1 are set. */
+void speaker_mix(int32_t *lr, int frames)
+{
+    static u32 phase;
+    if ((port61 & 3) != 3) return;
+    u32 rl = reload_of(&pit[2]);
+    if (rl < 20) return;                           /* above hearing */
+    u32 step = (PIT_HZ / rl) * 4096 / 3000;          /* cycles per frame, 16.16 */
+    for (int i = 0; i < frames; i++) {
+        phase += step;
+        int32_t v = (phase & 0x8000) ? 5000 : -5000;
+        lr[2 * i] += v;
+        lr[2 * i + 1] += v;
+    }
+}
+
 /* ---------------- keyboard controller ---------------- */
 static u8 kq[64];
 static u8 kq_head, kq_tail;
@@ -253,6 +269,8 @@ static u8 in8(u16 port)
     case 0x71: outb(0x70, cmos_index & 0x7F); return inb(0x71);
     case 0x92: return a20_on ? 2 : 0;
     }
+    u8 v;
+    if (sound_port(port, 0, &v)) return v;
     if (port >= 0x3B0 && port <= 0x3DF) return (u8)video_port_in(port);
     dbg(2, "guest in  %04x\n", port);
     return 0xFF;
@@ -275,6 +293,7 @@ static void out8(u16 port, u8 v)
     case 0x92: set_a20((v & 2) != 0); return;
     case 0x80: case 0xED: return;               /* POST / delay ports */
     }
+    if (sound_port(port, 1, &v)) return;
     if (port >= 0x3B0 && port <= 0x3DF) { video_port_out(port, v); return; }
     dbg(2, "guest out %04x <- %02x\n", port, v);
 }

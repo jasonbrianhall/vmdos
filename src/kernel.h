@@ -145,6 +145,11 @@ void bios_boot(struct regs *r);
 u32 bios_stub_entry(int vec);                 /* linear address of IVT default for vec */
 int bios_stub_is_direct(int vec);
 
+/* ---- sound.c ---- */
+void sound_init(void);
+void sound_tick(void);                        /* every timer tick */
+int sound_port(u16 port, int write, u8 *v);   /* 1 if it's a sound port */
+
 /* ---- video.c ---- */
 void video_init(void);
 void video_refresh(void);                     /* called at ~60 Hz */

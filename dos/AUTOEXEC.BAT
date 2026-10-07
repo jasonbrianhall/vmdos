@@ -1,6 +1,7 @@
 @ECHO OFF
 PROMPT $P$G
 PATH C:\
+SET BLASTER=A220 I5 D1 T4 P330
 ECHO.
 ECHO FreeDOS on vmdos (virtual-8086 mode)
 ECHO.

@@ -234,6 +234,7 @@ void isr_dispatch(struct regs *r)
         if (irq == 0) {
             ticks++;
             vdev_tick();
+            if (usb_ready) sound_tick();
         } else if (irq == 1) {
             vkbd_real_scancode(inb(0x60));
         }
@@ -260,6 +261,10 @@ void isr_dispatch(struct regs *r)
     case 13: gp_handler(r); break;
     case 0: case 1: case 5: case 6: case 7:          /* real-mode style: guest's own vector */
         v86_reflect(r, vec);
+        break;
+    case 16:                                          /* x87 error: a PC reports it on IRQ 13 */
+        if (rd16(0x75 * 4 + 2) == 0xF000) __asm__ volatile("fnclex");   /* nobody handles it */
+        else vpic_raise(13);
         break;
     default:
         dump(r, "exception in the DOS guest");
