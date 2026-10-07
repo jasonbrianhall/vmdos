@@ -23,7 +23,7 @@ make run-efi    # QEMU, UEFI, from vmdos.iso
 
 QEMU targets: `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
 (default pa: PulseAudio/PipeWire; wav records vmdos.wav), `USB=1` for a USB
-keyboard, `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
+keyboard and mouse, `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
 
 ### UEFI without GRUB
 
@@ -84,6 +84,10 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
+- Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
+  MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
+  the program's event handler (0Ch/14h). The pointer is drawn over text and
+  mode 13h by the renderer. A DOS mouse driver you load (CTMOUSE) takes over.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
   `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
   first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh
@@ -100,7 +104,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- EGA/planar modes and Mode X, VESA, EMS, DPMI, mouse, SB16 (16-bit)
+- DPMI (DOS/4GW games such as DOOM.EXE), EGA/planar modes and Mode X, VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
@@ -118,6 +122,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
+| `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 

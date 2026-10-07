@@ -239,34 +239,64 @@ static void draw_cell(int col, int row, u16 cell, int cursor)
     }
 }
 
+static int sh_mouse = -1;
+
 static void refresh_text(const u16 *cells, int cursor_off)
 {
     int n = text_cols * text_rows;
+    int mcell = -1, px, py;
+    u16 m_and, m_xor;
+    if (!console_on && mouse_pointer(&px, &py, &m_and, &m_xor))
+        mcell = (py / 8) * text_cols + px / (text_cols == 40 ? 16 : 8);
+    if (mcell >= n) mcell = -1;
     for (int i = 0; i < n; i++) {
         u16 c = cells[i];
         int cur = i == cursor_off;
         int blinky = (atc[0x10] & 8) && (c & 0x8000);
-        if (full_redraw || c != shadow_text[i] || cur || i == sh_cursor || (blinky && (frame_no & 15) == 0)) {
-            draw_cell(i % text_cols, i / text_cols, c, cur);
+        if (full_redraw || c != shadow_text[i] || cur || i == sh_cursor || i == mcell || i == sh_mouse ||
+            (blinky && (frame_no & 15) == 0)) {
+            draw_cell(i % text_cols, i / text_cols, i == mcell ? (u16)((c & m_and) ^ m_xor) : c, cur);
             shadow_text[i] = c;
         }
     }
     sh_cursor = cursor_off;
+    sh_mouse = mcell;
 }
+
+/* The mouse pointer in graphics modes: an arrow, 1 = outline, 2 = fill. */
+static const char *const arrow[16] = {
+    "1", "11", "121", "1221", "12221", "122221", "1222221", "12222221",
+    "122222221", "1222211111", "1221221", "121 1221", "11  1221", "1    1221", "     1221", "      11" };
+static int sh_ptr_y = -100, sh_ptr_x;
 
 static void refresh_13h(void)
 {
     static u32 line[4096];
+    static u8 ovr[320];
     const u8 *src = gptr(0xA0000);
+    int px = 0, py = -100;
+    u16 ma, mxr;
+    if (mouse_pointer(&px, &py, &ma, &mxr)) px /= 2; else py = -100;
+    int moved = px != sh_ptr_x || py != sh_ptr_y;
+    u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
     for (int y = 0; y < 200; y++) {
         const u8 *s = src + y * 320;
-        if (!full_redraw && !memcmp(s, shadow_gfx + y * 320, 320)) continue;
+        int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
+        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(s, shadow_gfx + y * 320, 320)) continue;
         memcpy(shadow_gfx + y * 320, s, 320);
         for (u32 x = 0; x < g_w; x++) line[x] = pal[s[xmap[x]]];
+        if (in_new) {
+            memset(ovr, 0, sizeof ovr);
+            const char *a = arrow[y - py];
+            for (int i = 0; a[i] && px + i < 320; i++) ovr[px + i] = a[i] == '1' ? 1 : a[i] == '2' ? 2 : 0;
+            for (u32 x = 0; x < g_w; x++)
+                if (ovr[xmap[x]]) line[x] = ovr[xmap[x]] == 1 ? black : white;
+        }
         u32 y0 = g_y + y * g_h / 200, y1 = g_y + (y + 1) * g_h / 200;
         put_row(line, g_w, g_x, y0);
         for (u32 yy = y0 + 1; yy < y1; yy++) copy_row(g_x, g_w, y0, yy);
     }
+    sh_ptr_x = px; sh_ptr_y = py;
 }
 
 static void refresh_fallback(void)

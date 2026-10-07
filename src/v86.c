@@ -87,7 +87,10 @@ static void deliver(struct regs *r)
     vkbd_refill();
     if (!vif) return;
     int vec = vpic_pending();
-    if (vec < 0) return;
+    if (vec < 0) {
+        if (mouse_callback_due()) mouse_start_callback(r);
+        return;
+    }
     vpic_ack(vec);
     v86_reflect(r, vec);
 }
@@ -103,6 +106,12 @@ static void do_int(struct regs *r, int n, u16 ip0)
        unknown calls on). */
     if (n == 0x2F && (AX(r) == 0x4300 || AX(r) == 0x4310)) {
         bios_service(r, 0x2F, 0);
+        return;
+    }
+    /* The mouse driver too, unless a DOS mouse driver has taken INT 33h
+       (DOS leaves unused vectors on a bare IRET). */
+    if (n == 0x33 && (tgt == bios_stub_entry(0x33) || rd8(tgt) == 0xCF)) {
+        bios_service(r, 0x33, 0);
         return;
     }
     if (bios_stub_is_direct(n) && tgt == bios_stub_entry(n)) {
@@ -244,6 +253,8 @@ void isr_dispatch(struct regs *r)
             if (usb_ready) sound_tick();
         } else if (irq == 1) {
             vkbd_real_scancode(inb(0x60));
+        } else if (irq == 12) {
+            mouse_ps2_byte(inb(0x60));
         }
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);

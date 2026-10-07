@@ -14,7 +14,7 @@ static u32 disk_sectors, disk_cyls;
 #define DISK_SPT 63
 
 u32 bios_stub_entry(int vec) { return BIOS_LIN + rd16(BIOS_LIN + vec * 2); }
-int bios_stub_is_direct(int vec) { return (vec >= 0x10 && vec <= 0x17) || vec == 0x1A || vec == 0x2F; }
+int bios_stub_is_direct(int vec) { return (vec >= 0x10 && vec <= 0x17) || vec == 0x1A || vec == 0x2F || vec == 0x33; }
 
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 static void set_zf(struct regs *r, int z) { if (z) r->eflags |= EFL_ZF; else r->eflags &= ~EFL_ZF; }
@@ -368,6 +368,9 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
         return BIOS_DONE;
     case 0x43: xms_call(r); return BIOS_CONT;                  /* XMS entry, then RETF */
+    case 0x33: mouse_int33(r); return BIOS_DONE;
+    case 0x34: mouse_cb_regs(r); return BIOS_CONT;
+    case 0x35: mouse_cb_done(); return BIOS_CONT;
     }
     return BIOS_DONE;
 }

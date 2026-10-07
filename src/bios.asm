@@ -28,6 +28,8 @@ vectors:
         dw svc_ %+ v
   %elif v == 0x2F
         dw int2f
+  %elif v == 0x33
+        dw int33
   %elif v == 0x18
         dw int18
   %elif v == 0x19
@@ -43,6 +45,8 @@ vectors:
         dw diskette_table
         dw stubs_end
         dw xms_entry                     ; 0206
+        dw mouse_cb                      ; 0208
+mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handler
 
 ; ---- stubs ----
 dummy:  iret
@@ -67,6 +71,21 @@ xms_entry:                       ; XMS driver entry (far call); starts with a sh
         nop
 .go:    TRAP 0x43
         retf
+
+int33:  TRAP 0x33                ; mouse driver (in the monitor)
+        iret
+
+mouse_cb:                        ; entered like an interrupt when a mouse event is due
+        pusha
+        push ds
+        push es
+        TRAP 0x34                ; event registers
+        call far [cs:mouse_handler]
+        TRAP 0x35                ; handler finished
+        pop es
+        pop ds
+        popa
+        iret
 
 int06:  TRAP 0x06               ; invalid opcode nobody handles: stop with a report
         iret

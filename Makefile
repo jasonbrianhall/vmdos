@@ -28,7 +28,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o xms.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o xms.o mouse.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -158,8 +158,8 @@ QSOUND_hda  := $(QAUDIO) -device intel-hda -device hda-duplex,audiodev=snd0
 QSOUND_ac97 := $(QAUDIO) -device AC97,audiodev=snd0
 QSOUND_sb   := $(QAUDIO) -device sb16,audiodev=snd0
 QSOUND_none :=
-# USB=1: keyboard on an xHCI controller instead of PS/2 (as on many UEFI PCs).
-QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd)
+# USB=1: keyboard and mouse on an xHCI controller (as on many UEFI PCs).
+QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device usb-mouse)
 QEMU_ARGS ?= -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
 
 run: vmdos.elf dos.img

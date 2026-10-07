@@ -375,6 +375,7 @@ void kmain(u32 magic, struct mb_info *mb)
     if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
     sound_init();
     xms_init();
+    mouse_ps2_init();
     usb_ready = 1;
     guest_start();
 }

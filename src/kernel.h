@@ -150,6 +150,19 @@ int bios_stub_is_direct(int vec);
 void xms_init(void);
 void xms_call(struct regs *r);
 
+/* ---- mouse.c: PS/2 and USB mice, INT 33h ---- */
+void mouse_ps2_init(void);
+void mouse_ps2_byte(u8 b);
+void mouse_input(int dx, int dy, int buttons);
+void mouse_usb_attached(void);
+void mouse_update(void);
+void mouse_int33(struct regs *r);
+int mouse_callback_due(void);
+void mouse_start_callback(struct regs *r);
+void mouse_cb_regs(struct regs *r);
+void mouse_cb_done(void);
+int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);
+
 /* ---- sound.c ---- */
 void sound_init(void);
 void sound_tick(void);                        /* every timer tick */

@@ -13,7 +13,7 @@
 #include "usb.hpp"
 
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
-static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)dx; (void)dy; (void)buttons; (void)wheel; }
+static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
 
 static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
 static void delay_ms(int ms) { io_delay(ms * 1000); }
@@ -543,6 +543,7 @@ static bool setup_slot(Keyboard& k, int ki) {
 
     k.kind = is_mouse ? MOUSE : KBD;
     k.mouse = is_mouse;
+    if (is_mouse) mouse_usb_attached();
     k.active = true;
     for (int i = 0; i < 8; i++) queue_report(k);
     H->db[k.slot] = k.dci;
