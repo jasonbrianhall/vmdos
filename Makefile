@@ -94,7 +94,7 @@ $(BUILD)/VMCD.COM: dos/vmcdtool.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
 $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
-	nasm -O9 -w-all -i third_party/shsucd/ $< -o $@
+	nasm -O9 -w-all -Di8086 -i third_party/shsucd/ $< -o $@   # 8086 build: assembles with any NASM
 
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
