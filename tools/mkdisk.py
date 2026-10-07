@@ -5,7 +5,8 @@ Needs mkfs.fat (dosfstools) and mcopy (mtools).
 
   mkdisk.py [--type=0C] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
 Files are copied to the root; a directory is copied recursively; SRC=DEST
-puts a file at DEST (directories are created). BOOTSECTOR "-" leaves the
+puts a file at DEST (directories are created); --contents=DIR copies
+everything inside DIR to the root. BOOTSECTOR "-" leaves the
 mkfs.fat boot code; --type sets the partition type (EF: EFI system partition)."""
 import os, struct, subprocess, sys
 
@@ -60,8 +61,17 @@ def main():
     img = "%s@@%d" % (out, START * 512)
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
     made = set()
+    expanded = []
     for p in files:
-        if "=" in p:
+        if p.startswith("--contents="):
+            d = p[len("--contents="):]
+            if not os.path.isdir(d):
+                sys.exit("mkdisk: %s is not a folder" % d)
+            expanded += [os.path.join(d, n) for n in sorted(os.listdir(d))]
+        else:
+            expanded.append(p)
+    for p in expanded:
+        if "=" in p and not os.path.exists(p):
             src, dest = p.split("=", 1)
             parts = dest.strip("/").split("/")
             for i in range(1, len(parts)):

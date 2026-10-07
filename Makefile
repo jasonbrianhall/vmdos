@@ -75,17 +75,18 @@ $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
 $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM:
 	sh tools/fetch-freedos.sh $(FREEDOS)
 
-# Rebuild C: when EXTRA names another folder or anything in it changes.
-EXTRA_FILES := $(if $(EXTRA),$(shell find $(EXTRA) -type f 2>/dev/null))
+# Rebuild C: when EXTRA names another folder or anything in it changes
+# (a checksum of the listing: names may contain spaces, which make can't take).
 $(BUILD)/extra.stamp: FORCE | $(BUILD)
-	@echo '$(EXTRA)' | cmp -s - $@ || echo '$(EXTRA)' > $@
+	@{ echo "$(EXTRA)"; [ -z "$(EXTRA)" ] || find "$(EXTRA)" -printf '%p %s %T@\n' | sort; } | md5sum > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 FORCE:
 
 dos.img: $(BUILD)/fat32lba.bin tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
-         $(BUILD)/extra.stamp $(EXTRA_FILES)
+         $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
 	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
-	    $(if $(EXTRA),$(wildcard $(EXTRA)/*))
+	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
 # grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).
 GRUB_MKRESCUE ?= $(firstword $(shell command -v grub-mkrescue grub2-mkrescue 2>/dev/null))
