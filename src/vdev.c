@@ -316,3 +316,8 @@ void vdev_init(void)
     pit[0].mode = 3;
     next_irq0 = pit_clock() + 65536;
 }
+
+void vpic_debug(char *buf, int n)
+{
+    snprintf(buf, n, "PIC irr %02x/%02x isr %02x/%02x imr %02x/%02x", pm.irr, ps.irr, pm.isr, ps.isr, pm.imr, ps.imr);
+}

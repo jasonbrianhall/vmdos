@@ -178,10 +178,12 @@ void dsp_out(uint16_t port, uint8_t v)
         else dsp.mixer[mix_index] = v;
         break;
     case 0x6:
+        dbg(2, "DSP reset %x\n", v);
         if (v & 1) reset_latch = 1;
         else if (reset_latch) { reset_latch = 0; dsp_reset(); }
         break;
     case 0xC:
+        dbg(2, "DSP <- %02x\n", v);
         if (nargs) {
             args[argi++] = v;
             if (argi >= nargs) { exec(); nargs = 0; }

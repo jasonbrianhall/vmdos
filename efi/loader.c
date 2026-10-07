@@ -2,7 +2,7 @@
 //
 // Reads dos.img from the folder vmdos.efi was started from, takes the
 // framebuffer from GOP, places the embedded kernel at its link address
-// (4 MiB), exits boot services, leaves long mode (efi/tramp.S) and enters
+// (16 MiB), exits boot services, leaves long mode (efi/tramp.S) and enters
 // the kernel with Multiboot information, as GRUB would.
 //
 // "debug" in the load options waits for a key before handing over; other
@@ -193,7 +193,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
                              { (UINTN)mmap, MAX_MMAP * sizeof(struct MultibootMmap) } };
         for (UINTN i = 0; i < sizeof ours / sizeof ours[0]; i++)
             if (overlaps(ours[i][0], ours[i][1], KERNEL_BASE, KERNEL_MEM_SIZE)) {
-                fail(L"the firmware put the loader's data where the kernel goes (4 MiB)");
+                fail(L"the firmware put the loader's data where the kernel goes (16 MiB)");
                 return EFI_OUT_OF_RESOURCES;
             }
         UINTN ms = 0, k, ds; UINT32 dv;
@@ -206,7 +206,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
                 if (overlaps(d->PhysicalStart, d->NumberOfPages * 4096, KERNEL_BASE, KERNEL_MEM_SIZE) &&
                     !usable_after_exit(d->Type)) {
                     Print(L"  memory at 0x%lx is type %d\r\n", d->PhysicalStart, d->Type);
-                    fail(L"the memory at 4 MiB, where the kernel goes, belongs to the firmware");
+                    fail(L"the memory at 16 MiB, where the kernel goes, belongs to the firmware");
                     return EFI_OUT_OF_RESOURCES;
                 }
             }

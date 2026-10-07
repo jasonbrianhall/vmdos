@@ -58,6 +58,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw pm_retf                       ; 021E  state save/restore: nothing to do
         dw rm_retf                       ; 0220
         dw pm_defint                     ; 0222  default PM interrupt handlers, 4 bytes apart
+        dw dpmi_intstub                  ; 0224  "INT n" for reflected interrupts (n patched)
 
 ; ---- stubs ----
 dummy:  iret
@@ -105,6 +106,9 @@ dpmi_entry:                      ; far-called by the client to enter protected m
         int 0x21
         TRAP 0x55                ; build the client, continue in protected mode
 dpmi_rmret:
+        TRAP 0x50
+dpmi_intstub:                    ; a real INT instruction, so the monitor's shortcuts apply
+        int 0x00                 ; the byte after CDh is patched before each use
         TRAP 0x50
 dpmi_raw_rm2pm:
         TRAP 0x56

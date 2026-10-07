@@ -84,19 +84,23 @@ void wait_for_irq(void)
 
 /* Deliver a pending virtual IRQ; returns the frame to resume (a DPMI
    client's protected-mode handler may mean a mode switch). */
+u32 stat_pmirq, stat_rmirq, stat_reflirq;
+int dpmi_route_rm_irqs = -1;
 static struct regs *deliver(struct regs *r)
 {
     vkbd_refill();
     if (!vif) return r;
     int pm = !(r->eflags & EFL_VM);
+    if (dpmi_route_rm_irqs < 0) dpmi_route_rm_irqs = !strstr(cmdline, "norouteirq");
     int vec = vpic_pending();
     if (vec < 0) {
         if (!pm && mouse_callback_due()) mouse_start_callback(r);
         return r;
     }
     vpic_ack(vec);
-    if (dpmi_pm_hooked(vec)) return dpmi_hw_interrupt(r, vec);
-    if (pm) return dpmi_reflect_irq(r, vec);
+    if (dpmi_pm_hooked(vec) && (pm || dpmi_route_rm_irqs)) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
+    if (pm) { stat_reflirq++; return dpmi_reflect_irq(r, vec); }
+    stat_rmirq++;
     v86_reflect(r, vec);
     return r;
 }
@@ -277,6 +281,16 @@ struct regs *isr_dispatch(struct regs *r)
             ticks++;
             vdev_tick();
             if (usb_ready) sound_tick();
+            /* A protected-mode client can't change IF with POPF (IOPL 0), and
+               PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
+               been off for a few ms with an interrupt waiting, take that as
+               a POPF that turned interrupts back on. */
+            static u32 vif_off;
+            static int vifhack = -1;
+            if (vifhack < 0) vifhack = !!strstr(cmdline, "vifhack");      /* old heuristic, off */
+            if (vifhack && from_pm && !vif && vpic_pending() >= 0) {
+                if (++vif_off >= 4) { vif = 1; vif_off = 0; }
+            } else vif_off = 0;
         } else if (irq == 1) {
             vkbd_real_scancode(inb(0x60));
         } else if (irq == 12) {
@@ -287,6 +301,18 @@ struct regs *isr_dispatch(struct regs *r)
         if (irq == 0 && usb_ready && (ticks & 7) == 0) {
             static int in_usb;
             if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
+        }
+        if (irq == 0 && debug_level >= 2 && ticks % 5000 == 0) {
+            extern int vif;
+            void vpic_debug(char *buf, int n);
+            int dpmi_depth(char *buf, int n);
+            char b1[64], b2[64];
+            vpic_debug(b1, sizeof b1);
+            dpmi_depth(b2, sizeof b2);
+            kprintf("[%us] irqs pm %u reflected %u rm %u, vif %u, mode %s, %x:%x  %s  %s\n", ticks / 1000,
+                    stat_pmirq, stat_reflirq, stat_rmirq, vif, from_v86 ? "v86" : from_pm ? "pm" : "kernel",
+                    r->cs, r->eip, b1, b2);
+            if (from_pm) { void dpmi_dump_code(u32, u32, int); dpmi_dump_code(r->cs, r->eip - 0x30, 0x60); }
         }
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;

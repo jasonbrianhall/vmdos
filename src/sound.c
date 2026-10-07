@@ -42,6 +42,7 @@ int sound_port(u16 port, int write, u8 *v)
     if (!sb_ready) return 0;
     if (dsp_owns(port)) {
         if (write) dsp_out(port, *v); else *v = dsp_in(port);
+        if (debug_level >= 4) kprintf("SB %s %03x %02x\n", write ? "out" : "in ", port, *v);
         check_irq();
         return 1;
     }

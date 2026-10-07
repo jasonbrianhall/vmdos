@@ -52,6 +52,12 @@ static void get_ctx(struct regs *r, struct ctx *c)
 static int sel_valid_data(u32 sel);
 struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg);
 
+/* After a client's CLI it runs single-stepped (TF), so a POPF or IRET that
+   turns interrupts back on is seen: at IOPL 0 those can't change IF
+   themselves, and PUSHF/CLI/.../POPF is common. */
+static int stepping;
+static u32 step_cs, step_eip, step_ss, step_esp;
+
 /* Build the frame for c at the top of the ring-0 stack and resume it. */
 static struct regs *resume(struct ctx *c)
 {
@@ -63,13 +69,20 @@ static struct regs *resume(struct ctx *c)
     r->esi = k.esi; r->edi = k.edi; r->ebp = k.ebp;
     r->eip = k.eip; r->cs = k.cs; r->esp = k.esp; r->ss = k.ss;
     if (k.pm) {
+        if (stepping && !k.vif) {
+            k.eflags |= EFL_TF;
+            step_cs = k.cs; step_eip = k.eip; step_ss = k.ss; step_esp = k.esp;
+        } else if (stepping) {
+            stepping = 0;
+            k.eflags &= ~EFL_TF;
+        }
         r->eflags = (k.eflags & 0x0DD5) | EFL_IF | 2;
         r->ds = sel_valid_data(k.ds) ? k.ds : 0;
         r->es = sel_valid_data(k.es) ? k.es : 0;
         r->fs = sel_valid_data(k.fs) ? k.fs : 0;
         r->gs = sel_valid_data(k.gs) ? k.gs : 0;
     } else {
-        r->eflags = (k.eflags & 0x0DD5) | EFL_VM | EFL_IF | 2;
+        r->eflags = (k.eflags & 0x0DD5 & ~EFL_TF) | EFL_VM | EFL_IF | 2;
         r->eip &= 0xFFFF; r->esp &= 0xFFFF;
         r->v86_ds = k.ds; r->v86_es = k.es; r->v86_fs = k.fs; r->v86_gs = k.gs;
     }
@@ -174,6 +187,17 @@ static u16 stubs(int slot) { return rd16(0xF0000 + slot); }
 #define S_PMRETF 0x21E
 #define S_RMRETF 0x220
 #define S_DEFINT 0x222
+#define S_INTSTUB 0x224
+
+/* Run INT n in real mode through the stub: the monitor's INT handling
+   (XMS, DPMI and mouse answers, BIOS shortcuts) applies as for any INT. */
+static struct regs *go_real_int(struct ctx *rm, int n)
+{
+    u16 off = stubs(S_INTSTUB);
+    wr8(0xF0000 + off + 1, (u8)n);
+    rm->cs = 0xF000; rm->eip = off;
+    return resume(rm);
+}
 
 static u32 lin(u32 sel, u32 off) { return sel_base(sel) + off; }
 
@@ -256,6 +280,7 @@ static void rm_from_pm(struct ctx *rm, struct ctx *pm)
 {
     *rm = *pm;
     rm->pm = 0;
+    rm->eflags &= ~EFL_TF;
     rm->ds = rm->es = rm->fs = rm->gs = rm_stack_seg;
     rm->ss = rm_stack_seg;
     rm->esp = rm_sp();
@@ -267,8 +292,8 @@ static struct regs *reflect(struct ctx *c, int n, int kind)
     xpush(kind, c);
     struct ctx rm;
     rm_from_pm(&rm, c);
-    rm.vif = 0;                                 /* as INT: handlers start with IF clear */
-    return go_real(&rm, rd16(n * 4 + 2), rd16(n * 4), 1);
+    rm.vif = c->vif;                            /* the INT itself clears IF for the handler */
+    return go_real_int(&rm, n);
 }
 
 /* Enter a protected-mode handler on the locked stack, returning (IRET or
@@ -278,6 +303,7 @@ static struct regs *visit_pm(struct ctx *from, int kind, u16 sel, u32 off, int r
     xpush(kind, from);
     struct ctx c = *pmregs;
     c.pm = 1;
+    c.eflags &= ~EFL_TF;
     if ((from->pm && (from->ss & 0xFFFF) == HOST_SS) ) c.esp = from->esp;   /* already on it */
     else c.esp = LOCKED_SIZE - 16;
     c.ss = HOST_SS;
@@ -495,8 +521,7 @@ static struct regs *sim_real(struct ctx *c, int kind_call)   /* 0300h / 0301h / 
     u32 words = rCX, from = lin(c->ss, sel_big(c->ss) ? c->esp : (c->esp & 0xFFFF));
     rm.esp = (rm.esp - words * 2) & 0xFFFF;
     if (words && lin_ok(from, words * 2)) memmove(gptr((rm.ss << 4) + rm.esp), gptr(from), words * 2);
-    if (kind_call == 0x0300)
-        return go_real(&rm, rd16((c->ebx & 0xFF) * 4 + 2), rd16((c->ebx & 0xFF) * 4), 1);
+    if (kind_call == 0x0300) return go_real_int(&rm, c->ebx & 0xFF);
     return go_real(&rm, rd16(s + 0x2C), rd16(s + 0x2A), kind_call == 0x0302);
 }
 
@@ -507,7 +532,7 @@ static struct regs *dos_call(struct ctx *c, int kind, u16 ax, u16 bx, u16 es)
     rm_from_pm(&rm, c);
     rm.eax = ax; rm.ebx = bx; rm.es = es;
     rm.vif = 1;
-    return go_real(&rm, rd16(0x21 * 4 + 2), rd16(0x21 * 4), 1);
+    return go_real_int(&rm, 0x21);
 }
 
 #define MAX_CB 16
@@ -516,7 +541,7 @@ static struct { u16 sel; u32 off; u16 ssel; u32 soff; u8 used; } cbs[MAX_CB];
 static struct regs *int31(struct ctx *c)
 {
     u16 fn = (u16)rAX;
-    dbg(2, "DPMI %04x BX=%04x CX=%04x DX=%04x\n", fn, rBX, rCX, rDX);
+    dbg(2, "DPMI %04x BX=%04x CX=%04x DX=%04x ES:EDI=%x:%x DS:ESI=%x:%x\n", fn, rBX, rCX, rDX, c->es, c->edi, c->ds, c->esi);
     ok(c);
     switch (fn) {
     case 0x0000: {
@@ -686,6 +711,8 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
 {
     struct ctx from;
     get_ctx(r, &from);
+    if (!from.pm) dbg(2, "DPMI: IRQ vector %x from real mode to PM handler (IVT %04x:%04x)\n", vec,
+                      rd16(vec * 4 + 2), rd16(vec * 4));
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
     return visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
@@ -785,7 +812,7 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
     int sz = op32 ? 4 : 2;
 #define NEXT(x) do { c->eip = (x); if (!code32(c)) c->eip &= 0xFFFF; } while (0)
     switch (op) {
-    case 0xFA: c->vif = 0; NEXT(ip); return resume(c);
+    case 0xFA: c->vif = 0; stepping = 1; NEXT(ip); return resume(c);
     case 0xFB: c->vif = 1; NEXT(ip); return resume(c);
     case 0xF4:
         if ((c->cs & 0xFFFF) == HOST_CS) {
@@ -860,6 +887,27 @@ struct regs *dpmi_exception(struct regs *r)
         if (exc_vec[16].sel) return pm_fault(&c, 16, 0);
         __asm__ volatile("fnclex");
         return resume(&c);
+    case 1: {
+        u32 dr6;
+        __asm__ volatile("mov %%dr6,%0" : "=r"(dr6));
+        if (!(dr6 & 0x4000) || !stepping) {            /* not our single step */
+            if (!stepping) { c.eflags &= ~EFL_TF; return resume(&c); }
+            return pm_fault(&c, 1, 0);
+        }
+        __asm__ volatile("mov %0,%%dr6" ::"r"(0));
+        /* what did the stepped instruction do to IF? */
+        u32 a = sel_base(step_cs) + step_eip;
+        int o32 = sel_big(step_cs);
+        u8 op = lin_ok(a, 4) ? rd8(a) : 0;
+        while (op == 0x66 || op == 0x67 || op == 0xF0 || op == 0x2E || op == 0x3E || op == 0x26 ||
+               op == 0x36 || op == 0x64 || op == 0x65) {
+            if (op == 0x66) o32 ^= 1;
+            op = rd8(++a);
+        }
+        u32 sp = sel_base(step_ss) + (sel_big(step_ss) ? step_esp : (step_esp & 0xFFFF));
+        if (op == 0x9D && lin_ok(sp, 4)) c.vif = (rd16(sp) & EFL_IF) != 0;                 /* POPF */
+        else if (op == 0xCF && lin_ok(sp, 12)) c.vif = (rd16(sp + (o32 ? 8 : 4)) & EFL_IF) != 0;   /* IRET */
+        return resume(&c); }
     default: return pm_fault(&c, r->vec, 0);
     }
 }
@@ -915,6 +963,7 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg)
         rm.es = rd16(s + 0x22); rm.ds = rd16(s + 0x24); rm.fs = rd16(s + 0x26); rm.gs = rd16(s + 0x28);
         rm.eip = rd16(s + 0x2A); rm.cs = rd16(s + 0x2C); rm.esp = rd16(s + 0x2E); rm.ss = rd16(s + 0x30);
         rm.vif = (rm.eflags & EFL_IF) != 0;
+        dbg(2, "DPMI callback returns to %04x:%04x SS:SP %04x:%04x\n", rm.cs, rm.eip, rm.ss, rm.esp);
         return resume(&rm); }
     case 0x57: {                               /* raw switch protected -> real */
         struct ctx rm = *c;
@@ -963,6 +1012,8 @@ int dpmi_rm_trap(struct regs *r, int id)
         wr16(s + 0x20, (u16)((c.eflags & 0x0DD5) | 2 | (c.vif ? EFL_IF : 0)));
         wr16(s + 0x22, c.es); wr16(s + 0x24, c.ds); wr16(s + 0x26, c.fs); wr16(s + 0x28, c.gs);
         wr16(s + 0x2A, (u16)c.eip); wr16(s + 0x2C, c.cs); wr16(s + 0x2E, (u16)c.esp); wr16(s + 0x30, c.ss);
+        dbg(2, "DPMI callback %d from %04x:%04x SS:SP %04x:%04x -> %x:%x struct %x:%x\n", i, c.cs, c.eip, c.ss, c.esp,
+            cbs[i].sel, cbs[i].off, cbs[i].ssel, cbs[i].soff);
         struct ctx p = c;
         p.pm = 1;
         ldt[HOST_DS_I] = make_desc(c.ss << 4, 0xFFFF, 0xF2, 0);
@@ -1047,4 +1098,19 @@ void dpmi_espfix(struct regs *r)
     espfix_ptr = esp;
     espfix_on = 1;
 
+}
+
+int dpmi_depth(char *buf, int n)
+{
+    int o = snprintf(buf, n, "x%d:", xdepth);
+    for (int i = 0; i < xdepth && o < n - 4; i++) o += snprintf(buf + o, n - o, " %d", xs[i].kind);
+    return xdepth;
+}
+
+void dpmi_dump_code(u32 sel, u32 off, int n)
+{
+    u32 a = sel_base(sel) + off;
+    kprintf("code %x:%x (base %x):", sel, off, sel_base(sel));
+    for (int i = 0; i < n; i++) if (lin_ok(a + i, 1)) kprintf(" %02x", rd8(a + i));
+    kprintf("\n");
 }
