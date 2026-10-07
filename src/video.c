@@ -604,6 +604,12 @@ static void vbe_init(void)
     vram = phys_alloc(VRAM_SIZE);
     vshadow = phys_alloc(VRAM_SIZE);
     set_user((u32)(uintptr_t)vram, VRAM_SIZE, 1);
+}
+
+/* The strings and the mode list (FFFFh-terminated), written when asked for:
+   the BIOS image is copied over F000h after video_init. */
+static void vbe_tables(void)
+{
     static const char *const str[4] = { "vmdos VBE", "vmdos", "vmdos SVGA", "1.0" };
     for (int i = 0; i < 4; i++) {
         u32 a = VBE_DATA + i * 0x20;
@@ -688,6 +694,9 @@ void video_vbe_window(struct regs *r)
 static void vbe_call(struct regs *r)
 {
     u32 es_di = LIN(r->v86_es, DI(r));
+    if ((AL(r) <= 1 || AL(r) == 9) && dpmi_reflected_buffer(r, &es_di))
+        dbg(1, "VESA %02x from protected mode: buffer at %x\n", AL(r), es_di);
+    vbe_tables();
     switch (AL(r)) {
     case 0x00: {
         int v2 = rd32(es_di) == 0x32454256u;     /* "VBE2" */

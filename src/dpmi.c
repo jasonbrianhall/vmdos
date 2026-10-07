@@ -725,6 +725,18 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
     return visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
 }
 
+/* A service in the monitor (INT 10h VESA) was reached by reflecting a
+   protected-mode INT: ES:DI is then the host's scratch segment, not the
+   program's buffer, so hand back the buffer the program meant (its PM
+   ES:EDI), as a host that translates these calls would. */
+int dpmi_reflected_buffer(struct regs *r, u32 *lin)
+{
+    if (!client || !xdepth || xs[xdepth - 1].kind != X_REFLECT || (r->v86_es & 0xFFFF) != rm_stack_seg) return 0;
+    struct ctx *pm = &xs[xdepth - 1].saved;
+    *lin = sel_base(pm->es) + (client32 ? pm->edi : (pm->edi & 0xFFFF));
+    return 1;
+}
+
 /* Run a real-mode routine that ends with IRET (the mouse driver's event
    callback) for a client in protected mode; it resumes as it was. */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip)
