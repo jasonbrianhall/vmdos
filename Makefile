@@ -26,7 +26,9 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -fno-stack-protector -fcf-protection=none -mgeneral-regs-only \
             -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o)
+CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
+            -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o)
 
 all: vmdos.elf dos.img
 
@@ -35,6 +37,9 @@ $(BUILD):
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: src/%.cpp | $(BUILD)
+	g++ $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/boot.o: src/boot.S | $(BUILD)
 	$(CC) -m32 -DFB_W=$(FB_W) -DFB_H=$(FB_H) -c $< -o $@

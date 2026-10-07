@@ -69,6 +69,8 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
   or `vmdos.efi` straight from the UEFI firmware.
 - BIOS: INT 10h (text modes, mode 13h, DAC/palette), 11h, 12h, 13h (CHS and
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
+- Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
+  `usb=off` on the command line skips USB.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
@@ -76,7 +78,6 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 
 ## Not yet
 
-- USB keyboards (PS/2 only; many UEFI machines need USB).
 - Sound (SBPRO), EGA/planar modes and Mode X, VESA, XMS/EMS, DPMI,
   mouse, saving C: to a real disk.
 
@@ -92,6 +93,7 @@ C: lives in RAM: changes are lost at power-off. Ctrl+Alt+Del restarts.
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
 | `boot/boot32lb.asm` | FreeDOS FAT32 LBA boot sector (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
+| `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).

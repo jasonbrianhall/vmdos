@@ -9,6 +9,7 @@ extern u8 v86_stack_top[];
 void reload_gdt(void);
 
 volatile u32 ticks;
+int usb_ready;
 u8 *disk_image;
 u32 disk_size;
 char cmdline[256];
@@ -40,6 +41,7 @@ static u32 *page_dir;                 /* non-PAE: the page directory */
 static u64 *pdpt;                     /* PAE: 4 entries, then 4 page directories */
 static u64 *pae_pd[4];
 static int pae;
+static u32 mmio_window = LOW_ALIAS;   /* MMIO above 4 GiB gets linear space below here */
 static u8 *guest_ram;
 static int paging_on;
 
@@ -124,6 +126,7 @@ static void paging_init(void)
         else {
             fb_lin = (LOW_ALIAS - fb_len - 0x400000u) & ~0x3FFFFFu;
             if (fb_lin < ram_top || (fb_phys >> 32 && !pae)) { fb_lin = 0; fb_len = 0; }
+            else mmio_window = fb_lin;
         }
         if (fb_len) map_range(fb_lin, fb_phys, fb_len, 3);
     }
@@ -144,8 +147,26 @@ static void paging_init(void)
 /* Map more MMIO later (e.g. a Bochs VBE framebuffer found by PCI scan). */
 void map_mmio(u32 phys, u32 len)
 {
-    map_range(phys, phys, len, 3);
+    map_range(phys, phys, len, 3 | 0x10);         /* PCD: uncached */
     flush_tlb();
+}
+
+/* MMIO anywhere: identity below 4 GiB, else a window below the framebuffer's. */
+void *map_mmio64(u64 phys, u32 len)
+{
+    u32 off = (u32)phys & 0xFFF;
+    len = (len + off + 4095) & ~4095u;
+    if (phys + len <= 0x100000000ull && (u32)phys >= GUEST_TOP) {
+        map_mmio((u32)phys, len);
+        return (void *)(uintptr_t)(u32)phys;
+    }
+    if (!pae) return 0;
+    u32 lin = (mmio_window - len) & ~0xFFFu;
+    if (lin < ram_top + 0x1000000u) return 0;
+    mmio_window = lin;
+    map_range(lin, phys - off, len, 3 | 0x10);
+    flush_tlb();
+    return (void *)(uintptr_t)(lin + off);
 }
 
 /* ---------------- GDT, TSS, IDT ---------------- */
@@ -349,5 +370,7 @@ void kmain(u32 magic, struct mb_info *mb)
 
     vdev_init();
     bios_init();
+    if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
+    usb_ready = 1;
     guest_start();
 }

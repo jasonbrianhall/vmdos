@@ -97,10 +97,14 @@ void *phys_alloc(u32 bytes);                  /* page-aligned, zeroed */
 void map_page(u32 lin, u32 phys, u32 flags);
 void set_a20(int on);
 extern int a20_on;
+extern int usb_ready;
 void *phys_low(u32 phys);                     /* pointer to physical memory below 1 MiB */
 void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
+void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
+void usb_start(const char *cmdline);
+void usb_tick(void);
 extern u32 kernel_stack_top;
 void v86_enter(struct regs *r) __attribute__((noreturn));
 extern u8 *disk_image;                        /* the RAM disk (boot module) */

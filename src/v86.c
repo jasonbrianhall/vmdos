@@ -239,6 +239,10 @@ void isr_dispatch(struct regs *r)
         }
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
+        if (irq == 0 && usb_ready && (ticks & 7) == 0) {
+            static int in_usb;
+            if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
+        }
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
             video_refresh();
