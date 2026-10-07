@@ -97,7 +97,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH and FreeCOM's XMS swapping work:
   about 620 KB free for programs.
 - DPMI 0.9 host in the monitor, for DOS extenders: DOS/4GW (DOOM runs: demo,
-  menus, keyboard, mouse; with sound set to "none" for now), PMODE/W. Clients run at ring 3 with LDT descriptors;
+  menus, keyboard, mouse, Sound Blaster effects and music), PMODE/W. Clients run at ring 3 with LDT descriptors;
   INT 31h descriptor, memory, interrupt, real-mode call/callback, DOS
   memory, physical-mapping and virtual-IF services; protected-mode hardware
   interrupt and exception handlers. Client memory appears at linear
@@ -122,10 +122,6 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- DOOM with Sound Blaster sound: DOS/16M corrupts its selector table during
-  DMX's DMA-buffer setup and hangs. Debug with `debug=2` (5 s heartbeat of
-  IRQ/vIF/DPMI state); `norouteirq` stops routing real-mode IRQs to
-  protected-mode handlers.
 - Mode X's 240-line timing, VGA write modes in Mode X (latch copies), VESA, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 

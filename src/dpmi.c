@@ -562,7 +562,7 @@ static struct regs *int31(struct ctx *c)
         u32 b = d_base(*d); SET16(ecx, b >> 16); SET16(edx, b); break; }
     case 0x0007: { u64 *d = desc_of(rBX); if (!d || IDX(rBX) < FIRST_FREE) { err(c, 0x8022); break; }
         u32 b = rCX << 16 | rDX;
-        *d = (*d & ~0xFF000000FFFF0000ull) | ((u64)(b & 0xFFFFFF) << 16) | ((u64)(b >> 24) << 56); break; }
+        *d = (*d & ~0xFF0000FFFFFF0000ull) | ((u64)(b & 0xFFFFFF) << 16) | ((u64)(b >> 24) << 56); break; }
     case 0x0008: { u64 *d = desc_of(rBX); if (!d || IDX(rBX) < FIRST_FREE) { err(c, 0x8022); break; }
         u32 l = rCX << 16 | rDX;
         if (l > 0xFFFFF && (l & 0xFFF) != 0xFFF) { err(c, 0x8025); break; }
@@ -578,11 +578,13 @@ static struct regs *int31(struct ctx *c)
         SET16(eax, SEL(i)); break; }
     case 0x000B: { u64 *d = desc_of(rBX); u32 a = lin(c->es, rEDI);
         if (!d || !lin_ok(a, 8)) { err(c, 0x8022); break; }
-        wr32(a, (u32)*d); wr32(a + 4, (u32)(*d >> 32)); break; }
+        wr32(a, (u32)*d); wr32(a + 4, (u32)(*d >> 32));
+        dbg(2, "  000b %x -> base %x acc %x\n", rBX, d_base(*d), (u32)(*d >> 40) & 0xFF); break; }
     case 0x000C: { u64 *d = desc_of(rBX); u32 a = lin(c->es, rEDI);
         if (!d || IDX(rBX) < FIRST_FREE || !lin_ok(a, 8)) { err(c, 0x8022); break; }
         u64 v = rd32(a) | (u64)rd32(a + 4) << 32;
-        if (!desc_rights_ok((u8)(v >> 40))) { err(c, 0x8021); break; }
+        dbg(2, "  000c %x <- base %x limit %x acc %x fl %x\n", rBX, d_base(v), (u32)(v & 0xFFFF) | (u32)((v >> 32) & 0xF0000), (u32)(v >> 40) & 0xFF, (u32)(v >> 52) & 0xF);
+        if (!desc_rights_ok((u8)(v >> 40))) { err(c, 0x8021); dbg(2, "  000c refused\n"); break; }
         *d = v; break; }
     case 0x000D: { u32 i = IDX(rBX);                  /* specific descriptor (the reserved 04h-7Ch range) */
         if (i <= HOST_DS_I || i >= FIRST_FREE || ldt_used[i]) { err(c, 0x8011); break; }
@@ -1073,6 +1075,7 @@ int dpmi_rm_trap(struct regs *r, int id)
                 pm.eflags &= ~EFL_CF;
                 pm.eax = (pm.eax & 0xFFFF0000u) | (u16)c.eax;
                 pm.edx = (pm.edx & 0xFFFF0000u) | SEL(i);
+                dbg(2, "  -> DOS block %04x (%x paragraphs), selector %x\n", c.eax & 0xFFFF, paras, SEL(i));
             }
             break;
         case X_DOSFREE:
