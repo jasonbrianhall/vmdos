@@ -135,7 +135,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 ## Not yet
 
-- Mode X's 240-line timing, VBE 3.0 / VBE protected-mode interface, VESA, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, VBE 3.0 / VBE protected-mode interface, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
