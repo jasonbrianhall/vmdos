@@ -22,6 +22,8 @@ vectors:
         dw int09
   %elif v >= 0x0A && v <= 0x0F
         dw irq_master
+  %elif v == 0x74
+        dw int74
   %elif v >= 0x70 && v <= 0x77
         dw irq_slave
   %elif (v >= 0x10 && v <= 0x17) || v == 0x1A
@@ -62,6 +64,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vbe_bank                      ; 0226  VESA window function (far call)
         dw vbe_pmi                       ; 0228  VESA protected-mode interface table (4F0Ah)
         dw vbe_pmi_end - vbe_pmi         ; 022A  its length
+        dw ps2_handler                   ; 022C  INT 15h C207h handler (far pointer)
 
 ; ---- stubs ----
 dummy:  iret
@@ -184,6 +187,29 @@ int18:  TRAP 0x18
         iret
 int19:  TRAP 0x19
         iret
+
+int74:                           ; IRQ 12: PS/2 mouse byte -> INT 15h C207h handler
+        pusha
+        push ds
+        push es
+        TRAP 0x74                ; DX=1: packet done, AX status, BX X, CX Y
+        test dx, dx
+        jz .eoi
+        push ax
+        push bx
+        push cx
+        xor dx, dx
+        push dx
+        call far [cs:ps2_handler]
+        add sp, 8
+.eoi:   mov al, 0x20
+        out 0xA0, al
+        out 0x20, al
+        pop es
+        pop ds
+        popa
+        iret
+ps2_handler: dd 0
 
 irq_master:
         push ax

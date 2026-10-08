@@ -1,0 +1,15 @@
+CuteMouse 2.1 beta 4 (FreeDOS CTMOUSE), GPL v2 (src/copying).
+Source: https://github.com/FDOS/mouse, commit dd268521dc76d323d0597d1b21f58be5b82c6c25.
+
+CTMOUSE.COM is prebuilt so the normal build needs no extra tools. It talks to
+the mouse through the BIOS PS/2 services (INT 15h C2xx, src/bios.c), which
+vmdos provides on top of its virtual PS/2 mouse port.
+
+Changes, for JWasm 2.21 (case-sensitive includes, stricter structures):
+lower-case include paths; "STRUCT ?" written as "STRUCT <?,...>" (still
+uninitialised, so the overlap with the PSP is kept); area0.def "STRUCT ?"
+as "<>" (AT segment, no data emitted); "say S_mousetype[si]" written out as
+mov di,S_mousetype[si] / call sayASCIIZ.
+
+Rebuild: tools/build-ctmouse.sh (needs JWasm and Open Watcom's wlink and
+exe2bin on PATH).

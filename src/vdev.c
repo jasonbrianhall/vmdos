@@ -256,6 +256,29 @@ static void aux_data(u8 v)
     }
 }
 
+/* INT 15h C2xx (BIOS PS/2 mouse services, bios.c) drive the same port, the
+   way a BIOS talks to its 8042; bytes are taken from the output buffer by
+   the BIOS IRQ 12 handler (trap 74h). */
+void vaux_bios_enable(int on)
+{
+    aux_stream = (u8)on;
+    aux_dx = aux_dy = 0; aux_moved = 0;
+    if (on) { ccb |= 0x02; ccb &= ~0x20; ps.imr &= ~0x10; pm.imr &= ~0x04; }
+}
+
+void vaux_bios_reset(void)
+{
+    aux_stream = 0; aux_param = 0;
+    mq_head = mq_tail = 0;
+    if (kbd_full && kbd_aux) kbd_full = 0;
+}
+
+int vaux_bios_byte(void)
+{
+    if (!kbd_full || !kbd_aux) return -1;
+    return vkbd_read_data();
+}
+
 static void kq_put(u8 v)
 {
     u8 n = (kq_tail + 1) % sizeof kq;

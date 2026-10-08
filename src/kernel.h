@@ -139,6 +139,9 @@ void port_out(u16 port, u32 val, int size);
 void vdev_tick(void);                         /* from the real timer IRQ */
 void vkbd_real_scancode(u8 sc);               /* from the real keyboard IRQ */
 void vaux_motion(int dx, int dy, int b);      /* the virtual PS/2 mouse port */
+void vaux_bios_enable(int on);                /* INT 15h C2xx on that port */
+void vaux_bios_reset(void);
+int vaux_bios_byte(void);                     /* mouse byte from the 8042, or -1 */
 void speed_init(void);                        /* speed= (slowdown) */
 void cd_add(u8 *data, u32 size, const char *name);   /* cd.c: a CD-ROM image */
 void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */

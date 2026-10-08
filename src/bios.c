@@ -272,6 +272,7 @@ static int int13(struct regs *r)
 }
 
 /* ---------------- INT 15h ---------------- */
+static int int15_ps2(struct regs *r);
 static int int15(struct regs *r)
 {
     switch (AH(r)) {
@@ -301,14 +302,71 @@ static int int15(struct regs *r)
         AH(r) = 0;
         set_cf(r, 0);
         return BIOS_DONEF;
-    }
-    {
-        if (AH(r) == 0xC2 && mouse_log()) kprintf("mouse: INT 15h AX=%04x BX=%04x (PS/2 BIOS mouse: not supported)\n", AX(r), BX(r));
+    case 0xC2: return int15_ps2(r);
     }
     dbg(2, "INT 15h AX=%04x unsupported\n", AX(r));
     AH(r) = 0x86;
     set_cf(r, 1);
     return BIOS_DONEF;
+}
+
+/* ---------------- PS/2 BIOS mouse (INT 15h C2xx) ----------------
+   For DOS mouse drivers such as CuteMouse (CTMOUSE.COM): they register a
+   far handler (C207h) and the BIOS IRQ 12 handler (int74 in bios.asm,
+   trap 74h) calls it with status, X, Y and 0 on the stack for every
+   3-byte packet from the virtual PS/2 mouse port (vdev.c). */
+#define PS2_HANDLER (BIOS_LIN + rd16(BIOS_LIN + 0x22C))
+static int ps2_on, ps2_n;
+static u8 ps2_pkt[3];
+
+static int int15_ps2(struct regs *r)
+{
+    int err = 0;
+    if (mouse_log()) kprintf("mouse: INT 15h AX=%04x BX=%04x ES=%04x\n", AX(r), BX(r), r->v86_es);
+    switch (AL(r)) {
+    case 0x00:                                          /* enable (BH=1) / disable (BH=0) */
+        if (BH(r) > 1) err = 1;
+        else if (BH(r) == 1 && !rd32(PS2_HANDLER)) err = 5;
+        else { ps2_on = BH(r); ps2_n = 0; vaux_bios_enable(ps2_on); }
+        break;
+    case 0x01:                                          /* reset: disabled, ID 0 */
+        ps2_on = 0; ps2_n = 0; vaux_bios_reset();
+        BH(r) = 0; BL(r) = 0xAA;
+        break;
+    case 0x02: if (BH(r) > 6) err = 2; break;           /* sample rate */
+    case 0x03: if (BH(r) > 3) err = 2; break;           /* resolution */
+    case 0x04: BH(r) = 0; break;                        /* device ID: standard mouse */
+    case 0x05:                                          /* initialise, BH = packet size */
+        if (BH(r) < 1 || BH(r) > 8) { err = 2; break; }
+        ps2_on = 0; ps2_n = 0; vaux_bios_reset();
+        break;
+    case 0x06:
+        if (BH(r) == 0) { BL(r) = ps2_on ? 0x20 : 0; CL(r) = 2; DL(r) = 100; }
+        else if (BH(r) > 2) err = 1;
+        break;
+    case 0x07:                                          /* handler ES:BX (0:0 = none) */
+        wr16(PS2_HANDLER, BX(r)); wr16(PS2_HANDLER + 2, r->v86_es);
+        break;
+    default: err = 1;
+    }
+    AH(r) = (u8)err;
+    set_cf(r, err != 0);
+    return BIOS_DONEF;
+}
+
+/* Trap 74h, from int74: take the mouse byte; at the end of a packet return
+   DX=1 with AX status, BX X, CX Y for the stub to pass on, else DX=0. */
+static void ps2_irq(struct regs *r)
+{
+    DX(r) = 0;
+    int b = vaux_bios_byte();
+    if (b < 0) return;
+    if (ps2_n == 0 && !(b & 0x08)) return;              /* resync on byte 0 (bit 3 set) */
+    ps2_pkt[ps2_n++] = (u8)b;
+    if (ps2_n < 3) return;
+    ps2_n = 0;
+    if (!ps2_on || !rd32(PS2_HANDLER)) return;
+    AX(r) = ps2_pkt[0]; BX(r) = ps2_pkt[1]; CX(r) = ps2_pkt[2]; DX(r) = 1;
 }
 
 /* ---------------- INT 1Ah ---------------- */
@@ -376,6 +434,7 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x34: mouse_cb_regs(r); return BIOS_CONT;
     case 0x46: video_vbe_window(r); return BIOS_CONT;         /* VESA WinFuncPtr */
     case 0x35: mouse_cb_done(); return BIOS_CONT;
+    case 0x74: ps2_irq(r); return BIOS_CONT;
     }
     if (id >= 0x60 && id < 0x70) return dpmi_rm_trap(r, id);   /* DPMI real-mode callbacks */
     return BIOS_DONE;
@@ -399,7 +458,7 @@ void bios_init(void)
     wr32(0x46 * 4, 0);
 
     /* BIOS data area */
-    u16 equip = 0x0020;                                  /* 80x25 colour, no floppies */
+    u16 equip = 0x0024;                                  /* 80x25 colour, PS/2 mouse port, no floppies */
     extern u32 fpu_present;
     if (fpu_present) equip |= 2;
     wr16(BDA + 0x10, equip);

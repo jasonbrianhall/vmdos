@@ -99,10 +99,10 @@ $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
          $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
-	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM \
+	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
 # grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).

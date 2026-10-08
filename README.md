@@ -91,7 +91,8 @@ to vmdos.efi (it loads every `*.ISO` there, up to 7), or add
 
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
 load options); the log shows every INT 33h call, event-handler call and
-command sent to the PS/2 mouse port.
+command sent to the PS/2 mouse port. If the built-in driver doesn't satisfy
+a game, try `CTMOUSE` first.
 
 C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
@@ -111,7 +112,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   run from protected mode through their real-mode callback), and a PS/2
   mouse on the virtual keyboard controller (IRQ 12 packets) for programs
   with their own mouse code. The pointer is drawn over text and
-  mode 13h by the renderer. A DOS mouse driver you load (CTMOUSE) takes over.
+  mode 13h by the renderer. BIOS PS/2 mouse services (INT 15h C2xx, IRQ 12
+  handler) let a real DOS driver run too: CuteMouse is in C:\ (`LH CTMOUSE`
+  before a game that wants a DOS driver); it takes over INT 33h.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
   `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
   first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh
