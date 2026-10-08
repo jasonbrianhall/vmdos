@@ -1,5 +1,5 @@
 /* Emulates the one instruction that touched trapped video memory (the
-   EGA/VGA 16-colour window at A0000h, whose pages are left unmapped so that
+   EGA/VGA 16-color window at A0000h, whose pages are left unmapped so that
    every access goes through the VGA's latches and write logic). Handles
    what programs use on video memory: MOV, MOVZX/MOVSX, the ALU group,
    TEST, XCHG, INC/DEC, NOT/NEG, shifts/rotates by 1/CL/imm, and the string

@@ -336,7 +336,7 @@ struct mb_info {
     u16 vbe_mode, vbe_seg, vbe_off, vbe_len;
     u64 fb_addr;
     u32 fb_pitch, fb_width, fb_height;
-    u8 fb_bpp, fb_type, pad[2];           /* GRUB aligns the colour info to 112 */
+    u8 fb_bpp, fb_type, pad[2];           /* GRUB aligns the color info to 112 */
     u8 rpos, rsz, gpos, gsz, bpos, bsz;
 } __attribute__((packed));
 
