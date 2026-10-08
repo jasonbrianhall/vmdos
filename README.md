@@ -236,6 +236,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from the PC's mic jack (else
   internal mic, else line in) when playing through HD Audio analog;
   silence otherwise. Test: `tests/sbrec.asm`.
+  `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
+  play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.
+  See AUTOEXEC.BAT. Test: `tests/sb16test.asm`.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,

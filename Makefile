@@ -102,6 +102,9 @@ FORCE:
 $(BUILD)/VMSPEED.COM: dos/vmspeed.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMSB.COM: dos/vmsb.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMCD.SYS: dos/vmcd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -119,7 +122,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMSPEED.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \

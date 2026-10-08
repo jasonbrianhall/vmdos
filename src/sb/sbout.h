@@ -17,6 +17,11 @@ void sb_render(int16_t *out, int frames);   /* interleaved stereo, 48 kHz */
    the game's DMA buffer, block by block as playback reads it. */
 void sb_in_start(int autoinit, uint32_t len_bytes);
 uint8_t sb_in_sample(void);                 /* DSP 20h: the latest input sample */
+/* SB16 (DSP 4.05) Bxh/Cxh: 8- or 16-bit (channel 5), at dsp.rate; len in samples */
+void sb16_start(int record, int autoinit, int bits16, int sign, int stereo, uint32_t len);
+void sb_out_raise_irq16(void);
+int  sb_irq_status(void);                   /* SB16 mixer 82h bits 0-1 */
+void sb_irq_ack(int bits16);                /* base+Eh (8-bit) / base+Fh (16-bit) read */
 int  sb_take_irq(void);                     /* 1: raise the SB IRQ now */
 int  sb_irq_line(void);
 
