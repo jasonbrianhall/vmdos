@@ -158,6 +158,57 @@ static u32 seg_value(struct regs *r, int seg)
     }
 }
 
+/* String instructions that faulted because an offset reached the end of
+   the segment (a word at offset FFFFh, or a MOVSW running into it): a 386
+   raises #GP, an 8086 wraps around to offset 0, which old programs (and
+   the FreeDOS kernel copying into their buffers) rely on. Emulated byte
+   by byte with 16-bit offsets, all REP iterations at once. */
+static u32 wrap_rd(u32 seg, u16 off, int s)
+{
+    u32 v = 0;
+    for (int i = 0; i < s; i++) v |= (u32)rd8(LIN(seg, (u16)(off + i))) << (8 * i);
+    return v;
+}
+static void wrap_wr(u32 seg, u16 off, u32 v, int s)
+{
+    for (int i = 0; i < s; i++) wr8(LIN(seg, (u16)(off + i)), (u8)(v >> (8 * i)));
+}
+static void sub_flags(struct regs *r, u32 a, u32 b, int s)
+{
+    u32 m = s == 1 ? 0xFF : s == 2 ? 0xFFFF : 0xFFFFFFFFu, sign = m ^ (m >> 1);
+    u32 d = (a - b) & m;
+    u32 f = r->eflags & ~(u32)(EFL_CF | EFL_PF | EFL_AF | EFL_ZF | EFL_SF | EFL_OF);
+    if ((a & m) < (b & m)) f |= EFL_CF;
+    if (!d) f |= EFL_ZF;
+    if (d & sign) f |= EFL_SF;
+    if ((a ^ b) & (a ^ d) & sign) f |= EFL_OF;
+    if ((a ^ b ^ d) & 0x10) f |= EFL_AF;
+    u8 p = (u8)d; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1;
+    if (!(p & 1)) f |= EFL_PF;
+    r->eflags = f;
+}
+static void string_wrap(struct regs *r, u8 op, int s, int seg, int rep)
+{
+    int step = (r->eflags & EFL_DF) ? -s : s;
+    u32 sseg = seg_value(r, seg), dseg = r->v86_es;
+    u32 count = rep ? CX(r) : 1;
+    int cmp = op == 0xA6 || op == 0xA7 || op == 0xAE || op == 0xAF;
+    u32 am = s == 1 ? 0xFF : s == 2 ? 0xFFFF : 0xFFFFFFFFu;
+    for (; count; count--) {
+        switch (op & ~1) {
+        case 0xA4: wrap_wr(dseg, DI(r), wrap_rd(sseg, SI(r), s), s); SI(r) += step; DI(r) += step; break;
+        case 0xA6: sub_flags(r, wrap_rd(sseg, SI(r), s), wrap_rd(dseg, DI(r), s), s); SI(r) += step; DI(r) += step; break;
+        case 0xAA: wrap_wr(dseg, DI(r), r->eax & am, s); DI(r) += step; break;
+        case 0xAC: { u32 v = wrap_rd(sseg, SI(r), s);
+                     if (s == 1) AL(r) = (u8)v; else if (s == 2) AX(r) = (u16)v; else r->eax = v;
+                     SI(r) += step; break; }
+        case 0xAE: sub_flags(r, r->eax & am, wrap_rd(dseg, DI(r), s), s); DI(r) += step; break;
+        }
+        if (rep) CX(r)--;
+        if (rep && cmp && ((rep == 2) != ((r->eflags & EFL_ZF) != 0))) break;   /* REPE stops on NZ, REPNE on Z */
+    }
+}
+
 static void gp_handler(struct regs *r)
 {
     u16 ip0 = IP(r), ip = ip0;
@@ -169,7 +220,8 @@ static void gp_handler(struct regs *r)
         switch (op) {
         case 0x66: op32 = 1; continue;
         case 0x67: a32 = 1; continue;
-        case 0xF2: case 0xF3: rep = 1; continue;
+        case 0xF2: rep = 1; continue;                               /* REPNE */
+        case 0xF3: rep = 2; continue;                               /* REP / REPE */
         case 0xF0: continue;
         case 0x26: seg = 0; continue;
         case 0x2E: seg = 1; continue;
@@ -265,6 +317,12 @@ static void gp_handler(struct regs *r)
             if (rep) { if (a32) r->ecx--; else CX(r)--; }
         }
         IP(r) = ip; return; }
+    case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB:   /* MOVS CMPS STOS LODS SCAS */
+    case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+        if (a32) break;
+        dbg(1, "segment wrap: string op %02x at %04x:%04x, SI=%04x DI=%04x CX=%04x\n", op, r->cs, ip0, SI(r), DI(r), CX(r));
+        string_wrap(r, op, (op & 1) ? sz : 1, seg, rep);
+        IP(r) = ip; return;
     }
     dump(r, "unhandled instruction in the DOS guest (#GP)");
 }
