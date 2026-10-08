@@ -488,10 +488,20 @@ static int bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t
     Ring& r = in ? k.intr : k.bout;
     int dci = in ? k.dci : k.dci_out;
     uint64_t p = phys(buf);
-    ring_push(r, (uint32_t)p, (uint32_t)(p >> 32), len, TRB_NORMAL << 10 | (1 << 5) | (in ? 1 << 2 : 0));
+    uint64_t trb = ring_push(r, (uint32_t)p, (uint32_t)(p >> 32), len, TRB_NORMAL << 10 | (1 << 5) | (in ? 1 << 2 : 0));
     H->db[k.slot] = dci;
     Trb e;
-    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, dci, &e, 5000)) return -1;
+    // The event for this TRB: some controllers (AMD, Renesas) send a second
+    // one for a short packet; taking that as the next transfer's would put
+    // every transfer after it out of step.
+    for (int tries = 0; ; tries++) {
+        if (tries == 8 || !wait_event(TRB_TRANSFER_EVENT, k.slot, dci, &e, 5000)) {
+            printf("USB: %s: bulk %s of %u bytes: no completion\n", k.where, in ? "IN" : "OUT", len);
+            return -1;
+        }
+        if ((e.d0 & ~15u) == (uint32_t)trb) break;
+        dbg(1, "USB: %s: stray event for TRB %x (code %u)\n", k.where, e.d0, e.d2 >> 24);
+    }
     int cc = e.d2 >> 24;
     if (got) *got = len - (e.d2 & 0xFFFFFF);
     return cc;
@@ -583,7 +593,7 @@ static bool msd_setup(Keyboard& k) {
     uint8_t rc[10] = { 0x25 };
     int r = -1;
     for (int i = 0; i < 3 && r != 0; i++) { r = scsi(k, rc, 10, true, 8); if (r) request_sense(k); }
-    if (r != 0) { printf("USB: %s: %s: no capacity (no medium?)\n", k.where, k.model); k.active = false; return false; }
+    if (r != 0) { printf("USB: %s: %s: no capacity (no medium? ready: %d)\n", k.where, k.model, ready); k.active = false; return false; }
     uint32_t last = (uint32_t)msd_buf[0] << 24 | msd_buf[1] << 16 | msd_buf[2] << 8 | msd_buf[3];
     k.bsize = (uint32_t)msd_buf[4] << 24 | msd_buf[5] << 16 | msd_buf[6] << 8 | msd_buf[7];
     k.blocks = (uint64_t)last + 1;
