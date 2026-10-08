@@ -1,0 +1,71 @@
+# Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk)
+# and publishes it as a GitHub release:
+#   - push a tag v* (git tag v1.0 && git push origin v1.0): release "v1.0"
+#   - run it by hand (Actions > release > Run workflow): pre-release "latest",
+#     replaced each time
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    env:
+      ESP_MB: 2000          # FAT16 (32 KiB clusters): fits a 4 GB stick, room for games
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
+            mtools dosfstools gnu-efi xz-utils
+
+      - name: Build esp.img (no EXTRA, no RAMDISK)
+        run: |
+          make -j"$(nproc)" esp FRESH=1 ESP_MB=$ESP_MB EXTRA= RAMDISK= ISO=
+          # what's on it, and that there's no RAM disk
+          MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/
+          MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT
+          if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
+
+      - name: Package
+        run: |
+          mkdir -p out
+          mv esp.img out/vmdos-usb.img
+          xz -T0 -6 out/vmdos-usb.img
+          cp vmdos.efi out/
+          (cd out && sha256sum * > SHA256SUMS)
+          ls -l out
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"; flags=""
+          else
+            tag=latest; flags="--prerelease"
+            gh release delete latest --cleanup-tag -y || true
+          fi
+          cat > notes.md <<EOF
+          Bootable USB-stick image: vmdos with FreeDOS, no games (commit ${GITHUB_SHA::7}).
+
+          **Write it to a USB stick (4 GB or larger; everything on the stick is replaced):**
+          - Linux: \`xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync\` (find sdX with \`lsblk\`)
+          - Windows / macOS: balenaEtcher or Rufus (DD mode) with vmdos-usb.img.xz
+
+          Then pick the stick in the PC's UEFI boot menu (Secure Boot off). The stick is drive C:
+          (a 2000 MiB FAT partition; changes are kept). Add games by copying them onto the stick
+          from any computer, and ISO files (e.g. to C:\\ISOS) for \`VMCD D: C:\\ISOS\\GAME.ISO\`.
+
+          vmdos.efi alone: for an existing EFI system partition (see the README).
+          EOF
+          gh release create "$tag" out/* --title "vmdos $tag" --notes-file notes.md --target "$GITHUB_SHA" $flags

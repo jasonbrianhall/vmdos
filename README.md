@@ -24,6 +24,13 @@ make run-efi    # QEMU, UEFI, from vmdos.iso
 
 ### Booting from a USB stick
 
+Ready-made image: the [releases](https://github.com/jasonbrianhall/vmdos/releases)
+have `vmdos-usb.img.xz` (FreeDOS + vmdos, no games, a 2000 MiB C:) built by
+GitHub Actions (`.github/workflows/release.yml`: a `v*` tag makes a release,
+running the workflow by hand updates the `latest` pre-release). Write it with
+`xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync`, or Etcher /
+Rufus. Or build your own with games:
+
 ```
 make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: EFI boot files + FreeDOS + your games
 sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); everything on it is replaced
