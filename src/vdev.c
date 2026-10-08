@@ -130,7 +130,9 @@ static void pit_write(int n, u8 v)
     if (done) {
         c->start = pit_clock();
         if (n == 0) {
+            extern void pit_guest_period(u32 per);
             next_irq0 = c->start + reload_of(c);
+            pit_guest_period(reload_of(c));
             dbg(1, "guest PIT ch0: reload %u (%u Hz)\n", reload_of(c), PIT_HZ / reload_of(c));
         }
     }

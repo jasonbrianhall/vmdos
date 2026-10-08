@@ -126,7 +126,15 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
     if (n == 0x2F && AX(r) == 0x5642) {                                 /* VMSB */
         extern int sound_sb_api(int bx);
-        AX(r) = (u16)sound_sb_api(BX(r));
+        extern int audio_capture_stats(u32 *peak, u32 *clips, u32 *resyncs);
+        extern int audio_capture_boost(int db);
+        if (BX(r) == 1) {               /* mic: AX = source, CX = peak, DX = clipped, SI = resyncs */
+            u32 pk, cl, rs;
+            AX(r) = (u16)audio_capture_stats(&pk, &cl, &rs);
+            CX(r) = (u16)pk; DX(r) = (u16)(cl > 0xFFFF ? 0xFFFF : cl); SI(r) = (u16)rs;
+        } else if (BX(r) == 3) {        /* mic boost CX dB: AX = what it got (FFFF: none) */
+            AX(r) = (u16)audio_capture_boost((short)CX(r));
+        } else AX(r) = (u16)sound_sb_api(BX(r));
         BX(r) = 0x564D;
         return;
     }
@@ -351,9 +359,10 @@ struct regs *isr_dispatch(struct regs *r)
                 goto out;
             }
         }
-        if (irq == 0) {
-            ticks++;
-            vdev_tick();
+        extern int pit_irq(void);
+        int ms = irq == 0 && pit_irq();     /* a millisecond tick (IRQ 0 can come faster) */
+        if (irq == 0) vdev_tick();
+        if (ms) {
             if (usb_ready) sound_tick();
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
@@ -372,12 +381,12 @@ struct regs *isr_dispatch(struct regs *r)
         }
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
-        if (irq == 0 && (from_v86 || from_pm)) speed_throttle();
-        if (irq == 0 && usb_ready && (ticks & 7) == 0) {
+        if (ms && (from_v86 || from_pm)) speed_throttle();
+        if (ms && usb_ready && (ticks & 7) == 0) {
             static int in_usb;
             if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
         }
-        if (irq == 0 && debug_level >= 2 && ticks % 5000 == 0) {
+        if (ms && debug_level >= 2 && ticks % 5000 == 0) {
             extern int vif;
             void vpic_debug(char *buf, int n);
             int dpmi_depth(char *buf, int n);
@@ -389,7 +398,7 @@ struct regs *isr_dispatch(struct regs *r)
                     r->cs, r->eip, b1, b2);
             if (from_pm) { void dpmi_dump_code(u32, u32, int); dpmi_dump_code(r->cs, r->eip - 0x30, 0x60); }
         }
-        if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
+        if (ms && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
             video_refresh();
         }

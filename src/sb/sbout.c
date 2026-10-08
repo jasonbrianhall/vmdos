@@ -33,6 +33,14 @@ static struct {
     int32_t in_acc, in_n;                   /* 48 kHz input samples summed for the next one */
 } s;
 static int16_t last_in;                     /* latest input sample (DSP 20h) */
+
+/* Direct DAC writes with their PIT time, replayed by sb_render. */
+#define DACQ 4096
+static struct { uint32_t t; uint8_t v; } dacq[DACQ];
+static uint32_t dq_head, dq_tail;
+static uint8_t dac_cur = 0x80;
+static uint32_t render_t;                   /* PIT time the last render reached */
+static uint32_t frame_t0, frame_dt, frame_n; /* this render: frame i at t0 + dt*i/n */
 int audio_capture_read(int16_t *mono, int n);   /* audio.cpp: 48 kHz mic samples, 0 when none */
 int audio_capture_latest(void);
 
@@ -252,7 +260,7 @@ uint8_t sb_in_sample(void)
     return (uint8_t)((last_in >> 8) + 128);
 }
 
-void sb_out_stop(void)            { s.active = 0; s.record = 0; irq_pending = 0; irq_stat = 0; }
+void sb_out_stop(void)            { s.active = 0; s.record = 0; irq_pending = 0; irq_stat = 0; dq_head = dq_tail; dac_cur = 0x80; }
 void sb_out_exit_autoinit(void)   { s.autoinit = 0; }
 void sb_out_raise_irq(void)       { raise_irq(0); }
 void sb_out_raise_irq16(void)     { raise_irq(1); }
@@ -311,6 +319,34 @@ static void next_frame(void)
     s.cur_l = l;
     s.cur_r = r;
 }
+
+void sb_dac_write(uint8_t v)
+{
+    uint32_t next = (dq_tail + 1) % DACQ;
+    if (next == dq_head) dq_head = (dq_head + 1) % DACQ;   /* full: drop the oldest */
+    dacq[dq_tail].t = pit_clock();
+    dacq[dq_tail].v = v;
+    dq_tail = next;
+}
+
+/* The DAC's value at render frame i (sample-and-hold, as the real one). */
+static int32_t dac_at(uint32_t i)
+{
+    uint32_t t = frame_t0 + (frame_n ? frame_dt * i / frame_n : frame_dt);
+    static uint32_t last_write;
+    while (dq_head != dq_tail && (int32_t)(dacq[dq_head].t - t) <= 0) {
+        dac_cur = dacq[dq_head].v;
+        last_write = dacq[dq_head].t;
+        dq_head = (dq_head + 1) % DACQ;
+    }
+    /* Left at a value after the last sample: ease back to the middle once
+       it has been quiet for 100 ms (keeps the DC out of the mix). */
+    if (dac_cur != 0x80 && t - last_write > 1193182 / 10 && (i & 15) == 0)
+        dac_cur += dac_cur < 0x80 ? 1 : -1;
+    return ((int32_t)dac_cur - 128) * 256;
+}
+
+static uint32_t frame_base;                 /* frames rendered so far in this sb_render */
 
 static int32_t mix[2 * OPL_MAX_FRAMES];
 void speaker_mix(int32_t *lr, int frames);            /* vdev.c: PC speaker */
@@ -378,7 +414,7 @@ static void render_chunk(int16_t *out, int frames)
             l = s.prev_l + (((s.cur_l - s.prev_l) * f) >> 16);
             r = s.prev_r + (((s.cur_r - s.prev_r) * f) >> 16);
         } else {
-            l = r = ((int32_t)dsp.dac_value - 128) * 256;  /* direct DAC (10h) */
+            l = r = dac_at(frame_base + i);              /* direct DAC (10h) */
         }
         if (!dsp.speaker) l = r = 0;
         mix[i * 2] = l;
@@ -392,9 +428,19 @@ static void render_chunk(int16_t *out, int frames)
 
 void sb_render(int16_t *out, int frames)
 {
+    /* This call covers the time since the last one: spread it over the frames. */
+    uint32_t now = pit_clock();
+    uint32_t span = now - render_t;
+    if (span > 1193182 / 20 || !render_t) span = (uint32_t)frames * 1193182u / 48000u;   /* first call, or a long gap */
+    frame_t0 = now - span;
+    frame_dt = span;
+    frame_n = (uint32_t)frames;
+    frame_base = 0;
+    render_t = now;
     while (frames > 0) {
         int n = frames > OPL_MAX_FRAMES ? OPL_MAX_FRAMES : frames;
         render_chunk(out, n);
+        frame_base += n;
         out += n * 2;
         frames -= n;
     }

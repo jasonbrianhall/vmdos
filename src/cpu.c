@@ -295,7 +295,45 @@ static void pit_init(void)
     outb(0x40, PIT_PER_TICK >> 8);
 }
 
-/* A 1.193182 MHz clock built from the tick count and the PIT's counter. */
+/* The real PIT runs at 1 kHz, or a multiple of it while the guest has its
+   own timer faster than that (sample playback at 10 kHz and so on), so its
+   interrupts can be delivered on time. pit_base counts PIT clocks up to the
+   last IRQ 0; ticks still count milliseconds. */
+static volatile u32 pit_base, cur_per = PIT_PER_TICK, next_per = PIT_PER_TICK;
+static u32 ms_acc;
+
+/* IRQ 0: returns 1 when a millisecond has passed (ticks advanced). */
+int pit_irq(void)
+{
+    pit_base += cur_per;
+    ms_acc += cur_per;
+    cur_per = next_per;                     /* a new count takes effect at the reload */
+    if (ms_acc < PIT_PER_TICK) return 0;
+    ms_acc -= PIT_PER_TICK;
+    ticks++;
+    return 1;
+}
+
+/* The guest's channel 0 period (PIT clocks): run the real one at twice
+   its rate when that's above 1 kHz (up to 40 kHz). */
+void pit_guest_period(u32 per)
+{
+    u32 k = 1;
+    if (per < PIT_PER_TICK) k = (2 * PIT_PER_TICK + per - 1) / per;
+    if (k > 40) k = 40;
+    u32 p = PIT_PER_TICK / k;
+    if (p == next_per) return;
+    u32 fl;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(fl));
+    next_per = p;
+    outb(0x43, 0x34);
+    outb(0x40, p & 0xFF);
+    outb(0x40, p >> 8);
+    if (fl & EFL_IF) sti();
+    dbg(1, "real PIT: %u Hz\n", PIT_HZ / p);
+}
+
+/* A 1.193182 MHz clock built from the IRQ count and the PIT's counter. */
 u32 pit_clock(void)
 {
     static u32 last;
@@ -304,11 +342,11 @@ u32 pit_clock(void)
     outb(0x43, 0x00);
     u32 c = inb(0x40);
     c |= inb(0x40) << 8;
-    u32 t = ticks;
+    u32 per = cur_per, t = pit_base;
     outb(0x20, 0x0A);
-    if ((inb(0x20) & 1) && c > PIT_PER_TICK / 2) t++;   /* wrapped, IRQ not yet taken */
-    if (c > PIT_PER_TICK) c = PIT_PER_TICK;
-    u32 now = t * PIT_PER_TICK + (PIT_PER_TICK - c);
+    if ((inb(0x20) & 1) && c > per / 2) t += per;       /* wrapped, IRQ not yet taken */
+    if (c > per) c = per;
+    u32 now = t + (per - c);
     if ((int32_t)(now - last) < 0) now = last;
     last = now;
     if (fl & EFL_IF) sti();

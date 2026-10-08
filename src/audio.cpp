@@ -527,23 +527,89 @@ static bool hda_try(const PciDevice& d, bool digital) {
 }
 
 static uint32_t cap_pos() { return (r32(0x80 + 0x04) / 4) % RING_FRAMES; }
-static int16_t cap_mono(uint32_t f) { return (int16_t)(((int)cap_ring[f * 2] + cap_ring[f * 2 + 1]) / 2); }
+// The controller's link position runs ahead of what has reached memory (the
+// input FIFO is written out in bursts): stay this far behind it.
+static const uint32_t CAP_SAFE = 1024;                 // ~21 ms
+static uint32_t cap_peak, cap_clips, cap_resyncs;       // for VMSB MIC
+static int has_clflush = -1;
+static int16_t cap_frame(uint32_t f) {
+    volatile int16_t* p = &cap_ring[f * 2];
+    if (has_clflush < 0) {
+        uint32_t a = 1, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+        has_clflush = (d >> 19) & 1;
+    }
+    if (has_clflush && ((f & 15) == 0 || f == cap_read))   // in case the controller doesn't snoop
+        __asm__ volatile("clflush %0" :: "m"(*(volatile char*)p));
+    int l = p[0], r = p[1];
+    int v = (l + r) / 2;
+    int a = l < 0 ? -l : l, b = r < 0 ? -r : r;
+    if (a > 32000 || b > 32000) cap_clips++;
+    uint32_t m = (uint32_t)(v < 0 ? -v : v);
+    if (m > cap_peak) cap_peak = m;
+    return (int16_t)v;
+}
+static uint32_t cap_ready(uint32_t pos) {               // frames safely in memory past cap_read
+    uint32_t lag = (pos + RING_FRAMES - cap_read) % RING_FRAMES;
+    if (lag > CAP_SAFE + RING_FRAMES / 4 || lag < CAP_SAFE / 2) {    // drifted: start again
+        cap_read = (pos + RING_FRAMES - CAP_SAFE) % RING_FRAMES;
+        cap_resyncs++;
+        return 0;
+    }
+    return lag > CAP_SAFE ? lag - CAP_SAFE : 0;
+}
 
 // Microphone samples (48 kHz mono) recorded since the last call, up to n.
 extern "C" int audio_capture_read(int16_t* mono, int n) {
     if (!cap_on || driver != AUDIO_HDA) return 0;
     uint32_t pos = cap_pos();
-    if (cap_read == 0xFFFFFFFF) cap_read = (pos + RING_FRAMES - n) % RING_FRAMES;
-    uint32_t avail = (pos + RING_FRAMES - cap_read) % RING_FRAMES;
-    if (avail > RING_FRAMES / 2) { cap_read = (pos + RING_FRAMES - n) % RING_FRAMES; avail = n; }  // fell behind
+    if (cap_read == 0xFFFFFFFF) cap_read = (pos + RING_FRAMES - CAP_SAFE - n) % RING_FRAMES;
+    uint32_t avail = cap_ready(pos);
     if ((int)avail > n) avail = n;
-    for (uint32_t i = 0; i < avail; i++) { mono[i] = cap_mono(cap_read); cap_read = (cap_read + 1) % RING_FRAMES; }
+    for (uint32_t i = 0; i < avail; i++) { mono[i] = cap_frame(cap_read); cap_read = (cap_read + 1) % RING_FRAMES; }
     return (int)avail;
 }
-// The latest microphone sample (DSP 20h: direct ADC).
+// DSP 20h (direct ADC), polled by a program at its own rate: the sample at
+// the current time, from the PIT, so polls between bursts still advance.
+extern "C" uint32_t pit_clock(void);
 extern "C" int audio_capture_latest(void) {
     if (!cap_on || driver != AUDIO_HDA) return 0;
-    return cap_mono((cap_pos() + RING_FRAMES - 1) % RING_FRAMES);
+    static uint32_t last_t, frac;
+    uint32_t pos = cap_pos(), t = pit_clock();
+    if (cap_read == 0xFFFFFFFF) { cap_read = (pos + RING_FRAMES - CAP_SAFE) % RING_FRAMES; last_t = t; frac = 0; }
+    uint32_t dt = t - last_t;
+    last_t = t;
+    if (dt > 1193182 / 10) dt = 1193182 / 10;
+    uint32_t f = dt * 4800 + frac;                      // PIT ticks -> 48 kHz frames
+    uint32_t adv = f / 119318;
+    frac = f % 119318;
+    uint32_t ready = cap_ready(pos);
+    if (adv > ready) adv = ready;
+    cap_read = (cap_read + adv) % RING_FRAMES;
+    return cap_frame(cap_read);
+}
+// VMSB MIC: what the microphone is, and its peak level since the last call.
+extern "C" int audio_capture_stats(uint32_t* peak, uint32_t* clips, uint32_t* resyncs) {
+    if (cap_on && driver == AUDIO_HDA) {                // take in what's arrived (when no program is recording)
+        int16_t tmp[256];
+        for (int i = 0; i < 64 && audio_capture_read(tmp, 256) > 0; i++) {}
+    }
+    *peak = cap_peak; *clips = cap_clips; *resyncs = cap_resyncs;
+    cap_peak = 0; cap_clips = 0;
+    if (!cap_on || driver != AUDIO_HDA) return 0;
+    uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
+    return ((cfg >> 20) & 0xF) == 0x8 ? 3 : cfg >> 30 == 2 ? 2 : 1;   // 1 jack, 2 internal, 3 line in
+}
+// VMSB BOOST n: the mic pin's boost, in dB (rounded to the codec's steps).
+extern "C" int audio_capture_boost(int db) {
+    if (!cap_on || driver != AUDIO_HDA || !(widgets[cap_pin].caps & (1 << 1))) return -1;
+    uint32_t c = param(cap_cad, cap_pin, 0x0D);
+    int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
+    int g = off + db * 4 / q;
+    if (g > steps) g = steps;
+    if (g < 0) g = 0;
+    verb4(cap_cad, cap_pin, 0x3, 0x7000 | g);
+    return (g - off) * q / 4;
 }
 
 static void hda_stop() {

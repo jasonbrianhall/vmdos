@@ -12,6 +12,9 @@ void sb_out_stop(void);
 void sb_out_exit_autoinit(void);
 void sb_out_raise_irq(void);
 void sb_render(int16_t *out, int frames);   /* interleaved stereo, 48 kHz */
+/* DSP 10h (direct DAC): programs write samples one by one from a timer
+   (10 kHz and so on); each is time-stamped and played at its moment. */
+void sb_dac_write(uint8_t v);
 /* Recording: 8-bit samples from the microphone (48 kHz mono from the real
    card, audio_capture_read) averaged down to the DSP's rate and written into
    the game's DMA buffer, block by block as playback reads it. */
