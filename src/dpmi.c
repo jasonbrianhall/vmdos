@@ -252,7 +252,7 @@ static u32 pop(struct ctx *c, int wide)
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
 enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC };
 #define XDEPTH 24
-static struct xent { int kind; struct ctx saved; u32 a, b; } xs[XDEPTH];
+static struct xent { int kind; struct ctx saved; u32 a, b, lk; } xs[XDEPTH];   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
 
 static struct xent *xpush(int kind, struct ctx *saved)
@@ -261,6 +261,7 @@ static struct xent *xpush(int kind, struct ctx *saved)
     struct xent *x = &xs[xdepth++];
     x->kind = kind;
     x->saved = *saved;
+    x->lk = 0;
     return x;
 }
 
@@ -298,6 +299,25 @@ static struct regs *reflect(struct ctx *c, int n, int kind)
     return go_real_int(&rm, n);
 }
 
+/* Where a new visit to protected mode may start on the locked stack: below
+   whatever is still live there. That is the context we come from when it
+   is on the locked stack, else the innermost saved context that is (a PM
+   handler that went to real mode, where an IRQ or a callback now brings us
+   back to PM). Starting at the top in that case overwrote the outer
+   handler's saved registers and IRET frame (DOS/4GW in Warcraft II popped
+   garbage selectors). */
+#define LOCKED_GAP 0x800      /* below a live visit's start: what its handler pushed before switching stacks */
+static u32 locked_esp(const struct ctx *from)
+{
+    if (from->pm && (from->ss & 0xFFFF) == HOST_SS) return from->esp;
+    u32 e = LOCKED_SIZE - 16;
+    for (int i = 0; i < xdepth; i++) {
+        if (xs[i].saved.pm && (xs[i].saved.ss & 0xFFFF) == HOST_SS && xs[i].saved.esp < e) e = xs[i].saved.esp;
+        if (xs[i].lk && xs[i].lk - LOCKED_GAP < e) e = xs[i].lk - LOCKED_GAP;
+    }
+    return e & ~3u;
+}
+
 /* Enter a protected-mode handler on the locked stack, returning (IRET or
    RETF) into the stub at HOST_CS:ret_slot. */
 static struct regs *visit_pm(struct ctx *from, int kind, u16 sel, u32 off, int ret_slot, int iret, struct ctx *pmregs)
@@ -306,14 +326,15 @@ static struct regs *visit_pm(struct ctx *from, int kind, u16 sel, u32 off, int r
     struct ctx c = *pmregs;
     c.pm = 1;
     c.eflags &= ~EFL_TF;
-    if ((from->pm && (from->ss & 0xFFFF) == HOST_SS) ) c.esp = from->esp;   /* already on it */
-    else c.esp = LOCKED_SIZE - 16;
+    c.esp = locked_esp(from);
+    if (c.esp < 0x400) panic("DPMI: locked stack overflow (nesting %d)", xdepth);
     c.ss = HOST_SS;
     if (iret) push(&c, (from->eflags & 0x0DD5) | 2 | (from->vif ? EFL_IF : 0), client32);
     push(&c, HOST_CS, client32);
     push(&c, stubs(ret_slot), client32);
     c.cs = sel; c.eip = off;
     c.vif = 0;
+    xs[xdepth - 1].lk = c.esp;
     return resume(&c);
 }
 
@@ -779,8 +800,8 @@ static struct regs *pm_fault(struct ctx *c, int n, u32 errc)
         struct ctx h = *c;
         struct regs *nr;
         /* DPMI 0.9 frame: return address, error code, eip, cs, eflags, esp, ss */
+        h.esp = locked_esp(c);
         xpush(X_EXC, c);
-        h.esp = (c->ss == HOST_SS) ? c->esp : LOCKED_SIZE - 16;
         h.ss = HOST_SS;
         push(&h, c->ss, client32);
         push(&h, c->esp, client32);
@@ -792,6 +813,7 @@ static struct regs *pm_fault(struct ctx *c, int n, u32 errc)
         push(&h, stubs(S_EXCRET), client32);
         h.cs = exc_vec[n].sel; h.eip = exc_vec[n].off;
         h.vif = 0;
+        xs[xdepth - 1].lk = h.esp;
         nr = resume(&h);
         return nr;
     }
