@@ -458,6 +458,7 @@ static volatile uint8_t* msd_cbw;
 #define MSD_MAX 4
 static int msd_dev[MSD_MAX], n_msd;
 static volatile int usb_busy;                          // a disk transfer is running: usb_poll keeps off
+static int in_poll;                                    // usb_poll running (the stop screen polls too)
 
 static bool configure_bulk(Keyboard& k) {
     k.dci = (k.ep_in & 0xF) * 2 + 1;
@@ -716,7 +717,13 @@ static bool setup_slot(Keyboard& k, int ki) {
         k.iface = ms_iface; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
         return msd_setup(k);
     }
-    if (iface < 0 || !ep_addr) { printf("USB: %s: not a keyboard, mouse, hub or mass storage\n", k.where); return false; }
+    if (iface < 0 || !ep_addr) {
+        int c0 = -1, c1 = 0, c2 = 0;                    // the first interface's class / subclass / protocol
+        for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i])
+            if (desc[i + 1] == 4) { c0 = desc[i + 5]; c1 = desc[i + 6]; c2 = desc[i + 7]; break; }
+        printf("USB: %s: not a keyboard, mouse, hub or mass storage (class %02x/%02x/%02x)\n", k.where, c0 & 0xFF, c1, c2);
+        return false;
+    }
     if (hub && k.speed >= 4) {                          // a USB 3 hub's SuperSpeed half
         printf("USB: %s: USB 3 hub (its USB 2 side carries keyboards and mice)\n", k.where);
         return false;
@@ -916,6 +923,35 @@ static bool init_controller(const PciDevice& d) {
     return true;
 }
 
+// USB 3 ports left in SS.Inactive or Compliance (it happens after the
+// controller reset, on real PCs) never report their device again until a
+// warm reset, as Linux does. Each such port of controller H gets one.
+static void warm_reset_stuck() {
+    for (int p = 1; p <= H->num_ports; p++) {
+        uint32_t sc = portsc(p);
+        int pls = (sc >> 5) & 0xF;
+        if (pls != 6 && pls != 10) continue;
+        printf("USB: port %d: link %s, warm reset\n", p, pls == 6 ? "inactive" : "in compliance mode");
+        set_portsc(p, (sc & PORT_KEEP) | (1u << 31));          // WPR
+        for (int i = 0; i < 300 && !(portsc(p) & ((1u << 19) | PORT_PRC)); i++) delay_ms(1);
+        sc = portsc(p);
+        set_portsc(p, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+        delay_ms(20);
+        if (portsc(p) & PORT_CCS) {
+            printf("USB: port %d: device connected (%s speed)\n", p, speed_name((portsc(p) >> 10) & 0xF));
+            setup_port(p);
+        } else printf("USB: port %d: nothing after the warm reset (link state %d)\n", p, (portsc(p) >> 5) & 0xF);
+    }
+}
+
+// From disk.c while it waits for the boot stick: stuck USB 3 ports on every controller.
+extern "C" void usb_kick_ports(void) {
+    if (usb_busy || in_poll) return;
+    in_poll = 1;
+    for (int c = 0; c < num_hc; c++) { H = &hcs[c]; warm_reset_stuck(); }
+    in_poll = 0;
+}
+
 bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
@@ -926,7 +962,8 @@ bool usb_init(const char* cmdline) {
         H = &hcs[num_hc];
         memset((void*)H, 0, sizeof *H);
         H->evt_cycle = 1;
-        printf("USB: xHCI %d at PCI %02x:%02x.%x\n", num_hc, d.bus, d.dev, d.fn);
+        uint32_t vd = pci_read(d, 0);
+        printf("USB: xHCI %d at PCI %02x:%02x.%x (%04x:%04x)\n", num_hc, d.bus, d.dev, d.fn, vd & 0xFFFF, vd >> 16);
         if (!init_controller(d)) continue;              // try the others
         num_hc++;
         for (int p = 1; p <= H->num_ports; p++)
@@ -934,6 +971,7 @@ bool usb_init(const char* cmdline) {
                 printf("USB: port %d: device connected (%s speed)\n", p, speed_name((portsc(p) >> 10) & 0xF));
                 setup_port(p);
             }
+        warm_reset_stuck();
         int n = 0;
         int nd = 0;
         for (auto& k : kbds) { n += k.active && k.hc == H && (k.kind == KBD || k.kind == MOUSE); nd += k.active && k.hc == H && k.kind == MSD; }
@@ -945,7 +983,8 @@ bool usb_init(const char* cmdline) {
 }
 
 void usb_poll() {
-    if (usb_busy) return;                               // a disk transfer is waiting on the event ring
+    if (usb_busy || in_poll) return;                    // a disk transfer is waiting on the event ring / re-entered
+    in_poll = 1;
     for (int c = 0; c < num_hc; c++) {
         H = &hcs[c];
         Trb e;
@@ -974,6 +1013,7 @@ void usb_poll() {
                 if (d & (1u << p)) hub_port_change(h, p);
         }
     }
+    in_poll = 0;
 }
 
 // C entry points for the kernel.

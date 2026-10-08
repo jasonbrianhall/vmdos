@@ -359,6 +359,15 @@ void speed_throttle(void)
 }
 
 /* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+F11/F12 stay here. */
+/* For the "vmdos stopped" screen: the next queued keyboard byte, or -1. */
+int vkbd_take(void)
+{
+    if (kq_head == kq_tail) return -1;
+    u8 v = kq[kq_head];
+    kq_head = (kq_head + 1) % sizeof kq;
+    return v;
+}
+
 void vkbd_real_scancode(u8 sc)
 {
     static int ctrl, alt;

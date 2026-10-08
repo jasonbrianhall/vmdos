@@ -137,7 +137,8 @@ void vpic_eoi_irq(int irq);
 u32 port_in(u16 port, int size);
 void port_out(u16 port, u32 val, int size);
 void vdev_tick(void);                         /* from the real timer IRQ */
-void vkbd_real_scancode(u8 sc);               /* from the real keyboard IRQ */
+void vkbd_real_scancode(u8 sc);
+int vkbd_take(void);                          /* raw byte from the keyboard queue, -1 if none */               /* from the real keyboard IRQ */
 void vaux_motion(int dx, int dy, int b);      /* the virtual PS/2 mouse port */
 void vaux_bios_enable(int on);                /* INT 15h C2xx on that port */
 void vaux_bios_reset(void);

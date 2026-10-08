@@ -112,7 +112,7 @@ static void serial_putc(char c)
 
 /* The last few KiB of the log, shown on the "vmdos stopped" screen: on a
    real PC there is usually no serial port to read it from. */
-static char logbuf[4096];
+static char logbuf[16384];
 static u32 logpos;
 
 void kprintf(const char *fmt, ...)
@@ -128,22 +128,76 @@ void kprintf(const char *fmt, ...)
     }
 }
 
-/* The last n log lines (each cut to width), oldest first, into out. */
-static void log_tail(char *out, int size, int n, int width)
+/* ---- the "vmdos stopped" screen: the message, then the log, scrollable
+   with the arrow keys / PgUp / PgDn / Home / End (PS/2 or USB keyboard). */
+#define LOG_W 76
+static char loglin[16384 + 2048];
+static u16 line_at[2048];
+static int n_lines;
+
+static void log_lines(void)
 {
-    u32 end = logpos, start = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0, p = end;
-    while (p > start && logbuf[(p - 1) % sizeof logbuf] == '\n') p--;      /* trailing newlines */
-    int lines = 0;
-    while (p > start && lines < n) { p--; if (logbuf[p % sizeof logbuf] == '\n') lines++; }
-    if (p > start || lines >= n) p++;
+    u32 end = logpos, start = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0;
     int o = 0, col = 0;
-    for (; p < end && o < size - 1; p++) {
+    n_lines = 0;
+    line_at[n_lines++] = 0;
+    for (u32 p = start; p < end && o < (int)sizeof loglin - 2 && n_lines < 2047; p++) {
         char c = logbuf[p % sizeof logbuf];
-        if (c == '\n') { out[o++] = c; col = 0; continue; }
-        if (c < 32 || c > 126 || col >= width) continue;
-        out[o++] = c; col++;
+        if (c == '\n' || col == LOG_W) {
+            loglin[o++] = 0; col = 0;
+            line_at[n_lines++] = (u16)o;
+            if (c == '\n') continue;
+        }
+        if (c < 32 || c > 126) continue;
+        loglin[o++] = c; col++;
     }
-    out[o] = 0;
+    loglin[o] = 0;
+    if (n_lines > 1 && !loglin[line_at[n_lines - 1]]) n_lines--;    /* the empty line after the last newline */
+}
+
+void usb_tick(void);
+static int stop_key(void)
+{
+    if ((inb(0x64) & 0x21) == 0x01) return inb(0x60);              /* PS/2 keyboard byte */
+    usb_tick();                                                      /* USB keyboards (safe: guarded in usb.cpp) */
+    return vkbd_take();
+}
+
+static void stop_screen(const char *msg)
+{
+    static char screen[4096];
+    log_lines();
+    int msg_rows = 1, col = 0;                                       /* as video_console wraps it */
+    for (const char *q = msg; *q; q++) {
+        if (*q == '\n' || col >= 76) { msg_rows++; col = 0; if (*q == '\n') continue; }
+        col++;
+    }
+    int rows = 24 - 3 - msg_rows - 3;
+    if (rows < 3) rows = 3;
+    int top = n_lines > rows ? n_lines - rows : 0, last = -1;
+    for (;;) {
+        if (top != last) {
+            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End):\n",
+                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines);
+            for (int i = top; i < top + rows && i < n_lines && n < (int)sizeof screen - 80; i++)
+                n += snprintf(screen + n, sizeof screen - n, "%s\n", loglin + line_at[i]);
+            video_console(screen);
+            last = top;
+        }
+        int k = stop_key();
+        if (k < 0) { for (int i = 0; i < 2000; i++) inb(0x80); continue; }
+        int max = n_lines > rows ? n_lines - rows : 0;
+        switch (k) {
+        case 0x48: top--; break;                                     /* up */
+        case 0x50: top++; break;                                     /* down */
+        case 0x49: top -= rows - 1; break;                           /* page up */
+        case 0x51: top += rows - 1; break;                           /* page down */
+        case 0x47: top = 0; break;                                   /* home */
+        case 0x4F: top = max; break;                                 /* end */
+        }
+        if (top > max) top = max;
+        if (top < 0) top = 0;
+    }
 }
 
 void panic(const char *fmt, ...)
@@ -153,17 +207,7 @@ void panic(const char *fmt, ...)
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    {                                               /* the message, then the log that led to it */
-        static char screen[2048];
-        int n = snprintf(screen, sizeof screen, "%s\n\nLast log lines:\n", buf);
-        int msg_rows = 3;
-        for (const char *q = buf; *q; q++) if (*q == '\n') msg_rows++;
-        msg_rows += (int)strlen(buf) / 76;
-        int rows = 20 - msg_rows;
-        if (rows < 4) rows = 4;
-        log_tail(screen + n, (int)sizeof screen - n, rows, 76);
-        kprintf("\n*** vmdos stopped: %s\n", buf);
-        video_console(screen);
-    }
+    kprintf("\n*** vmdos stopped: %s\n", buf);
+    stop_screen(buf);
     for (;;) __asm__ volatile("cli; hlt");
 }

@@ -20,6 +20,7 @@ int usb_msd_count(void);
 u64 usb_msd_sectors(int i);
 const char *usb_msd_name(int i);
 int usb_msd_rw(int i, u64 lba, u32 count, void *buf, int write);
+void usb_kick_ports(void);
 
 /* The real disks: AHCI (SATA) disks and USB mass storage, 512-byte sectors. */
 #define MAX_DEVS 12
@@ -249,6 +250,7 @@ void disk_init(void)
             if (waited >= wait_ms) break;
             if (waited == 0) kprintf("disk: waiting for USB disks (up to %d s)\n", wait_ms / 1000);
             usb_tick();
+            if (waited % 1000 == 500) usb_kick_ports();             /* stuck USB 3 links: warm reset */
             sleep_ms(20);
             waited += 20;
         }
