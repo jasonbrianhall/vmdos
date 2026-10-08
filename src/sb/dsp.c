@@ -81,6 +81,12 @@ static void exec(void)
         sb_out_start(1, dsp.block_len + 1u, 0);
         break;
     case 0x80: sb_out_start(0, w, 1); break;                     /* silence block */
+    /* Recording (the microphone, through the real card's input: audio.cpp) */
+    case 0x20: q_push(sb_in_sample()); break;                    /* direct ADC: one sample */
+    case 0x24: sb_in_start(0, w); break;                         /* 8-bit single-cycle ADC */
+    case 0x2C: sb_in_start(1, dsp.block_len + 1u); break;        /* 8-bit auto-init ADC */
+    case 0x98: sb_in_start(1, dsp.block_len + 1u); break;        /* high-speed auto-init ADC */
+    case 0x99: sb_in_start(0, dsp.block_len + 1u); break;        /* high-speed single-cycle ADC */
     case 0x40: dsp.time_constant = args[0]; break;
     case 0x48: dsp.block_len = args[0] | (args[1] << 8); break;
     case 0xD0: dsp.paused = 1; break;

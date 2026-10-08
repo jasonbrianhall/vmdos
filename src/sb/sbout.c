@@ -25,7 +25,12 @@ static struct {
     uint32_t step, frac;
     int stereo;
     int16_t prev_l, prev_r, cur_l, cur_r;
+    int record;                             /* the DMA goes the other way: ADC -> memory */
+    int32_t in_acc, in_n;                   /* 48 kHz input samples summed for the next one */
 } s;
+static int16_t last_in;                     /* latest input sample (DSP 20h) */
+int audio_capture_read(int16_t *mono, int n);   /* audio.cpp: 48 kHz mic samples, 0 when none */
+int audio_capture_latest(void);
 
 /* ---------------------------------------------------------------- 8237 */
 static struct { uint16_t addr, count; uint8_t page, mode; } dch[4];
@@ -117,6 +122,7 @@ int sb_irq_line(void) { return sb_irq; }
 
 void sb_out_start(int autoinit, uint32_t len_bytes, int silence)
 {
+    s.record = 0;
     uint32_t tc = dsp.time_constant;
     uint32_t rate = 1000000u / (256 - tc);
 
@@ -158,7 +164,21 @@ void sb_out_start(int autoinit, uint32_t len_bytes, int silence)
     s.active = 1;
 }
 
-void sb_out_stop(void)            { s.active = 0; irq_pending = 0; }
+void sb_in_start(int autoinit, uint32_t len_bytes)
+{
+    sb_out_start(autoinit, len_bytes, 0);   /* the same DMA / block / IRQ set-up */
+    s.record = 1;
+    s.in_acc = s.in_n = 0;
+    dbg(1, "SB: recording %s, %u bytes\n", autoinit ? "auto-init" : "single-cycle", s.block_len);
+}
+
+uint8_t sb_in_sample(void)
+{
+    if (!s.record) last_in = (int16_t)audio_capture_latest();
+    return (uint8_t)((last_in >> 8) + 128);
+}
+
+void sb_out_stop(void)            { s.active = 0; s.record = 0; irq_pending = 0; }
 void sb_out_exit_autoinit(void)   { s.autoinit = 0; }
 void sb_out_raise_irq(void)       { irq_pending = 1; }
 
@@ -214,11 +234,50 @@ static inline int16_t limit(int32_t v)
     return (int16_t)v;
 }
 
+/* One recorded byte into the DMA buffer (the counterpart of fetch). */
+static void store(uint8_t b)
+{
+    ((volatile uint8_t *)s.mem)[s.dma_pos] = b;
+    if (++s.dma_pos >= s.dma_len) {
+        s.dma_pos = 0;
+        dma_tc = 1;
+        if (!s.autoinit) dma_done = 1;
+    }
+    if (--s.block_left == 0) {
+        irq_pending = 1;
+        if (s.autoinit) s.block_left = s.block_len;
+        else { s.active = 0; s.record = 0; }
+    }
+}
+
+/* frames of 48 kHz input: averaged down to the DSP's rate (s.step) */
+static void record_chunk(int frames)
+{
+    static int16_t in[OPL_MAX_FRAMES];
+    int got = audio_capture_read(in, frames);
+    for (int i = got; i < frames; i++) in[i] = got ? in[got - 1] : 0;   /* no mic, or late: hold */
+    if (frames) last_in = in[frames - 1];
+    for (int i = 0; i < frames && s.active && s.record; i++) {
+        s.in_acc += in[i]; s.in_n++;
+        if (dsp.paused) continue;
+        s.frac += s.step;
+        while (s.frac >= 0x10000 && s.active && s.record) {
+            s.frac -= 0x10000;
+            int32_t v = s.in_n ? s.in_acc / s.in_n : 0;
+            s.in_acc = s.in_n = 0;
+            uint8_t b = (uint8_t)((v >> 8) + 128);
+            store(b);
+            if (s.stereo && s.active) store(b);
+        }
+    }
+}
+
 static void render_chunk(int16_t *out, int frames)
 {
+    if (s.active && s.record) record_chunk(frames);
     for (int i = 0; i < frames; i++) {
         int32_t l, r;
-        if (s.active && !dsp.paused) {
+        if (s.active && !s.record && !dsp.paused) {
             s.frac += s.step;
             while (s.frac >= 0x10000 && s.active) {
                 s.frac -= 0x10000;

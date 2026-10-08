@@ -233,6 +233,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
   `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
   A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
+  Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from the PC's mic jack (else
+  internal mic, else line in) when playing through HD Audio analog;
+  silence otherwise. Test: `tests/sbrec.asm`.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
