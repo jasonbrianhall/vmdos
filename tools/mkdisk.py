@@ -66,6 +66,7 @@ def main():
 
     mbr = bytearray(512)
     mbr[0:2] = b"\xCD\x18"        # no MBR code: INT 18h
+    mbr[440:444] = os.urandom(4)  # disk signature: vmdos finds the disk it booted from by it
     e = bytes([0x80]) + chs(START) + bytes([ptype]) + chs(total - 1) + struct.pack("<II", START, plen)
     mbr[446:462] = e
     mbr[510:512] = b"\x55\xAA"

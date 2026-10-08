@@ -117,7 +117,7 @@ extern u32 kernel_stack_top;
 void v86_enter(struct regs *r) __attribute__((noreturn));
 extern u8 *disk_image;                        /* the RAM disk (boot module) */
 extern u32 disk_size;
-extern char cmdline[256];
+extern char cmdline[512];
 
 /* ---- v86.c ---- */
 extern int vif;                               /* the guest's virtual IF */

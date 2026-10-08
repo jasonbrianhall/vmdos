@@ -8,7 +8,8 @@
 #   make efi             vmdos.efi: run straight from UEFI (no GRUB);
 #                        both go in the same folder of the EFI system partition
 #   make esp             esp.img: the EFI disk, also C: (EFI/BOOT/BOOTX64.EFI + FreeDOS)
-#   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img
+#   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img (SATA)
+#   make run-usb         QEMU, UEFI (OVMF), booting esp.img as a USB stick
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
@@ -245,9 +246,13 @@ run-efi: vmdos.iso $(DISK_DEP)
 run-efi-app: BOOTDISK = 0
 run-efi-app: esp.img
 	qemu-system-x86_64 -bios $(OVMF) $(QESP) $(QEMU_ARGS)
+# esp.img as a USB stick (xHCI), booted by the firmware, C: on the stick.
+run-usb: esp.img
+	qemu-system-x86_64 -bios $(OVMF) -device qemu-xhci,id=xhci \
+	    -drive if=none,id=stick,format=raw,file=esp.img -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 $(QEMU_ARGS)
 
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
-.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app clean
+.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app run-usb clean
 -include $(OBJS:.o=.d)

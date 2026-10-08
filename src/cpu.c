@@ -12,7 +12,7 @@ volatile u32 ticks;
 int usb_ready;
 u8 *disk_image;
 u32 disk_size;
-char cmdline[256];
+char cmdline[512];
 int a20_on = 1;
 
 /* ---------------- physical memory ---------------- */
@@ -457,11 +457,11 @@ void kmain(u32 magic, struct mb_info *mb)
                           fbi.rpos, fbi.rsz, fbi.gpos, fbi.gsz, fbi.bpos, fbi.bsz);
     video_init();
 
+    if (!strstr(cmdline, "usb=off")) usb_start(cmdline);   /* before C:, which may be a USB stick */
     disk_init();
     vdev_init();
     speed_init();
     bios_init();
-    if (!strstr(cmdline, "usb=off")) usb_start(cmdline);
     sound_init();
     xms_init();
     mouse_ps2_init();

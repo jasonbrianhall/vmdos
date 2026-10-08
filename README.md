@@ -22,6 +22,19 @@ make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img
 make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
 
+### Booting from a USB stick
+
+```
+make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: EFI boot files + FreeDOS + your games
+sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); everything on it is replaced
+```
+
+Plug it in, pick the stick in the PC's boot menu (UEFI). The stick is then
+C: (vmdos reads it through its own USB driver: xHCI, bulk-only mass
+storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
+Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
+Afterwards the stick can be mounted on Linux to add games (it's FAT).
+
 ### Drive C:
 
 The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
@@ -34,18 +47,19 @@ vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
 CTMOUSE) are in C:\VMDOS, which is on the PATH.
 
 `C=disk` (default): C: is the FAT partition of `esp.img`, which the run
-targets attach as a SATA (AHCI) disk; what DOS writes stays there. Rebuilding
+targets attach as a SATA (AHCI) disk (`run-usb`: as a USB stick); what DOS writes stays there. Rebuilding
 updates esp.img in place: programs and FreeDOS files are refreshed,
 AUTOEXEC.BAT, FDCONFIG.SYS and files already copied from `EXTRA` are kept
 (`FRESH=1` starts over). `C=ram`: C: is dos.img in RAM, changes lost (kernel
 option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
 EFI/BOOT/vmdos.cfg, which vmdos.efi reads).
 
-The kernel picks C: from the FAT partitions on AHCI disks that hold
-KERNEL.SYS at their root, preferring the one vmdos.efi started from; other
+The kernel picks C: from the FAT partitions on SATA (AHCI) disks and USB
+sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
+started from (it passes the partition's start and disk signature); other
 partitions are never touched (DOS sees a one-partition disk and can't write
-outside it). No such partition, or a disk that isn't AHCI (NVMe, USB): the
-RAM disk, from dos.img next to vmdos.efi or the GRUB module. To use an
+outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
+disk if built with `RAMDISK=1`. To use an
 existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
 COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)
 to the ESP's root and vmdos.efi + dos.img to a folder on it.
@@ -204,7 +218,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
-| `src/disk.c`, `src/ahci.cpp`, `src/fat.c` | drive C: (AHCI partition or RAM disk), SATA driver, FAT reader |
+| `src/disk.c`, `src/ahci.cpp`, `src/fat.c` | drive C: (SATA / USB partition or RAM disk), SATA driver, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-colour VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |

@@ -158,16 +158,23 @@ static void load_isos(EFI_HANDLE image, CHAR16* dir) {
     }
 }
 
-// Start (LBA) of the partition vmdos.efi was loaded from, 0 if unknown: the
-// kernel prefers it for C: (esp=LBA on the command line).
-static UINT64 boot_partition_start(EFI_HANDLE image) {
+// The partition vmdos.efi was loaded from: its start (LBA, 0 if unknown)
+// and signature (MBR disk signature or GPT partition GUID, sig_len 4 / 16).
+// The kernel prefers it for C: (esp=LBA espsig=HEX on the command line).
+static UINT64 boot_partition(EFI_HANDLE image, UINT8* sig, int* sig_len) {
     EFI_GUID lip = LOADED_IMAGE_PROTOCOL;
     EFI_LOADED_IMAGE* li;
+    *sig_len = 0;
     if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, image, &lip, (void**)&li))) return 0;
     EFI_DEVICE_PATH* dp = DevicePathFromHandle(li->DeviceHandle);
     for (int guard = 0; dp && !IsDevicePathEnd(dp) && guard < 64; guard++, dp = NextDevicePathNode(dp))
-        if (DevicePathType(dp) == MEDIA_DEVICE_PATH && DevicePathSubType(dp) == MEDIA_HARDDRIVE_DP)
-            return ((HARDDRIVE_DEVICE_PATH*)dp)->PartitionStart;
+        if (DevicePathType(dp) == MEDIA_DEVICE_PATH && DevicePathSubType(dp) == MEDIA_HARDDRIVE_DP) {
+            HARDDRIVE_DEVICE_PATH* hd = (HARDDRIVE_DEVICE_PATH*)dp;
+            int n = hd->SignatureType == 1 ? 4 : hd->SignatureType == 2 ? 16 : 0;
+            for (int i = 0; i < n; i++) sig[i] = hd->Signature[i];
+            *sig_len = n;
+            return hd->PartitionStart;
+        }
     return 0;
 }
 
@@ -249,8 +256,10 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         opts[n] = 0;
     }
     // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
-    // (the kernel's AHCI driver uses it); dos.img only for c=ram or else.
-    UINT64 esp = boot_partition_start(image);
+    // (the kernel's SATA or USB driver reads it); dos.img only for c=ram or else.
+    UINT8 esp_sig[16];
+    int esp_sig_len;
+    UINT64 esp = boot_partition(image, esp_sig, &esp_sig_len);
     int disk_c = file_exists(image, L"\\KERNEL.SYS") && !has_word(opts, "c=ram");
     UINTN disk_size = 0;
     UINT8* disk = NULL;
@@ -267,6 +276,14 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         const char* pre = " esp=";
         for (int i = 0; pre[i] && n < sizeof opts - 1; i++) opts[n++] = pre[i];
         while (k && n < sizeof opts - 1) opts[n++] = num[--k];
+        if (esp_sig_len && n + 9 + 2 * esp_sig_len < sizeof opts) {
+            const char* p2 = " espsig=";
+            for (int i = 0; p2[i]; i++) opts[n++] = p2[i];
+            for (int i = 0; i < esp_sig_len; i++) {
+                opts[n++] = "0123456789abcdef"[esp_sig[i] >> 4];
+                opts[n++] = "0123456789abcdef"[esp_sig[i] & 15];
+            }
+        }
         opts[n] = 0;
     }
 
@@ -282,7 +299,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     if (!gop) { fail(L"no 32-bit graphics mode (GOP) available"); return EFI_UNSUPPORTED; }
 
     Print(L"vmdos UEFI loader\r\n");
-    if (disk_c) Print(L"  C: drive:     this partition (LBA %ld), through the kernel's AHCI driver\r\n", esp);
+    if (disk_c) Print(L"  C: drive:     this partition (LBA %ld), through the kernel's SATA/USB driver\r\n", esp);
     if (disk) Print(L"  disk image:   %s, %d KiB at 0x%lx%s\r\n", img_path, disk_size >> 10, (UINT64)(UINTN)disk,
                     disk_c ? L" (fallback)" : L"");
     Print(L"  graphics:     %dx%d, framebuffer 0x%lx\r\n", gop->Mode->Info->HorizontalResolution,

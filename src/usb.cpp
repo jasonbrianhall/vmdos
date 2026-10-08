@@ -1,4 +1,8 @@
-// xHCI USB keyboard driver (polled, boot protocol).
+// xHCI USB keyboards, mice and mass storage (polled).
+//
+// Mass storage: bulk-only transport sticks and card readers (SCSI READ(10)
+// / WRITE(10), 512-byte blocks), for C: on the USB stick vmdos booted from
+// (disk.c, through usb_msd_*).
 //
 // Takes every xHCI controller from the BIOS, resets it, enumerates keyboards and
 // mice on the root ports and behind USB 2 hubs (hubs in hubs too, and ones
@@ -144,7 +148,7 @@ static bool next_event(Trb* out) {
 // string down through the hubs (4 bits a tier), and, for a low/full-speed
 // device behind a high-speed hub, that hub's slot and port (its transaction
 // translator).
-enum Kind { KBD, MOUSE, HUB };
+enum Kind { KBD, MOUSE, HUB, MSD };
 struct Keyboard {
     bool active;
     Hc* hc;                                // the controller it's on
@@ -167,6 +171,12 @@ struct Keyboard {
     uint32_t dirty;                        // ports with a change waiting (bit n = port n)
     uint32_t power_good_ms;
     char where[24];                        // "port 3" / "port 3.2" for messages
+    // mass storage
+    int dci_out, ep_in, ep_out, iface;
+    Ring bout;                             // bulk OUT (bulk IN uses intr)
+    uint32_t tag, bsize;
+    uint64_t blocks;
+    char model[28];
 };
 #define MAX_KBD 32
 static Keyboard kbds[MAX_KBD];
@@ -175,7 +185,7 @@ static Keyboard kbds[MAX_KBD];
  * never freed, so allocating per plug-in ran it dry after a few hundred. */
 static struct {
     volatile uint8_t *out_ctx, *in_ctx, *reports;
-    volatile Trb *ep0, *intr;
+    volatile Trb *ep0, *intr, *bout;
 } devmem[MAX_KBD];
 
 static inline volatile uint32_t* ctx(volatile uint8_t* base, int idx) {
@@ -275,7 +285,7 @@ static void dispatch(const Trb& e) {
     if (type != TRB_TRANSFER_EVENT) return;
     int slot = e.d3 >> 24, ep = (e.d3 >> 16) & 0x1F, cc = e.d2 >> 24;
     for (auto& k : kbds) {
-        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep) continue;
+        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD) continue;
         uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
         int idx = (int)((trb - phys(k.intr.trb)) / sizeof(Trb));
         if (idx >= 0 && idx < RING_TRBS && (cc == 1 || cc == 13)) {
@@ -440,6 +450,184 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
 }
 
 
+// ---------------------------------------------------------------- mass storage
+// Bulk-only transport: a 31-byte command block wrapper (CBW) on bulk OUT, the
+// data on bulk IN or OUT, a 13-byte status wrapper (CSW) on bulk IN.
+static volatile uint8_t* msd_buf;                       // 64 KiB, 64 KiB aligned (a TRB can't cross 64 KiB)
+static volatile uint8_t* msd_cbw;
+#define MSD_MAX 4
+static int msd_dev[MSD_MAX], n_msd;
+static volatile int usb_busy;                          // a disk transfer is running: usb_poll keeps off
+
+static bool configure_bulk(Keyboard& k) {
+    k.dci = (k.ep_in & 0xF) * 2 + 1;
+    k.dci_out = (k.ep_out & 0xF) * 2;
+    int last = k.dci > k.dci_out ? k.dci : k.dci_out;
+    memset((void*)k.in_ctx, 0, 33 * H->csz);
+    ctx(k.in_ctx, 0)[1] = 1 | 1u << k.dci | 1u << k.dci_out;
+    fill_slot(k, last);
+    for (int w = 0; w < 2; w++) {
+        int dci = w ? k.dci : k.dci_out;
+        Ring& r = w ? k.intr : k.bout;
+        volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+        ep[0] = 0;
+        ep[1] = 3 << 1 | (uint32_t)(w ? 6 : 2) << 3 | (uint32_t)k.mps << 16;   // CErr 3, bulk IN / OUT
+        uint64_t ri = phys(r.trb) | 1;
+        ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+        ep[4] = 1024;                                   // average TRB length
+    }
+    uint64_t ic = phys(k.in_ctx);
+    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+    if (cc != 1) { printf("USB: %s: configure failed (%d)\n", k.where, cc); return false; }
+    return true;
+}
+
+// One bulk transfer; the completion code (1 ok, 13 short, 6 stall, -1 timeout).
+static int bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t* got) {
+    Ring& r = in ? k.intr : k.bout;
+    int dci = in ? k.dci : k.dci_out;
+    uint64_t p = phys(buf);
+    ring_push(r, (uint32_t)p, (uint32_t)(p >> 32), len, TRB_NORMAL << 10 | (1 << 5) | (in ? 1 << 2 : 0));
+    H->db[k.slot] = dci;
+    Trb e;
+    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, dci, &e, 5000)) return -1;
+    int cc = e.d2 >> 24;
+    if (got) *got = len - (e.d2 & 0xFFFFFF);
+    return cc;
+}
+
+// A halted bulk endpoint: Reset Endpoint, move its ring on, CLEAR_FEATURE(HALT).
+static void clear_halt(Keyboard& k, bool in) {
+    Ring& r = in ? k.intr : k.bout;
+    int dci = in ? k.dci : k.dci_out;
+    command(0, 0, 0, 14u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);       // Reset Endpoint
+    uint64_t dq = phys(&r.trb[r.enq]) | r.cycle;
+    command((uint32_t)dq, (uint32_t)(dq >> 32), 0, 16u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);
+    control(k, 0x02, 1, 0, in ? k.ep_in : k.ep_out, 0, nullptr);
+}
+
+static void bot_reset(Keyboard& k) {
+    control(k, 0x21, 0xFF, 0, k.iface, 0, nullptr);       // Bulk-Only Mass Storage Reset
+    clear_halt(k, true);
+    clear_halt(k, false);
+}
+
+// A SCSI command: 0 done, 1 failed (check condition), -1 transport error.
+static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t len) {
+    volatile uint8_t* w = msd_cbw;
+    for (int i = 0; i < 31; i++) w[i] = 0;
+    uint32_t tag = ++k.tag;
+    w[0] = 'U'; w[1] = 'S'; w[2] = 'B'; w[3] = 'C';
+    w[4] = (uint8_t)tag; w[5] = (uint8_t)(tag >> 8); w[6] = (uint8_t)(tag >> 16); w[7] = (uint8_t)(tag >> 24);
+    w[8] = (uint8_t)len; w[9] = (uint8_t)(len >> 8); w[10] = (uint8_t)(len >> 16); w[11] = (uint8_t)(len >> 24);
+    w[12] = in ? 0x80 : 0;
+    w[14] = (uint8_t)cdb_len;
+    for (int i = 0; i < cdb_len; i++) w[15 + i] = cdb[i];
+    int cc = bulk(k, false, w, 31, nullptr);
+    if (cc != 1) { if (cc == 6) bot_reset(k); return -1; }
+    if (len) {
+        cc = bulk(k, in, msd_buf, len, nullptr);
+        if (cc == 6) clear_halt(k, in);
+        else if (cc != 1 && cc != 13) return -1;
+    }
+    volatile uint8_t* csw = msd_cbw + 64;
+    for (int tries = 0; tries < 2; tries++) {
+        for (int i = 0; i < 13; i++) csw[i] = 0;
+        cc = bulk(k, true, csw, 13, nullptr);
+        if (cc == 6) { clear_halt(k, true); continue; }
+        break;
+    }
+    if (cc != 1 && cc != 13) { bot_reset(k); return -1; }
+    uint32_t t = csw[4] | csw[5] << 8 | csw[6] << 16 | (uint32_t)csw[7] << 24;
+    if (csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S' || t != tag || csw[12] == 2) { bot_reset(k); return -1; }
+    return csw[12] ? 1 : 0;
+}
+
+static void request_sense(Keyboard& k) {
+    uint8_t cdb[6] = { 0x03, 0, 0, 0, 18, 0 };
+    scsi(k, cdb, 6, true, 18);
+}
+
+static bool msd_setup(Keyboard& k) {
+    if (!msd_buf) {
+        msd_buf = (volatile uint8_t*)dma_alloc(65536, 65536);
+        msd_cbw = (volatile uint8_t*)dma_alloc(128, 64);
+        if (!msd_buf || !msd_cbw) { printf("USB: out of memory for mass storage\n"); return false; }
+    }
+    if (n_msd == MSD_MAX) return false;
+    k.kind = MSD;
+    if (!configure_bulk(k)) return false;
+    k.active = true;
+    msd_buf[0] = 0;
+    uint8_t inq[6] = { 0x12, 0, 0, 0, 36, 0 };
+    if (scsi(k, inq, 6, true, 36) == 0) {
+        int n = 0;
+        for (int i = 8; i < 32 && n < 27; i++) {
+            char c = (char)msd_buf[i];
+            if (c < 32 || c > 126) c = ' ';
+            if (c == ' ' && (n == 0 || k.model[n - 1] == ' ')) continue;
+            k.model[n++] = c;
+        }
+        while (n && k.model[n - 1] == ' ') n--;
+        k.model[n] = 0;
+    }
+    if (msd_buf[0] & 0x1F) { printf("USB: %s: storage device type %d, not a disk\n", k.where, msd_buf[0] & 0x1F); k.active = false; return false; }
+    bool ready = false;
+    for (int i = 0; i < 50 && !ready; i++) {            // up to ~5 s to spin up / settle
+        uint8_t tur[6] = { 0 };
+        int r = scsi(k, tur, 6, false, 0);
+        if (r == 0) ready = true;
+        else { request_sense(k); delay_ms(100); }
+    }
+    uint8_t rc[10] = { 0x25 };
+    int r = -1;
+    for (int i = 0; i < 3 && r != 0; i++) { r = scsi(k, rc, 10, true, 8); if (r) request_sense(k); }
+    if (r != 0) { printf("USB: %s: %s: no capacity (no medium?)\n", k.where, k.model); k.active = false; return false; }
+    uint32_t last = (uint32_t)msd_buf[0] << 24 | msd_buf[1] << 16 | msd_buf[2] << 8 | msd_buf[3];
+    k.bsize = (uint32_t)msd_buf[4] << 24 | msd_buf[5] << 16 | msd_buf[6] << 8 | msd_buf[7];
+    k.blocks = (uint64_t)last + 1;
+    printf("USB: disk on %s: %s, %u MiB, %u-byte blocks (slot %d, %s speed)\n", k.where, k.model,
+           (uint32_t)(k.blocks * k.bsize >> 20), k.bsize, k.slot, speed_name(k.speed));
+    if (k.bsize != 512) { printf("USB: %s: only 512-byte blocks are supported\n", k.where); k.active = false; return false; }
+    msd_dev[n_msd++] = (int)(&k - kbds);
+    return true;
+}
+
+extern "C" int usb_msd_count(void) { return n_msd; }
+extern "C" uint64_t usb_msd_sectors(int i) {
+    if (i >= n_msd) return 0;
+    Keyboard& k = kbds[msd_dev[i]];
+    return k.active && k.kind == MSD ? k.blocks : 0;
+}
+extern "C" const char* usb_msd_name(int i) { return i < n_msd ? kbds[msd_dev[i]].model : ""; }
+
+// count <= 128 sectors; buf anywhere (copied through the DMA buffer).
+extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int write) {
+    if (i >= n_msd || !count || count > 128) return -1;
+    Keyboard& k = kbds[msd_dev[i]];
+    if (!k.active || k.kind != MSD || lba + count > k.blocks || lba > 0xFFFFFFFFull) return -1;
+    Hc* saved = H;
+    usb_busy = 1;
+    H = k.hc;
+    uint32_t bytes = count * 512;
+    if (write) memcpy((void*)msd_buf, buf, bytes);
+    uint8_t cdb[10] = { (uint8_t)(write ? 0x2A : 0x28), 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+                        (uint8_t)(lba >> 8), (uint8_t)lba, 0, (uint8_t)(count >> 8), (uint8_t)count, 0 };
+    int r = -1;
+    for (int t = 0; t < 3 && r != 0; t++) {
+        r = scsi(k, cdb, 10, !write, bytes);
+        if (r != 0) {
+            request_sense(k);
+            if (write) memcpy((void*)msd_buf, buf, bytes);  // the sense data went through the buffer
+        }
+    }
+    if (r == 0 && !write) memcpy(buf, (const void*)msd_buf, bytes);
+    if (r != 0) printf("USB: %s: %s of %u sectors at %u failed\n", k.where, write ? "write" : "read", count, (uint32_t)lba);
+    H = saved;
+    usb_busy = 0;
+    return r == 0 ? 0 : -1;
+}
+
 // The rest of setting up a device that has slot k.slot: its memory, an
 // address, and a keyboard, mouse or hub on top. False: not driven.
 static bool setup_slot(Keyboard& k, int ki) {
@@ -450,7 +638,8 @@ static bool setup_slot(Keyboard& k, int ki) {
         m.reports = (volatile uint8_t*)dma_alloc(RING_TRBS * 8, 64);
         m.ep0     = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
         m.intr    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
-        if (!m.out_ctx || !m.in_ctx || !m.reports || !m.ep0 || !m.intr) {
+        m.bout    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
+        if (!m.out_ctx || !m.in_ctx || !m.reports || !m.ep0 || !m.intr || !m.bout) {
             printf("USB: %s: out of memory\n", k.where);
             m.out_ctx = nullptr;
             return false;
@@ -462,6 +651,7 @@ static bool setup_slot(Keyboard& k, int ki) {
     memset((void*)k.reports, 0, RING_TRBS * 8);
     ring_attach(k.ep0, m.ep0);
     ring_attach(k.intr, m.intr);
+    ring_attach(k.bout, m.bout);
     H->dcbaa[k.slot] = phys(k.out_ctx);
 
     // Address Device: slot context + endpoint 0.
@@ -497,8 +687,19 @@ static bool setup_slot(Keyboard& k, int ki) {
     // A boot keyboard or mouse interface, or a hub's, and its interrupt IN endpoint.
     int iface = -1, ep_addr = 0, ep_mps = 8, ep_interval = 10;
     bool in_iface = false, is_mouse = false;
+    int ms_iface = -1, ms_in = 0, ms_out = 0, ms_mps = 512;
+    bool in_ms = false;
     for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
         uint8_t type = desc[i + 1];
+        if (type == 4) {                                // mass storage, bulk-only transport
+            in_ms = !hub && ms_iface < 0 && desc[i + 5] == 8 && desc[i + 7] == 0x50;
+            if (in_ms) ms_iface = desc[i + 2];
+        }
+        if (type == 5 && in_ms && (desc[i + 3] & 3) == 2) {
+            int a = desc[i + 2], mp = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+            if (a & 0x80) { if (!ms_in) ms_in = a; } else if (!ms_out) ms_out = a;
+            ms_mps = mp;
+        }
         if (type == 4) {
             if (hub) in_iface = iface < 0 && desc[i + 5] == 9;
             // HID boot interface: protocol 1 = keyboard, 2 = mouse.
@@ -510,7 +711,12 @@ static bool setup_slot(Keyboard& k, int ki) {
             ep_interval = desc[i + 6];
         }
     }
-    if (iface < 0 || !ep_addr) { printf("USB: %s: not a keyboard, mouse or hub\n", k.where); return false; }
+    if (ms_iface >= 0 && ms_in && ms_out) {
+        if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;      // SET_CONFIGURATION
+        k.iface = ms_iface; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
+        return msd_setup(k);
+    }
+    if (iface < 0 || !ep_addr) { printf("USB: %s: not a keyboard, mouse, hub or mass storage\n", k.where); return false; }
     if (hub && k.speed >= 4) {                          // a USB 3 hub's SuperSpeed half
         printf("USB: %s: USB 3 hub (its USB 2 side carries keyboards and mice)\n", k.where);
         return false;
@@ -558,10 +764,10 @@ static void forget(int i) {
     H = k.hc;
     for (int j = 0; j < MAX_KBD; j++)
         if (kbds[j].active && kbds[j].parent == i) forget(j);
-    if (k.kind != HUB) release_all(k);
+    if (k.kind == KBD || k.kind == MOUSE) release_all(k);
     k.active = false;
     command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
-    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.mouse ? "mouse" : "keyboard", k.where);
+    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? "disk" : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
 // Port `port` of hub h: something plugged in or out (or the first look).
@@ -712,14 +918,17 @@ bool usb_init(const char* cmdline) {
         for (int p = 1; p <= H->num_ports; p++)
             if (portsc(p) & PORT_CCS) setup_port(p);
         int n = 0;
-        for (auto& k : kbds) n += k.active && k.hc == H && k.kind != HUB;
-        printf("USB: xHCI %d with %d ports, %d keyboard/mouse device%s\n", num_hc - 1, H->num_ports, n, n == 1 ? "" : "s");
+        int nd = 0;
+        for (auto& k : kbds) { n += k.active && k.hc == H && (k.kind == KBD || k.kind == MOUSE); nd += k.active && k.hc == H && k.kind == MSD; }
+        printf("USB: xHCI %d with %d ports, %d keyboard/mouse device%s, %d disk%s\n", num_hc - 1, H->num_ports, n, n == 1 ? "" : "s",
+               nd, nd == 1 ? "" : "s");
     }
     if (!num_hc) { printf("USB: no xHCI controller\n"); return false; }
     return true;
 }
 
 void usb_poll() {
+    if (usb_busy) return;                               // a disk transfer is waiting on the event ring
     for (int c = 0; c < num_hc; c++) {
         H = &hcs[c];
         Trb e;
