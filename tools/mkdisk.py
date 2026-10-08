@@ -14,6 +14,11 @@ boot sector: FreeDOS walks a file's cluster chain on every seek, which with
 FAT32's 512-byte clusters (all a small FAT32 disk can have) makes seeking in
 a big file (DOOM's WAD) very slow. Otherwise FAT32 with BOOTSECTOR.
 
+--bios=BOOT.img,CORE.img: GRUB's i386-pc boot code for legacy BIOS boot:
+BOOT.img's code goes into the MBR (the partition table and disk signature
+stay), CORE.img into the sectors between the MBR and the partition, as
+grub-bios-setup would put them (with --update too).
+
 --update: OUT.img exists (made by this script) and is kept: files are copied
 in, but AUTOEXEC.BAT, FDCONFIG.SYS and anything from --contents / folders
 that is already there is left alone (it may have been changed in DOS)."""
@@ -33,16 +38,19 @@ def chs(lba, heads=255, spt=63):
 
 def main():
     args = sys.argv[1:]
-    ptype, boot16, update = None, None, False
+    ptype, boot16, update, bios = None, None, False, None
     while args and args[0].startswith("--"):
         a = args.pop(0)
         if a.startswith("--type="): ptype = int(a[7:], 16)
         elif a.startswith("--boot16="): boot16 = a[9:]
         elif a == "--update": update = True
+        elif a.startswith("--bios="): bios = a[7:].split(",")
         else: sys.exit("mkdisk: unknown option " + a)
     out, size_mb, bootbin, files = args[0], int(args[1]), args[2], args[3:]
     if update and os.path.exists(out):
-        return copy_files(out, files, True)
+        copy_files(out, files, True)
+        if bios: bios_boot(out, *bios)
+        return
     total = size_mb * 2048
     plen = total - START
     fat16 = boot16 is not None and plen < 4 * 1024 * 1024 - 8192
@@ -89,9 +97,26 @@ def main():
                 f.write(new)
 
     copy_files(out, files, False)
+    if bios: bios_boot(out, *bios)
 
 
-KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS"}
+def bios_boot(out, boot_img, core_img):
+    boot = bytearray(open(boot_img, "rb").read())
+    core = open(core_img, "rb").read()
+    if len(boot) != 512 or len(core) > (START - 1) * 512:
+        sys.exit("mkdisk: unexpected GRUB boot.img / core.img (core %d bytes)" % len(core))
+    boot[0x5C:0x64] = struct.pack("<Q", 1)          # core.img starts at sector 1
+    boot[0x66:0x68] = b"\x90\x90"                   # hard disk: trust/fix DL (as grub-bios-setup does)
+    core = bytearray(core)
+    struct.pack_into("<QHH", core, 0x1F4, 2, (len(core) + 511) // 512 - 1, 0x820)   # the rest of core.img
+    with open(out, "r+b") as f:
+        mbr = bytearray(f.read(512))
+        mbr[0:440] = boot[0:440]
+        f.seek(0); f.write(mbr)
+        f.seek(512); f.write(core)
+
+
+KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG"}
 
 
 def copy_files(out, files, update):

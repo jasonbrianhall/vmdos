@@ -36,11 +36,32 @@ make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: EFI boot files + FreeDO
 sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); everything on it is replaced
 ```
 
-Plug it in, pick the stick in the PC's boot menu (UEFI). The stick is then
+Plug it in, pick the stick in the PC's boot menu (UEFI or legacy BIOS). The stick is then
 C: (vmdos reads it through its own USB driver: xHCI, bulk-only mass
 storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
 Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
 Afterwards the stick can be mounted on Linux to add games (it's FAT).
+
+### Boot menu (UEFI and legacy BIOS)
+
+esp.img boots both ways through GRUB: on UEFI, `EFI/BOOT/BOOTX64.EFI` is
+GRUB, which chainloads `EFI/vmdos/vmdos.efi`; on a legacy BIOS (or CSM),
+GRUB's boot code in the MBR and in the gap before the partition boots
+`boot/vmdos.elf`. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
+own entries go in `boot/grub/custom.cfg` on the stick, which nothing
+overwrites; when it exists, the menu waits 5 s:
+
+```
+menuentry "QuickBASIC clone" {
+    if [ "$grub_platform" = "efi" ]; then chainloader /EFI/qb/qb.efi
+    else multiboot /qb/qb.elf; fi
+}
+```
+
+`make run-bios` boots esp.img under SeaBIOS; `GRUB=0` (or no GRUB tools:
+Fedora grub2-tools grub2-pc-modules grub2-efi-x64-modules, Debian
+grub-common grub-pc-bin grub-efi-amd64-bin) makes the old UEFI-only image
+with vmdos.efi as BOOTX64.EFI.
 
 ### Drive C:
 
@@ -59,7 +80,7 @@ updates esp.img in place: programs and FreeDOS files are refreshed,
 AUTOEXEC.BAT, FDCONFIG.SYS and files already copied from `EXTRA` are kept
 (`FRESH=1` starts over). `C=ram`: C: is dos.img in RAM, changes lost (kernel
 option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
-EFI/BOOT/vmdos.cfg, which vmdos.efi reads).
+EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks and USB
 sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
@@ -127,7 +148,7 @@ menuentry "FreeDOS (vmdos)" {
 
 Screen: the picture is scaled to the largest 4:3 box that fits (text too),
 black bars at the sides of a wide screen; `aspect=fill` on the kernel command
-line (KARGS, or EFI/BOOT/vmdos.cfg on the stick) stretches it to the whole
+line (KARGS, or EFI/vmdos/vmdos.cfg on the stick) stretches it to the whole
 screen. The framebuffer is mapped write-combining (`nowc` turns that off).
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):

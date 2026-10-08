@@ -1,4 +1,5 @@
-# Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk)
+# Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk;
+# boots on UEFI and legacy BIOS through GRUB)
 # and publishes it as a GitHub release:
 #   - push a tag v* (git tag v1.0 && git push origin v1.0): release "v1.0"
 #   - run it by hand (Actions > release > Run workflow): pre-release "latest",
@@ -25,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
-            mtools dosfstools gnu-efi xz-utils
+            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin
 
       - name: Build esp.img (no EXTRA, no RAMDISK)
         run: |
@@ -33,8 +34,10 @@ jobs:
           # what's on it, and that there's no RAM disk
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS
-          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT
-          if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos ::/boot ::/boot/grub
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/boot/vmdos.elf ::/EFI/vmdos/vmdos.efi   # both boot paths there
+          head -c 440 esp.img | grep -aq GRUB || { echo 'no GRUB boot code in the MBR'; exit 1; }
+          if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
 
       - name: Package
         run: |
@@ -62,9 +65,11 @@ jobs:
           - Linux: \`xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync\` (find sdX with \`lsblk\`)
           - Windows / macOS: balenaEtcher or Rufus (DD mode) with vmdos-usb.img.xz
 
-          Then pick the stick in the PC's UEFI boot menu (Secure Boot off). The stick is drive C:
+          Then pick the stick in the PC's boot menu, UEFI (Secure Boot off) or legacy BIOS. The stick is drive C:
           (a 2000 MiB FAT partition; changes are kept). Add games by copying them onto the stick
           from any computer, and ISO files (e.g. to C:\\ISOS) for \`VMCD D: C:\\ISOS\\GAME.ISO\`.
+
+          Your own boot-menu entries go in /boot/grub/custom.cfg on the stick (both modes).
 
           vmdos.efi alone: for an existing EFI system partition (see the README).
           EOF

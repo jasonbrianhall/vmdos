@@ -10,6 +10,7 @@
 #   make esp             esp.img: the EFI disk, also C: (EFI/BOOT/BOOTX64.EFI + FreeDOS)
 #   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img (SATA)
 #   make run-usb         QEMU, UEFI (OVMF), booting esp.img as a USB stick
+#   make run-bios        QEMU, legacy BIOS (SeaBIOS), booting esp.img (GRUB in the MBR)
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
@@ -190,25 +191,70 @@ vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)
 	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel -j .rela \
 	        -j '.rel.*' -j '.rela.*' -j .reloc -O efi-app-x86_64 --subsystem=10 $(BUILD)/efi/vmdos.so $@
 
-# esp.img: the EFI system partition, also C: (FreeDOS files at its root,
-# vmdos.efi as EFI/BOOT/BOOTX64.EFI, dos.img next to it with RAMDISK=1, KARGS in
-# EFI/BOOT/vmdos.cfg). Updated in place unless FRESH=1 or missing.
+# esp.img: the EFI system partition, also C:, bootable both ways:
+#  - UEFI: EFI/BOOT/BOOTX64.EFI is GRUB (x86_64-efi), which chainloads
+#    EFI/vmdos/vmdos.efi (KARGS in EFI/vmdos/vmdos.cfg, dos.img next to it
+#    with RAMDISK=1);
+#  - legacy BIOS: GRUB (i386-pc) in the MBR and the gap before the
+#    partition, which boots boot/vmdos.elf (Multiboot).
+# Both read boot/grub/grub.cfg, which picks the entry for the platform and
+# then reads boot/grub/custom.cfg if you made one (your own menu entries;
+# never overwritten; with it, the menu waits 5 s). GRUB=0 (or no GRUB tools):
+# UEFI only, vmdos.efi as BOOTX64.EFI. Updated in place unless FRESH=1.
 ESP_FREE ?= 256
 EXTRA_MB := $(if $(EXTRA),$(shell du -sm "$(EXTRA)" | cut -f1),0)
 ESP_MB   ?= $(shell echo $$(( $(DISK_MB) + $(EXTRA_MB) + $(ISO_MB) + $(ESP_FREE) )))
-# Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list).
+GRUB_MKIMAGE ?= $(firstword $(shell command -v grub-mkimage grub2-mkimage 2>/dev/null))
+GRUB_LIB ?= $(firstword $(wildcard /usr/lib/grub /usr/share/grub2 /usr/lib64/grub))
+GRUB_OK  := $(and $(GRUB_MKIMAGE),$(wildcard $(GRUB_LIB)/i386-pc/boot.img),$(wildcard $(GRUB_LIB)/x86_64-efi/normal.mod))
+GRUB     ?= $(if $(GRUB_OK),1,0)
+GRUB_MODS := part_msdos part_gpt fat normal configfile search search_fs_file test echo sleep chain multiboot boot \
+             video video_fb all_video gfxterm
+VMDOS_EFI_DIR := $(if $(filter 1,$(GRUB)),EFI/vmdos,EFI/BOOT)
+# Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list, GRUB).
 $(BUILD)/esp.opts: FORCE | $(BUILD)
-	@echo '$(USE_RAM) $(ISO_C)' > $@.new
+	@echo '$(USE_RAM) $(ISO_C) $(GRUB)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+$(BUILD)/grub/early.cfg: | $(BUILD)
+	@mkdir -p $(BUILD)/grub
+	printf 'search --no-floppy --file --set=root /boot/vmdos.elf\nset prefix=($$root)/boot/grub\nconfigfile $$prefix/grub.cfg\n' > $@
+$(BUILD)/grub/core.img: $(BUILD)/grub/early.cfg
+	$(GRUB_MKIMAGE) -O i386-pc -d $(GRUB_LIB)/i386-pc -o $@ -c $< -p /boot/grub biosdisk vbe vga $(GRUB_MODS)
+$(BUILD)/grub/BOOTX64.EFI: $(BUILD)/grub/early.cfg
+	$(GRUB_MKIMAGE) -O x86_64-efi -d $(GRUB_LIB)/x86_64-efi -o $@ -c $< -p /boot/grub efi_gop efi_uga $(GRUB_MODS)
+$(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
+	@mkdir -p $(BUILD)/grub
+	@{ echo '# vmdos boot menu (made by make esp: changes here are overwritten;'; \
+	   echo '# put your own entries in /boot/grub/custom.cfg)'; \
+	   echo 'insmod all_video'; \
+	   echo 'set default=0'; \
+	   echo 'if [ -f $$prefix/custom.cfg ]; then set timeout=5; else set timeout=0; fi'; \
+	   echo 'if [ "$$grub_platform" = "efi" ]; then'; \
+	   echo '  menuentry "FreeDOS (vmdos)" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi'; \
+	   echo '  }'; \
+	   echo 'else'; \
+	   echo '  menuentry "FreeDOS (vmdos)" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
+	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
+	   echo '  }'; \
+	   echo 'fi'; \
+	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+ESP_GRUB_DEPS  := $(if $(filter 1,$(GRUB)),vmdos.elf $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/grub/grub.cfg)
+ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BOOTX64.EFI vmdos.elf=boot/vmdos.elf \
+                    $(BUILD)/grub/grub.cfg=boot/grub/grub.cfg --bios=$(GRUB_LIB)/i386-pc/boot.img$(comma)$(BUILD)/grub/core.img)
 esp: esp.img
-esp.img: vmdos.efi $(RAM_IMG) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
-	python3 tools/mkdisk.py $(if $(FRESH),,--update) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
-	    $(DOS_FILES) vmdos.efi=EFI/BOOT/BOOTX64.EFI $(if $(USE_RAM),dos.img=EFI/BOOT/dos.img) $(BUILD)/vmdos.cfg=EFI/BOOT/vmdos.cfg \
-	    $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
-	$(if $(USE_RAM),,@MTOOLS_SKIP_CHECK=1 mdel -i $@@@1M ::/EFI/BOOT/dos.img 2>/dev/null || true)
+esp.img: vmdos.efi $(RAM_IMG) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
+	$(if $(filter 1,$(GRUB)),,@echo "esp.img: UEFI only (GRUB=0, or grub-mkimage / GRUB's i386-pc and x86_64-efi modules not found)")
+	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
+	    $(DOS_FILES) vmdos.efi=$(VMDOS_EFI_DIR)/$(if $(filter 1,$(GRUB)),vmdos.efi,BOOTX64.EFI) \
+	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
+	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
+	$(if $(USE_RAM),,@MTOOLS_SKIP_CHECK=1 mdel -i $@@@1M ::/EFI/BOOT/dos.img ::/EFI/vmdos/dos.img 2>/dev/null || true)
 	@touch $@
 
 OVMF     ?= $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd))
@@ -249,6 +295,10 @@ run-efi: vmdos.iso $(DISK_DEP)
 run-efi-app: BOOTDISK = 0
 run-efi-app: esp.img
 	qemu-system-x86_64 -bios $(OVMF) $(QESP) $(QEMU_ARGS)
+# esp.img on a SATA disk, legacy BIOS (SeaBIOS) boot through GRUB.
+run-bios: BOOTDISK = 0
+run-bios: esp.img
+	qemu-system-i386 $(QESP) $(QEMU_ARGS)
 # esp.img as a USB stick (xHCI), booted by the firmware, C: on the stick.
 run-usb: esp.img
 	qemu-system-x86_64 -bios $(OVMF) -device qemu-xhci,id=xhci \
@@ -257,5 +307,5 @@ run-usb: esp.img
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
-.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app run-usb clean
+.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app run-usb run-bios clean
 -include $(OBJS:.o=.d)
