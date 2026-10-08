@@ -24,6 +24,10 @@ make run-efi    # QEMU, UEFI, from vmdos.iso
 
 ### Drive C:
 
+C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
+vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
+CTMOUSE) are in C:\VMDOS, which is on the PATH.
+
 `C=disk` (default): C: is the FAT partition of `esp.img`, which the run
 targets attach as a SATA (AHCI) disk; what DOS writes stays there. Rebuilding
 updates esp.img in place: programs and FreeDOS files are refreshed,
@@ -38,7 +42,7 @@ partitions are never touched (DOS sees a one-partition disk and can't write
 outside it). No such partition, or a disk that isn't AHCI (NVMe, USB): the
 RAM disk, from dos.img next to vmdos.efi or the GRUB module. To use an
 existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
-COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT, VM*.*, SHSUCDX.COM, CTMOUSE.COM)
+COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)
 to the ESP's root and vmdos.efi + dos.img to a folder on it.
 
 QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
@@ -97,7 +101,7 @@ menuentry "FreeDOS (vmdos)" {
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):
 `VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,
-`VMSPEED` alone shows it; it's in C:\), Ctrl+F11 / Ctrl+F12 step it slower /
+`VMSPEED` alone shows it), Ctrl+F11 / Ctrl+F12 step it slower /
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
@@ -113,7 +117,7 @@ images are held in RAM as boot modules instead, one drive each, and
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
 load options); the log shows every INT 33h call, event-handler call and
 command sent to the PS/2 mouse port. If the built-in driver doesn't satisfy
-a game, try `CTMOUSE` first.
+a game, try CuteMouse (loaded by AUTOEXEC.BAT; see below).
 
 The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
@@ -134,8 +138,10 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   mouse on the virtual keyboard controller (IRQ 12 packets) for programs
   with their own mouse code. The pointer is drawn over text and
   mode 13h by the renderer. BIOS PS/2 mouse services (INT 15h C2xx, IRQ 12
-  handler) let a real DOS driver run too: CuteMouse is in C:\ (`LH CTMOUSE`
-  before a game that wants a DOS driver); it takes over INT 33h.
+  handler) let a real DOS driver run too: AUTOEXEC.BAT loads CuteMouse
+  (`LH C:\VMDOS\CTMOUSE.COM`), which takes over INT 33h. Some games need it
+  (Warcraft II), most don't: put REM in front of that line to use the
+  built-in driver.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
   `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
   first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh

@@ -107,10 +107,15 @@ $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS \
-             $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM
+# C:\ root: FreeDOS and the two configuration files; vmdos's tools and
+# drivers go in C:\VMDOS (on the PATH).
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMSPEED.COM $(BUILD)/SHSUCDX.COM \
+               third_party/ctmouse/CTMOUSE.COM
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(VMDOS_FILES)
+DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
+             $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
 
-dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(DOS_FILES) tools/mkdisk.py $(BUILD)/extra.stamp
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(DOS_DEPS) tools/mkdisk.py $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin $(DOS_FILES) \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
@@ -185,7 +190,7 @@ $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 esp: esp.img
-esp.img: vmdos.efi dos.img $(DOS_FILES) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
+esp.img: vmdos.efi dos.img $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
 	python3 tools/mkdisk.py $(if $(FRESH),,--update) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
 	    $(DOS_FILES) vmdos.efi=EFI/BOOT/BOOTX64.EFI dos.img=EFI/BOOT/dos.img $(BUILD)/vmdos.cfg=EFI/BOOT/vmdos.cfg \
 	    $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")

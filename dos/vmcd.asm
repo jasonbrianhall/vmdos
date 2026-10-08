@@ -2,7 +2,7 @@
 ; chosen with VMCD.COM, or loaded as boot modules). Every request goes to
 ; the monitor (INT 2Fh AX=5644h);
 ; SHSUCDX or MSCDEX then gives each drive a letter:
-;   DEVICE=C:\VMCD.SYS          (in FDCONFIG.SYS)
+;   DEVICE=C:\VMDOS\VMCD.SYS    (in FDCONFIG.SYS)
 ;   SHSUCDX /D:?VMCD0001        (in AUTOEXEC.BAT)
 ; Not under vmdos it doesn't stay in memory (and says nothing).
         org 0

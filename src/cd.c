@@ -202,7 +202,7 @@ void cd_api(struct regs *r)
                 put(&o, "\r\n");
             }
             for (int u = 0; u < n_units; u++)
-                if (unit_img[u] < 0) { char t[24] = " drive 1: empty\r\n"; t[8] = (char)('1' + u); put(&o, t); }
+                if (unit_img[u] < 0) { char t[24] = " drive 1: empty\r\n"; t[7] = (char)('1' + u); put(&o, t); }
             wr8(o, '$');
             AX(r) = 0;
             return;

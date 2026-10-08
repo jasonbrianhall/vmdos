@@ -1,7 +1,7 @@
 ; VMXMS.SYS - makes vmdos's built-in XMS driver visible the way HIMEM is:
 ; a device named XMSXXXX0 that hooks INT 2Fh (AX=4300h/4310h). The XMS
 ; functions themselves run in the vmdos monitor. Load it first:
-;   DEVICE=C:\VMXMS.SYS
+;   DEVICE=C:\VMDOS\VMXMS.SYS
 ; Build: nasm -f bin -o VMXMS.SYS vmxms.asm
         org 0
 
