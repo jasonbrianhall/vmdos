@@ -256,9 +256,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     UINT8* disk = NULL;
     // dos.img too when it's there: the RAM disk is the fallback if the
     // kernel can't drive this disk (not AHCI).
-    Print(L"vmdos UEFI loader\r\n  reading %s\r\n", img_path);
     disk = read_file(image, img_path, &disk_size);
-    if (!disk && !disk_c) { fail(L"can't read dos.img (it goes in the same folder as vmdos.efi), and no KERNEL.SYS on this partition"); return EFI_NOT_FOUND; }
+    if (!disk && !disk_c) { fail(L"no KERNEL.SYS on this partition and no dos.img next to vmdos.efi (build with RAMDISK=1)"); return EFI_NOT_FOUND; }
     if (esp) {
         UINTN n = 0;
         while (opts[n]) n++;

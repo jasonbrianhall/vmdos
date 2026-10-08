@@ -176,8 +176,8 @@ void disk_init(void)
         if (n) kprintf("disk: no FAT partition with KERNEL.SYS on the AHCI disks\n");
     }
     if (!disk_image)
-        panic("No C: drive: no disk partition with KERNEL.SYS (AHCI) and no dos.img boot module "
-              "(GRUB: module /boot/dos.img dos.img; QEMU: -initrd dos.img).");
+        panic("No C: drive: no FAT partition with KERNEL.SYS on an AHCI (SATA) disk, and no RAM disk "
+              "(build with RAMDISK=1: dos.img next to vmdos.efi, GRUB module, QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
             want_ram ? "" : "; changes are lost at power-off");

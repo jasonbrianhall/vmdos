@@ -13,8 +13,8 @@ changes are kept; a RAM disk (dos.img) is the option and the fallback.
 #         grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso qemu-system-x86 edk2-ovmf
 sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf
-make            # vmdos.elf + dos.img (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
-make efi        # vmdos.efi + dos.img: a UEFI application, no GRUB needed
+make            # vmdos.elf (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
+make efi        # vmdos.efi: a UEFI application, no GRUB needed
 make esp        # esp.img: the EFI disk, also C: (FreeDOS at its root, EFI/BOOT/BOOTX64.EFI); dd it to a disk
 make iso        # vmdos.iso (GRUB), hybrid BIOS/UEFI
 make run        # QEMU, BIOS (-kernel)
@@ -23,6 +23,11 @@ make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
 
 ### Drive C:
+
+The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
+`C=ram`): then esp.img carries EFI/BOOT/dos.img, the ISO carries the GRUB
+module and `make run` passes it to QEMU, as a fallback for machines whose
+disk vmdos can't drive (not SATA/AHCI) and for `c=ram`.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,

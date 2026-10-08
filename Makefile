@@ -1,17 +1,19 @@
 # vmdos: FreeDOS in virtual-8086 mode under a small 32-bit kernel.
 #
-#   make                 vmdos.elf + dos.img (fetches FreeDOS on first use)
+#   make                 vmdos.elf (+ dos.img with RAMDISK=1; fetches FreeDOS on first use)
 #   make iso             vmdos.iso: GRUB, boots on BIOS and UEFI
 #   make run             QEMU, BIOS, -kernel/-initrd
 #   make run-iso         QEMU, BIOS, from the ISO
 #   make run-efi         QEMU, UEFI (OVMF), from the ISO
-#   make efi             vmdos.efi + dos.img: run straight from UEFI (no GRUB);
+#   make efi             vmdos.efi: run straight from UEFI (no GRUB);
 #                        both go in the same folder of the EFI system partition
-#   make esp             esp.img: a FAT32 disk with EFI/BOOT/BOOTX64.EFI + dos.img
+#   make esp             esp.img: the EFI disk, also C: (EFI/BOOT/BOOTX64.EFI + FreeDOS)
 #   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
+# RAMDISK=1: also build the RAM disk dos.img and pack it (esp.img, the ISO,
+#   make run) as a fallback / for c=ram. Off by default. C=ram implies it.
 # DISK_MB=size of the RAM disk dos.img (default 64; at least 34 for FAT32)
 # C=disk (default): C: is esp.img's FAT partition on an AHCI disk, so changes
 #   are kept; ISO= files go to C:\ISOS (the first in CD drive 1). C=ram: C:
@@ -21,6 +23,9 @@
 FREEDOS  ?= freedos
 DISK_MB  ?= 64
 C        ?= disk
+RAMDISK  ?=
+USE_RAM  := $(if $(filter 1 yes,$(RAMDISK))$(filter ram,$(C)),1)
+RAM_IMG  := $(if $(USE_RAM),dos.img)
 EXTRA    ?=
 FB_W     ?= 640
 FB_H     ?= 480
@@ -41,7 +46,7 @@ OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o
 FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
 LIBGCC   := $(shell $(CC) -m32 -print-libgcc-file-name)
 
-all: vmdos.elf dos.img
+all: vmdos.elf $(RAM_IMG)
 
 $(BUILD):
 	mkdir -p $@
@@ -137,17 +142,18 @@ iso: vmdos.iso
 # KARGS: kernel command line for the ISO's GRUB entry (e.g. KARGS="debug=2 audio=ac97").
 $(BUILD)/grub.cfg: grub.cfg FORCE | $(BUILD)
 	@sed 's|multiboot /boot/vmdos.elf.*|multiboot /boot/vmdos.elf $(KARGS_ALL)|' $< > $@.new
+	@$(if $(USE_RAM),true,sed -i '/dos.img/d' $@.new)
 	@for f in $(ISO_RAM); do n=$$(basename $$f); sed -i "/^}/i\    module /boot/cd/$$n $$n" $@.new; done
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 
-vmdos.iso: vmdos.elf dos.img $(BUILD)/grub.cfg $(ISO_RAM)
+vmdos.iso: vmdos.elf $(RAM_IMG) $(BUILD)/grub.cfg $(ISO_RAM)
 	@test -n "$(GRUB_MKRESCUE)" || { echo "grub-mkrescue / grub2-mkrescue not found."; \
 	  echo "  Debian/Ubuntu: sudo apt install grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools"; \
 	  echo "  Fedora:        sudo dnf install grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools"; \
 	  echo "Or skip GRUB: make efi / make esp"; exit 1; }
 	rm -rf $(BUILD)/iso && mkdir -p $(BUILD)/iso/boot/grub
 	cp vmdos.elf $(BUILD)/iso/boot/
-	gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz
+	$(if $(USE_RAM),gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz)
 	cp $(BUILD)/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
 	$(if $(ISO_RAM),mkdir -p $(BUILD)/iso/boot/cd && cp $(ISO_RAM) $(BUILD)/iso/boot/cd/)
 	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
@@ -160,7 +166,7 @@ EFI_LIBS ?= $(shell find /usr/lib /usr/lib64 \( -name libgnuefi.a -o -name libef
 EFI_CFLAGS := -I$(EFI_INC) -I$(EFI_INC)/x86_64 -I$(BUILD)/efi -fpic -ffreestanding -fno-stack-protector \
               -fno-stack-check -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -O2 -Wall
 
-efi: vmdos.efi dos.img
+efi: vmdos.efi $(RAM_IMG)
 
 $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h: vmdos.elf
 	mkdir -p $(BUILD)/efi
@@ -181,19 +187,24 @@ vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)
 	        -j '.rel.*' -j '.rela.*' -j .reloc -O efi-app-x86_64 --subsystem=10 $(BUILD)/efi/vmdos.so $@
 
 # esp.img: the EFI system partition, also C: (FreeDOS files at its root,
-# vmdos.efi as EFI/BOOT/BOOTX64.EFI, dos.img next to it for c=ram, KARGS in
+# vmdos.efi as EFI/BOOT/BOOTX64.EFI, dos.img next to it with RAMDISK=1, KARGS in
 # EFI/BOOT/vmdos.cfg). Updated in place unless FRESH=1 or missing.
 ESP_FREE ?= 256
 EXTRA_MB := $(if $(EXTRA),$(shell du -sm "$(EXTRA)" | cut -f1),0)
 ESP_MB   ?= $(shell echo $$(( $(DISK_MB) + $(EXTRA_MB) + $(ISO_MB) + $(ESP_FREE) )))
+# Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list).
+$(BUILD)/esp.opts: FORCE | $(BUILD)
+	@echo '$(USE_RAM) $(ISO_C)' > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 esp: esp.img
-esp.img: vmdos.efi dos.img $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
+esp.img: vmdos.efi $(RAM_IMG) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
 	python3 tools/mkdisk.py $(if $(FRESH),,--update) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
-	    $(DOS_FILES) vmdos.efi=EFI/BOOT/BOOTX64.EFI dos.img=EFI/BOOT/dos.img $(BUILD)/vmdos.cfg=EFI/BOOT/vmdos.cfg \
+	    $(DOS_FILES) vmdos.efi=EFI/BOOT/BOOTX64.EFI $(if $(USE_RAM),dos.img=EFI/BOOT/dos.img) $(BUILD)/vmdos.cfg=EFI/BOOT/vmdos.cfg \
 	    $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
+	$(if $(USE_RAM),,@MTOOLS_SKIP_CHECK=1 mdel -i $@@@1M ::/EFI/BOOT/dos.img 2>/dev/null || true)
 	@touch $@
 
 OVMF     ?= $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd))
@@ -222,8 +233,8 @@ QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \
 QDISK = $(if $(filter ram,$(C)),,$(QESP))
 DISK_DEP := $(if $(filter ram,$(C)),,esp.img)
 
-run: vmdos.elf dos.img $(DISK_DEP)
-	qemu-system-i386 -kernel vmdos.elf -initrd $(subst $(space),$(comma),dos.img $(ISO_RAM)) \
+run: vmdos.elf $(RAM_IMG) $(DISK_DEP)
+	qemu-system-i386 -kernel vmdos.elf $(if $(USE_RAM),-initrd $(subst $(space),$(comma),$(strip dos.img $(ISO_RAM)))) \
 	    -append "$(KARGS_ALL)" $(QDISK) $(QEMU_ARGS)
 run-iso: vmdos.iso $(DISK_DEP)
 	qemu-system-i386 -drive if=none,id=cd0,media=cdrom,file=vmdos.iso -device ide-cd,drive=cd0,bootindex=0 \
