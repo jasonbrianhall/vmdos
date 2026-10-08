@@ -21,11 +21,15 @@ static struct { u16 seg, paras; } umbs[8];
 
 void xms_init(void)
 {
-    u32 want = 32;                          /* MB; "xms=N" on the command line */
+    /* MB; "xms=N" on the command line. By default 1 GB, as DOS memory
+       managers give a big machine, but at most half of the kernel's free
+       RAM, so DPMI programs (taken as they ask) still find plenty. */
+    u32 want = 1024;
     char *p = strstr(cmdline, "xms=");
     if (p) { want = 0; for (p += 4; *p >= '0' && *p <= '9'; p++) want = want * 10 + (*p - '0'); }
     u32 avail = phys_free();
     avail = avail > (16u << 20) ? avail - (16u << 20) : 0;    /* leave the kernel some room */
+    if (!p) avail /= 2;
     if (want > 3072) want = 3072;
     u32 bytes = want << 20;
     if (bytes > avail) bytes = avail & ~0xFFFFFu;

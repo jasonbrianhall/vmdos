@@ -465,7 +465,7 @@ static int desc_rights_ok(u8 acc) { return (acc & 0x60) == 0x60 && (acc & 0x10);
    Blocks that don't fit there (Quake's DJGPP heap grows past 14 MiB) are
    kernel heap pages above 16 MiB, at their own (identity-mapped) address,
    opened to ring 3. Blocks keep their place when freed, for reuse. The
-   free-memory report offers up to dpmi=MB (default 256) in all, but its
+   free-memory report offers up to dpmi=MB (default 1024) in all, but its
    "largest block" stays what the window has, so DOS/4GW stays inside it. */
 #define WIN_LO 0x00200000u
 #define WIN_HI 0x01000000u
@@ -475,7 +475,7 @@ static u32 dpmi_cap(void)
 {
     static u32 cap;
     if (!cap) {
-        cap = 256;
+        cap = 1024;
         const char *o = strstr(cmdline, "dpmi=");
         if (o) { cap = 0; for (o += 5; *o >= '0' && *o <= '9'; o++) cap = cap * 10 + (u32)(*o - '0'); }
         if (cap < 4) cap = 4;

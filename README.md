@@ -173,8 +173,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   (`LH C:\VMDOS\CTMOUSE.COM`), which takes over INT 33h. Some games need it
   (Warcraft II), most don't: put REM in front of that line to use the
   built-in driver.
-- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
-  `xms=MB`) and 96 KB of upper memory (C800h-DFFFh; 160 KB to EFFFh with
+- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (1 GB or half the free
+  RAM below 4 GB, `xms=MB`; the old XMS 2.0 calls report at most 64 MB) and 96 KB of upper memory (C800h-DFFFh; 160 KB to EFFFh with
   `ems=0`). `VMXMS.SYS`, loaded first in FDCONFIG.SYS, is the HIMEM-style
   front (device XMSXXXX0, INT 2Fh hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH
   and FreeCOM's XMS swapping work: about 620 KB free for programs.
@@ -192,7 +192,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   area. Client memory appears at linear
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB; what doesn't fit there comes from above 16 MiB, up to
-  256 MB in all (`dpmi=MB`), and 0503h grows blocks in place where it can
+  1 GB in all (`dpmi=MB`), and 0503h grows blocks in place where it can
   (DJGPP programs such as Quake). Not yet: DOS/32A (it insists on its own XMS mode).
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
