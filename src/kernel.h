@@ -249,7 +249,7 @@ struct emu_cpu {
     int code32;                               /* 32-bit code segment */
 };
 int mem_emulate(struct emu_cpu *e);
-int vga16_window(u32 lin);                    /* video.c: 16-colour planar window */
+int vga16_window(u32 lin);                    /* video.c: 16-color planar window */
 u8 vga16_read(u32 lin);
 void vga16_write(u32 lin, u8 v);
 int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */

@@ -191,12 +191,12 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   0800h maps it), scan line length, display start, palette, and the
   protected-mode interface (4F00h-4F0Ah).
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
-  or port 3D9h), mode 13h, unchained 256-colour (Mode X/Y, as DOOM uses:
+  or port 3D9h), mode 13h, unchained 256-color (Mode X/Y, as DOOM uses:
   single-plane access mapped directly, latch copies and the rest emulated),
-  and the EGA/VGA 16-colour modes 0Dh, 0Eh, 10h, 12h. In the 16-colour modes
+  and the EGA/VGA 16-color modes 0Dh, 0Eh, 10h, 12h. In the 16-color modes
   every access to A000h faults and the instruction is emulated against the
   four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
-  and read modes; the screen honours the CRTC start/offset, pel panning and
+  and read modes; the screen honors the CRTC start/offset, pel panning and
   line compare. INT 10h draws pixels and text in all of them, with the
   program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
@@ -232,7 +232,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/disk.c`, `src/ahci.cpp`, `src/fat.c` | drive C: (SATA / USB partition or RAM disk), SATA driver, FAT reader |
 | `src/dpmi.c` | DPMI host |
-| `src/mememu.c` | instruction emulator for the trapped 16-colour VGA window |
+| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM images: monitor side, VMCD.SYS driver, VMCD.COM |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |

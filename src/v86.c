@@ -401,7 +401,7 @@ struct regs *isr_dispatch(struct regs *r)
 
     switch (vec) {
     case 13: gp_handler(r); break;
-    case 14: {                                        /* the 16-colour VGA window */
+    case 14: {                                        /* the 16-color VGA window */
         u32 cr2;
         __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
         struct emu_cpu e = { { &r->eax, &r->ecx, &r->edx, &r->ebx, &r->esp, &r->ebp, &r->esi, &r->edi },

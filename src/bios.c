@@ -454,7 +454,7 @@ void bios_init(void)
     wr32(0x46 * 4, 0);
 
     /* BIOS data area */
-    u16 equip = 0x0024;                                  /* 80x25 colour, PS/2 mouse port, no floppies */
+    u16 equip = 0x0024;                                  /* 80x25 color, PS/2 mouse port, no floppies */
     extern u32 fpu_present;
     if (fpu_present) equip |= 2;
     wr16(BDA + 0x10, equip);

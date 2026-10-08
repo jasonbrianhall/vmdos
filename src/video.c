@@ -92,8 +92,8 @@ static const u8 cga16[16][3] = {
     { 0, 0, 0 }, { 0, 0, 42 }, { 0, 42, 0 }, { 0, 42, 42 }, { 42, 0, 0 }, { 42, 0, 42 }, { 42, 21, 0 }, { 42, 42, 42 },
     { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 }, { 63, 21, 21 }, { 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 } };
 
-/* kind 0: the EGA 64-colour palette (400-line text, modes 10h, 12h);
-   1: the 256-colour default (13h); 2: the CGA-compatible palette of the
+/* kind 0: the EGA 64-color palette (400-line text, modes 10h, 12h);
+   1: the 256-color default (13h); 2: the CGA-compatible palette of the
    200-line modes (4, 5, 6, 0Dh, 0Eh), where attribute bit 4 is intensity. */
 static void default_palette(int kind)
 {
@@ -148,10 +148,10 @@ static void default_palette(int kind)
 static int text_cols = 80, text_rows = 25;
 static u32 text_base = 0xB8000;
 
-static u8 *planes;                 /* 4 x 64 KiB: unchained 256-colour and 16-colour modes */
+static u8 *planes;                 /* 4 x 64 KiB: unchained 256-color and 16-color modes */
 static int is_text(int m) { return m <= 3 || m == 7; }
 static int is_cga(int m) { return m >= 4 && m <= 6; }
-static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x12; }   /* 16-colour planar */
+static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x12; }   /* 16-color planar */
 static void planar_check(void);
 static void ega_check(void);
 static void modex_check(void);
@@ -161,7 +161,7 @@ static int gfx_w(void) { return video_mode == 6 || video_mode == 0x0E || video_m
 static int gfx_h(void) { return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200; }
 int video_gfx_height(void) { return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h(); }
 
-/* CGA colour select (port 3D9h, INT 10h AH=0Bh): background (or the
+/* CGA color select (port 3D9h, INT 10h AH=0Bh): background (or the
    640x200 foreground), palette and intensity, as attribute-palette entries. */
 static u8 cga_sel;
 static void cga_color_select(u8 v)
@@ -217,7 +217,7 @@ void video_set_mode(int mode, int clear)
     memset(crtc, 0, sizeof crtc);
     memset(gc, 0, sizeof gc);
     gc[6] = is_text(mode) || is_cga(mode) ? 0x0E : 0x05;   /* memory map: B800h / A000h 64K */
-    gc[7] = 0x0F; gc[8] = 0xFF;                    /* colour don't care, bit mask */
+    gc[7] = 0x0F; gc[8] = 0xFF;                    /* color don't care, bit mask */
     seq[2] = 0x0F;                                 /* all planes */
     seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) ? 0x06 : 0x02;   /* chain-4 in mode 13h */
     crtc[0x13] = text_cols == 40 && (is_text(mode) || mode == 0x0D) ? 0x14 : 0x28;
@@ -351,7 +351,7 @@ static const char *const arrow[16] = {
     "122222221", "1222211111", "1221221", "121 1221", "11  1221", "1    1221", "     1221", "      11" };
 static int sh_ptr_y = -100, sh_ptr_x;
 
-/* ---------------- unchained 256-colour (planar) VGA ----------------
+/* ---------------- unchained 256-color (planar) VGA ----------------
    With chain-4 off (Mode X/Y, DOOM), video memory is four 64 KB planes: the
    map mask (sequencer 2) picks the planes a write goes to, the read map
    (graphics controller 4) the one a read comes from. With one plane in the
@@ -362,7 +362,7 @@ static int sh_ptr_y = -100, sh_ptr_x;
    emulated. Anything else (several planes, write modes 1-3 such as DOOM's
    latch copies of its status bar, set/reset, a bit mask, a logical
    function) leaves the window unmapped and every access is emulated as in
-   the 16-colour modes. */
+   the 16-color modes. */
 static int planar_on, mapped_plane = -1, mapped_ro, modex_trap, readmap_last;
 
 static void map_window_flags(u32 phys, u32 flags)
