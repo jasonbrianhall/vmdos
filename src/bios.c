@@ -8,6 +8,7 @@ extern const u8 bios_bin[], bios_bin_end[];
 #define BIOS_LIN 0xF0000u
 #define FONT16_OFF 0xA000
 #define FONT8_OFF 0xB000
+#define FONT14_OFF 0xD000                   /* 8x14 (EGA 350-line modes): the 8x16 font's rows 1-14 */
 
 static u32 disk_cyls;
 #define DISK_HEADS 255
@@ -444,6 +445,7 @@ void bios_init(void)
     memcpy(gptr(BIOS_LIN), bios_bin, bios_bin_end - bios_bin);
     memcpy(gptr(BIOS_LIN + FONT16_OFF), vga_font16, 4096);
     memcpy(gptr(BIOS_LIN + FONT8_OFF), vga_font8, 2048);
+    for (int c = 0; c < 256; c++) memcpy(gptr(BIOS_LIN + FONT14_OFF + c * 14), vga_font16 + c * 16 + 1, 14);
     for (int v = 0; v < 256; v++) {
         wr16(v * 4, rd16(BIOS_LIN + v * 2));
         wr16(v * 4 + 2, BIOS_SEG);

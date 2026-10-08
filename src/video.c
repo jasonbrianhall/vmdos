@@ -211,6 +211,14 @@ void video_set_mode(int mode, int clear)
     wr8(BDA + 0x66, 0x30);
     wr8(BDA + 0x84, (u8)(text_rows - 1));
     wr16(BDA + 0x85, mode == 0x10 ? 14 : mode == 0x12 || is_text(mode) ? 16 : 8);
+    /* INT 43h: the graphics font for this mode's character height, as a VGA
+       BIOS sets it (F000:D000 8x14, A000 8x16, B000 8x8). Programs draw text
+       themselves from it with the height in 40:85h (SimCity, mode 10h). */
+    if (!is_text(mode)) {
+        u16 h = rd16(BDA + 0x85);
+        wr16(0x43 * 4, h == 14 ? 0xD000 : h == 16 ? 0xA000 : 0xB000);
+        wr16(0x43 * 4 + 2, 0xF000);
+    }
     wr8(BDA + 0x87, (rd8(BDA + 0x87) & 0x7F) | (clear ? 0 : 0x80) | 0x60);
     wr8(BDA + 0x88, 0x09);
     wr8(BDA + 0x89, 0x11);
@@ -1102,12 +1110,11 @@ static void gfx_char(int row, int col, u8 ch, u8 color)
     /* The glyphs, as a BIOS finds them: CGA modes take 0-127 from the ROM
        and 128-255 from the table at INT 1Fh (programs such as Willy the Worm
        put their own there); the others use the table at INT 43h. Our
-       default INT 43h table is 8x8, so the 14/16-line modes use the
-       built-in 8x16 font unless a program pointed INT 43h elsewhere. */
+       mode set points INT 43h at the font of the mode's height. */
     const u8 *g;
     u32 v1f = LIN(rd16(0x1F * 4 + 2), rd16(0x1F * 4)), v43 = LIN(rd16(0x43 * 4 + 2), rd16(0x43 * 4));
     if (is_cga(video_mode)) g = ch < 128 ? font8x8 + ch * 8 : v1f ? gptr(v1f + (ch - 128) * 8) : font8x8 + ch * 8;
-    else if (v43 && (h == 8 || v43 != 0xFB000)) g = gptr(v43 + ch * h);
+    else if (v43) g = gptr(v43 + ch * h);
     else g = h == 8 ? font8x8 + ch * 8 : font8x16 + ch * 16 + (h == 14 ? 1 : 0);
     u8 fg = bpp == 8 ? color : (u8)(color & ((1 << bpp) - 1)) | (color & 0x80);
     for (int y = 0; y < h; y++)
@@ -1278,7 +1285,9 @@ void video_int10(struct regs *r)
         break;
     case 0x11:
         if (AL(r) == 0x30) {
-            static const u16 offs[8] = { 0, 0, 0xA000, 0xB000, 0xB400, 0xA000, 0xA000, 0xA000 };
+            /* 2: 8x14, 3: 8x8, 4: 8x8 upper half, 6: 8x16; 5 and 7 (the 9-dot
+               patch lists) point at a 0 byte: an empty list */
+            static const u16 offs[8] = { 0, 0, 0xD000, 0xB000, 0xB400, 0xB000, 0xA000, 0xB000 };
             u8 which = BH(r) & 7;
             if (which == 0) { r->v86_es = rd16(0x1F * 4 + 2); BP(r) = rd16(0x1F * 4); }
             else if (which == 1) { r->v86_es = rd16(0x43 * 4 + 2); BP(r) = rd16(0x43 * 4); }
