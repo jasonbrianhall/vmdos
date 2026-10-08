@@ -40,14 +40,6 @@ static void put_row(const u32 *px, u32 n, u32 x, u32 y)
     else { u16 *p = (u16 *)(d + x * 2); for (u32 i = 0; i < n; i++) p[i] = (u16)px[i]; }
 }
 
-static void copy_row(u32 x, u32 n, u32 ysrc, u32 ydst)
-{
-    if (ydst >= fb_h || x >= fb_w) return;
-    if (x + n > fb_w) n = fb_w - x;
-    u32 b = (fb_bpp + 7) / 8;
-    memcpy(fb + ydst * fb_pitch + x * b, fb + ysrc * fb_pitch + x * b, n * b);
-}
-
 static void clear_fb(void)
 {
     if (!fb) return;
@@ -75,7 +67,7 @@ static int bochs_vbe(void)
     const u16 W = 640, H = 480;
     static const u16 regs[][2] = { { 4, 0 }, { 1, 640 }, { 2, 480 }, { 3, 32 }, { 4, 0x41 } };
     for (unsigned i = 0; i < 5; i++) { outw(0x1CE, regs[i][0]); outw(0x1CF, regs[i][1]); }
-    map_mmio(lfb, W * H * 4);
+    map_fb(lfb, W * H * 4);
     video_framebuffer(lfb, W * 4, W, H, 32, 16, 8, 8, 8, 0, 8);
     return 1;
 }
@@ -252,11 +244,13 @@ static u16 shadow_text[132 * 60];
 static u8 shadow_gfx[640 * 480];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
-static int t_scale, t_ox, t_oy;
-static u32 g_x, g_y, g_w, g_h;
-static u16 xmap[4096];
+static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, or all of it (aspect=fill) */
+static u16 xmap[4096], txmap[4096];
+static int aspect_fill = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
+
+static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols * 8; }
 
 static void layout(void)
 {
@@ -264,66 +258,91 @@ static void layout(void)
     last_layout_mode = video_mode;
     full_redraw = 1;
     clear_fb();
-    int tw = 80 * 8, th = text_rows * 16;
-    t_scale = (int)(fb_w / tw < fb_h / th ? fb_w / tw : fb_h / th);
-    if (t_scale < 1) t_scale = 1;
-    t_ox = ((int)fb_w - tw * t_scale) / 2; if (t_ox < 0) t_ox = 0;
-    t_oy = ((int)fb_h - th * t_scale) / 2; if (t_oy < 0) t_oy = 0;
+    if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     g_h = fb_h; g_w = fb_h * 4 / 3;
-    if (g_w > fb_w) { g_w = fb_w; g_h = fb_w * 3 / 4; }
+    if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * 3 / 4; }
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
     u32 w = vbe_on ? vbe_w : is_text(video_mode) ? 320 : (u32)gfx_w();
     for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * w / g_w);
+    u32 tw = text_pixels_w();
+    for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
 }
 
-static void draw_cell(int col, int row, u16 cell, int cursor)
+static int sh_mouse = -1, sh_blink = -1;
+
+/* Text modes are drawn like the graphics ones: each text row (16 scanlines)
+   that changed is rendered into a buffer in RAM at its native width (640
+   pixels for 80 or 40 columns) and scaled into the picture's box, so it
+   fills the screen as games do; nothing is read back from the framebuffer. */
+static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_and, u16 m_xor)
 {
-    static u32 line[132 * 8 * 8];
-    u8 ch = cell & 0xFF, a = cell >> 8;
-    int fg = a & 15, bg = a >> 4;
-    if (atc[0x10] & 8) { bg &= 7; if ((a & 0x80) && !blink_phase) fg = bg; }
-    u32 pf = pal[atc[fg] & 0x3F], pb = pal[atc[bg] & 0x3F];
-    int s = t_scale, xs = (text_cols == 40 ? 2 : 1) * s;
+    static u32 band[16][132 * 8];
+    static u32 line[4096];
+    int cw = text_cols == 40 ? 16 : 8;
     int cs = crtc[0x0A] & 0x1F, ce = crtc[0x0B] & 0x1F;
-    int cur_on = cursor && blink_phase && !(crtc[0x0A] & 0x20);
-    const u8 *g = font8x16 + ch * 16;
-    for (int gy = 0; gy < 16; gy++) {
-        u8 bits = g[gy];
-        if (cur_on && gy >= cs && gy <= ce) bits = 0xFF;
-        u32 *p = line;
-        for (int bx = 0; bx < 8; bx++) {
-            u32 c = (bits & (0x80 >> bx)) ? pf : pb;
-            for (int k = 0; k < xs; k++) *p++ = c;
+    for (int c = 0; c < text_cols; c++) {
+        int i = r * text_cols + c;
+        u16 cell = cells[i];
+        if (i == mcell) cell = (u16)((cell & m_and) ^ m_xor);
+        u8 ch = cell & 0xFF, a = cell >> 8;
+        int fg = a & 15, bg = a >> 4;
+        if (atc[0x10] & 8) { bg &= 7; if ((a & 0x80) && !blink_phase) fg = bg; }
+        u32 pf = pal[atc[fg] & 0x3F], pb = pal[atc[bg] & 0x3F];
+        int cur_on = i == cursor_off && blink_phase && !(crtc[0x0A] & 0x20);
+        const u8 *g = font8x16 + ch * 16;
+        for (int gy = 0; gy < 16; gy++) {
+            u8 bits = g[gy];
+            if (cur_on && gy >= cs && gy <= ce) bits = 0xFF;
+            u32 *p = band[gy] + c * cw;
+            for (int bx = 0; bx < 8; bx++) {
+                u32 col = (bits & (0x80 >> bx)) ? pf : pb;
+                *p++ = col;
+                if (cw == 16) *p++ = col;
+            }
         }
-        u32 x = t_ox + col * 8 * xs, y = t_oy + (row * 16 + gy) * s;
-        put_row(line, 8 * xs, x, y);
-        for (int k = 1; k < s; k++) copy_row(x, 8 * xs, y, y + k);
+    }
+    u32 th = (u32)text_rows * 16;
+    u32 y0 = ((u32)r * 16 * g_h + th - 1) / th, y1 = ((u32)(r + 1) * 16 * g_h + th - 1) / th;
+    int last = -1;
+    for (u32 y = y0; y < y1 && y < g_h; y++) {
+        int gy = (int)(y * th / g_h) - r * 16;
+        if (gy < 0) gy = 0;
+        if (gy > 15) gy = 15;
+        if (gy != last) { for (u32 x = 0; x < g_w; x++) line[x] = band[gy][txmap[x]]; last = gy; }
+        put_row(line, g_w, g_x, g_y + y);
     }
 }
-
-static int sh_mouse = -1;
 
 static void refresh_text(const u16 *cells, int cursor_off)
 {
+    static u8 dirty[60];
     int n = text_cols * text_rows;
     int mcell = -1, px, py;
-    u16 m_and, m_xor;
+    u16 m_and = 0xFFFF, m_xor = 0;
     if (!console_on && mouse_pointer(&px, &py, &m_and, &m_xor))
         mcell = (py / 8) * text_cols + px / (text_cols == 40 ? 16 : 8);
     if (mcell >= n) mcell = -1;
+    int blink_changed = blink_phase != sh_blink;
+    for (int r = 0; r < text_rows; r++) dirty[r] = (u8)full_redraw;
     for (int i = 0; i < n; i++) {
         u16 c = cells[i];
-        int cur = i == cursor_off;
         int blinky = (atc[0x10] & 8) && (c & 0x8000);
-        if (full_redraw || c != shadow_text[i] || cur || i == sh_cursor || i == mcell || i == sh_mouse ||
-            (blinky && (frame_no & 15) == 0)) {
-            draw_cell(i % text_cols, i / text_cols, i == mcell ? (u16)((c & m_and) ^ m_xor) : c, cur);
-            shadow_text[i] = c;
-        }
+        if (c != shadow_text[i] || (blinky && blink_changed)) { dirty[i / text_cols] = 1; shadow_text[i] = c; }
     }
+    if (cursor_off != sh_cursor || blink_changed) {
+        if (cursor_off >= 0 && cursor_off < n) dirty[cursor_off / text_cols] = 1;
+        if (sh_cursor >= 0 && sh_cursor < n) dirty[sh_cursor / text_cols] = 1;
+    }
+    if (mcell != sh_mouse) {
+        if (mcell >= 0) dirty[mcell / text_cols] = 1;
+        if (sh_mouse >= 0 && sh_mouse < n) dirty[sh_mouse / text_cols] = 1;
+    }
+    for (int r = 0; r < text_rows; r++)
+        if (dirty[r]) text_row(cells, r, cursor_off, mcell, m_and, m_xor);
     sh_cursor = cursor_off;
     sh_mouse = mcell;
+    sh_blink = blink_phase;
 }
 
 /* The mouse pointer in graphics modes: an arrow, 1 = outline, 2 = fill. */
@@ -559,8 +578,7 @@ static void refresh_gfx(void)
         }
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0) continue;
-        put_row(line, g_w, g_x, y0);
-        for (u32 yy = y0 + 1; yy < y1; yy++) copy_row(g_x, g_w, y0, yy);
+        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);   /* from RAM: never read the framebuffer */
     }
     sh_ptr_x = px; sh_ptr_y = py;
 }
@@ -845,8 +863,7 @@ static void refresh_vbe(void)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
         for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
-        put_row(line, g_w, g_x, y0);
-        for (u32 yy = y0 + 1; yy < y1; yy++) copy_row(g_x, g_w, y0, yy);
+        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);
     }
     sh_ptr_x = px; sh_ptr_y = py;
 }

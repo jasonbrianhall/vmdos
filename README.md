@@ -125,6 +125,11 @@ menuentry "FreeDOS (vmdos)" {
 }
 ```
 
+Screen: the picture is scaled to the largest 4:3 box that fits (text too),
+black bars at the sides of a wide screen; `aspect=fill` on the kernel command
+line (KARGS, or EFI/BOOT/vmdos.cfg on the stick) stretches it to the whole
+screen. The framebuffer is mapped write-combining (`nowc` turns that off).
+
 Slowdown for games that time themselves by the CPU (as MoSlo does):
 `VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,
 `VMSPEED` alone shows it), Ctrl+F11 / Ctrl+F12 step it slower /

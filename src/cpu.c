@@ -139,8 +139,33 @@ void *isa_dma_buffer(u32 *phys)
     return isa_dma_phys ? phys_low(isa_dma_phys) : 0;
 }
 
+/* Write-combining for the framebuffer: PAT entry 1 (picked by PWT in a
+   page entry) becomes WC. The firmware often leaves the framebuffer
+   uncached in the MTRRs, where every write is a separate bus transaction;
+   WC (it wins over an MTRR's UC) sends them in bursts. nowc: don't. */
+static u32 pat_wc;
+static void pat_init(void)
+{
+    u32 a = 1, b, c, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    if (!(d & (1u << 16)) || strstr(cmdline, "nowc")) return;
+    u32 lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    lo = (lo & ~0xFF00u) | 0x0100u;                   /* PA1 = WC (01) */
+    __asm__ volatile("wbinvd; wrmsr; wbinvd" :: "a"(lo), "d"(hi), "c"(0x277) : "memory");
+    pat_wc = 0x08;                                    /* PWT */
+}
+
+/* A framebuffer found later (Bochs VBE): write-combining like the boot one. */
+void map_fb(u32 phys, u32 len)
+{
+    map_range(phys, phys, len, 3 | (pat_wc ? pat_wc : 0x10));
+    flush_tlb();
+}
+
 static void paging_init(void)
 {
+    pat_init();
     pae = cpu_has_pae() && !strstr(cmdline, "nopae");
     if (pae) {
         pdpt = phys_alloc(4096);
@@ -163,7 +188,7 @@ static void paging_init(void)
             if (fb_lin < ram_top || (fb_phys >> 32 && !pae)) { fb_lin = 0; fb_len = 0; }
             else mmio_window = fb_lin;
         }
-        if (fb_len) map_range(fb_lin, fb_phys, fb_len, 3);
+        if (fb_len) map_range(fb_lin, fb_phys, fb_len, 3 | pat_wc);
     }
     u32 cr0;
     if (pae) {
@@ -176,7 +201,7 @@ static void paging_init(void)
     cr0 |= 0x80000000u;
     __asm__ volatile("mov %0,%%cr0; jmp 1f; 1:" ::"r"(cr0) : "memory");
     paging_on = 1;
-    kprintf("paging on (%s)\n", pae ? "PAE" : "32-bit");
+    kprintf("paging on (%s)%s\n", pae ? "PAE" : "32-bit", pat_wc ? ", framebuffer write-combining" : "");
 }
 
 /* Map more MMIO later (e.g. a Bochs VBE framebuffer found by PCI scan). */

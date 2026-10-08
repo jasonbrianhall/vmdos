@@ -4,24 +4,33 @@
 int debug_level = 1;
 static int serial_ok;
 
+/* 4 bytes at a time (rep movsl / stosl): byte loops into the framebuffer of
+   a real graphics card are one bus write per byte, which made drawing a
+   1080p frame take about a second. */
 void *memcpy(void *d, const void *s, size_t n)
 {
-    u8 *dd = d; const u8 *ss = s;
-    while (n--) *dd++ = *ss++;
-    return d;
+    void *r = d;
+    size_t w = n >> 2, b = n & 3;
+    __asm__ volatile("cld; rep movsl" : "+D"(d), "+S"(s), "+c"(w) :: "memory");
+    __asm__ volatile("rep movsb" : "+D"(d), "+S"(s), "+c"(b) :: "memory");
+    return r;
 }
 void *memmove(void *d, const void *s, size_t n)
 {
     u8 *dd = d; const u8 *ss = s;
-    if (dd < ss) while (n--) *dd++ = *ss++;
-    else { dd += n; ss += n; while (n--) *--dd = *--ss; }
+    if (dd <= ss || dd >= ss + n) return memcpy(d, s, n);
+    dd += n; ss += n;
+    while (n--) *--dd = *--ss;
     return d;
 }
 void *memset(void *d, int c, size_t n)
 {
-    u8 *dd = d;
-    while (n--) *dd++ = (u8)c;
-    return d;
+    void *r = d;
+    u32 v = (u8)c * 0x01010101u;
+    size_t w = n >> 2, b = n & 3;
+    __asm__ volatile("cld; rep stosl" : "+D"(d), "+c"(w) : "a"(v) : "memory");
+    __asm__ volatile("rep stosb" : "+D"(d), "+c"(b) : "a"(v) : "memory");
+    return r;
 }
 int memcmp(const void *a, const void *b, size_t n)
 {

@@ -110,6 +110,7 @@ void *isa_dma_buffer(u32 *phys);              /* 64 KiB of RAM below 16 MiB, 64 
 void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
+void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */
 void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
 void usb_start(const char *cmdline);
 void usb_tick(void);
