@@ -19,7 +19,7 @@ jobs:
     env:
       ESP_MB: 2000          # FAT16 (32 KiB clusters): fits a 4 GB stick, room for games
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tools
         run: |
