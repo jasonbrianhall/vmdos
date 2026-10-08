@@ -174,10 +174,16 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   (Warcraft II), most don't: put REM in front of that line to use the
   built-in driver.
 - XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (32 MB,
-  `xms=MB`) and 160 KB of upper memory (C800h-EFFFh). `VMXMS.SYS`, loaded
-  first in FDCONFIG.SYS, is the HIMEM-style front (device XMSXXXX0, INT 2Fh
-  hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH and FreeCOM's XMS swapping work:
-  about 620 KB free for programs.
+  `xms=MB`) and 96 KB of upper memory (C800h-DFFFh; 160 KB to EFFFh with
+  `ems=0`). `VMXMS.SYS`, loaded first in FDCONFIG.SYS, is the HIMEM-style
+  front (device XMSXXXX0, INT 2Fh hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH
+  and FreeCOM's XMS swapping work: about 620 KB free for programs.
+- EMS 4.0 (expanded memory, INT 67h) in the monitor, as EMM386 gives it:
+  32 MB (`ems=MB`, `ems=0` for none), page frame E000h, functions 40h-5Ch
+  (allocate, map, map multiple, reallocate, save/restore and partial page
+  maps, handle names and directory, move/exchange region, mappable pages,
+  hardware info). `VMEMS.SYS` is the EMMXXXX0 device programs look for
+  (Master of Magic). No VCPI: DOS extenders use the DPMI host.
 - DPMI 0.9 host in the monitor, for DOS extenders: DOS/4GW (DOOM runs: demo,
   menus, keyboard, mouse, Sound Blaster effects and music), PMODE/W. Clients run at ring 3 with LDT descriptors;
   INT 31h descriptor, memory, interrupt, real-mode call/callback, DOS
@@ -185,7 +191,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   interrupt and exception handlers; selector 0040h for the BIOS data
   area. Client memory appears at linear
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
-  now loads at 16 MiB. Not yet: DOS/32A (it insists on its own XMS mode).
+  now loads at 16 MiB; what doesn't fit there comes from above 16 MiB, up to
+  256 MB in all (`dpmi=MB`), and 0503h grows blocks in place where it can
+  (DJGPP programs such as Quake). Not yet: DOS/32A (it insists on its own XMS mode).
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, and the

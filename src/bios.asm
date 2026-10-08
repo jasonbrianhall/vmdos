@@ -65,6 +65,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vbe_pmi                       ; 0228  VESA protected-mode interface table (4F0Ah)
         dw vbe_pmi_end - vbe_pmi         ; 022A  its length
         dw ps2_handler                   ; 022C  INT 15h C207h handler (far pointer)
+        dw int67                         ; 022E  EMS (VMEMS.SYS points INT 67h here)
 
 ; ---- stubs ----
 dummy:  iret
@@ -111,6 +112,9 @@ vbe_bank:                        ; VESA WinFuncPtr: BH=0 set / 1 get, DX = bank
         retf
 
 int33:  TRAP 0x33                ; mouse driver (in the monitor)
+        iret
+
+int67:  TRAP 0x67                ; EMS (in the monitor, ems.c)
         iret
 
 mouse_cb:                        ; entered like an interrupt when a mouse event is due

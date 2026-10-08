@@ -9,7 +9,8 @@
 
 #define MAX_HANDLES 64
 #define UMB_START 0xC800                    /* paragraphs */
-#define UMB_END   0xF000
+extern u16 umb_end;                         /* ems.c: E000h with an EMS page frame */
+#define UMB_END   umb_end
 
 static u8 *pool;                            /* extended memory */
 static u32 pool_kb;

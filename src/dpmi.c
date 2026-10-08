@@ -461,9 +461,44 @@ static void err(struct ctx *c, u16 code) { c->eflags |= EFL_CF; c->eax = (c->eax
 static int desc_rights_ok(u8 acc) { return (acc & 0x60) == 0x60 && (acc & 0x10); }
 
 /* Client memory lives at linear 2-16 MiB (the "window"), backed by kernel
-   pages from anywhere. Blocks keep their place when freed, for reuse. */
+   pages from anywhere: DOS/4GW's DOS/16M core keeps 24-bit addresses.
+   Blocks that don't fit there (Quake's DJGPP heap grows past 14 MiB) are
+   kernel heap pages above 16 MiB, at their own (identity-mapped) address,
+   opened to ring 3. Blocks keep their place when freed, for reuse. The
+   free-memory report offers up to dpmi=MB (default 256) in all, but its
+   "largest block" stays what the window has, so DOS/4GW stays inside it. */
 #define WIN_LO 0x00200000u
 #define WIN_HI 0x01000000u
+#define RESERVE (16u << 20)             /* heap the kernel keeps for itself */
+
+static u32 dpmi_cap(void)
+{
+    static u32 cap;
+    if (!cap) {
+        cap = 256;
+        const char *o = strstr(cmdline, "dpmi=");
+        if (o) { cap = 0; for (o += 5; *o >= '0' && *o <= '9'; o++) cap = cap * 10 + (u32)(*o - '0'); }
+        if (cap < 4) cap = 4;
+        if (cap > 2048) cap = 2048;
+        cap <<= 20;
+    }
+    return cap;
+}
+static u32 dpmi_used(void)
+{
+    u32 n = 0;
+    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].size && blk[i].used == 1) n += blk[i].size;
+    return n;
+}
+/* What a client could still get, in bytes: the cap, and the kernel's heap. */
+static u32 dpmi_avail(void)
+{
+    u32 cap = dpmi_cap(), used = dpmi_used(), f = phys_free();
+    u32 a = used < cap ? cap - used : 0;
+    u32 h = f > RESERVE ? f - RESERVE : 0;
+    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].size && !blk[i].used) h += blk[i].size;   /* freed, reusable */
+    return a < h ? a : h;
+}
 
 static u32 win_find(u32 size)
 {
@@ -500,6 +535,12 @@ static u32 win_largest(void)
     return best;
 }
 
+static int new_slot(void)
+{
+    for (int i = 0; i < MAX_BLOCKS; i++) if (!blk[i].size) return i;
+    return -1;
+}
+
 static int alloc_block(u32 size)
 {
     size = (size + 4095) & ~4095u;
@@ -508,19 +549,34 @@ static int alloc_block(u32 size)
     for (int i = 0; i < MAX_BLOCKS; i++)          /* reuse a freed block of this size or larger */
         if (blk[i].size && !blk[i].used && blk[i].size >= size && (fit < 0 || blk[i].size < blk[fit].size)) fit = i;
     if (fit >= 0) { blk[fit].used = 1; memset(gptr(blk[fit].lin), 0, blk[fit].size); return fit; }
-    if (phys_free() < size + (8u << 20)) return -1;
+    if (size > dpmi_avail()) return -1;
+    if (phys_free() < size + RESERVE) return -1;
+    int i = new_slot();
+    if (i < 0) return -1;
     u32 lin = win_find(size);
-    if (!lin) return -1;
+    u8 *p = phys_try_alloc(size);
+    if (!p) return -1;
+    if (lin) for (u32 o = 0; o < size; o += 4096) map_page(lin + o, (u32)(uintptr_t)p + o, 7);
+    else { lin = (u32)(uintptr_t)p; set_user(lin, size, 1); }       /* above 16 MiB, where it is */
+    blk[i].lin = lin; blk[i].size = size; blk[i].used = 1;
+    memset(gptr(lin), 0, size);
+    return i;
+}
+
+/* Grow block o in place: window blocks into free window space after them. */
+static int grow_in_place(int o, u32 size)
+{
+    u32 end = blk[o].lin + blk[o].size, more = size - blk[o].size;
+    if (blk[o].lin < WIN_LO || end + more > WIN_HI || end + more < end) return 0;
     for (int i = 0; i < MAX_BLOCKS; i++)
-        if (!blk[i].size) {
-            u8 *p = phys_try_alloc(size);
-            if (!p) return -1;
-            for (u32 o = 0; o < size; o += 4096) map_page(lin + o, (u32)(uintptr_t)p + o, 7);
-            blk[i].lin = lin; blk[i].size = size; blk[i].used = 1;
-            memset(gptr(lin), 0, size);
-            return i;
-        }
-    return -1;
+        if (i != o && blk[i].size && blk[i].lin < end + more && end < blk[i].lin + blk[i].size) return 0;
+    if (more > dpmi_avail() || phys_free() < more + RESERVE) return 0;
+    u8 *p = phys_try_alloc(more);
+    if (!p) return 0;
+    for (u32 a = 0; a < more; a += 4096) map_page(end + a, (u32)(uintptr_t)p + a, 7);
+    memset(gptr(end), 0, more);
+    blk[o].size = size;
+    return 1;
 }
 
 static struct regs *sim_real(struct ctx *c, int kind_call)   /* 0300h / 0301h / 0302h */
@@ -659,11 +715,13 @@ static struct regs *int31(struct ctx *c)
         SET16(edx, 0x0870); break;
     case 0x0500: { u32 a = lin(c->es, rEDI);
         if (!lin_ok(a, 0x30)) { err(c, 0x8021); break; }
-        u32 f = phys_free() > (8u << 20) ? phys_free() - (8u << 20) : 0;
-        if (f > win_largest()) f = win_largest();
+        u32 f = dpmi_avail(), w = win_largest();
+        if (w > f) w = f;
         for (int i = 0; i < 0x30; i += 4) wr32(a + i, 0xFFFFFFFF);
-        wr32(a, f); wr32(a + 4, f >> 12); wr32(a + 8, f >> 12); wr32(a + 0x14, f >> 12);
-        wr32(a + 0x10, f >> 12); wr32(a + 0x18, f >> 12);
+        wr32(a, w);                                 /* largest block: what the window has (DOS/4GW) */
+        wr32(a + 4, f >> 12); wr32(a + 8, f >> 12); /* max unlocked / locked allocation: everything (Quake) */
+        wr32(a + 0x10, f >> 12); wr32(a + 0x14, f >> 12);
+        wr32(a + 0x18, (f + dpmi_used()) >> 12);
         break; }
     case 0x0501: { int i = alloc_block(rBX << 16 | rCX);
         if (i < 0) { err(c, 0x8013); break; }
@@ -674,7 +732,8 @@ static struct regs *int31(struct ctx *c)
     case 0x0503: { u32 h = rSI << 16 | rDI, size = rBX << 16 | rCX;
         if (!h || h > MAX_BLOCKS || !blk[h - 1].used) { err(c, 0x8023); break; }
         int o = h - 1;
-        if (((size + 4095) & ~4095u) <= blk[o].size) { SET16(ebx, blk[o].lin >> 16); SET16(ecx, blk[o].lin); break; }
+        size = (size + 4095) & ~4095u;
+        if (size <= blk[o].size || grow_in_place(o, size)) { SET16(ebx, blk[o].lin >> 16); SET16(ecx, blk[o].lin); break; }
         blk[o].used = 0;                            /* so alloc_block can't hand it back */
         int n = alloc_block(size);
         if (n < 0) { blk[o].used = 1; err(c, 0x8013); break; }

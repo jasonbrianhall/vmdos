@@ -431,6 +431,7 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x46: video_vbe_window(r); return BIOS_CONT;         /* VESA WinFuncPtr */
     case 0x35: mouse_cb_done(); return BIOS_CONT;
     case 0x74: ps2_irq(r); return BIOS_CONT;
+    case 0x67: ems_int67(r); return BIOS_DONE;
     }
     if (id >= 0x60 && id < 0x70) return dpmi_rm_trap(r, id);   /* DPMI real-mode callbacks */
     return BIOS_DONE;

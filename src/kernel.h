@@ -165,7 +165,11 @@ int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
 const char *disk_kind(void);
 
-void cd_add(u8 *data, u32 size, const char *name);   /* cd.c: a CD-ROM image */
+void cd_add(u8 *data, u32 size, const char *name);
+void ems_init(void);                          /* ems.c: LIM 4.0 expanded memory */
+void ems_int67(struct regs *r);
+void ems_query(struct regs *r);
+int ems_present(void);   /* cd.c: a CD-ROM image */
 void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */
 void speed_throttle(void);                    /* after each timer tick */
 u32 speed_api(u32 pm);                        /* INT 2Fh AX=5653h */

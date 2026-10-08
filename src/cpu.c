@@ -488,6 +488,7 @@ void kmain(u32 magic, struct mb_info *mb)
     speed_init();
     bios_init();
     sound_init();
+    ems_init();                                   /* before XMS: the page frame takes E000h from the UMBs */
     xms_init();
     mouse_ps2_init();
     usb_ready = 1;
