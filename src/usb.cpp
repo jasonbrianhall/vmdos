@@ -855,6 +855,20 @@ static bool init_controller(const PciDevice& d) {
 
     if (!bios_handoff()) return false;
 
+    // Intel 7/8/9-series chipsets start with the USB ports routed to their
+    // EHCI controllers: switch the USB 3 (SuperSpeed) and USB 2 ports over to
+    // xHCI, as Linux does (usb_enable_intel_xhci_ports).
+    uint32_t id = pci_read(d, 0);
+    if ((id & 0xFFFF) == 0x8086) {
+        uint16_t dev = id >> 16;
+        static const uint16_t routed[] = { 0x1E31, 0x8C31, 0x9C31, 0x8CB1, 0x9CB1, 0x9D2F, 0x0F35, 0x22B5 };
+        for (uint16_t r : routed) if (dev == r) {
+            pci_write(d, 0xD8, pci_read(d, 0xDC));      // USB3_PSSEN = USB3PRM
+            pci_write(d, 0xD0, pci_read(d, 0xD4));      // XUSB2PR = XUSB2PRM
+            printf("USB: Intel port routing switched to xHCI (ports %x / %x)\n", pci_read(d, 0xD8), pci_read(d, 0xD0));
+        }
+    }
+
     // Halt and reset.
     wr(H->op, 0x00, rd(H->op, 0x00) & ~1u);
     for (int i = 0; i < 100 && !(rd(H->op, 0x04) & 1); i++) delay_ms(1);
@@ -916,7 +930,10 @@ bool usb_init(const char* cmdline) {
         if (!init_controller(d)) continue;              // try the others
         num_hc++;
         for (int p = 1; p <= H->num_ports; p++)
-            if (portsc(p) & PORT_CCS) setup_port(p);
+            if (portsc(p) & PORT_CCS) {
+                printf("USB: port %d: device connected (%s speed)\n", p, speed_name((portsc(p) >> 10) & 0xF));
+                setup_port(p);
+            }
         int n = 0;
         int nd = 0;
         for (auto& k : kbds) { n += k.active && k.hc == H && (k.kind == KBD || k.kind == MOUSE); nd += k.active && k.hc == H && k.kind == MSD; }
@@ -939,7 +956,10 @@ void usb_poll() {
             uint32_t sc = portsc(p);
             set_portsc(p, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack
             if (sc & PORT_CCS) {
-                if (sc & PORT_CSC || !(sc & PORT_PED)) setup_port(p);
+                if (sc & PORT_CSC || !(sc & PORT_PED)) {
+                    printf("USB: port %d: device connected (%s speed)\n", p, speed_name((sc >> 10) & 0xF));
+                    setup_port(p);
+                }
             } else {
                 for (int i = 0; i < MAX_KBD; i++)
                     if (kbds[i].active && kbds[i].hc == H && kbds[i].port == p && kbds[i].parent < 0) forget(i);

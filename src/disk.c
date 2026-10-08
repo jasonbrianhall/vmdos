@@ -185,6 +185,19 @@ static int scan(int d, u32 *bs, u32 *bz)
     return best;
 }
 
+/* Busy-wait ms milliseconds by the PIT (channel 0 counts down once per ms;
+   this runs before interrupts are on, so the tick counter doesn't move). */
+static u16 pit_count(void) { outb(0x43, 0x00); u16 c = inb(0x40); return c | (u16)(inb(0x40) << 8); }
+static void sleep_ms(int ms)
+{
+    u16 prev = pit_count();
+    while (ms > 0) {
+        u16 c = pit_count();
+        if (c > prev) ms--;                                     /* reloaded: a millisecond went by */
+        prev = c;
+    }
+}
+
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
 
 void disk_init(void)
@@ -208,16 +221,36 @@ void disk_init(void)
             dev[n_dev].usb = 0; dev[n_dev].idx = i; dev[n_dev].sectors = ahci_sectors(i); dev[n_dev].name = ahci_model(i);
             n_dev++;
         }
-        for (int i = 0; i < usb_msd_count() && n_dev < MAX_DEVS; i++) {
-            dev[n_dev].usb = 1; dev[n_dev].idx = i; dev[n_dev].sectors = usb_msd_sectors(i); dev[n_dev].name = usb_msd_name(i);
-            n_dev++;
-        }
-        int bd = -1, bq = 0;
+        /* USB sticks show up a little after the controller reset (USB 3 link
+           training, slow sticks): keep polling for a while, longer when
+           vmdos.efi says it came from a USB device (bootdev=usb), until the
+           partition it started from (or, without a hint, any) turns up. */
+        int boot_usb = strstr(cmdline, "bootdev=usb") != 0;
+        int wait_ms = boot_usb ? 10000 : usb_msd_count() || hint ? 2000 : 1000;
+        int bd = -1, bq = 0, usb_seen = 0, waited = 0;
         u32 bs = 0, bz = 0;
-        for (int d = 0; d < n_dev && bq < 8; d++) {
+        for (int d = 0; d < n_dev; d++) {
             u32 s = 0, z = 0;
             int q = scan(d, &s, &z);
             if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
+        }
+        for (;;) {
+            while (usb_seen < usb_msd_count() && n_dev < MAX_DEVS) {
+                int i = usb_seen++, d = n_dev++;
+                dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
+                u32 s = 0, z = 0;
+                int q = scan(d, &s, &z);
+                kprintf("disk: USB disk %d (%s, %u MiB): %s\n", i, dev[d].name, (u32)(dev[d].sectors >> 11),
+                        q >= 8 ? "the boot partition" : q ? "has KERNEL.SYS" : "no FAT partition with KERNEL.SYS");
+                if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
+            }
+            int good = hint ? bq >= (hint_sig_len ? 8 : 6) : bq > 0;
+            if (good && !(boot_usb && bd >= 0 && !dev[bd].usb && waited < wait_ms)) break;
+            if (waited >= wait_ms) break;
+            if (waited == 0) kprintf("disk: waiting for USB disks (up to %d s)\n", wait_ms / 1000);
+            usb_tick();
+            sleep_ms(20);
+            waited += 20;
         }
         if (bd >= 0) { use(bd, bs, bz); return; }
         if (n_dev) kprintf("disk: no FAT partition with KERNEL.SYS on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");

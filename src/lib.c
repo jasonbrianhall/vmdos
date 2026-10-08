@@ -110,6 +110,11 @@ static void serial_putc(char c)
     outb(COM1, c);
 }
 
+/* The last few KiB of the log, shown on the "vmdos stopped" screen: on a
+   real PC there is usually no serial port to read it from. */
+static char logbuf[4096];
+static u32 logpos;
+
 void kprintf(const char *fmt, ...)
 {
     char buf[256];
@@ -119,7 +124,26 @@ void kprintf(const char *fmt, ...)
     for (char *p = buf; *p; p++) {
         if (*p == '\n') serial_putc('\r');
         serial_putc(*p);
+        logbuf[logpos++ % sizeof logbuf] = *p;
     }
+}
+
+/* The last n log lines (each cut to width), oldest first, into out. */
+static void log_tail(char *out, int size, int n, int width)
+{
+    u32 end = logpos, start = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0, p = end;
+    while (p > start && logbuf[(p - 1) % sizeof logbuf] == '\n') p--;      /* trailing newlines */
+    int lines = 0;
+    while (p > start && lines < n) { p--; if (logbuf[p % sizeof logbuf] == '\n') lines++; }
+    if (p > start || lines >= n) p++;
+    int o = 0, col = 0;
+    for (; p < end && o < size - 1; p++) {
+        char c = logbuf[p % sizeof logbuf];
+        if (c == '\n') { out[o++] = c; col = 0; continue; }
+        if (c < 32 || c > 126 || col >= width) continue;
+        out[o++] = c; col++;
+    }
+    out[o] = 0;
 }
 
 void panic(const char *fmt, ...)
@@ -129,7 +153,17 @@ void panic(const char *fmt, ...)
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    kprintf("\n*** vmdos stopped: %s\n", buf);
-    video_console(buf);
+    {                                               /* the message, then the log that led to it */
+        static char screen[2048];
+        int n = snprintf(screen, sizeof screen, "%s\n\nLast log lines:\n", buf);
+        int msg_rows = 3;
+        for (const char *q = buf; *q; q++) if (*q == '\n') msg_rows++;
+        msg_rows += (int)strlen(buf) / 76;
+        int rows = 20 - msg_rows;
+        if (rows < 4) rows = 4;
+        log_tail(screen + n, (int)sizeof screen - n, rows, 76);
+        kprintf("\n*** vmdos stopped: %s\n", buf);
+        video_console(screen);
+    }
     for (;;) __asm__ volatile("cli; hlt");
 }

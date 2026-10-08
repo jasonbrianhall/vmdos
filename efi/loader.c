@@ -158,6 +158,8 @@ static void load_isos(EFI_HANDLE image, CHAR16* dir) {
     }
 }
 
+static int boot_usb;
+
 // The partition vmdos.efi was loaded from: its start (LBA, 0 if unknown)
 // and signature (MBR disk signature or GPT partition GUID, sig_len 4 / 16).
 // The kernel prefers it for C: (esp=LBA espsig=HEX on the command line).
@@ -167,7 +169,10 @@ static UINT64 boot_partition(EFI_HANDLE image, UINT8* sig, int* sig_len) {
     *sig_len = 0;
     if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, image, &lip, (void**)&li))) return 0;
     EFI_DEVICE_PATH* dp = DevicePathFromHandle(li->DeviceHandle);
-    for (int guard = 0; dp && !IsDevicePathEnd(dp) && guard < 64; guard++, dp = NextDevicePathNode(dp))
+    for (int guard = 0; dp && !IsDevicePathEnd(dp) && guard < 64; guard++, dp = NextDevicePathNode(dp)) {
+        if (DevicePathType(dp) == MESSAGING_DEVICE_PATH &&
+            (DevicePathSubType(dp) == MSG_USB_DP || DevicePathSubType(dp) == MSG_USB_CLASS_DP))
+            boot_usb = 1;                               // on a USB stick: the kernel waits for it
         if (DevicePathType(dp) == MEDIA_DEVICE_PATH && DevicePathSubType(dp) == MEDIA_HARDDRIVE_DP) {
             HARDDRIVE_DEVICE_PATH* hd = (HARDDRIVE_DEVICE_PATH*)dp;
             int n = hd->SignatureType == 1 ? 4 : hd->SignatureType == 2 ? 16 : 0;
@@ -175,6 +180,7 @@ static UINT64 boot_partition(EFI_HANDLE image, UINT8* sig, int* sig_len) {
             *sig_len = n;
             return hd->PartitionStart;
         }
+    }
     return 0;
 }
 
@@ -283,6 +289,10 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
                 opts[n++] = "0123456789abcdef"[esp_sig[i] >> 4];
                 opts[n++] = "0123456789abcdef"[esp_sig[i] & 15];
             }
+        }
+        if (boot_usb && n + 12 < sizeof opts) {
+            const char* p3 = " bootdev=usb";
+            for (int i = 0; p3[i]; i++) opts[n++] = p3[i];
         }
         opts[n] = 0;
     }
