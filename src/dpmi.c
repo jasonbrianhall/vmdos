@@ -208,6 +208,7 @@ static u32 lin(u32 sel, u32 off) { return sel_base(sel) + off; }
 static struct { u32 lin, size; u8 used; } blk[MAX_BLOCKS];
 u8 *xms_pool_range(u32 *len);
 static int alloc_block(u32 size);
+static void merge_free(void);
 static int lin_ok(u32 a, u32 n)
 {
     if (a + n < a) return 0;
@@ -367,6 +368,7 @@ static void reset_client(void)
 {
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
     for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1) blk[i].used = 0;  /* memory stays for reuse */
+    merge_free();
     memset(ldt_used, 0, sizeof ldt_used);
     memset(seg_cache, 0, sizeof seg_cache);
     xdepth = 0;
@@ -515,6 +517,27 @@ static u32 win_find(u32 size)
     }
 }
 
+static int in_window(int i) { return blk[i].lin >= WIN_LO && blk[i].lin + blk[i].size <= WIN_HI; }
+
+/* Freed window blocks that touch are one block (each page is mapped on its
+   own, so a block is only a range of the window): after Quake's many
+   resizes the window would otherwise stay in pieces for the next program. */
+static void merge_free(void)
+{
+    for (int again = 1; again;) {
+        again = 0;
+        for (int i = 0; i < MAX_BLOCKS; i++) {
+            if (!blk[i].size || blk[i].used || !in_window(i)) continue;
+            for (int j = 0; j < MAX_BLOCKS; j++) {
+                if (j == i || !blk[j].size || blk[j].used || !in_window(j)) continue;
+                if (blk[i].lin + blk[i].size == blk[j].lin) {
+                    blk[i].size += blk[j].size; blk[j].size = 0; again = 1;
+                }
+            }
+        }
+    }
+}
+
 static u32 win_largest(void)
 {
     u32 best = 0, a = WIN_LO;
@@ -530,8 +553,8 @@ static u32 win_largest(void)
         if (next - a > best) best = next - a;
         a = next;
     }
-    for (int i = 0; i < MAX_BLOCKS; i++)          /* freed blocks can be handed out again */
-        if (blk[i].size && !blk[i].used && blk[i].size > best) best = blk[i].size;
+    for (int i = 0; i < MAX_BLOCKS; i++)          /* freed window blocks can be handed out again */
+        if (blk[i].size && !blk[i].used && in_window(i) && blk[i].size > best) best = blk[i].size;
     return best;
 }
 
@@ -541,19 +564,30 @@ static int new_slot(void)
     return -1;
 }
 
+static int reuse(u32 size, int window)
+{
+    int fit = -1;
+    for (int i = 0; i < MAX_BLOCKS; i++)
+        if (blk[i].size && !blk[i].used && in_window(i) == window && blk[i].size >= size &&
+            (fit < 0 || blk[i].size < blk[fit].size)) fit = i;
+    if (fit >= 0) { blk[fit].used = 1; memset(gptr(blk[fit].lin), 0, blk[fit].size); }
+    return fit;
+}
+
+/* Window first (a freed block, then fresh space), memory above 16 MiB only
+   when the window can't: DOS/4GW handed an old block from up there (left
+   by Quake) fails with "can't lock stack". */
 static int alloc_block(u32 size)
 {
     size = (size + 4095) & ~4095u;
     if (!size) size = 4096;
-    int fit = -1;
-    for (int i = 0; i < MAX_BLOCKS; i++)          /* reuse a freed block of this size or larger */
-        if (blk[i].size && !blk[i].used && blk[i].size >= size && (fit < 0 || blk[i].size < blk[fit].size)) fit = i;
-    if (fit >= 0) { blk[fit].used = 1; memset(gptr(blk[fit].lin), 0, blk[fit].size); return fit; }
+    int i = reuse(size, 1);
+    if (i >= 0) return i;
+    u32 lin = win_find(size);
+    if (!lin && (i = reuse(size, 0)) >= 0) return i;
     if (size > dpmi_avail()) return -1;
     if (phys_free() < size + RESERVE) return -1;
-    int i = new_slot();
-    if (i < 0) return -1;
-    u32 lin = win_find(size);
+    if ((i = new_slot()) < 0) return -1;
     u8 *p = phys_try_alloc(size);
     if (!p) return -1;
     if (lin) for (u32 o = 0; o < size; o += 4096) map_page(lin + o, (u32)(uintptr_t)p + o, 7);
@@ -728,7 +762,7 @@ static struct regs *int31(struct ctx *c)
         SET16(ebx, blk[i].lin >> 16); SET16(ecx, blk[i].lin); SET16(esi, (i + 1) >> 16); SET16(edi, i + 1); break; }
     case 0x0502: { u32 h = rSI << 16 | rDI;
         if (!h || h > MAX_BLOCKS || blk[h - 1].used != 1) { err(c, 0x8023); break; }
-        blk[h - 1].used = 0; break; }
+        blk[h - 1].used = 0; merge_free(); break; }
     case 0x0503: { u32 h = rSI << 16 | rDI, size = rBX << 16 | rCX;
         if (!h || h > MAX_BLOCKS || !blk[h - 1].used) { err(c, 0x8023); break; }
         int o = h - 1;
