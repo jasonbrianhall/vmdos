@@ -214,7 +214,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
 | `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
-| `src/usb.cpp`, `src/pci.cpp` | xHCI keyboard driver (from baremetaldoom) |
+| `src/usb.cpp`, `src/pci.cpp` | xHCI: USB keyboards, mice (from baremetaldoom) and mass storage (C: on a stick) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
