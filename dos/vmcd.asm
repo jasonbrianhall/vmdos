@@ -1,9 +1,10 @@
-; VMCD.SYS: CD-ROM device driver for vmdos's CD images (ISO files loaded as
-; boot modules). Every request goes to the monitor (INT 2Fh AX=5644h);
+; VMCD.SYS: CD-ROM device driver for vmdos's CD drives (ISO files on C:,
+; chosen with VMCD.COM, or loaded as boot modules). Every request goes to
+; the monitor (INT 2Fh AX=5644h);
 ; SHSUCDX or MSCDEX then gives each drive a letter:
 ;   DEVICE=C:\VMCD.SYS          (in FDCONFIG.SYS)
 ;   SHSUCDX /D:?VMCD0001        (in AUTOEXEC.BAT)
-; Without images it doesn't stay in memory (and says nothing).
+; Not under vmdos it doesn't stay in memory (and says nothing).
         org 0
 hdr:    dd -1
         dw 0C800h                       ; character device, IOCTL, open/close
@@ -73,4 +74,4 @@ init:   push cx
         jmp done
 
 msg_ok   db 'VMCD: '
-msg_n    db '0 CD-ROM drive(s) from vmdos CD images', 13, 10, '$'
+msg_n    db '0 CD-ROM drive(s); VMCD.COM changes the disc', 13, 10, '$'

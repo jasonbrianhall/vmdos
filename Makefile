@@ -12,10 +12,15 @@
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
-# DISK_MB=size of C: (default 64; at least 34 for FAT32)
+# DISK_MB=size of the RAM disk dos.img (default 64; at least 34 for FAT32)
+# C=disk (default): C: is esp.img's FAT partition on an AHCI disk, so changes
+#   are kept; ISO= files go to C:\ISOS (the first in CD drive 1). C=ram: C:
+#   is dos.img in RAM (changes lost), ISO= files are loaded into RAM.
+# FRESH=1: make esp.img anew (else it is updated, keeping what DOS changed)
 
 FREEDOS  ?= freedos
 DISK_MB  ?= 64
+C        ?= disk
 EXTRA    ?=
 FB_W     ?= 640
 FB_H     ?= 480
@@ -28,7 +33,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -66,6 +71,9 @@ $(BUILD)/bios.bin: src/bios.asm | $(BUILD)
 $(BUILD)/biosblob.o: src/biosblob.S $(BUILD)/bios.bin
 	$(CC) -m32 -DBIOS_BIN='"$(BUILD)/bios.bin"' -c $< -o $@
 
+$(BUILD)/bootblob.o: src/bootblob.S $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin
+	$(CC) -m32 -DFAT16_BIN='"$(BUILD)/fat16.bin"' -DFAT32_BIN='"$(BUILD)/fat32lba.bin"' -c $< -o $@
+
 vmdos.elf: $(OBJS) src/linker.ld
 	ld -m elf_i386 -T src/linker.ld -o $@ $(OBJS) $(LIBGCC)
 
@@ -99,28 +107,35 @@ $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM tools/mkdisk.py dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM \
-         $(BUILD)/extra.stamp
-	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin \
-	    $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM \
+DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(BUILD)/VMXMS.SYS \
+             $(BUILD)/VMSPEED.COM $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/SHSUCDX.COM third_party/ctmouse/CTMOUSE.COM
+
+dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(DOS_FILES) tools/mkdisk.py $(BUILD)/extra.stamp
+	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin $(DOS_FILES) \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
 
 # grub-mkrescue (Debian/Ubuntu) or grub2-mkrescue (Fedora/RHEL/openSUSE).
 GRUB_MKRESCUE ?= $(firstword $(shell command -v grub-mkrescue grub2-mkrescue 2>/dev/null))
 
-# ISO="game.iso disc2.iso": CD-ROM images (no spaces in the names), held in RAM
-# and given drive letters by VMCD.SYS + SHSUCDX; VMCD.COM swaps discs.
+# ISO="game.iso disc2.iso": CD-ROM images (no spaces in the names). C=disk:
+# copied to C:\ISOS under 8.3 names, the first one in drive 1 at boot (cd=);
+# VMCD D: C:\ISOS\OTHER.ISO changes the disc while running. C=ram: held in
+# RAM as boot modules, one drive each; VMCD 1 2 swaps.
 ISO_MB   := $(if $(ISO),$(shell du -cm $(ISO) | tail -1 | cut -f1),0)
 space    := $(empty) $(empty)
+iso83     = $(shell n=$$(basename "$(1)"); b=$${n%.*}; echo "$$b" | tr a-z A-Z | tr -cd 'A-Z0-9_-' | cut -c1-8).ISO
+ISO_C    := $(foreach f,$(ISO),$(f)=ISOS/$(call iso83,$(f)))
+ISO_RAM  := $(if $(filter ram,$(C)),$(ISO))
+KARGS_ALL = $(strip $(KARGS) $(if $(filter ram,$(C)),c=ram,$(if $(ISO),cd=/ISOS/$(call iso83,$(firstword $(ISO))))))
 
 iso: vmdos.iso
 # KARGS: kernel command line for the ISO's GRUB entry (e.g. KARGS="debug=2 audio=ac97").
 $(BUILD)/grub.cfg: grub.cfg FORCE | $(BUILD)
-	@sed 's|multiboot /boot/vmdos.elf.*|multiboot /boot/vmdos.elf $(KARGS)|' $< > $@.new
-	@for f in $(ISO); do n=$$(basename $$f); sed -i "/^}/i\    module /boot/cd/$$n $$n" $@.new; done
+	@sed 's|multiboot /boot/vmdos.elf.*|multiboot /boot/vmdos.elf $(KARGS_ALL)|' $< > $@.new
+	@for f in $(ISO_RAM); do n=$$(basename $$f); sed -i "/^}/i\    module /boot/cd/$$n $$n" $@.new; done
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 
-vmdos.iso: vmdos.elf dos.img $(BUILD)/grub.cfg $(ISO)
+vmdos.iso: vmdos.elf dos.img $(BUILD)/grub.cfg $(ISO_RAM)
 	@test -n "$(GRUB_MKRESCUE)" || { echo "grub-mkrescue / grub2-mkrescue not found."; \
 	  echo "  Debian/Ubuntu: sudo apt install grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools"; \
 	  echo "  Fedora:        sudo dnf install grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools"; \
@@ -129,7 +144,7 @@ vmdos.iso: vmdos.elf dos.img $(BUILD)/grub.cfg $(ISO)
 	cp vmdos.elf $(BUILD)/iso/boot/
 	gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz
 	cp $(BUILD)/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
-	$(if $(ISO),mkdir -p $(BUILD)/iso/boot/cd && cp $(ISO) $(BUILD)/iso/boot/cd/)
+	$(if $(ISO_RAM),mkdir -p $(BUILD)/iso/boot/cd && cp $(ISO_RAM) $(BUILD)/iso/boot/cd/)
 	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
 
 # ---- UEFI application (gnu-efi): efi/loader.c with the kernel embedded ----
@@ -160,15 +175,25 @@ vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)
 	objcopy -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym -j .rel -j .rela \
 	        -j '.rel.*' -j '.rela.*' -j .reloc -O efi-app-x86_64 --subsystem=10 $(BUILD)/efi/vmdos.so $@
 
-ESP_MB ?= $(shell echo $$(( $(DISK_MB) + $(ISO_MB) + 40 )))
+# esp.img: the EFI system partition, also C: (FreeDOS files at its root,
+# vmdos.efi as EFI/BOOT/BOOTX64.EFI, dos.img next to it for c=ram, KARGS in
+# EFI/BOOT/vmdos.cfg). Updated in place unless FRESH=1 or missing.
+ESP_FREE ?= 256
+EXTRA_MB := $(if $(EXTRA),$(shell du -sm "$(EXTRA)" | cut -f1),0)
+ESP_MB   ?= $(shell echo $$(( $(DISK_MB) + $(EXTRA_MB) + $(ISO_MB) + $(ESP_FREE) )))
+$(BUILD)/vmdos.cfg: FORCE | $(BUILD)
+	@echo '$(KARGS_ALL)' > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 esp: esp.img
-esp.img: vmdos.efi dos.img tools/mkdisk.py $(ISO)
-	python3 tools/mkdisk.py --type=EF $@ $(ESP_MB) - vmdos.efi=EFI/BOOT/BOOTX64.EFI dos.img=EFI/BOOT/dos.img \
-	    $(foreach f,$(ISO),$(f)=EFI/BOOT/$(notdir $(f)))
+esp.img: vmdos.efi dos.img $(DOS_FILES) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/extra.stamp tools/mkdisk.py $(ISO)
+	python3 tools/mkdisk.py $(if $(FRESH),,--update) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
+	    $(DOS_FILES) vmdos.efi=EFI/BOOT/BOOTX64.EFI dos.img=EFI/BOOT/dos.img $(BUILD)/vmdos.cfg=EFI/BOOT/vmdos.cfg \
+	    $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
+	@touch $@
 
 OVMF     ?= $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd))
 QDISPLAY ?=
-QEMU_MEM ?= $(shell echo $$(( 512 + $(ISO_MB) * 2 )))
+QEMU_MEM ?= $(shell echo $$(( 512 + $(if $(ISO_RAM),$(ISO_MB),0) * 2 )))
 # Sound card QEMU gives the machine: SOUND=hda (default), ac97, sb (a real SB16
 # for vmdos to play through), or none. AUDIODEV: pa (PulseAudio / PipeWire),
 # alsa, sdl, or wav (writes vmdos.wav).
@@ -185,15 +210,25 @@ QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device us
 # KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
 ACCEL ?= -accel kvm -accel tcg
 QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
+# C=disk: esp.img on an AHCI controller (C:), after the CD in the boot order.
+BOOTDISK ?= 1
+QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \
+        -device ide-hd,drive=cdisk,bus=ahci.0,bootindex=$(BOOTDISK)
+QDISK = $(if $(filter ram,$(C)),,$(QESP))
+DISK_DEP := $(if $(filter ram,$(C)),,esp.img)
 
-run: vmdos.elf dos.img
-	qemu-system-i386 -kernel vmdos.elf -initrd $(subst $(space),$(comma),dos.img $(ISO)) $(QEMU_ARGS)
-run-iso: vmdos.iso
-	qemu-system-i386 -cdrom vmdos.iso $(QEMU_ARGS)
-run-efi: vmdos.iso
-	qemu-system-x86_64 -bios $(OVMF) -cdrom vmdos.iso $(QEMU_ARGS)
+run: vmdos.elf dos.img $(DISK_DEP)
+	qemu-system-i386 -kernel vmdos.elf -initrd $(subst $(space),$(comma),dos.img $(ISO_RAM)) \
+	    -append "$(KARGS_ALL)" $(QDISK) $(QEMU_ARGS)
+run-iso: vmdos.iso $(DISK_DEP)
+	qemu-system-i386 -drive if=none,id=cd0,media=cdrom,file=vmdos.iso -device ide-cd,drive=cd0,bootindex=0 \
+	    $(QDISK) $(QEMU_ARGS)
+run-efi: vmdos.iso $(DISK_DEP)
+	qemu-system-x86_64 -bios $(OVMF) -drive if=none,id=cd0,media=cdrom,file=vmdos.iso -device ide-cd,drive=cd0,bootindex=0 \
+	    $(QDISK) $(QEMU_ARGS)
+run-efi-app: BOOTDISK = 0
 run-efi-app: esp.img
-	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=esp.img $(QEMU_ARGS)
+	qemu-system-x86_64 -bios $(OVMF) $(QESP) $(QEMU_ARGS)
 
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img

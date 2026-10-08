@@ -1,17 +1,34 @@
-/* CD-ROM images: ISO 9660 files loaded as boot modules after dos.img
-   (GRUB "module", QEMU -initrd "dos.img,game.iso", vmdos.efi takes the
-   *.ISO files next to it). VMCD.SYS, a CD-ROM device driver in DOS, hands
-   every request header here (INT 2Fh AX=5644h); SHSUCDX (or MSCDEX) gives
-   each drive a letter. VMCD.COM lists the images and changes the one in a
-   drive (multi-disc games), which the driver reports as a media change. */
+/* CD-ROM drives. VMCD.SYS, a CD-ROM device driver in DOS, hands every
+   request header here (INT 2Fh AX=5644h); SHSUCDX (or MSCDEX) gives each
+   drive a letter. A drive holds one image at a time:
+   - an ISO file on C:, read straight from the disk (no RAM copy). VMCD.COM
+     puts one in a drive at any time ("VMCD D: C:\ISOS\WAR2.ISO"); cd=PATH
+     on the kernel command line fills drive 1 at boot;
+   - an ISO loaded as a boot module after dos.img (GRUB "module", QEMU
+     -initrd "dos.img,game.iso", vmdos.efi with C: as RAM disk).
+   Changing the image is reported to DOS as a media change. There is
+   always at least one drive (cdrives=N, 1-4, for more). */
 #include "kernel.h"
 
-#define MAX_IMAGES 8
+#define MAX_IMAGES 16
 #define MAX_UNITS 4
-static struct { u8 *data; u32 sectors; char name[32]; } img[MAX_IMAGES];
-static int n_img, n_units;
-static int unit_img[MAX_UNITS];          /* image in each drive, -1 = empty */
+static struct {
+    u8 *data;                            /* RAM image, or */
+    struct extent *ext; int n_ext;       /* the file's runs of disk sectors */
+    u32 sectors;
+    char name[80];
+} img[MAX_IMAGES];
+static int n_img, n_units = -1;
+static int unit_img[MAX_UNITS] = { -1, -1, -1, -1 };
 static u8 changed[MAX_UNITS];
+static int n_mod;                        /* boot-module images, first in img[] */
+
+static void set_name(int i, const char *name)
+{
+    int j = 0;
+    for (; name[j] && name[j] != ' ' && j < 79; j++) img[i].name[j] = name[j];
+    img[i].name[j] = 0;
+}
 
 void cd_add(u8 *data, u32 size, const char *name)
 {
@@ -20,20 +37,89 @@ void cd_add(u8 *data, u32 size, const char *name)
         kprintf("cd: %s is not an ISO 9660 image\n", name);
         return;
     }
+    for (const char *p = name; *p; p++) if (*p == '/' || *p == '\\') name = p + 1;
     img[n_img].data = data;
     img[n_img].sectors = size / 2048;
-    int j = 0;
-    for (const char *p = name; *p; p++) if (*p == '/' || *p == '\\') name = p + 1;
-    for (; name[j] && name[j] != ' ' && j < 31; j++) img[n_img].name[j] = name[j];
-    img[n_img].name[j] = 0;
+    set_name(n_img, name);
     kprintf("cd: image %d: %s, %u MiB\n", n_img + 1, img[n_img].name, size >> 20);
-    if (n_units < MAX_UNITS) { unit_img[n_units] = n_img; n_units++; }
-    n_img++;
+    n_img++; n_mod = n_img;
+}
+
+/* Read n CD sectors from image im into buf. */
+static int img_read(int im, u32 start, u32 n, u8 *buf)
+{
+    if (img[im].data) { memcpy(buf, img[im].data + start * 2048, n * 2048); return 0; }
+    u32 s = start * 4, left = n * 4, base = 0;           /* in 512-byte disk sectors */
+    for (int e = 0; e < img[im].n_ext && left; e++) {
+        struct extent *x = &img[im].ext[e];
+        if (s < base + x->count) {
+            u32 off = s - base, k = x->count - off;
+            if (k > left) k = left;
+            if (disk_read(x->lba + off, k, buf)) return -1;
+            buf += k * 512; s += k; left -= k;
+        }
+        base += x->count;
+    }
+    return left ? -1 : 0;
+}
+
+/* Put the ISO file at path (on C:) in drive u. 0, or 2 not found, 3 not an
+   ISO image, 4 not on C:, 6 out of memory, 7 disk error. */
+static int mount_file(int u, const char *path)
+{
+    if (path[0] && path[1] == ':' && (path[0] | 32) != 'c') return 4;
+    static struct fatvol v;
+    if (disk_volume(&v)) return 7;
+    u32 clus, size;
+    if (fat_lookup(&v, path, &clus, &size)) return 2;
+    if (size < 0x8800) return 3;
+    int slot = -1;
+    for (int i = n_mod; i < n_img; i++) {                 /* a file slot no drive uses */
+        int used = 0;
+        for (int k = 0; k < MAX_UNITS; k++) if (unit_img[k] == i) used = 1;
+        if (!used && slot < 0) slot = i;
+    }
+    if (slot < 0) { if (n_img == MAX_IMAGES) return 6; slot = n_img; }
+    int n = fat_extents(&v, clus, size, 0, 1 << 20);
+    if (n <= 0) return 7;
+    struct extent *ext = phys_try_alloc((u32)n * sizeof *ext);
+    if (!ext) return 6;
+    fat_extents(&v, clus, size, ext, n);
+    img[slot].data = 0; img[slot].ext = ext; img[slot].n_ext = n;
+    img[slot].sectors = size / 2048;
+    static u8 pvd[2048];
+    if (img_read(slot, 16, 1, pvd)) return 7;
+    if (memcmp(pvd + 1, "CD001", 5)) return 3;
+    set_name(slot, path);
+    if (slot == n_img) n_img++;
+    unit_img[u] = slot;
+    changed[u] = 1;
+    kprintf("cd: drive %d now holds %s (%u MiB, %d run%s on C:)\n", u + 1, img[slot].name, size >> 20, n, n == 1 ? "" : "s");
+    return 0;
+}
+
+static void units_init(void)
+{
+    if (n_units >= 0) return;
+    n_units = n_img < 1 ? 1 : n_img > MAX_UNITS ? MAX_UNITS : n_img;
+    const char *o = strstr(cmdline, "cdrives=");
+    if (o && o[8] >= '1' && o[8] <= '4') n_units = o[8] - '0';
+    for (int u = 0; u < n_units && u < n_img; u++) unit_img[u] = u;
+    o = strstr(cmdline, "cd=");
+    if (o && (o == cmdline || o[-1] == ' ')) {
+        char path[80];
+        int j = 0;
+        for (o += 3; *o && *o != ' ' && j < 79; o++) path[j++] = *o == '/' ? '\\' : *o;
+        path[j] = 0;
+        int e = mount_file(0, path);
+        if (e) kprintf("cd: cd=%s: can't use it (error %d)\n", path, e);
+        changed[0] = 0;
+    }
 }
 
 /* ---------------- MSCDEX device-driver requests ---------------- */
 #define ST_DONE 0x0100
-#define ST_ERR(e) (0x8100 | (e))          /* 2 not ready, 3 unknown command, 8 sector not found */
+#define ST_ERR(e) (0x8100 | (e))          /* 2 not ready, 3 unknown command, 8 sector not found, F invalid disk change */
 
 static u32 msf(u32 lba) { lba += 150; return (lba / 4500) << 16 | (lba / 75 % 60) << 8 | (lba % 75); }
 
@@ -71,15 +157,20 @@ static u16 read_long(int unit, u32 rh)
     if (rd8(rh + 24) != 0) return ST_ERR(3);                            /* cooked only */
     if (start + n > img[im].sectors || start + n < start) return ST_ERR(8);
     if (buf + n * 2048 > GUEST_TOP) return ST_ERR(0xC);
-    memcpy(gptr(buf), img[im].data + start * 2048, n * 2048);
+    if (img_read(im, start, n, gptr(buf))) return ST_ERR(0xB);          /* read fault */
     return ST_DONE;
 }
 
+static void put(u32 *o, const char *s) { for (; *s; s++) wr8((*o)++, (u8)*s); }
+
 /* INT 2Fh AX=5644h. BX=0: number of drives. BX=1: ES:DI = request header,
    DX = driver segment. BX=2: VMCD.COM: CX=0 list (ES:DI <- text), else
-   put image DL (1..n, 0 = empty) in drive CL (1..). */
+   put image DL (1..n, 0 = empty) in drive CL (1..). BX=3: put the ISO
+   file DS:SI (full DOS path, from INT 21h AH=60h) in drive CL; AX=0 or
+   an error (see mount_file). */
 void cd_api(struct regs *r)
 {
+    units_init();
     switch (BX(r)) {
     case 0: AX(r) = (u16)n_units; return;
     case 1: {
@@ -98,27 +189,40 @@ void cd_api(struct regs *r)
     case 2: {
         if (CX(r) == 0) {                                               /* list into ES:DI ($-terminated) */
             u32 o = LIN(r->v86_es, DI(r));
-            const char *hdr = "CD images:\r\n";
-            for (const char *p = hdr; *p; p++) wr8(o++, (u8)*p);
+            put(&o, "CD images:\r\n");
             for (int i = 0; i < n_img; i++) {
-                wr8(o++, ' '); wr8(o++, (u8)('1' + i)); wr8(o++, ' ');
-                for (const char *p = img[i].name; *p; p++) wr8(o++, (u8)*p);
+                int used = 0;
+                for (int u = 0; u < n_units; u++) if (unit_img[u] == i) used = 1;
+                if (i >= n_mod && !used) continue;                      /* a file no drive holds any more */
+                char num[4] = { ' ', (char)(i < 9 ? '1' + i : 'A' + i - 9), ' ', 0 };
+                put(&o, num);
+                put(&o, img[i].name);
                 for (int u = 0; u < n_units; u++)
-                    if (unit_img[u] == i) { const char *t = "  (in drive "; for (const char *p = t; *p; p++) wr8(o++, (u8)*p);
-                                            wr8(o++, (u8)('1' + u)); wr8(o++, ')'); }
-                wr8(o++, '\r'); wr8(o++, '\n');
+                    if (unit_img[u] == i) { char t[16] = "  (in drive 1)"; t[12] = (char)('1' + u); put(&o, t); }
+                put(&o, "\r\n");
             }
-            if (!n_img) { const char *t = " none: add ISO files as boot modules\r\n"; for (const char *p = t; *p; p++) wr8(o++, (u8)*p); }
+            for (int u = 0; u < n_units; u++)
+                if (unit_img[u] < 0) { char t[24] = " drive 1: empty\r\n"; t[8] = (char)('1' + u); put(&o, t); }
             wr8(o, '$');
             AX(r) = 0;
             return;
         }
         int u = CL(r) - 1, i = DL(r) - 1;
-        if (u < 0 || u >= n_units || i < -1 || i >= n_img) { AX(r) = 1; return; }
+        if (u < 0 || u >= n_units || i < -1 || i >= n_mod) { AX(r) = 1; return; }
         unit_img[u] = i;
         changed[u] = 1;
         kprintf("cd: drive %d now holds %s\n", u + 1, i >= 0 ? img[i].name : "nothing");
         AX(r) = 0;
+        return; }
+    case 3: {
+        int u = CL(r) - 1;
+        if (u < 0 || u >= n_units) { AX(r) = 5; return; }
+        char path[80];
+        u32 a = LIN(r->v86_ds, SI(r));
+        int j = 0;
+        for (; j < 79 && rd8(a + j); j++) path[j] = (char)rd8(a + j);
+        path[j] = 0;
+        AX(r) = (u16)mount_file(u, path);
         return; }
     }
     AX(r) = 0xFFFF;

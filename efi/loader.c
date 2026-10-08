@@ -158,6 +158,41 @@ static void load_isos(EFI_HANDLE image, CHAR16* dir) {
     }
 }
 
+// Start (LBA) of the partition vmdos.efi was loaded from, 0 if unknown: the
+// kernel prefers it for C: (esp=LBA on the command line).
+static UINT64 boot_partition_start(EFI_HANDLE image) {
+    EFI_GUID lip = LOADED_IMAGE_PROTOCOL;
+    EFI_LOADED_IMAGE* li;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, image, &lip, (void**)&li))) return 0;
+    EFI_DEVICE_PATH* dp = DevicePathFromHandle(li->DeviceHandle);
+    for (int guard = 0; dp && !IsDevicePathEnd(dp) && guard < 64; guard++, dp = NextDevicePathNode(dp))
+        if (DevicePathType(dp) == MEDIA_DEVICE_PATH && DevicePathSubType(dp) == MEDIA_HARDDRIVE_DP)
+            return ((HARDDRIVE_DEVICE_PATH*)dp)->PartitionStart;
+    return 0;
+}
+
+static int file_exists(EFI_HANDLE image, CHAR16* name) {
+    EFI_GUID lip = LOADED_IMAGE_PROTOCOL, sfs = SIMPLE_FILE_SYSTEM_PROTOCOL;
+    EFI_LOADED_IMAGE* li;
+    EFI_FILE_IO_INTERFACE* fs;
+    EFI_FILE_HANDLE root, f;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, image, &lip, (void**)&li))) return 0;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, li->DeviceHandle, &sfs, (void**)&fs))) return 0;
+    if (EFI_ERROR(uefi_call_wrapper(fs->OpenVolume, 2, fs, &root))) return 0;
+    if (EFI_ERROR(uefi_call_wrapper(root->Open, 5, root, &f, name, EFI_FILE_MODE_READ, 0))) return 0;
+    uefi_call_wrapper(f->Close, 1, f);
+    return 1;
+}
+
+static int has_word(const char* s, const char* w) {
+    for (; *s; s++) {
+        int i = 0;
+        while (w[i] && s[i] == w[i]) i++;
+        if (!w[i] && (s[i] == 0 || s[i] == ' ')) return 1;
+    }
+    return 0;
+}
+
 static int usable_after_exit(UINT32 t) {
     return t == EfiConventionalMemory || t == EfiBootServicesCode || t == EfiBootServicesData ||
            t == EfiLoaderCode || t == EfiLoaderData;
@@ -194,10 +229,47 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
                 (i + 5 == n || opts[i+5] == ' ')) debug = 1;
     }
 
-    Print(L"vmdos UEFI loader\r\n  reading %s\r\n", img_path);
+    // vmdos.cfg next to vmdos.efi: more kernel options (one line).
+    {
+        static CHAR16 cfg_path[512];
+        UINTN i = 0;
+        for (; i < cut; i++) cfg_path[i] = img_path[i];
+        StrCpy(cfg_path + cut, L"vmdos.cfg");
+        UINTN cs = 0;
+        char* cfg = read_file(image, cfg_path, &cs);
+        UINTN n = 0;
+        while (opts[n]) n++;
+        for (UINTN k = 0; cfg && k < cs && n < sizeof opts - 2; k++) {
+            char c = cfg[k];
+            if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+            if (c < 32 || c > 126) continue;
+            if (k == 0 && n) opts[n++] = ' ';
+            opts[n++] = c;
+        }
+        opts[n] = 0;
+    }
+    // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
+    // (the kernel's AHCI driver uses it); dos.img only for c=ram or else.
+    UINT64 esp = boot_partition_start(image);
+    int disk_c = file_exists(image, L"\\KERNEL.SYS") && !has_word(opts, "c=ram");
     UINTN disk_size = 0;
-    UINT8* disk = read_file(image, img_path, &disk_size);
-    if (!disk) { fail(L"can't read dos.img (it goes in the same folder as vmdos.efi)"); return EFI_NOT_FOUND; }
+    UINT8* disk = NULL;
+    // dos.img too when it's there: the RAM disk is the fallback if the
+    // kernel can't drive this disk (not AHCI).
+    Print(L"vmdos UEFI loader\r\n  reading %s\r\n", img_path);
+    disk = read_file(image, img_path, &disk_size);
+    if (!disk && !disk_c) { fail(L"can't read dos.img (it goes in the same folder as vmdos.efi), and no KERNEL.SYS on this partition"); return EFI_NOT_FOUND; }
+    if (esp) {
+        UINTN n = 0;
+        while (opts[n]) n++;
+        char num[24]; int k = 0;
+        UINT64 v = esp;
+        do { num[k++] = (char)('0' + v % 10); v /= 10; } while (v && k < 20);
+        const char* pre = " esp=";
+        for (int i = 0; pre[i] && n < sizeof opts - 1; i++) opts[n++] = pre[i];
+        while (k && n < sizeof opts - 1) opts[n++] = num[--k];
+        opts[n] = 0;
+    }
 
     {
         static CHAR16 dir[512];
@@ -211,7 +283,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     if (!gop) { fail(L"no 32-bit graphics mode (GOP) available"); return EFI_UNSUPPORTED; }
 
     Print(L"vmdos UEFI loader\r\n");
-    Print(L"  disk image:   %s, %d KiB at 0x%lx\r\n", img_path, disk_size >> 10, (UINT64)(UINTN)disk);
+    if (disk_c) Print(L"  C: drive:     this partition (LBA %ld), through the kernel's AHCI driver\r\n", esp);
+    if (disk) Print(L"  disk image:   %s, %d KiB at 0x%lx%s\r\n", img_path, disk_size >> 10, (UINT64)(UINTN)disk,
+                    disk_c ? L" (fallback)" : L"");
     Print(L"  graphics:     %dx%d, framebuffer 0x%lx\r\n", gop->Mode->Info->HorizontalResolution,
           gop->Mode->Info->VerticalResolution, (UINT64)gop->Mode->FrameBufferBase);
 
@@ -279,7 +353,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     struct MultibootModule* mod = (struct MultibootModule*)((UINT8*)mbi + 512);
     char* cmdline = (char*)mbi + 1024;
     char* modname = (char*)mbi + 3072;
-    copy(modname, "dos.img", 8);
+    copy(modname, disk ? "dos.img" : "none", disk ? 8 : 5);
     mod->mod_start = (UINT32)(UINTN)disk;
     mod->mod_end = (UINT32)(UINTN)disk + (UINT32)disk_size;
     mod->string = (UINT32)(UINTN)modname;

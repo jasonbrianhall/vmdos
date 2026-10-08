@@ -3,7 +3,7 @@
 FreeDOS FAT32 (LBA) boot sector, then copy files into its root.
 Needs mkfs.fat (dosfstools) and mcopy (mtools).
 
-  mkdisk.py [--type=0C] [--boot16=FAT16BOOT.bin] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
+  mkdisk.py [--update] [--type=0C] [--boot16=FAT16BOOT.bin] OUT.img SIZE_MB BOOTSECTOR.bin|- FILE... [DIR/...] [SRC=DEST/PATH]
 Files are copied to the root; a directory is copied recursively; SRC=DEST
 puts a file at DEST (directories are created); --contents=DIR copies
 everything inside DIR to the root. BOOTSECTOR "-" leaves the
@@ -12,7 +12,11 @@ mkfs.fat boot code; --type sets the partition type (EF: EFI system partition).
 With --boot16, disks up to 2 GiB are FAT16 with 8-32 KiB clusters and that
 boot sector: FreeDOS walks a file's cluster chain on every seek, which with
 FAT32's 512-byte clusters (all a small FAT32 disk can have) makes seeking in
-a big file (DOOM's WAD) very slow. Otherwise FAT32 with BOOTSECTOR."""
+a big file (DOOM's WAD) very slow. Otherwise FAT32 with BOOTSECTOR.
+
+--update: OUT.img exists (made by this script) and is kept: files are copied
+in, but AUTOEXEC.BAT, FDCONFIG.SYS and anything from --contents / folders
+that is already there is left alone (it may have been changed in DOS)."""
 import os, struct, subprocess, sys
 
 START = 2048                      # first partition sector (1 MiB aligned)
@@ -29,13 +33,16 @@ def chs(lba, heads=255, spt=63):
 
 def main():
     args = sys.argv[1:]
-    ptype, boot16 = None, None
+    ptype, boot16, update = None, None, False
     while args and args[0].startswith("--"):
         a = args.pop(0)
         if a.startswith("--type="): ptype = int(a[7:], 16)
         elif a.startswith("--boot16="): boot16 = a[9:]
+        elif a == "--update": update = True
         else: sys.exit("mkdisk: unknown option " + a)
     out, size_mb, bootbin, files = args[0], int(args[1]), args[2], args[3:]
+    if update and os.path.exists(out):
+        return copy_files(out, files, True)
     total = size_mb * 2048
     plen = total - START
     fat16 = boot16 is not None and plen < 4 * 1024 * 1024 - 8192
@@ -80,16 +87,27 @@ def main():
                 f.seek(sec * 512)
                 f.write(new)
 
+    copy_files(out, files, False)
+
+
+KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS"}
+
+
+def copy_files(out, files, update):
     img = "%s@@%d" % (out, START * 512)
+    keep = ["-D", "s"] if update else ["-o"]
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
     made = set()
     expanded = []
+    user = set()
     for p in files:
         if p.startswith("--contents="):
             d = p[len("--contents="):]
             if not os.path.isdir(d):
                 sys.exit("mkdisk: %s is not a folder" % d)
-            expanded += [os.path.join(d, n) for n in sorted(os.listdir(d))]
+            more = [os.path.join(d, n) for n in sorted(os.listdir(d))]
+            expanded += more
+            user.update(more)
         else:
             expanded.append(p)
     for p in expanded:
@@ -104,10 +122,11 @@ def main():
                     made.add(d)
             subprocess.run(["mcopy", "-o", "-i", img, src, "::/" + "/".join(parts)], check=True, env=env)
         elif os.path.isdir(p):
-            subprocess.run(["mcopy", "-s", "-o", "-i", img, p, "::/"], check=True, env=env)
+            subprocess.run(["mcopy", "-s"] + keep + ["-i", img, p, "::/"], check=not update, env=env)
         else:
-            subprocess.run(["mcopy", "-o", "-i", img, p, "::/" + os.path.basename(p).upper()],
-                           check=True, env=env)
+            name = os.path.basename(p).upper()
+            mode = keep if (p in user or name in KEEP) else ["-o"]
+            subprocess.run(["mcopy"] + mode + ["-i", img, p, "::/" + name], check=mode == ["-o"], env=env)
 
 
 main()

@@ -143,6 +143,26 @@ void vaux_bios_enable(int on);                /* INT 15h C2xx on that port */
 void vaux_bios_reset(void);
 int vaux_bios_byte(void);                     /* mouse byte from the 8042, or -1 */
 void speed_init(void);                        /* speed= (slowdown) */
+/* ---- fat.c: read-only FAT reader ---- */
+struct fatvol {
+    int (*rd)(u32 lba, u32 n, void *buf);
+    u32 base, total, spc, fat_start, root_start, root_secs, data_start, root_clus, nclus, fat_cached;
+    int type;
+    u8 sec[512], fat[1024];
+};
+struct extent { u32 lba, count; };
+int fat_mount(struct fatvol *v, int (*rd)(u32 lba, u32 n, void *buf), u32 base);
+int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size);
+int fat_extents(struct fatvol *v, u32 clus, u32 bytes, struct extent *ext, int max);
+
+/* ---- disk.c: drive C: (AHCI partition or RAM disk) ---- */
+extern u32 disk_sectors;
+void disk_init(void);
+int disk_read(u32 lba, u32 n, void *buf);     /* 0 or a BIOS INT 13h status */
+int disk_write(u32 lba, u32 n, const void *buf);
+int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
+const char *disk_kind(void);
+
 void cd_add(u8 *data, u32 size, const char *name);   /* cd.c: a CD-ROM image */
 void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */
 void speed_throttle(void);                    /* after each timer tick */

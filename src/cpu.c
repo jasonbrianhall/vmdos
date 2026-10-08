@@ -352,6 +352,7 @@ void kmain(u32 magic, struct mb_info *mb)
         for (u32 i = 1; i < mb->mods_count && i < 8; i++) {
             cdmod[n_cdmod].start = m[i].start; cdmod[n_cdmod].end = m[i].end;
             const char *nm = m[i].string ? (const char *)(uintptr_t)m[i].string : "image.iso";
+            for (const char *q = nm; *q && *q != ' '; q++) if (*q == '/' || *q == '\\') nm = q + 1;   /* file name only */
             int j = 0;
             for (; nm[j] && j < 63; j++) cdmod[n_cdmod].name[j] = nm[j];
             cdmod[n_cdmod].name[j] = 0;
@@ -421,7 +422,7 @@ void kmain(u32 magic, struct mb_info *mb)
         kprintf("framebuffer type %u (not a linear RGB framebuffer)\n", mb->fb_type);
     }
 
-    if (mod_start) {
+    if (mod_end > mod_start) {        /* module 0: dos.img (may be empty: vmdos.efi with C: on disk) */
         if (mod_start < LOW_END) {        /* below 16 MiB: move it out of the guest's / DPMI's way */
             u8 *p = phys_alloc(mod_end - mod_start);
             memcpy(p, (void *)(uintptr_t)mod_start, mod_end - mod_start);
@@ -429,6 +430,9 @@ void kmain(u32 magic, struct mb_info *mb)
             mod_start = (u32)(uintptr_t)p;
         }
         disk_image = (u8 *)(uintptr_t)mod_start;
+        disk_size = mod_end - mod_start;
+    }
+    {
         for (int i = 0; i < n_cdmod; i++) {
             u32 a = cdmod[i].start, n = cdmod[i].end - cdmod[i].start;
             if (a < LOW_END) {                   /* below 16 MiB: move it, as dos.img */
@@ -439,7 +443,6 @@ void kmain(u32 magic, struct mb_info *mb)
             }
             cd_add((u8 *)(uintptr_t)a, n, cdmod[i].name);
         }
-        disk_size = mod_end - mod_start;
     }
 
     paging_init();
@@ -454,10 +457,7 @@ void kmain(u32 magic, struct mb_info *mb)
                           fbi.rpos, fbi.rsz, fbi.gpos, fbi.gsz, fbi.bpos, fbi.bsz);
     video_init();
 
-    if (!disk_image)
-        panic("No disk image. Load dos.img as a boot module "
-              "(GRUB: module /boot/dos.img dos.img; QEMU: -initrd dos.img).");
-
+    disk_init();
     vdev_init();
     speed_init();
     bios_init();

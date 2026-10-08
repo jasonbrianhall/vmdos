@@ -3,7 +3,8 @@
 FreeDOS running in virtual-8086 mode under a small 32-bit protected-mode
 kernel. Boots from GRUB (BIOS or UEFI) or QEMU `-kernel`. The kernel emulates
 the BIOS and the PC hardware DOS touches; FreeDOS's kernel and FreeCOM run
-unmodified, with drive C: a FAT32 RAM disk loaded as a boot module.
+unmodified. Drive C: is the FAT partition of the EFI disk (AHCI/SATA), so
+changes are kept; a RAM disk (dos.img) is the option and the fallback.
 
 ## Build and run
 
@@ -14,12 +15,31 @@ sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf
 make            # vmdos.elf + dos.img (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
 make efi        # vmdos.efi + dos.img: a UEFI application, no GRUB needed
-make esp        # esp.img: FAT32 disk with EFI/BOOT/BOOTX64.EFI + dos.img; dd it to a USB stick
+make esp        # esp.img: the EFI disk, also C: (FreeDOS at its root, EFI/BOOT/BOOTX64.EFI); dd it to a disk
 make iso        # vmdos.iso (GRUB), hybrid BIOS/UEFI
 make run        # QEMU, BIOS (-kernel)
-make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img (OVMF takes ~40 s to read dos.img without KVM)
+make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img
 make run-efi    # QEMU, UEFI, from vmdos.iso
 ```
+
+### Drive C:
+
+`C=disk` (default): C: is the FAT partition of `esp.img`, which the run
+targets attach as a SATA (AHCI) disk; what DOS writes stays there. Rebuilding
+updates esp.img in place: programs and FreeDOS files are refreshed,
+AUTOEXEC.BAT, FDCONFIG.SYS and files already copied from `EXTRA` are kept
+(`FRESH=1` starts over). `C=ram`: C: is dos.img in RAM, changes lost (kernel
+option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
+EFI/BOOT/vmdos.cfg, which vmdos.efi reads).
+
+The kernel picks C: from the FAT partitions on AHCI disks that hold
+KERNEL.SYS at their root, preferring the one vmdos.efi started from; other
+partitions are never touched (DOS sees a one-partition disk and can't write
+outside it). No such partition, or a disk that isn't AHCI (NVMe, USB): the
+RAM disk, from dos.img next to vmdos.efi or the GRUB module. To use an
+existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
+COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT, VM*.*, SHSUCDX.COM, CTMOUSE.COM)
+to the ESP's root and vmdos.efi + dos.img to a folder on it.
 
 QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
 is many times slower; `ACCEL=` overrides). `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
@@ -81,20 +101,21 @@ Slowdown for games that time themselves by the CPU (as MoSlo does):
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
-CD-ROM images: `ISO="game.iso disc2.iso"` with `make run`, `make iso` /
-`run-efi` or `make esp` (no spaces in the names). Each ISO becomes a CD drive
-(D:, E:, ... by SHSUCDX); `VMCD` lists the images and `VMCD 1 2` puts image 2
-in drive 1, for the next disc of a game. They are held in RAM (the QEMU
-targets add their size to `QEMU_MEM`). On a real machine: copy the ISOs next
-to vmdos.efi (it loads every `*.ISO` there, up to 7), or add
-`module /boot/vmdos/game.iso game.iso` lines after dos.img in GRUB.
+CD-ROM: any ISO file on C: can be put in the CD drive (D:) while running:
+`VMCD D: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
+names). It is read straight from the disk, nothing is copied to RAM; `VMCD`
+lists the drives. `ISO="game.iso disc2.iso"` copies ISOs to C:\ISOS (8.3
+names) and puts the first in the drive at boot (`cd=/ISOS/GAME.ISO` on the
+kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
+images are held in RAM as boot modules instead, one drive each, and
+`VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
 load options); the log shows every INT 33h call, event-handler call and
 command sent to the PS/2 mouse port. If the built-in driver doesn't satisfy
 a game, try `CTMOUSE` first.
 
-C: lives in RAM: changes are lost at power-off. The kernel loads at 16 MiB.
+The kernel loads at 16 MiB.
 Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
 dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
 
@@ -172,6 +193,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
+| `src/disk.c`, `src/ahci.cpp`, `src/fat.c` | drive C: (AHCI partition or RAM disk), SATA driver, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-colour VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |

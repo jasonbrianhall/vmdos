@@ -9,7 +9,7 @@ extern const u8 bios_bin[], bios_bin_end[];
 #define FONT16_OFF 0xA000
 #define FONT8_OFF 0xB000
 
-static u32 disk_sectors, disk_cyls;
+static u32 disk_cyls;
 #define DISK_HEADS 255
 #define DISK_SPT 63
 
@@ -197,12 +197,8 @@ static u8 disk_status;
 
 static int disk_rw(u32 lba, u32 count, u32 buf, int write)
 {
-    if (lba >= disk_sectors || count > disk_sectors - lba) return 0x04;
     if (buf + count * 512 > GUEST_TOP) return 0x09;
-    u8 *d = disk_image + lba * 512;
-    if (write) memcpy(d, gptr(buf), count * 512);
-    else memcpy(gptr(buf), d, count * 512);
-    return 0;
+    return write ? disk_write(lba, count, gptr(buf)) : disk_read(lba, count, gptr(buf));
 }
 
 static int int13(struct regs *r)
@@ -475,7 +471,6 @@ void bios_init(void)
 
     video_set_mode(3, 1);
 
-    disk_sectors = disk_size / 512;
     disk_cyls = disk_sectors / (DISK_HEADS * DISK_SPT);
     if (disk_cyls > 1024) disk_cyls = 1024;
     if (!disk_cyls) disk_cyls = 1;
@@ -483,31 +478,34 @@ void bios_init(void)
             disk_cyls, DISK_HEADS, DISK_SPT);
 }
 
+/* FreeDOS boot sectors (boot/), laid over C:'s boot sector in memory so a
+   partition formatted elsewhere (an ESP made by mkfs or Windows) boots too;
+   the disk itself is not changed. */
+extern const u8 fd_boot16[512], fd_boot32[512];
+
 void bios_boot(struct regs *r)
 {
-    u8 *d = disk_image;
-    if (d[0] == 0x1F && d[1] == 0x8B)
+    if (disk_kind()[0] == 'R' && disk_image[0] == 0x1F && disk_image[1] == 0x8B)
         panic("dos.img is gzip-compressed. GRUB unpacks modules itself; for QEMU -initrd use the plain image.");
-    if (d[510] != 0x55 || d[511] != 0xAA) panic("dos.img: no boot signature in sector 0");
-
-    u32 vbr = 0;
+    static struct fatvol v;
+    u8 m[512];
+    if (disk_read(0, 1, m) || m[510] != 0x55 || m[511] != 0xAA) panic("C: has no boot signature in sector 0");
+    if (disk_volume(&v)) panic("C: has no FAT partition");
+    if (v.type == 12) panic("C: is FAT12; FreeDOS needs FAT16 or FAT32 here");
     int part = -1;
-    /* A partition table, unless sector 0 is itself a FAT boot sector. */
-    if (memcmp(d + 0x52, "FAT32", 5) && memcmp(d + 0x36, "FAT", 3)) {
-        for (int i = 0; i < 4; i++) {
-            u8 *e = d + 446 + i * 16;
-            u8 t = e[4];
-            if (t == 0x01 || t == 0x04 || t == 0x06 || t == 0x0B || t == 0x0C || t == 0x0E) {
-                if (part < 0 || e[0] == 0x80) { part = i; vbr = *(u32 *)(e + 8); }
-            }
-        }
-        if (part < 0) panic("dos.img: no FAT partition in the partition table");
-        memcpy(gptr(0x600), d, 512);                 /* as an MBR would leave it */
+    if (v.base) {
+        for (int i = 0; i < 4; i++) if (*(u32 *)(m + 446 + i * 16 + 8) == v.base) part = i;
+        memcpy(gptr(0x600), m, 512);                 /* as an MBR would leave it */
     }
-    if ((u64)vbr * 512 + 512 > disk_size) panic("dos.img: partition outside the image");
-    memcpy(gptr(0x7C00), d + vbr * 512, 512);
-    if (rd16(0x7DFE) != 0xAA55) panic("dos.img: partition boot sector has no signature");
-    kprintf("booting partition %d at LBA %u\n", part, vbr);
+    u8 *b = gptr(0x7C00);
+    if (disk_read(v.base, 1, b)) panic("C: boot sector unreadable");
+    const u8 *code = v.type == 32 ? fd_boot32 : fd_boot16;
+    int bpb_end = v.type == 32 ? 0x5A : 0x3E;
+    memcpy(b, code, 3);
+    memcpy(b + bpb_end, code + bpb_end, 510 - bpb_end);
+    *(u32 *)(b + 0x1C) = v.base;                     /* hidden sectors = partition start */
+    b[v.type == 32 ? 0x40 : 0x24] = 0x80;            /* drive number */
+    kprintf("booting FAT%d partition %d at LBA %u (%s)\n", v.type, part, v.base, disk_kind());
 
     r->cs = 0; r->eip = 0x7C00;
     r->ss = 0; r->esp = 0x7C00;
