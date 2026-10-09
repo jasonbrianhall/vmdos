@@ -5,11 +5,11 @@
 // (disk.c, through usb_msd_*).
 //
 // Takes every xHCI controller from the BIOS, resets it, enumerates keyboards and
-// mice on the root ports and behind USB 2 hubs (hubs in hubs too, and ones
+// mice on the root ports and behind hubs (hubs in hubs too, and ones
 // plugged in later), and turns keyboards' 8-byte boot reports into the same
-// PS/2 set-1 scancodes the rest of the kernel already handles. A USB 3
-// hub's SuperSpeed half is left alone: keyboards and mice show up on its
-// USB 2 half, which is an ordinary hub.
+// PS/2 set-1 scancodes the rest of the kernel already handles. A USB 3 hub
+// is two: its USB 2 half (keyboards, mice, USB 2 sticks) and its
+// SuperSpeed half (USB 3 sticks and drives).
 // From baremetaldoom (same author); here the scancodes go to the DOS guest's
 // virtual keyboard controller.
 #include "hw.hpp"
@@ -756,20 +756,20 @@ static bool setup_slot(Keyboard& k, int ki) {
         printf("USB: %s: not a keyboard, mouse, hub or mass storage (class %02x/%02x/%02x)\n", k.where, c0 & 0xFF, c1, c2);
         return false;
     }
-    if (hub && k.speed >= 4) {                          // a USB 3 hub's SuperSpeed half
-        printf("USB: %s: USB 3 hub (its USB 2 side carries keyboards and mice)\n", k.where);
-        return false;
-    }
     if (hub && k.depth >= 5) { printf("USB: %s: hubs nested too deep\n", k.where); return false; }
 
     if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;          // SET_CONFIGURATION
 
     if (hub) {
         // Hub descriptor: port count, characteristics (TT think time), power-on delay.
-        if (!control(k, 0xA0, 6, 0x2900, 0, 9, desc)) { printf("USB: %s: no hub descriptor\n", k.where); return false; }
+        // A USB 3 hub's SuperSpeed half has its own descriptor (type 2Ah) and
+        // must be told its depth; USB 3 sticks behind it show up only there.
+        bool ss = k.speed >= 4;
+        if (!control(k, 0xA0, 6, ss ? 0x2A00 : 0x2900, 0, ss ? 12 : 9, desc)) { printf("USB: %s: no hub descriptor\n", k.where); return false; }
+        if (ss && !control(k, 0x20, 12, k.depth, 0, 0, nullptr)) { printf("USB: %s: SET_HUB_DEPTH failed\n", k.where); return false; }
         k.kind = HUB;
         k.nports = desc[2] > 31 ? 31 : desc[2];
-        k.ttt = (desc[3] >> 5) & 3;
+        k.ttt = ss ? 0 : (desc[3] >> 5) & 3;
         k.power_good_ms = desc[5] * 2u;
         if (!configure_intr(k, ep_addr, ep_mps, ep_interval)) return false;
         k.active = true;
@@ -816,9 +816,16 @@ static void hub_port_change(int h, int port) {
     static volatile uint8_t st[4] __attribute__((aligned(64)));
     if (!hb.active || !control(hb, 0xA3, 0, 0, port, 4, st)) return;            // GET_STATUS
     uint16_t status = st[0] | st[1] << 8, change = st[2] | st[3] << 8;
-    static const uint8_t clear[] = {16, 17, 18, 19, 20};                        // C_PORT_* features
-    for (int b = 0; b < 5; b++)
-        if (change & (1 << (b == 4 ? 4 : b))) control(hb, 0x23, 1, clear[b], port, 0, nullptr);
+    // C_PORT_* features by change bit. A USB 3 hub's SuperSpeed ports have
+    // no enable/suspend changes (bits 1, 2) but warm reset, link state and
+    // config error ones (bits 5-7).
+    bool ss = hb.speed >= 4;
+    static const uint8_t clear2[8] = {16, 17, 18, 19, 20, 0, 0, 0};
+    static const uint8_t clear3[8] = {16, 0, 0, 19, 20, 29, 25, 26};
+    for (int b = 0; b < 8; b++) {
+        uint8_t f = ss ? clear3[b] : clear2[b];
+        if (f && (change & (1 << b))) control(hb, 0x23, 1, f, port, 0, nullptr);
+    }
     int existing = -1;
     for (int j = 0; j < MAX_KBD; j++)
         if (kbds[j].active && kbds[j].parent == h && kbds[j].hub_port == port) existing = j;
@@ -827,18 +834,26 @@ static void hub_port_change(int h, int port) {
     if (!connected || existing >= 0) return;
 
     // Reset the port, wait for it to finish, and see how fast the device is.
-    if (!control(hb, 0x23, 3, 4, port, 0, nullptr)) return;                   // SET_FEATURE PORT_RESET
-    bool done = false;
-    for (int i = 0; i < 50 && !done; i++) {
-        delay_ms(10);
-        if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
-        done = (st[2] | st[3] << 8) & (1 << 4);                                // C_PORT_RESET
+    // A SuperSpeed port enables itself once its link trains: a link stuck in
+    // SS.Inactive or Compliance gets a warm (BH) reset, an enabled one none.
+    int pls = (status >> 5) & 0xF;
+    bool warm = ss && (pls == 6 || pls == 10);
+    if (!ss || warm || !(status & 2)) {
+        if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
+        bool done = false;
+        for (int i = 0; i < 50 && !done; i++) {
+            delay_ms(10);
+            if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
+            done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
+        }
+        control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
+        if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
+        status = st[0] | st[1] << 8;
+        if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
+        delay_ms(10);                                                           // reset recovery
     }
-    control(hb, 0x23, 1, 20, port, 0, nullptr);                                 // clear C_PORT_RESET
-    status = st[0] | st[1] << 8;
-    if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
-    delay_ms(10);                                                               // reset recovery
-    int speed = (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;         // low / high / full
+    int speed = ss ? 4                                                          // SuperSpeed
+              : (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;        // low / high / full
     setup_device(hb.port, h, port, speed);
 }
 
