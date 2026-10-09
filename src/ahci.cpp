@@ -92,26 +92,36 @@ static bool issue(Port& d, uint8_t cmd, uint64_t lba, uint32_t count, void* buf,
 static void port_init(volatile uint8_t* p, bool staggered) {
     if ((rd(p, PxSSTS) & 0xF) != 3) return;                  // no device / no link
     uint32_t sig = rd(p, PxSIG);
-    bool atapi = sig == 0xEB140101;                           // CD/DVD drive
-    if (sig != 0x00000101 && sig != 0xFFFFFFFF && !atapi) return;   // port multiplier, enclosure ...
-    if (atapi ? n_cds == MAX_CDS : n_disks == MAX_DISKS) return;
+    if (sig != 0x00000101 && sig != 0xFFFFFFFF && sig != 0xEB140101) {   // port multiplier, enclosure ...
+        kprintf("ahci: port %d: device signature %x, skipped\n", (int)((p - abar - 0x100) / 0x80), sig);
+        return;
+    }
+    if (n_cds == MAX_CDS && n_disks == MAX_DISKS) return;
     if (!port_stop(p)) { kprintf("ahci: port won't stop\n"); return; }
-    Port& d = atapi ? cds[n_cds] : disks[n_disks];
-    d.r = p;
-    d.mem = (uint8_t*)phys_try_alloc(4096);
+    uint8_t* mem = (uint8_t*)phys_try_alloc(4096);
     uint8_t* id = (uint8_t*)phys_try_alloc(4096);
-    if (!d.mem || !id) return;
-    wr(p, PxCLB, (uint32_t)(uintptr_t)d.mem); wr(p, PxCLBU, 0);
-    wr(p, PxFB, (uint32_t)(uintptr_t)d.mem + 0x400); wr(p, PxFBU, 0);
+    if (!mem || !id) return;
+    wr(p, PxCLB, (uint32_t)(uintptr_t)mem); wr(p, PxCLBU, 0);
+    wr(p, PxFB, (uint32_t)(uintptr_t)mem + 0x400); wr(p, PxFBU, 0);
     wr(p, PxSERR, 0xFFFFFFFF); wr(p, PxIS, 0xFFFFFFFF); wr(p, PxIE, 0);
     uint32_t c = rd(p, PxCMD) | CMD_POD | (staggered ? CMD_SUD : 0);
     wr(p, PxCMD, c | CMD_FRE);
     if (sig == 0xFFFFFFFF) {                                  // never started: wait for the device's first FIS
         for (int i = 0; i < 1000 && rd(p, PxSIG) == 0xFFFFFFFF; i++) io_delay(1000);
-        if (rd(p, PxSIG) != 0x00000101) { port_stop(p); return; }
+        sig = rd(p, PxSIG);
+        if (sig != 0x00000101 && sig != 0xEB140101) {
+            kprintf("ahci: port %d: device signature %x after start, skipped\n", (int)((p - abar - 0x100) / 0x80), sig);
+            port_stop(p);
+            return;
+        }
     }
+    bool atapi = sig == 0xEB140101;                           // CD/DVD drive
+    if (atapi ? n_cds == MAX_CDS : n_disks == MAX_DISKS) { port_stop(p); return; }
+    Port& d = atapi ? cds[n_cds] : disks[n_disks];
+    d.r = p;
+    d.mem = mem;
     wr(p, PxCMD, rd(p, PxCMD) | CMD_ST);
-    if (!issue(d, atapi ? 0xA1 : 0xEC, 0, 0, id, 512, false)) { kprintf("ahci: IDENTIFY failed\n"); return; }
+    if (!issue(d, atapi ? 0xA1 : 0xEC, 0, 0, id, 512, false)) { kprintf("ahci: IDENTIFY%s failed\n", atapi ? " PACKET" : ""); return; }
     uint16_t* w = (uint16_t*)id;
     if (atapi) {
         for (int i = 0; i < 20; i++) { d.model[i * 2] = (char)(w[27 + i] >> 8); d.model[i * 2 + 1] = (char)w[27 + i]; }
