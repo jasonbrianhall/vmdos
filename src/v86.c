@@ -124,6 +124,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
+    if (n == 0x2F && AX(r) == 0x5646) { fd_api(r); return; }            /* VMFD.COM */
     if (n == 0x2F && AX(r) == 0x5642) {                                 /* VMSB */
         extern int sound_sb_api(int bx);
         extern int audio_capture_stats(u32 *peak, u32 *clips, u32 *resyncs);

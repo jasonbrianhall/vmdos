@@ -623,6 +623,8 @@ static void stop_all(void)
     pl.state = 0;
 }
 
+void cdaudio_stop(void) { stop_all(); pl.unit = -1; }
+
 static void audio_unit_gone(int unit) { if (pl.unit == unit) { stop_all(); pl.unit = -1; } }
 
 /* Start playing [start, end) on a unit. ST_DONE-style status. */

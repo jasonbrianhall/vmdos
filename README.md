@@ -170,6 +170,20 @@ kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
 images are held in RAM as boot modules instead, one drive each, and
 `VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
+Floppy drives: A: and B: hold disk images from C: (there is no floppy
+controller): `VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
+`VMFD A: /E` (empty), `VMFD` alone lists them; `fda=/DISKS/BOOT.IMG` (and
+`fdb=`) on the kernel command line fill them at boot. A new image is a disk
+change to DOS, so "insert disk 2" works; an empty drive says "not ready".
+Writes go into the image file on C:, and are refused if that file has been
+replaced, resized or moved since it went in. 160K to 2.88M images, DMF
+included; other sizes are taken from the boot sector.
+
+Self-booting floppies (booter games): `VMFD A: C:\DISKS\GAME.IMG /BOOT`
+restarts the PC from that disk, without DOS (`VMFD A: /BOOT` boots what's in
+A: already); `fda=/DISKS/GAME.IMG boot=a` on the kernel command line boots it
+instead of DOS. To get back to DOS, restart the machine.
+
 CUE/BIN images work like ISOs (`VMCD D: C:\GAMES\QUAKE.CUE`, `cd=` too), with
 their CD audio tracks: one BIN or one per track, MODE1/2048, MODE1/2352,
 MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so
@@ -294,6 +308,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
+| `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |

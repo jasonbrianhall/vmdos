@@ -19,6 +19,14 @@ static int hma_used, a20_global, a20_local;
 static u16 umb_next = UMB_START;
 static struct { u16 seg, paras; } umbs[8];
 
+/* A restart into a floppy: A20 off, the HMA free (the rest of DOS's XMS
+   use is simply left behind). */
+void xms_restart(void)
+{
+    hma_used = 0; a20_global = a20_local = 0;
+    set_a20(0);
+}
+
 void xms_init(void)
 {
     /* MB; "xms=N" on the command line. By default 1 GB, as DOS memory

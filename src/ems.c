@@ -54,6 +54,14 @@ static void map_phys(int p, int hd, int lp)
 }
 static void flush(void) { tlb_flush(); }
 
+/* A restart into a floppy: the page frame is plain memory again. */
+void ems_restart(void)
+{
+    if (!total) return;
+    for (int p = 0; p < NPHYS; p++) if (cur[p][0] >= 0) map_phys(p, -1, 0);
+    flush();
+}
+
 static int alloc_pages(int hd, u32 n)
 {
     u16 *pg = n ? phys_try_alloc((n * 2 + 4095) & ~4095u) : 0;
