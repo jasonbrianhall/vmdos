@@ -559,6 +559,27 @@ static void request_sense(Keyboard& k) {
     scsi(k, cdb, 6, true, 18);
 }
 
+// USB CD/DVD drives (SCSI peripheral type 5): no medium needed to attach;
+// cd.c sends them SCSI commands through usb_cd_packet. A drive plugged
+// back in takes the slot of the one that went, so its DOS drive letter
+// works again.
+#define UCD_MAX 4
+static int ucd_dev[UCD_MAX], n_ucd;
+static uint8_t ucd_asc;
+static bool ucd_is(int i) {                                 // slot i still holds a plugged-in drive
+    Keyboard& k = kbds[ucd_dev[i]];
+    return k.active && k.kind == MSD && k.bsize == 2048;
+}
+static bool ucd_setup(Keyboard& k) {
+    int slot = -1;
+    for (int i = 0; i < n_ucd; i++) if (!ucd_is(i)) { slot = i; break; }
+    if (slot < 0) { if (n_ucd == UCD_MAX) { k.active = false; return false; } slot = n_ucd++; }
+    ucd_dev[slot] = (int)(&k - kbds);
+    k.bsize = 2048;
+    printf("USB: CD/DVD drive on %s: %s (slot %d, %s speed)\n", k.where, k.model, k.slot, speed_name(k.speed));
+    return true;
+}
+
 static bool msd_setup(Keyboard& k) {
     if (!msd_buf) {
         msd_buf = (volatile uint8_t*)dma_alloc(65536, 65536);
@@ -582,6 +603,7 @@ static bool msd_setup(Keyboard& k) {
         while (n && k.model[n - 1] == ' ') n--;
         k.model[n] = 0;
     }
+    if ((msd_buf[0] & 0x1F) == 5) return ucd_setup(k);       // CD/DVD drive: cd.c's, through usb_cd_*
     if (msd_buf[0] & 0x1F) { printf("USB: %s: storage device type %d, not a disk\n", k.where, msd_buf[0] & 0x1F); k.active = false; return false; }
     bool ready = false;
     for (int i = 0; i < 50 && !ready; i++) {            // up to ~5 s to spin up / settle
@@ -784,7 +806,7 @@ static void forget(int i) {
     if (k.kind == KBD || k.kind == MOUSE) release_all(k);
     k.active = false;
     command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
-    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? "disk" : k.mouse ? "mouse" : "keyboard", k.where);
+    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
 // Port `port` of hub h: something plugged in or out (or the first look).
@@ -1029,3 +1051,32 @@ void usb_poll() {
 // C entry points for the kernel.
 extern "C" void usb_start(const char* cmdline) { usb_init(cmdline); }
 extern "C" void usb_tick(void) { usb_poll(); }
+
+// CD/DVD drives. A SCSI command (cdb; its length from the opcode group)
+// with bytes (<= 64 KiB) of data in to buf. 0, or the sense key of the
+// failure (sense data is read right away), or -1 (transport error, or the
+// USB stack busy: try again later). An unplugged drive reads as empty.
+extern "C" int usb_cd_count(void) { return n_ucd; }
+extern "C" const char* usb_cd_model(int i) { return i < n_ucd && ucd_is(i) ? kbds[ucd_dev[i]].model : "(unplugged)"; }
+extern "C" int usb_cd_asc(void) { return ucd_asc; }
+extern "C" int usb_cd_packet(int i, const uint8_t* cdb, void* buf, uint32_t bytes) {
+    ucd_asc = 0;
+    if (i >= n_ucd || bytes > 65536) return -1;
+    if (!ucd_is(i)) { ucd_asc = 0x3A; return 2; }              // gone: "medium not present"
+    Keyboard& k = kbds[ucd_dev[i]];
+    if (usb_busy) return -1;
+    Hc* saved = H;
+    usb_busy = 1;
+    H = k.hc;
+    int len = cdb[0] < 0x20 ? 6 : cdb[0] < 0x60 ? 10 : 12;
+    int r = scsi(k, cdb, len, true, bytes), key = 0;
+    if (r == 0 && bytes) memcpy(buf, (const void*)msd_buf, bytes);
+    if (r != 0) {
+        uint8_t rs[6] = { 0x03, 0, 0, 0, 18, 0 };
+        msd_buf[0] = 0;
+        if (scsi(k, rs, 6, true, 18) == 0 && (msd_buf[0] & 0x7E) == 0x70) { key = msd_buf[2] & 0xF; ucd_asc = msd_buf[12]; }
+    }
+    H = saved;
+    usb_busy = 0;
+    return r == 0 ? 0 : key ? key : -1;
+}

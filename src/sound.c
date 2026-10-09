@@ -69,17 +69,20 @@ int sound_port(u16 port, int write, u8 *v)
     return 0;
 }
 
+void cdaudio_mix(int16_t *buf, int n);       /* cd.c: CD audio, mixed in (buf 0: just advance) */
+
 void sound_tick(void)
 {
     static u32 div;
-    if (!sb_ready) return;
     if (++div < TICKS_PER_RENDER) return;
     div = 0;
+    if (!sb_ready) { cdaudio_mix(0, 48000 * TICKS_PER_RENDER / TICK_HZ); return; }
     static int16_t buf[2 * 1024];
     int n = sound_on ? audio_wanted(48000 * TICKS_PER_RENDER / TICK_HZ) : 48000 * TICKS_PER_RENDER / TICK_HZ;
     if (n > 1024) n = 1024;
     if (n > 0) {
         sb_render(buf, n);
+        cdaudio_mix(buf, n);
         if (sound_on) audio_put_stereo(buf, n);
     }
     check_irq();

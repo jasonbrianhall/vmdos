@@ -166,11 +166,26 @@ kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
 images are held in RAM as boot modules instead, one drive each, and
 `VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
-Real CD/DVD drives on SATA (AHCI) get a drive letter each after the image
-drives (E: with one image drive): the disc is read from the drive, swapping
-discs works, and eject/close requests go to the drive. Data tracks only (no
-CD audio playback yet). `cdphys=off` leaves them out. In QEMU:
-`-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso -device ide-cd,drive=cd,bus=ide.2`.
+CUE/BIN images work like ISOs (`VMCD D: C:\GAMES\QUAKE.CUE`, `cd=` too), with
+their CD audio tracks: one BIN or one per track, MODE1/2048, MODE1/2352,
+MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so
+the BIN names in the sheet have to be 8.3 ones (a single BIN may also just be
+named like the sheet: QUAKE.CUE + QUAKE.BIN).
+
+Real CD/DVD drives on SATA (AHCI) and USB get a drive letter each after the
+image drives (E: with one image drive): the disc is read from the drive,
+swapping discs works, and eject/close requests go to the drive. `cdphys=off`
+leaves them out. In QEMU: `-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso
+-device ide-cd,drive=cd,bus=ide.2`, or `-device qemu-xhci -drive
+if=none,id=ucd,media=cdrom,file=game.iso -device usb-storage,drive=ucd` for USB.
+
+CD audio (MSCDEX play, stop/pause, resume, track position, audio status,
+volume) plays through the sound card, mixed in with the Sound Blaster: from
+a CUE image's audio tracks, or read digitally from a real drive. A drive that
+can't read audio digitally is told to play the tracks itself, through its own
+output (a headphone jack, or an analog cable to a sound card). With no sound
+card a play still runs for its length, so games waiting on a track go on.
+`tests/cdplay.asm` (CDPLAY.COM) plays a track and shows the position.
 
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
 load options); the log shows every INT 33h call, event-handler call and
@@ -275,7 +290,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
-| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: images and real SATA drives (monitor side), VMCD.SYS driver, VMCD.COM |
+| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
