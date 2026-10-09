@@ -73,15 +73,26 @@ static int fd_mount(int d, const char *path, int ro)
         if (shapes[i].kb * 1024 == size) {
             t.cyls = shapes[i].cyls; t.heads = shapes[i].heads; t.spt = shapes[i].spt; t.type = shapes[i].type;
         }
-    if (!t.spt) {                                         /* odd size: believe the boot sector */
-        static u8 bs[512];
-        if (img_io(&t, 0, 1, bs, 0)) return 7;
-        u32 spt = bs[0x18] | bs[0x19] << 8, heads = bs[0x1A] | bs[0x1B] << 8;
-        if (bs[0x0B] != 0 || bs[0x0C] != 2 || spt < 1 || spt > 63 || heads < 1 || heads > 2) return 3;
+    /* The boot sector's BPB, when it has a sane one, says how DOS will
+       address the disk: its geometry wins over the one the size suggests. */
+    static u8 bs[512];
+    if (img_io(&t, 0, 1, bs, 0)) return 7;
+    u32 spt = bs[0x18] | bs[0x19] << 8, heads = bs[0x1A] | bs[0x1B] << 8;
+    u32 bps = bs[0x0B] | bs[0x0C] << 8, total = bs[0x13] | bs[0x14] << 8;
+    int bpb = bps == 512 && spt >= 8 && spt <= 63 && heads >= 1 && heads <= 2 && bs[0x15] >= 0xF0;
+    if (bpb && (spt != t.spt || heads != t.heads)) {
         u32 cyls = (t.sectors + spt * heads - 1) / (spt * heads);
-        if (cyls > 255) return 3;
-        t.cyls = (u8)cyls; t.heads = (u8)heads; t.spt = (u8)spt; t.type = 4;
+        if (cyls <= 255) {
+            if (t.spt) kprintf("floppy: %s: %u KiB, but its boot sector says %u heads, %u sectors a track: going by that\n",
+                               path, size >> 10, heads, spt);
+            t.cyls = (u8)cyls; t.heads = (u8)heads; t.spt = (u8)spt;
+            if (!t.type) t.type = 4;
+        }
     }
+    if (!t.spt) return 3;                                 /* odd size and no BPB to go by */
+    if (!bpb) kprintf("floppy: %s: no DOS boot sector (a game's own boot disk?): DOS may not read it\n", path);
+    else if (total && total != t.sectors)
+        kprintf("floppy: %s: its boot sector says %u sectors, the file has %u\n", path, total, t.sectors);
     int j = 0;
     for (; path[j] && j < 79; j++) t.path[j] = path[j];
     t.path[j] = 0;
@@ -151,9 +162,14 @@ int fd_int13(struct regs *r)
     case 0x02: case 0x03: case 0x04: {                                  /* read, write, verify */
         if (!f->in) { st = 0x80; AL(r) = 0; break; }                   /* no disk: time-out (not ready) */
         u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), sec = CL(r) & 63, head = DH(r), n = AL(r);
-        if (!sec || sec > f->spt || head >= f->heads || cyl >= f->cyls) { st = 0x04; AL(r) = 0; break; }
         u32 lba = (cyl * f->heads + head) * f->spt + sec - 1, buf = LIN(r->v86_es, BX(r));
-        if (lba + n > f->sectors) { st = 0x04; AL(r) = 0; break; }
+        if (!sec || sec > f->spt || head >= f->heads || cyl >= f->cyls || lba + n > f->sectors) {
+            static int said;
+            if (said++ < 8)
+                kprintf("floppy: %c: %s of %u at C/H/S %u/%u/%u: outside the image (%u/%u/%u, %u sectors)\n",
+                        'A' + d, fn == 3 ? "write" : "read", n, cyl, head, sec, f->cyls, f->heads, f->spt, f->sectors);
+            st = 0x04; AL(r) = 0; break;
+        }
         if (fn == 0x04) break;
         if (buf + n * 512 > GUEST_TOP) { st = 0x09; AL(r) = 0; break; }
         if (fn == 0x03) {
