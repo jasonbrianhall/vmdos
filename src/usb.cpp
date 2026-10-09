@@ -19,19 +19,45 @@
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
 static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
 
-static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
-static void delay_ms(int ms) { io_delay(ms * 1000); }
+// Delays count port 80h reads, ~1 us each on most PCs but several times
+// faster on some (AMD chipsets): usb_init measures them against the PIT
+// (channel 0, reloaded once a millisecond) and scales.
+static uint32_t io_per_ms = 1000;
+static void io_delay(int us) { for (uint32_t n = (uint32_t)us * io_per_ms / 1000; n; n--) inb(0x80); }
+static void delay_ms(int ms) { while (ms--) io_delay(1000); }
+static uint16_t pit_count() { outb(0x43, 0x00); uint16_t c = inb(0x40); return c | (uint16_t)(inb(0x40) << 8); }
+static void calibrate_delay() {
+    uint16_t prev = pit_count();
+    int ms = -1;
+    uint32_t n = 0;
+    while (ms < 20 && n < 100000000u) {                 // 20 whole milliseconds, counted from a reload
+        uint16_t c = pit_count();
+        if (c > prev) ms++;
+        prev = c;
+        if (ms >= 0) { inb(0x80); n++; }
+    }
+    if (ms == 20 && n / 20 >= 100) io_per_ms = n / 20;
+}
 #define barrier() __asm__ volatile("" ::: "memory")
 
 // ---------------------------------------------------------------- memory
 // All controller-visible structures come from one zeroed, identity-mapped pool.
-static uint8_t pool[2 << 20] __attribute__((aligned(4096)));
-static size_t pool_used;
+// When it runs out (several controllers, each with scratchpad pages), more
+// comes from the kernel heap, which is identity-mapped too.
+static uint8_t pool0[2 << 20] __attribute__((aligned(4096)));
+static uint8_t* pool = pool0;
+static size_t pool_size = sizeof(pool0), pool_used;
 static void* dma_alloc(size_t size, size_t align) {
-    pool_used = (pool_used + align - 1) & ~(align - 1);
-    if (pool_used + size > sizeof(pool)) return nullptr;
-    void* p = pool + pool_used;
-    pool_used += size;
+    uintptr_t at = ((uintptr_t)pool + pool_used + align - 1) & ~(uintptr_t)(align - 1);
+    if (at + size > (uintptr_t)pool + pool_size) {
+        size_t chunk = size + align > (1u << 20) ? size + align : 1u << 20;
+        uint8_t* more = (uint8_t*)phys_try_alloc((uint32_t)chunk);
+        if (!more) return nullptr;
+        pool = more; pool_size = chunk; pool_used = 0;
+        at = ((uintptr_t)pool + align - 1) & ~(uintptr_t)(align - 1);
+    }
+    pool_used = at + size - (uintptr_t)pool;
+    void* p = (void*)at;
     memset(p, 0, size);
     return p;
 }
@@ -1002,6 +1028,8 @@ extern "C" void usb_kick_ports(void) {
 bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
+    calibrate_delay();
+    dbg(1, "USB: %u port 80h reads a millisecond\n", io_per_ms);
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
     PciDevice d;
