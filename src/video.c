@@ -157,8 +157,31 @@ static void ega_check(void);
 static void modex_check(void);
 
 /* Graphics mode size in pixels. */
-static int gfx_w(void) { return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320; }
-static int gfx_h(void) { return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200; }
+/* 256-colour (mode 13h based) screens as the CRTC describes them, so
+   tweaked modes come out right: Nesticle's 256x256, Mode X's 320x240,
+   360x240 ... Width from the horizontal display end (4 pixels a character
+   clock), height from the vertical display end over the scan lines per
+   row (max scan line, double scan), bytes a line from the offset register.
+   A half-programmed CRTC (mid-tweak) reads as plain 320x200. */
+static void m13_geom(int *w, int *h)
+{
+    int ww = (crtc[0x01] + 1) * 4;
+    int lines = (crtc[0x12] | (crtc[0x07] & 0x02) << 7 | (crtc[0x07] & 0x40) << 3) + 1;
+    int per = ((crtc[0x09] & 0x1F) + 1) * ((crtc[0x09] & 0x80) ? 2 : 1);
+    int hh = lines / per;
+    if (ww < 128 || ww > 640 || hh < 100 || hh > 480 || !crtc[0x13]) { ww = 320; hh = 200; }
+    *w = ww; *h = hh;
+}
+static int gfx_w(void)
+{
+    if (video_mode == 0x13) { int w, h; m13_geom(&w, &h); return w; }
+    return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320;
+}
+static int gfx_h(void)
+{
+    if (video_mode == 0x13) { int w, h; m13_geom(&w, &h); return h; }
+    return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200;
+}
 int video_gfx_height(void) { return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h(); }
 
 /* CGA color select (port 3D9h, INT 10h AH=0Bh): background (or the
@@ -230,6 +253,10 @@ void video_set_mode(int mode, int clear)
     seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) ? 0x06 : 0x02;   /* chain-4 in mode 13h */
     crtc[0x13] = text_cols == 40 && (is_text(mode) || mode == 0x0D) ? 0x14 : 0x28;
     crtc[0x18] = 0xFF; crtc[0x07] = 0x10; crtc[0x09] = 0x40;    /* line compare off */
+    if (mode == 0x13) {                            /* as the BIOS programs it: 320 wide, 400 lines doubled */
+        crtc[0x01] = 0x4F; crtc[0x12] = 0x8F; crtc[0x07] = 0x1F; crtc[0x09] = 0x41;
+        crtc[0x14] = 0x40; crtc[0x17] = 0xA3;
+    }
     planar_check();
     ega_check();
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
@@ -262,8 +289,11 @@ static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols *
 
 static void layout(void)
 {
-    if (last_layout_mode == video_mode) return;
+    static int last_w, last_h;
+    int cw = is_text(video_mode) || vbe_on ? 0 : gfx_w(), ch = is_text(video_mode) || vbe_on ? 0 : gfx_h();
+    if (last_layout_mode == video_mode && cw == last_w && ch == last_h) return;
     last_layout_mode = video_mode;
+    last_w = cw; last_h = ch;
     full_redraw = 1;
     clear_fb();
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
@@ -533,11 +563,16 @@ static void fetch_row(int y, u8 *out)
 {
     int w = gfx_w();
     if (video_mode == 0x13) {
-        if (planar_on) {
-            u32 start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]), pitch = crtc[0x13] ? crtc[0x13] * 2u : 80;
-            u32 o = start + y * pitch;
-            for (int x = 0; x < 320; x++) out[x] = planes[(x & 3) * 65536 + ((o + (x >> 2)) & 0xFFFF)];
-        } else memcpy(out, gptr(0xA0000 + y * 320), 320);
+        u32 start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]);
+        if (planar_on) {                          /* per plane: offset * 2 addresses a line */
+            u32 pitch = crtc[0x13] ? crtc[0x13] * 2u : 80, o = start + y * pitch;
+            for (int x = 0; x < w; x++) out[x] = planes[(x & 3) * 65536 + ((o + (x >> 2)) & 0xFFFF)];
+        } else {                                  /* chain-4: offset * 8 bytes a line, start in dwords */
+            u32 pitch = crtc[0x13] ? crtc[0x13] * 8u : 320, o = start * 4 + y * pitch;
+            const u8 *v = gptr(0xA0000);
+            if ((o & 0xFFFF) + (u32)w <= 0x10000) memcpy(out, v + (o & 0xFFFF), (u32)w);
+            else for (int x = 0; x < w; x++) out[x] = v[(o + x) & 0xFFFF];
+        }
         return;
     }
     if (is_cga(video_mode)) {                     /* even rows at B800:0000, odd at B800:2000 */
@@ -560,7 +595,7 @@ static void refresh_gfx(void)
     int w = gfx_w(), h = gfx_h();
     int px = 0, py = -100;
     u16 ma, mxr;
-    if (mouse_pointer(&px, &py, &ma, &mxr)) { if (w == 320) px /= 2; } else py = -100;
+    if (mouse_pointer(&px, &py, &ma, &mxr)) { if (w < 640) px = px * w / 640; } else py = -100;
     int moved = px != sh_ptr_x || py != sh_ptr_y;
     if (is_ega(video_mode)) {                      /* nothing new in the planes or registers */
         static u8 last_regs[32 + 21];
