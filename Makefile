@@ -40,7 +40,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -111,6 +111,9 @@ $(BUILD)/VMCD.SYS: dos/vmcd.asm | $(BUILD)
 $(BUILD)/VMCD.COM: dos/vmcdtool.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 	nasm -O9 -w-all -Di8086 -i third_party/shsucd/ $< -o $@   # 8086 build: assembles with any NASM
 
@@ -122,7 +125,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \

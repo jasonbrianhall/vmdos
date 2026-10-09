@@ -206,10 +206,10 @@ static int int13(struct regs *r)
 {
     int st = 0;
     u8 fn = AH(r);
-    if (DL(r) != 0x80) {                         /* no floppies, one hard disk */
+    if (DL(r) < 0x80) { fd_int13(r); return BIOS_DONEF; }   /* A:, B: (floppy.c) */
+    if (DL(r) != 0x80) {                         /* one hard disk */
         if (fn == 0x00) { set_cf(r, 0); AH(r) = 0; return BIOS_DONEF; }
-        if (fn == 0x15 && DL(r) < 0x80) { AH(r) = 0; set_cf(r, 0); return BIOS_DONEF; }
-        AH(r) = DL(r) < 0x80 ? 0x80 : 0x01;
+        AH(r) = 0x01;
         set_cf(r, 1);
         return BIOS_DONEF;
     }
@@ -457,7 +457,7 @@ void bios_init(void)
     wr32(0x46 * 4, 0);
 
     /* BIOS data area */
-    u16 equip = 0x0024;                                  /* 80x25 color, PS/2 mouse port, no floppies */
+    u16 equip = 0x0065;                                  /* 80x25 color, PS/2 mouse port, two floppy drives (floppy.c) */
     extern u32 fpu_present;
     if (fpu_present) equip |= 2;
     wr16(BDA + 0x10, equip);
@@ -465,6 +465,7 @@ void bios_init(void)
     wr16(BDA + 0x1A, 0x1E); wr16(BDA + 0x1C, 0x1E);
     wr16(BDA + 0x80, 0x1E); wr16(BDA + 0x82, 0x3E);
     wr8(BDA + 0x75, 1);                                  /* one hard disk */
+    wr8(BDA + 0x8F, 0x77);                               /* both floppy drives: 80 tracks, change line */
     wr8(BDA + 0x96, 0x10);                               /* 101/102-key keyboard */
     wr8(BDA + 0x17, 0x20);                               /* Num Lock on */
 
