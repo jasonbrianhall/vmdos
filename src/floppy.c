@@ -25,6 +25,7 @@ static struct fd {
     u32 sectors, size, clus;
     u8 cyls, heads, spt, type;           /* type: INT 13h AH=08h BL (1 360K, 2 1.2M, 3 720K, 4 1.44M, 6 2.88M) */
     u8 in, ro, changed;
+    u8 nodos;                            /* not a DOS disk: DOS is shown a standard BPB (dos_bpb) */
     char path[80];
 } fd[FD_DRIVES] = { { .changed = 1 }, { .changed = 1 } };
 static u8 fd_status;
@@ -53,6 +54,51 @@ static int img_io(struct fd *f, u32 s, u32 count, u8 *buf, int write)
     return count ? 0x04 : 0;
 }
 
+/* Does the image hold a DOS disk: a whole, consistent BPB and a FAT that
+   starts with its media byte; or a DOS 1.x disk (no BPB) with the media
+   byte for its size? A self-booting game disk usually has neither, and a
+   DOS that takes its first sector for a BPB can fall over (FreeDOS
+   divides by its "sectors per cluster"), so DOS is shown a standard BPB
+   for it (dos_bpb). */
+static int is_dos_disk(struct fd *f, const u8 *bs)
+{
+    static u8 fat[512];
+    u32 bps = bs[0x0B] | bs[0x0C] << 8, spc = bs[0x0D], res = bs[0x0E] | bs[0x0F] << 8, nfats = bs[0x10];
+    u32 roots = bs[0x11] | bs[0x12] << 8, total = bs[0x13] | bs[0x14] << 8, media = bs[0x15];
+    u32 fatsz = bs[0x16] | bs[0x17] << 8, spt = bs[0x18] | bs[0x19] << 8, heads = bs[0x1A] | bs[0x1B] << 8;
+    if (bps == 512 && spc && !(spc & (spc - 1)) && res >= 1 && res < 64 && (nfats == 1 || nfats == 2) &&
+        roots >= 16 && roots % 16 == 0 && roots <= 1024 && media >= 0xF0 && fatsz >= 1 && fatsz <= 64 &&
+        spt >= 1 && spt <= 63 && heads >= 1 && heads <= 2 && total >= res + nfats * fatsz + roots / 16 &&
+        total <= f->sectors &&
+        !img_io(f, res, 1, fat, 0) && fat[0] == media && fat[1] == 0xFF && fat[2] == 0xFF)
+        return 1;
+    if (f->size <= 368640 && !img_io(f, 1, 1, fat, 0) && fat[1] == 0xFF && fat[2] == 0xFF &&
+        ((fat[0] == 0xFE && f->size == 163840) || (fat[0] == 0xFC && f->size == 184320) ||
+         (fat[0] == 0xFF && f->size == 327680) || (fat[0] == 0xFD && f->size == 368640)))
+        return 1;                                         /* DOS 1.x: the FAT's media byte is all there is */
+    return 0;
+}
+
+/* Sector 0 of a disk that isn't a DOS disk, as DOS reads it: the BPB
+   (0Bh-1Dh) says what a FORMAT of this size and geometry would, so DOS
+   finds a consistent layout (and lists junk) instead of dividing by
+   whatever the boot code's bytes there happen to be. Only the copy DOS
+   gets is changed, not the image. */
+static void dos_bpb(struct fd *f, u8 *bs)
+{
+    u32 n = f->sectors, spc = 1, roots = n > 2000 ? 224 : 112, fatsz = 1;
+    while (spc < 64 && n / spc > 4084) spc *= 2;
+    for (int i = 0; i < 4; i++) {                         /* FAT12 size, settled */
+        u32 data = n - 1 - 2 * fatsz - roots / 16, cl = data / spc + 2;
+        fatsz = (cl * 3 / 2 + 511) / 512;
+    }
+    u8 media = f->spt >= 18 ? 0xF0 : f->spt == 15 || f->cyls >= 80 ? 0xF9 :
+               f->heads == 1 ? (f->spt == 8 ? 0xFE : 0xFC) : (f->spt == 8 ? 0xFF : 0xFD);
+    u8 v[19] = { 0x00, 0x02, (u8)spc, 1, 0, 2, (u8)roots, (u8)(roots >> 8), (u8)n, (u8)(n >> 8), media,
+                 (u8)fatsz, 0, f->spt, 0, f->heads, 0, 0, 0 };
+    memcpy(bs + 0x0B, v, sizeof v);
+}
+
 /* Put the image at path (on C:) in drive d (0 A:, 1 B:). 0, or 2 not
    found, 3 not a floppy image, 4 not on C:, 6 out of memory, 7 disk error. */
 static int fd_mount(int d, const char *path, int ro)
@@ -79,8 +125,9 @@ static int fd_mount(int d, const char *path, int ro)
     if (img_io(&t, 0, 1, bs, 0)) return 7;
     u32 spt = bs[0x18] | bs[0x19] << 8, heads = bs[0x1A] | bs[0x1B] << 8;
     u32 bps = bs[0x0B] | bs[0x0C] << 8, total = bs[0x13] | bs[0x14] << 8;
-    int bpb = bps == 512 && spt >= 8 && spt <= 63 && heads >= 1 && heads <= 2 && bs[0x15] >= 0xF0;
-    if (bpb && (spt != t.spt || heads != t.heads)) {
+    (void)bps;
+    int dos = is_dos_disk(&t, bs);
+    if (dos && (spt != t.spt || heads != t.heads)) {
         u32 cyls = (t.sectors + spt * heads - 1) / (spt * heads);
         if (cyls <= 255) {
             if (t.spt) kprintf("floppy: %s: %u KiB, but its boot sector says %u heads, %u sectors a track: going by that\n",
@@ -90,7 +137,8 @@ static int fd_mount(int d, const char *path, int ro)
         }
     }
     if (!t.spt) return 3;                                 /* odd size and no BPB to go by */
-    if (!bpb) kprintf("floppy: %s: no DOS boot sector (a game's own boot disk?): DOS may not read it\n", path);
+    t.nodos = (u8)!dos;
+    if (t.nodos) kprintf("floppy: %s: not a DOS disk (a self-booting one?): DOS gets a standard layout for it\n", path);
     else if (total && total != t.sectors)
         kprintf("floppy: %s: its boot sector says %u sectors, the file has %u\n", path, total, t.sectors);
     int j = 0;
@@ -180,6 +228,15 @@ int fd_int13(struct regs *r)
             }
         }
         st = img_io(f, lba, n, gptr(buf), fn == 0x03);
+        if (!st && fn == 0x02 && lba == 0 && f->nodos) dos_bpb(f, gptr(buf));
+        if (!st && fn == 0x03 && lba < 64) {               /* boot sector / FAT rewritten (FORMAT, SYS): look again */
+            static u8 b0[512];
+            if (!img_io(f, 0, 1, b0, 0)) {
+                int was = f->nodos;
+                f->nodos = (u8)!is_dos_disk(f, b0);
+                if (was != f->nodos) kprintf("floppy: %c: now %s DOS disk\n", 'A' + d, f->nodos ? "not a" : "a");
+            }
+        }
         if (st) { st = st == 0x04 ? 0x04 : 0x20; AL(r) = 0; }
         break; }
     case 0x05: {                                                        /* format a track: fill it */
@@ -241,8 +298,9 @@ void fd_api(struct regs *r)
             t[1] = (char)('A' + i);
             put(&o, t);
             if (fd[i].in) {
-                char sz[24];
-                snprintf(sz, sizeof sz, "  (%uK%s)", fd[i].size >> 10, fd[i].ro ? ", read-only" : "");
+                char sz[40];
+                snprintf(sz, sizeof sz, "  (%uK%s%s)", fd[i].size >> 10, fd[i].ro ? ", read-only" : "",
+                         fd[i].nodos ? ", not a DOS disk" : "");
                 put(&o, fd[i].path); put(&o, sz);
             } else put(&o, "empty");
             put(&o, "\r\n");
