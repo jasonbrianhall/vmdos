@@ -572,32 +572,21 @@ extern "C" int audio_capture_read(int16_t* mono, int n) {
 // DSP 20h (direct ADC), polled by a program at its own rate: the sample at
 // the current time, from the PIT, so polls between bursts still advance.
 extern "C" uint32_t pit_clock(void);
-// rate: the program's sample rate when it polls from a fast timer (one
-// sample per tick: step through the input at exactly that rate, averaging
-// what's in between); 0: go by the clock.
+// DSP 20h (direct ADC). Programs poll it at whatever rate they manage
+// (Parrot: 2.7-6.4 kHz, uneven), so each poll gets the input at the current
+// wall-clock time, never one sample per poll: averaged over the last
+// 1/4500 s (a low-pass for those rates), as DOSBox-X does. `rate` unused.
+extern "C" uint32_t pit_clock(void);
 extern "C" int audio_capture_latest(int rate) {
+    (void)rate;
     if (!cap_on || driver != AUDIO_HDA) return 0;
-    static uint32_t last_t, frac, sfrac;
+    static uint32_t last_t, frac;
     uint32_t pos = cap_pos(), t = pit_clock();
-    if (cap_read == 0xFFFFFFFF) { cap_read = (pos + RING_FRAMES - CAP_SAFE) % RING_FRAMES; last_t = t; frac = 0; }
-    if (rate > 1000 && rate <= 48000) {
-        last_t = t;
-        uint32_t lag = (pos + RING_FRAMES - cap_read) % RING_FRAMES;
-        if (lag > CAP_SAFE + 4096 || lag < CAP_SAFE / 2) {     // far off: start again
-            cap_read = (pos + RING_FRAMES - CAP_SAFE - 512) % RING_FRAMES;
-            cap_resyncs++;
-            lag = CAP_SAFE + 512;
-        }
-        uint32_t step = (48000u << 8) / (uint32_t)rate;         // input frames per sample, 24.8
-        int32_t err = (int32_t)lag - (int32_t)(CAP_SAFE + 512); // drift: lean on it a little
-        step += (uint32_t)((int32_t)step * (err > 256 ? 256 : err < -256 ? -256 : err) / 4096);
-        sfrac += step;
-        uint32_t n = sfrac >> 8;
-        sfrac &= 0xFF;
-        if (n == 0) return cap_frame(cap_read);
-        int32_t acc = 0;
-        for (uint32_t i = 0; i < n; i++) { acc += cap_frame(cap_read); cap_read = (cap_read + 1) % RING_FRAMES; }
-        return acc / (int32_t)n;
+    uint32_t lag = (pos + RING_FRAMES - cap_read) % RING_FRAMES;
+    if (cap_read == 0xFFFFFFFF || lag > 3 * CAP_SAFE) {          // first poll, or long idle
+        cap_read = (pos + RING_FRAMES - CAP_SAFE) % RING_FRAMES;
+        last_t = t; frac = 0;
+        lag = CAP_SAFE;
     }
     uint32_t dt = t - last_t;
     last_t = t;
@@ -605,10 +594,12 @@ extern "C" int audio_capture_latest(int rate) {
     uint32_t f = dt * 4800 + frac;                      // PIT ticks -> 48 kHz frames
     uint32_t adv = f / 119318;
     frac = f % 119318;
-    uint32_t ready = cap_ready(pos);
-    if (adv > ready) adv = ready;
+    if (adv + CAP_SAFE / 2 > lag) adv = lag > CAP_SAFE / 2 ? lag - CAP_SAFE / 2 : 0;   // not past what's in memory
     cap_read = (cap_read + adv) % RING_FRAMES;
-    return cap_frame(cap_read);
+    int32_t acc = 0;
+    const int N = 11;                                   // 48000 / 4500
+    for (int i = 1; i <= N; i++) acc += cap_frame((cap_read + RING_FRAMES - i) % RING_FRAMES);
+    return acc / N;
 }
 // VMSB MIC: what the microphone is, and its peak level since the last call.
 extern "C" int audio_capture_stats(uint32_t* peak, uint32_t* clips, uint32_t* resyncs) {
