@@ -179,6 +179,11 @@ Writes go into the image file on C:, and are refused if that file has been
 replaced, resized or moved since it went in. 160K to 2.88M images, DMF
 included; other sizes are taken from the boot sector.
 
+Self-booting floppies (booter games): `VMFD A: C:\DISKS\GAME.IMG /BOOT`
+restarts the PC from that disk, without DOS (`VMFD A: /BOOT` boots what's in
+A: already); `fda=/DISKS/GAME.IMG boot=a` on the kernel command line boots it
+instead of DOS. To get back to DOS, restart the machine.
+
 CUE/BIN images work like ISOs (`VMCD D: C:\GAMES\QUAKE.CUE`, `cd=` too), with
 their CD audio tracks: one BIN or one per track, MODE1/2048, MODE1/2352,
 MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so

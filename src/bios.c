@@ -487,8 +487,61 @@ void bios_init(void)
    the disk itself is not changed. */
 extern const u8 fd_boot16[512], fd_boot32[512];
 
+/* Start the guest from floppy drive d's boot sector, as a BIOS would:
+   loaded at 0000:7C00, DL = the drive. Booters ("self-booting" games)
+   run without DOS. 0, or -1 when the drive is empty. */
+int fd_boot_sector(int d, u8 *out);
+static int boot_floppy(struct regs *r, int d)
+{
+    static u8 sec[512];
+    if (fd_boot_sector(d, sec)) return -1;
+    memcpy(gptr(0x7C00), sec, 512);
+    r->cs = 0; r->eip = 0x7C00;
+    r->ss = 0; r->esp = 0x7C00;
+    r->v86_ds = r->v86_es = r->v86_fs = r->v86_gs = 0;
+    r->eax = r->ebx = r->ecx = r->esi = r->edi = r->ebp = 0;
+    r->edx = (u32)d;
+    kprintf("booting floppy %c:%s\n", 'A' + d, sec[510] == 0x55 && sec[511] == 0xAA ? "" : " (no 55AA signature; started anyway)");
+    return 0;
+}
+
+/* VMFD A: /BOOT: restart the guest into a floppy, without DOS: the
+   virtual hardware and the BIOS go back to how they are at power-on
+   (interrupt vectors, BIOS data, PIC, timer, A20 off, text mode, no EMS
+   pages mapped, mouse driver reset, CD audio and Sound Blaster stopped).
+   -1 when the drive is empty (nothing changed). */
+void vpic_reset(void);
+void xms_restart(void);
+void ems_restart(void);
+void mouse_restart(void);
+void cdaudio_stop(void);
+void sb_out_stop(void);
+extern int vif;
+int bios_restart_floppy(struct regs *r, int d)
+{
+    static u8 sec[512];
+    if (fd_boot_sector(d, sec)) return -1;
+    cdaudio_stop();
+    sb_out_stop();
+    mouse_restart();
+    ems_restart();
+    xms_restart();
+    vpic_reset();
+    vdev_init();
+    bios_init();
+    boot_floppy(r, d);
+    r->eflags = EFL_VM | EFL_IF | 2;
+    vif = 1;
+    return 0;
+}
+
 void bios_boot(struct regs *r)
 {
+    const char *bo = strstr(cmdline, "boot=");                      /* boot=a / boot=b: a floppy, not DOS */
+    if (bo && (bo == cmdline || bo[-1] == ' ') && ((bo[5] | 32) == 'a' || (bo[5] | 32) == 'b')) {
+        if (!boot_floppy(r, (bo[5] | 32) - 'a')) return;
+        kprintf("boot=%c: the drive is empty (fd%c= for an image); booting C:\n", bo[5], bo[5] | 32);
+    }
     if (disk_kind()[0] == 'R' && disk_image[0] == 0x1F && disk_image[1] == 0x8B)
         panic("dos.img is gzip-compressed. GRUB unpacks modules itself; for QEMU -initrd use the plain image.");
     static struct fatvol v;

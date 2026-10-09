@@ -199,6 +199,8 @@ static void soft_reset(void)
     pending_cond = 0;
 }
 
+void mouse_restart(void) { soft_reset(); in_callback = 0; }
+
 /* "mouselog" on the command line: what a program asks of the mouse. */
 static int mlog = -1;
 int mouse_log(void) { if (mlog < 0) mlog = !!strstr(cmdline, "mouselog"); return mlog; }

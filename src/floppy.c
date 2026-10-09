@@ -280,12 +280,23 @@ int fd_int13(struct regs *r)
     return 0;
 }
 
+/* Drive d's boot sector, for booting from it (bios.c). 0, or -1: empty. */
+int fd_boot_sector(int d, u8 *out)
+{
+    fd_boot();
+    if (d < 0 || d >= FD_DRIVES || !fd[d].in) return -1;
+    if (img_io(&fd[d], 0, 1, out, 0)) return -1;
+    fd[d].changed = 1;
+    return 0;
+}
+
 static void put(u32 *o, const char *s) { for (; *s; s++) wr8((*o)++, (u8)*s); }
 
 /* INT 2Fh AX=5646h (VMFD.COM). BX=0: list into ES:DI ($-terminated).
    BX=1: put the image DS:SI (full DOS path) in drive CL (0 A:, 1 B:),
    DL bit 0 = read-only; AX = 0 or an error (see fd_mount). BX=2: empty
-   drive CL. */
+   drive CL. BX=3: restart the machine into drive CL's disk (no return;
+   AX = 1 if the drive is empty). */
 void fd_api(struct regs *r)
 {
     fd_boot();
@@ -322,6 +333,11 @@ void fd_api(struct regs *r)
         fd_eject(d);
         AX(r) = 0;
         return;
+    case 3: {                                                           /* restart into drive CL */
+        int bios_restart_floppy(struct regs *r, int d);
+        if (d >= FD_DRIVES) { AX(r) = 5; return; }
+        if (bios_restart_floppy(r, d)) AX(r) = 1;                       /* empty: back to VMFD */
+        return; }
     }
     AX(r) = 0xFFFF;
 }

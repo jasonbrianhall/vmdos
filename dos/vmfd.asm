@@ -5,6 +5,9 @@
 ;   VMFD B: GAME2.IMG /R          ... in B:, read-only
 ;   VMFD DISK1.IMG                drive A:
 ;   VMFD A: /E                    take the disk out of A:
+;   VMFD A: GAME.IMG /BOOT        restart the PC from that disk (a self-
+;                                 booting game: no DOS); VMFD A: /BOOT
+;                                 boots what is in A: already
         org 100h
         mov si, 81h
         call skipsp
@@ -27,10 +30,12 @@
         call skipsp
         cmp al, 13
         je usage
-.arg:   cmp byte [si], '/'              ; /E: eject
+.arg:   cmp byte [si], '/'              ; /E: eject, /BOOT: boot what's in it
         jne path
         mov al, [si + 1]
         or al, 20h
+        cmp al, 'b'
+        je boot
         cmp al, 'e'
         jne usage
         mov ax, 5646h
@@ -66,15 +71,24 @@ path:   mov di, pbuf                    ; token -> ASCIIZ
         jb .cp
 .end:   mov byte [di], 0
         dec si
-        call skipsp                     ; /R: read-only
         mov byte [ro], 0
+.opt:   call skipsp                     ; /R read-only, /BOOT boot it
         cmp al, '/'
         jne .go
         mov al, [si + 1]
         or al, 20h
         cmp al, 'r'
+        je .r
+        cmp al, 'b'
         jne usage
-        mov byte [ro], 1
+        mov byte [doboot], 1
+        jmp .skip
+.r:     mov byte [ro], 1
+.skip:  lodsb                           ; past the option
+        cmp al, ' '
+        ja .skip
+        dec si
+        jmp .opt
 .go:    mov ah, 0Dh                     ; flush DOS buffers: the monitor reads the disk itself
         int 21h
         mov si, pbuf
@@ -92,12 +106,29 @@ path:   mov di, pbuf                    ; token -> ASCIIZ
         cmp ax, 5646h
         je novm
         or ax, ax
-        jz list
-        mov bx, ax
+        jnz .err
+        cmp byte [doboot], 0
+        je list
+        jmp boot
+.err:   mov bx, ax
         cmp bx, 7
         ja bad
         shl bx, 1
         mov dx, [errs + bx]
+        jmp say
+
+boot:   mov dx, msg_boot
+        mov ah, 9
+        int 21h
+        mov ah, 0Dh                     ; DOS's buffers out first: this is a restart
+        int 21h
+        mov ax, 5646h
+        mov bx, 3
+        mov cl, [unit]
+        int 2Fh                         ; returns only when the drive is empty
+        cmp ax, 5646h
+        je novm
+        mov dx, msg_empty
         jmp say
 
 skipsp: lodsb
@@ -110,10 +141,13 @@ skipsp: lodsb
 
 unit    db 0
 ro      db 0
+doboot  db 0
 errs    dw msg_bad, msg_bad, msg_e2, msg_e3, msg_e4, msg_bad, msg_e6, msg_e7
-msg_use  db 'Usage: VMFD [A:|B:] [disk image on C: [/R] | /E]', 13, 10
-         db '  e.g. VMFD A: C:\DISKS\DISK1.IMG   (/R read-only, /E take it out;', 13, 10
-         db '  no arguments: list)', 13, 10, '$'
+msg_use  db 'Usage: VMFD [A:|B:] [disk image on C: [/R] [/BOOT] | /E | /BOOT]', 13, 10
+         db '  e.g. VMFD A: C:\DISKS\DISK1.IMG   (/R read-only, /E take it out,', 13, 10
+         db '  /BOOT restart the PC from the disk; no arguments: list)', 13, 10, '$'
+msg_boot db 'Restarting from the floppy...', 13, 10, '$'
+msg_empty db 'VMFD: no disk in that drive', 13, 10, '$'
 msg_bad  db 'VMFD: no such drive', 13, 10, '$'
 msg_novm db 'VMFD: not running under vmdos', 13, 10, '$'
 msg_e2   db 'VMFD: file not found on C:', 13, 10, '$'

@@ -8,6 +8,14 @@ static struct pic pm = { 0, 0, 0xF8, 0x08, 0, 0, 0 };
 static struct pic ps = { 0, 0, 0xFF, 0x70, 0, 0, 0 };
 static int chosen_irq = -1;
 
+/* Back to how the BIOS leaves them (a restart into a floppy, floppy.c). */
+void vpic_reset(void)
+{
+    struct pic m = { 0, 0, 0xF8, 0x08, 0, 0, 0 }, s = { 0, 0, 0xFF, 0x70, 0, 0, 0 };
+    pm = m; ps = s;
+    chosen_irq = -1;
+}
+
 void vpic_raise(int irq)
 {
     if (irq < 8) pm.irr |= 1 << irq;
