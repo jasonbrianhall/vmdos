@@ -1063,6 +1063,10 @@ void audio_submit_stereo(const int16_t* lr, int n) {
 
 // C entry points for the kernel.
 extern "C" int audio_start(const char* cmdline) { return audio_init(cmdline) != AUDIO_NONE; }
+extern "C" int audio_out_count(void) { return audio_output_count(); }
+extern "C" int audio_out_current(void) { return audio_output_current(); }
+extern "C" const char* audio_out_name(int i) { return audio_output_name(i); }
+extern "C" int audio_out_select(int i) { return audio_select(i); }
 extern "C" int audio_wanted(int nominal) { return audio_frames_wanted(nominal); }
 extern "C" void audio_put_stereo(const int16_t* lr, int n) { audio_submit_stereo(lr, n); }
 

@@ -69,17 +69,54 @@ int sound_port(u16 port, int write, u8 *v)
     return 0;
 }
 
+void cdaudio_mix(int16_t *buf, int n);       /* cd.c: CD audio, mixed in (buf 0: just advance) */
+
+/* Ctrl+Shift+F2: play through the next output found at boot (speakers, HDMI,
+   another card ...). The key only asks; the switch is made at the start of
+   the next sound tick, between two renders. */
+int audio_out_count(void);
+int audio_out_current(void);
+const char *audio_out_name(int i);
+int audio_out_select(int i);
+static volatile int switch_req;
+
+void sound_next_output(void) { switch_req = 1; }
+
+static void switch_output(void)
+{
+    char msg[64];
+    int n = sound_on ? audio_out_count() : 0;
+    if (n < 2) {
+        snprintf(msg, sizeof msg, n ? "Only output: %s" : "No sound output", n ? audio_out_name(0) : "");
+        video_osd(msg);
+        return;
+    }
+    int cur = audio_out_current();
+    for (int k = 1; k < n; k++) {                         /* the next one that starts */
+        int i = (cur + k) % n;
+        if (audio_out_select(i)) {
+            snprintf(msg, sizeof msg, "%d/%d %s", i + 1, n, audio_out_name(i));
+            video_osd(msg);
+            kprintf("sound: output %d of %d: %s\n", i + 1, n, audio_out_name(i));
+            return;
+        }
+    }
+    video_osd("No other output would start");
+}
+
 void sound_tick(void)
 {
     static u32 div;
-    if (!sb_ready) return;
+    if (switch_req) { switch_req = 0; switch_output(); }
     if (++div < TICKS_PER_RENDER) return;
     div = 0;
+    if (!sb_ready) { cdaudio_mix(0, 48000 * TICKS_PER_RENDER / TICK_HZ); return; }
     static int16_t buf[2 * 1024];
     int n = sound_on ? audio_wanted(48000 * TICKS_PER_RENDER / TICK_HZ) : 48000 * TICKS_PER_RENDER / TICK_HZ;
     if (n > 1024) n = 1024;
     if (n > 0) {
         sb_render(buf, n);
+        cdaudio_mix(buf, n);
         if (sound_on) audio_put_stereo(buf, n);
     }
     check_irq();

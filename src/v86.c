@@ -363,6 +363,7 @@ struct regs *isr_dispatch(struct regs *r)
             ticks++;
             vdev_tick();
             if (usb_ready) sound_tick();
+            if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
                been off for a few ms with an interrupt waiting, take that as
