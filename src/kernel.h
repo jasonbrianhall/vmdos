@@ -163,6 +163,8 @@ void disk_init(void);
 int disk_read(u32 lba, u32 n, void *buf);     /* 0 or a BIOS INT 13h status */
 int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
+void disk_flush(void);                        /* gathered writes out to the disk */
+void disk_tick(void);                         /* timer: flush writes older than 50 ms */
 const char *disk_kind(void);
 
 void cd_add(u8 *data, u32 size, const char *name);
@@ -171,6 +173,7 @@ void ems_int67(struct regs *r);
 void ems_query(struct regs *r);
 int ems_present(void);   /* cd.c: a CD-ROM image */
 void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */
+void guest_idle_poll(void);                   /* v86.c: a "nothing to do" poll; sleeps when spinning */
 int fd_int13(struct regs *r);                 /* floppy.c: INT 13h, DL < 80h */
 void fd_api(struct regs *r);                  /* INT 2Fh AX=5646h (VMFD.COM) */
 void speed_throttle(void);                    /* after each timer tick */

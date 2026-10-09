@@ -170,6 +170,12 @@ kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
 images are held in RAM as boot modules instead, one drive each, and
 `VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
+Disk speed: C: on a real disk is cached (8 MiB by default, `diskcache=MB` on
+the kernel command line, 0 to turn it off). Reads fetch 32 KiB at a time and
+sequential writes are gathered into one disk command; gathered writes reach
+the disk within 50 ms (and before a restart), so switch off a moment after
+saving, not in the same instant.
+
 Floppy drives: A: and B: hold disk images from C: (there is no floppy
 controller): `VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
 `VMFD A: /E` (empty), `VMFD` alone lists them; `fda=/DISKS/BOOT.IMG` (and

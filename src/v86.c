@@ -90,6 +90,19 @@ static void raw_pm(struct regs *r, const char *insn)
     dump(r, why);
 }
 
+/* The guest is idle: DOS's prompt (FreeDOS waits for a key by asking
+   INT 16h AH=01 "is there one?" in a loop, with INT 28h in between),
+   programs polling the keyboard. Many such polls within one millisecond
+   mean it is just spinning: halt the real CPU until the next interrupt
+   (at most a millisecond, the timer), so an idle DOS doesn't keep a core
+   busy. A game that polls once a frame never comes near the threshold. */
+void guest_idle_poll(void)
+{
+    static u32 last, polls;
+    if (ticks != last) { last = ticks; polls = 0; }
+    if (++polls > 4) { idle_wait(); polls = 0; }
+}
+
 /* Wait (real HLT) until the guest has an interrupt it will take. */
 void wait_for_irq(void)
 {
@@ -140,6 +153,8 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
+    if (n == 0x2F && AX(r) == 0x1680) { idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
+    if (n == 0x28) guest_idle_poll();                                    /* DOS idle (then the vector, for TSRs) */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
     if (n == 0x2F && AX(r) == 0x5646) { fd_api(r); return; }            /* VMFD.COM */
@@ -395,6 +410,7 @@ struct regs *isr_dispatch(struct regs *r)
             ticks++;
             vdev_tick();
             if (usb_ready) sound_tick();
+            if (usb_ready) disk_tick();
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has

@@ -216,6 +216,7 @@ void panic(const char *fmt, ...)
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+    disk_flush();                                 /* don't lose gathered writes (no-op while flushing) */
     kprintf("\n*** vmdos stopped: %s\n", buf);
     stop_screen(buf);
     for (;;) __asm__ volatile("cli; hlt");

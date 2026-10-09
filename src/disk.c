@@ -54,26 +54,157 @@ static int probe_rd(u32 lba, u32 n, void *buf)
     return 0;
 }
 
+/* ---- the cache, for C: on a real disk ----
+   DOS asks for one sector at a time (a file read in small pieces, every
+   FAT and directory sector), and each request was a disk command of its
+   own. Reads now load 64 sectors (32 KiB, aligned to the partition start)
+   at once and serve the rest from memory; writes go into the cached copy
+   at once and, when sequential, are gathered into one run (up to 64 KiB)
+   that goes to the disk as one command: when the next write isn't
+   contiguous, when the run is full, 50 ms after it started (timer tick),
+   on INT 13h reset, before a restart and when vmdos stops. diskcache=MB
+   sizes the read cache (default 8, 0: off). */
+#define LINE 64                                   /* sectors a cache line */
+#define RUN_MAX BOUNCE_SECS                       /* sectors a gathered write */
+static struct cline { u32 lba, n, used; } *lines; /* lba ~0: empty */
+static u8 *cdata;
+static u32 n_lines, stamp;
+static u8 *run;                                   /* pending write run */
+static u32 run_lba, run_n, run_since;
+static int flushing;
+
+static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through the bounce buffer */
+{
+    u8 *b = buf;
+    while (n) {
+        u32 k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
+        if (dev_rw(cdev, lba, k, b, write)) return -1;
+        lba += k; n -= k; b += k * 512;
+    }
+    return 0;
+}
+
+static void cache_init(void)
+{
+    u32 mb = 8;
+    const char *o = strstr(cmdline, "diskcache=");
+    if (o) { mb = 0; for (o += 10; *o >= '0' && *o <= '9'; o++) mb = mb * 10 + (u32)(*o - '0'); }
+    if (mb > 64) mb = 64;
+    if (mb && mb * 2 > phys_free() >> 20) mb = phys_free() >> 21;    /* never more than half the free RAM */
+    run = phys_try_alloc(RUN_MAX * 512);
+    n_lines = mb * 32;                                              /* 32 KiB lines */
+    if (n_lines) {
+        lines = phys_try_alloc(n_lines * sizeof *lines);
+        cdata = phys_try_alloc(n_lines * LINE * 512);
+        if (!lines || !cdata) n_lines = 0;
+        for (u32 i = 0; i < n_lines; i++) lines[i].lba = ~0u;
+    }
+    kprintf("disk: cache %u MiB%s\n", n_lines / 32, run ? ", writes gathered" : "");
+}
+
+/* Put the pending run on the disk. */
+void disk_flush(void)
+{
+    if (!run_n || flushing) return;
+    flushing = 1;
+    if (dev_io(run_lba, run_n, run, 1)) kprintf("disk: write of %u sectors at %u failed\n", run_n, run_lba);
+    run_n = 0;
+    flushing = 0;
+}
+
+/* Timer tick: a run doesn't wait more than 50 ms. */
+void disk_tick(void) { if (run_n && ticks - run_since > 50) disk_flush(); }
+
+/* Sectors of [lba, lba + n) that are in the pending run: copied over buf. */
+static void overlay_run(u32 lba, u32 n, u8 *buf)
+{
+    if (!run_n || lba >= run_lba + run_n || lba + n <= run_lba) return;
+    u32 a = lba > run_lba ? lba : run_lba, b = lba + n < run_lba + run_n ? lba + n : run_lba + run_n;
+    memcpy(buf + (a - lba) * 512, run + (a - run_lba) * 512, (b - a) * 512);
+}
+
+static u8 *line_data(u32 i) { return cdata + i * LINE * 512; }
+
+static int line_get(u32 base, u32 *out)          /* the line holding base, loaded if need be */
+{
+    u32 victim = 0, oldest = ~0u;
+    for (u32 i = 0; i < n_lines; i++) {
+        if (lines[i].lba == base) { lines[i].used = ++stamp; *out = i; return 0; }
+        if (lines[i].used < oldest) { oldest = lines[i].used; victim = i; }
+    }
+    u32 n = disk_sectors - base < LINE ? disk_sectors - base : LINE;
+    lines[victim].lba = ~0u;
+    if (dev_io(base, n, line_data(victim), 0)) return -1;
+    overlay_run(base, n, line_data(victim));     /* the disk doesn't have those yet */
+    lines[victim].lba = base; lines[victim].n = n; lines[victim].used = ++stamp;
+    *out = victim;
+    return 0;
+}
+
+/* The partition's sectors, through the cache. */
+static int part_read(u32 lba, u32 n, u8 *d)
+{
+    if (!n_lines || n >= LINE) {                  /* big reads straight from the disk (they'd only evict) */
+        if (dev_io(lba, n, d, 0)) return -1;
+        overlay_run(lba, n, d);
+        for (u32 i = 0; i < n_lines; i++)         /* cached lines may be newer than the disk */
+            if (lines[i].lba != ~0u && lines[i].lba < lba + n && lines[i].lba + lines[i].n > lba) {
+                u32 a = lines[i].lba > lba ? lines[i].lba : lba;
+                u32 b = lines[i].lba + lines[i].n < lba + n ? lines[i].lba + lines[i].n : lba + n;
+                memcpy(d + (a - lba) * 512, line_data(i) + (a - lines[i].lba) * 512, (b - a) * 512);
+            }
+        return 0;
+    }
+    while (n) {
+        u32 base = pstart + (lba - pstart) / LINE * LINE, off = lba - base, k = LINE - off, li;
+        if (k > n) k = n;
+        if (line_get(base, &li)) return -1;
+        memcpy(d, line_data(li) + off * 512, k * 512);
+        lba += k; n -= k; d += k * 512;
+    }
+    return 0;
+}
+
+static int part_write(u32 lba, u32 n, const u8 *s)
+{
+    for (u32 i = 0; i < n_lines; i++)              /* cached copies first */
+        if (lines[i].lba != ~0u && lines[i].lba < lba + n && lines[i].lba + lines[i].n > lba) {
+            u32 a = lines[i].lba > lba ? lines[i].lba : lba;
+            u32 b = lines[i].lba + lines[i].n < lba + n ? lines[i].lba + lines[i].n : lba + n;
+            memcpy(line_data(i) + (a - lines[i].lba) * 512, s + (a - lba) * 512, (b - a) * 512);
+        }
+    if (!run) return dev_io(lba, n, (void *)s, 1);
+    if (run_n && lba >= run_lba && lba + n <= run_lba + run_n) {    /* rewrites sectors of the run */
+        memcpy(run + (lba - run_lba) * 512, s, n * 512);
+        return 0;
+    }
+    if (run_n && lba == run_lba + run_n && run_n + n <= RUN_MAX) {  /* carries it on */
+        memcpy(run + run_n * 512, s, n * 512);
+        run_n += n;
+        return 0;
+    }
+    disk_flush();
+    if (n >= RUN_MAX) return dev_io(lba, n, (void *)s, 1);
+    memcpy(run, s, n * 512);
+    run_lba = lba; run_n = n; run_since = ticks;
+    return 0;
+}
+
 /* ---- I/O as DOS sees the disk: 0 or a BIOS status (4 sector not found, 3 write protected, 0x20 controller) ---- */
 int disk_read(u32 lba, u32 n, void *buf)
 {
     if (lba >= disk_sectors || n > disk_sectors - lba) return 0x04;
     if (!on_dev) { memcpy(buf, disk_image + lba * 512, n * 512); return 0; }
     u8 *d = buf;
-    while (n) {
-        u32 k;
-        if (lba < pstart) {                                    /* MBR + gap before the partition */
-            k = pstart - lba < n ? pstart - lba : n;
-            for (u32 i = 0; i < k; i++) {
-                if (lba + i == 0) memcpy(d + i * 512, vmbr, 512);
-                else memset(d + i * 512, 0, 512);
-            }
-        } else {
-            k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
-            if (dev_rw(cdev, lba, k, d, 0)) return 0x20;
+    if (lba < pstart) {                                        /* MBR + gap before the partition */
+        u32 k = pstart - lba < n ? pstart - lba : n;
+        for (u32 i = 0; i < k; i++) {
+            if (lba + i == 0) memcpy(d + i * 512, vmbr, 512);
+            else memset(d + i * 512, 0, 512);
         }
         lba += k; n -= k; d += k * 512;
     }
+    if (n && part_read(lba, n, d)) return 0x20;
     return 0;
 }
 
@@ -82,13 +213,7 @@ int disk_write(u32 lba, u32 n, const void *buf)
     if (lba >= disk_sectors || n > disk_sectors - lba) return 0x04;
     if (!on_dev) { memcpy(disk_image + lba * 512, buf, n * 512); return 0; }
     if (lba < pstart) return 0x03;                             /* only the partition is writable */
-    const u8 *s = buf;
-    while (n) {
-        u32 k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
-        if (dev_rw(cdev, lba, k, (void *)s, 1)) return 0x20;
-        lba += k; n -= k; s += k * 512;
-    }
-    return 0;
+    return part_write(lba, n, buf) ? 0x20 : 0;
 }
 
 /* The FAT partition DOS boots from, through the same view (for cd.c / bios.c). */
@@ -153,6 +278,7 @@ static void use(int d, u32 start, u32 size)
     vmbr[510] = 0x55; vmbr[511] = 0xAA;
     kprintf("disk: C: is FAT%d partition at LBA %u (%u MiB) on %s disk %d (%s)\n",
             v.type, start, size >> 11, dev[d].usb ? "USB" : "SATA", dev[d].idx, dev[d].name);
+    cache_init();
 }
 
 static int scan(int d, u32 *bs, u32 *bz)

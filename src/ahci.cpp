@@ -71,14 +71,21 @@ static bool issue(Port& d, uint8_t cmd, uint64_t lba, uint32_t count, void* buf,
         uint32_t* prd = (uint32_t*)(tbl + 0x80);
         prd[0] = (uint32_t)(uintptr_t)buf; prd[1] = 0; prd[2] = 0; prd[3] = bytes - 1;
     }
-    if (!wait_clear(p, PxTFD, 0x88, 1000)) return false;     // BSY / DRQ
+    if ((rd(p, PxTFD) & 0x88) && !wait_clear(p, PxTFD, 0x88, 1000)) return false;   // BSY / DRQ
     wr(p, PxIS, 0xFFFFFFFF);
     wr(p, PxCI, 1);
-    for (int i = 0; i < 100000; i++) {                       // ~10 s
+    // Watch for completion continuously: a disk answers in microseconds,
+    // and DOS sends many small commands. (Checking every ~100 us, with
+    // port 80h delays between, cost each command far more than the disk
+    // did, above all in a VM where every port access is an exit.) The
+    // clock is read only now and then; give up after ~10 s.
+    uint32_t t0 = pit_clock();
+    for (uint32_t i = 1;; i++) {
         uint32_t is = rd(p, PxIS);
         if (is & (1u << 30)) break;                           // task file error
         if (!(rd(p, PxCI) & 1)) return !(rd(p, PxTFD) & 1);
-        io_delay(100);
+        __asm__ volatile("pause");
+        if (!(i & 1023) && pit_clock() - t0 > 1193182u * 10) break;
     }
     if (!quiet) kprintf("ahci: command %02x at %u failed (TFD %x IS %x)\n", cdb ? cdb[0] : cmd, (uint32_t)lba, rd(p, PxTFD), rd(p, PxIS));
     d.err = (uint8_t)(rd(p, PxTFD) >> 8);                     // ATAPI: sense key in bits 7-4
