@@ -92,8 +92,10 @@ static u32 next_irq0;
 static u8 port61;
 
 u32 vpit_clock(void) { return pit_clock(); }
+u32 vpit_period0(void);
 
 static u32 reload_of(struct pitch *c) { return c->reload ? c->reload : 65536; }
+u32 vpit_period0(void) { return reload_of(&pit[0]); }   /* the guest's timer, PIT clocks */
 
 static u16 pit_count(int n)
 {
@@ -175,7 +177,10 @@ void vdev_tick(void)
     if ((int32_t)(now - next_irq0) >= 0) {
         vpic_raise(0);
         next_irq0 += per;
-        if ((int32_t)(now - next_irq0) >= 0)        /* fell behind: drop the backlog */
+        /* Late (the screen refresh held interrupts off): catch up, as the
+           real PIT runs faster than a fast guest timer, unless it's more
+           than 20 ms behind. Sample-per-tick sound needs every tick. */
+        if ((int32_t)(now - next_irq0) >= (int32_t)(PIT_HZ / 50))
             next_irq0 = now + per;
     }
 }

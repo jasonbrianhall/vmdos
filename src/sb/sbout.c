@@ -42,7 +42,8 @@ static uint8_t dac_cur = 0x80;
 static uint32_t render_t;                   /* PIT time the last render reached */
 static uint32_t frame_t0, frame_dt, frame_n; /* this render: frame i at t0 + dt*i/n */
 int audio_capture_read(int16_t *mono, int n);   /* audio.cpp: 48 kHz mic samples, 0 when none */
-int audio_capture_latest(void);
+int audio_capture_latest(int rate);
+uint32_t vpit_period0(void);
 
 /* ---------------------------------------------------------------- 8237 pair */
 /* Channels 0-3: ports 00h-0Fh (bytes). Channels 4-7: ports C0h-DEh (words;
@@ -256,7 +257,10 @@ void sb16_start(int record, int autoinit, int bits16, int sign, int stereo, uint
 
 uint8_t sb_in_sample(void)
 {
-    if (!s.record) last_in = (int16_t)audio_capture_latest();
+    if (!s.record) {
+        uint32_t per = vpit_period0();           /* polled from a fast timer: its rate */
+        last_in = (int16_t)audio_capture_latest(per < 1193 / 2 && per > 20 ? (int)(1193182u / per) : 0);
+    }
     return (uint8_t)((last_in >> 8) + 128);
 }
 
@@ -320,8 +324,10 @@ static void next_frame(void)
     s.cur_r = r;
 }
 
+static uint32_t dac_writes, dac_dry;
 void sb_dac_write(uint8_t v)
 {
+    dac_writes++;
     uint32_t next = (dq_tail + 1) % DACQ;
     if (next == dq_head) dq_head = (dq_head + 1) % DACQ;   /* full: drop the oldest */
     dacq[dq_tail].t = pit_clock();
@@ -329,9 +335,49 @@ void sb_dac_write(uint8_t v)
     dq_tail = next;
 }
 
+/* A program writing the DAC from a fast timer (Parrot: 12 kHz) means one
+   sample per timer tick: play the writes at exactly that rate, about 15 ms
+   behind, interpolated, so interrupt jitter doesn't become crackle. */
+uint32_t vpit_period0(void);
+static int dac_stream;                      /* playing the queue at the timer's rate */
+static uint32_t ds_step, ds_frac;           /* timer ticks per 48 kHz frame, 16.16 */
+static int32_t ds_prev = 0, ds_cur = 0;
+static uint32_t dq_level(void) { return (dq_tail + DACQ - dq_head) % DACQ; }
+
+static int32_t dac_stream_at(void)
+{
+    uint32_t per = vpit_period0();
+    uint32_t rate = 1193182u / per;                       /* samples per second */
+    uint32_t target = rate * 15 / 1000 + 8;
+    uint32_t lvl = dq_level();
+    if (!dac_stream) {                                     /* prebuffer */
+        if (lvl < target) return ds_cur;
+        dac_stream = 1;
+        ds_frac = 0;
+    }
+    uint32_t step = (rate << 16) / 48000u;
+    int32_t err = (int32_t)lvl - (int32_t)target;          /* drift: lean on the rate a little */
+    step += (uint32_t)((int32_t)step * (err > 64 ? 64 : err < -64 ? -64 : err) / 1024);
+    ds_step = step;
+    ds_frac += ds_step;
+    while (ds_frac >= 0x10000) {
+        ds_frac -= 0x10000;
+        if (dq_head == dq_tail) { dac_stream = 0; dac_dry++; break; }  /* ran dry: hold, refill */
+        ds_prev = ds_cur;
+        ds_cur = ((int32_t)dacq[dq_head].v - 128) * 256;
+        dac_cur = dacq[dq_head].v;
+        dq_head = (dq_head + 1) % DACQ;
+    }
+    return ds_prev + (((ds_cur - ds_prev) * (int32_t)((ds_frac & 0xFFFF) >> 2)) >> 14);
+}
+
 /* The DAC's value at render frame i (sample-and-hold, as the real one). */
 static int32_t dac_at(uint32_t i)
 {
+    uint32_t per = vpit_period0();
+    if (per < 1193 / 2 && per > 20) return dac_stream_at();   /* timer above 2 kHz */
+    dac_stream = 0;
+    ds_prev = ds_cur = ((int32_t)dac_cur - 128) * 256;
     uint32_t t = frame_t0 + (frame_n ? frame_dt * i / frame_n : frame_dt);
     static uint32_t last_write;
     while (dq_head != dq_tail && (int32_t)(dacq[dq_head].t - t) <= 0) {
@@ -437,6 +483,12 @@ void sb_render(int16_t *out, int frames)
     frame_n = (uint32_t)frames;
     frame_base = 0;
     render_t = now;
+    static uint32_t rep_t;
+    if (now - rep_t > 1193182u && dac_writes) {
+        dbg(2, "DAC: %u writes/s, dry %u, level %u, per %u\n", dac_writes, dac_dry, (dq_tail + DACQ - dq_head) % DACQ, vpit_period0());
+        dac_writes = dac_dry = 0;
+    }
+    if (now - rep_t > 1193182u) rep_t = now;
     while (frames > 0) {
         int n = frames > OPL_MAX_FRAMES ? OPL_MAX_FRAMES : frames;
         render_chunk(out, n);
