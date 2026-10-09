@@ -124,6 +124,20 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
+    if (n == 0x2F && AX(r) == 0x5642) {                                 /* VMSB */
+        extern int sound_sb_api(int bx);
+        extern int audio_capture_stats(u32 *peak, u32 *clips, u32 *resyncs);
+        extern int audio_capture_boost(int db);
+        if (BX(r) == 1) {               /* mic: AX = source, CX = peak, DX = clipped, SI = resyncs */
+            u32 pk, cl, rs;
+            AX(r) = (u16)audio_capture_stats(&pk, &cl, &rs);
+            CX(r) = (u16)pk; DX(r) = (u16)(cl > 0xFFFF ? 0xFFFF : cl); SI(r) = (u16)rs;
+        } else if (BX(r) == 3) {        /* mic boost CX dB: AX = what it got (FFFF: none) */
+            AX(r) = (u16)audio_capture_boost((short)CX(r));
+        } else AX(r) = (u16)sound_sb_api(BX(r));
+        BX(r) = 0x564D;
+        return;
+    }
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;

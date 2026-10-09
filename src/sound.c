@@ -26,10 +26,22 @@ void sound_init(void)
     dsp_init(SB_BASE);
     mpu_init(MPU_BASE);
     sb_out_init(5, 1);
+    if (strstr(cmdline, "sb16=1")) dsp_set_sb16(1);
     sb_ready = 1;
     if (strstr(cmdline, "audio=off")) { kprintf("sound: off\n"); return; }
     sound_on = audio_start(cmdline);
     if (!sound_on) kprintf("sound: no sound card found\n");
+}
+
+/* INT 2Fh AX=5642h (VMSB.COM): BX = 0 ask, 2 SB Pro, 16 SB16. Returns AX = 2 or 16. */
+int sound_sb_api(int bx)
+{
+    if (!sb_ready) return 0;
+    if (bx == 2 || bx == 16) {
+        dsp_set_sb16(bx == 16);
+        kprintf("SB: now a Sound Blaster %s\n", bx == 16 ? "16 (DSP 4.05)" : "Pro (DSP 3.02)");
+    }
+    return dsp.sb16 ? 16 : 2;
 }
 
 static void check_irq(void)

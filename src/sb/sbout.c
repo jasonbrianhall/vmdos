@@ -14,83 +14,133 @@
 
 #define OUT_RATE 48000
 
-static int sb_irq = 5, sb_dma = 1;
+static int sb_irq = 5, sb_dma = 1, sb_hdma = 5;
 static volatile int irq_pending;
+static int irq_stat;                        /* SB16 mixer 82h: bit 0 8-bit, bit 1 16-bit IRQ */
 
 static struct {
     int active, autoinit, silence;
-    uint32_t dma_phys, dma_len, dma_pos;
+    int ch;                                 /* DMA channel of this transfer */
+    int bits16, sign;                       /* 16-bit samples (channel 5), signed */
+    uint32_t dma_phys, dma_len, dma_pos;    /* dma_len, dma_pos: in bytes or words */
+    uint16_t dma_addr;                      /* the address register at the start */
     const volatile uint8_t *mem;
-    uint32_t block_len, block_left;
+    uint32_t block_len, block_left;         /* in samples */
     uint32_t step, frac;
     int stereo;
     int16_t prev_l, prev_r, cur_l, cur_r;
+    int record;                             /* the DMA goes the other way: ADC -> memory */
+    int32_t in_acc, in_n;                   /* 48 kHz input samples summed for the next one */
 } s;
+static int16_t last_in;                     /* latest input sample (DSP 20h) */
+int audio_capture_read(int16_t *mono, int n);   /* audio.cpp: 48 kHz mic samples, 0 when none */
+int audio_capture_latest(int rate);
 
-/* ---------------------------------------------------------------- 8237 */
-static struct { uint16_t addr, count; uint8_t page, mode; } dch[4];
-static uint8_t dma_mask = 0x0F, dma_ff;
+/* ---------------------------------------------------------------- 8237 pair */
+/* Channels 0-3: ports 00h-0Fh (bytes). Channels 4-7: ports C0h-DEh (words;
+   the page register's bit 0 is ignored, addresses are word addresses). */
+static struct { uint16_t addr, count; uint8_t page, mode; } dch[8];
+static uint8_t dma_mask = 0xFF, dma_ff[2];
 static int dma_valid, dma_tc, dma_done;
 
 static int page_channel(uint16_t port)
 {
-    switch (port) { case 0x87: return 0; case 0x83: return 1; case 0x81: return 2; case 0x82: return 3; }
+    switch (port) {
+    case 0x87: return 0; case 0x83: return 1; case 0x81: return 2; case 0x82: return 3;
+    case 0x8F: return 4; case 0x8B: return 5; case 0x89: return 6; case 0x8A: return 7;
+    }
     return -1;
 }
 
-int dma_owns(uint16_t port) { return port <= 0x0F || (port >= 0x81 && port <= 0x8F); }
+int dma_owns(uint16_t port)
+{
+    return port <= 0x0F || (port >= 0x81 && port <= 0x8F) || (port >= 0xC0 && port <= 0xDF);
+}
+
+static void ctl_out(int hi, int reg, uint8_t v)     /* registers 8-15 of a controller */
+{
+    int b = hi ? 4 : 0;
+    switch (reg) {
+    case 0xA: if (v & 4) dma_mask |= 1 << (b + (v & 3)); else dma_mask &= ~(1 << (b + (v & 3))); return;
+    case 0xB: dch[b + (v & 3)].mode = v; return;
+    case 0xC: dma_ff[hi] = 0; return;
+    case 0xD: dma_ff[hi] = 0; dma_mask |= 0x0F << b; return;
+    case 0xE: dma_mask &= ~(0x0F << b); return;
+    case 0xF: dma_mask = (uint8_t)((dma_mask & ~(0x0F << b)) | (v & 0x0F) << b); return;
+    }
+}
+
+static void reg_out(int ch, int count, uint8_t v)
+{
+    int hi = ch >= 4;
+    uint16_t *r = count ? &dch[ch].count : &dch[ch].addr;
+    *r = dma_ff[hi] ? (uint16_t)((*r & 0xFF) | v << 8) : (uint16_t)((*r & 0xFF00) | v);
+    dma_ff[hi] ^= 1;
+    if (ch == s.ch) dma_valid = 0;
+}
 
 void dma_out(uint16_t port, uint8_t v)
 {
-    if (port < 8) {
-        int ch = port >> 1;
-        uint16_t *r = (port & 1) ? &dch[ch].count : &dch[ch].addr;
-        *r = dma_ff ? (uint16_t)((*r & 0xFF) | v << 8) : (uint16_t)((*r & 0xFF00) | v);
-        dma_ff ^= 1;
-        if (ch == sb_dma) dma_valid = 0;
+    if (port < 8) { reg_out(port >> 1, port & 1, v); return; }
+    if (port < 0x10) { ctl_out(0, port, v); return; }
+    if (port >= 0xC0) {
+        int r = (port - 0xC0) >> 1;                 /* register 0-15 */
+        if (r < 8) reg_out(4 + (r >> 1), r & 1, v);
+        else ctl_out(1, r, v);
         return;
     }
-    switch (port) {
-    case 0x0A: if (v & 4) dma_mask |= 1 << (v & 3); else dma_mask &= ~(1 << (v & 3)); return;
-    case 0x0B: dch[v & 3].mode = v; return;
-    case 0x0C: dma_ff = 0; return;
-    case 0x0D: dma_ff = 0; dma_mask = 0x0F; return;
-    case 0x0E: dma_mask = 0; return;
-    case 0x0F: dma_mask = v & 0x0F; return;
-    }
     int ch = page_channel(port);
-    if (ch >= 0) { dch[ch].page = v; if (ch == sb_dma) dma_valid = 0; }
+    if (ch >= 0) { dch[ch].page = v; if (ch == s.ch) dma_valid = 0; }
+}
+
+static uint8_t reg_in(int ch, int count)
+{
+    int hi = ch >= 4;
+    uint32_t v;
+    if (ch == s.ch && dma_valid) {
+        if (count) v = dma_done ? 0xFFFF : s.dma_len - 1 - s.dma_pos;
+        else v = (uint16_t)(s.dma_addr + (dma_done ? s.dma_len : s.dma_pos));
+    } else v = count ? dch[ch].count : dch[ch].addr;
+    uint8_t b = dma_ff[hi] ? (uint8_t)(v >> 8) : (uint8_t)v;
+    dma_ff[hi] ^= 1;
+    return b;
+}
+
+static uint8_t status_in(int hi)
+{
+    int b = hi ? 4 : 0;
+    uint8_t v = 0;
+    if (s.ch >= b && s.ch < b + 4) {
+        if (dma_tc) v |= 1 << (s.ch - b);
+        if (s.active && !s.silence) v |= 0x10 << (s.ch - b);
+        dma_tc = 0;
+    }
+    return v;
 }
 
 uint8_t dma_in(uint16_t port)
 {
-    if (port < 8) {
-        int ch = port >> 1;
-        uint32_t v;
-        if (ch == sb_dma && dma_valid) {
-            if (port & 1) v = dma_done ? 0xFFFF : s.dma_len - 1 - s.dma_pos;
-            else v = (s.dma_phys & 0xFFFF) + (dma_done ? s.dma_len : s.dma_pos);
-        } else v = (port & 1) ? dch[ch].count : dch[ch].addr;
-        uint8_t b = dma_ff ? (uint8_t)(v >> 8) : (uint8_t)v;
-        dma_ff ^= 1;
-        return b;
+    if (port < 8) return reg_in(port >> 1, port & 1);
+    if (port == 0x08) return status_in(0);
+    if (port == 0x0F) return dma_mask & 0x0F;
+    if (port >= 0xC0) {
+        int r = (port - 0xC0) >> 1;
+        if (r < 8) return reg_in(4 + (r >> 1), r & 1);
+        if (r == 8) return status_in(1);
+        if (r == 15) return dma_mask >> 4;
+        return 0xFF;
     }
-    if (port == 0x08) {
-        uint8_t v = 0;
-        if (dma_tc) v |= 1 << sb_dma;
-        if (s.active && !s.silence) v |= 0x10 << sb_dma;
-        dma_tc = 0;
-        return v;
-    }
-    if (port == 0x0F) return dma_mask;
     int ch = page_channel(port);
     return ch >= 0 ? dch[ch].page : 0xFF;
 }
 
 static void read_dma_controller(void)
 {
-    s.dma_phys = (uint32_t)dch[sb_dma].page << 16 | dch[sb_dma].addr;
-    s.dma_len = (uint32_t)dch[sb_dma].count + 1;
+    int ch = s.ch;
+    s.dma_addr = dch[ch].addr;
+    if (ch < 4) s.dma_phys = (uint32_t)dch[ch].page << 16 | dch[ch].addr;
+    else s.dma_phys = (uint32_t)(dch[ch].page & 0xFE) << 16 | (uint32_t)dch[ch].addr << 1;
+    s.dma_len = (uint32_t)dch[ch].count + 1;
     s.dma_pos = 0;
     dma_valid = 1;
     dma_done = 0;
@@ -99,7 +149,8 @@ static void read_dma_controller(void)
 
 static int map_dma_buffer(void)
 {
-    if (s.dma_phys + s.dma_len > GUEST_TOP) return 0;
+    uint32_t bytes = s.dma_len << (s.ch >= 4);
+    if (s.dma_phys + bytes > GUEST_TOP) return 0;
     s.mem = (const volatile uint8_t *)gptr(s.dma_phys);
     return 1;
 }
@@ -111,38 +162,50 @@ void sb_out_init(int irq, int dma)
     sb_irq = irq;
     sb_dma = dma & 3;
     memset(&s, 0, sizeof s);
+    s.ch = -1;
 }
 
 int sb_irq_line(void) { return sb_irq; }
 
-void sb_out_start(int autoinit, uint32_t len_bytes, int silence)
+static void raise_irq(int bits16)
 {
-    uint32_t tc = dsp.time_constant;
-    uint32_t rate = 1000000u / (256 - tc);
+    irq_pending = 1;
+    irq_stat |= bits16 ? 2 : 1;
+}
+int  sb_irq_status(void)        { return irq_stat; }
+void sb_irq_ack(int bits16)     { irq_stat &= bits16 ? ~2 : ~1; }
 
-    s.stereo = (dsp.mixer[0x0E] & 0x02) && !silence;
-    if (s.stereo) rate /= 2;                /* TC was set for twice the frame rate */
+/* rate: sample frames per second; len: samples (each channel counts) */
+static void start(int record, int autoinit, int bits16, int sign, int stereo,
+                  uint32_t rate, uint32_t len, int silence)
+{
+    s.record = 0;
+    s.active = 0;
+    s.bits16 = bits16;
+    s.sign = sign;
+    s.stereo = stereo && !silence;
+    s.ch = bits16 ? sb_hdma : sb_dma;
     if (rate < 1000) rate = 1000;
     if (rate > 48000) rate = 48000;
     s.step = (rate << 16) / OUT_RATE;
     s.frac = 0;
 
     s.silence = silence;
-    dsp.paused = 0;                         /* a new transfer ends a D0h pause */
+    dsp.paused = 0;                         /* a new transfer ends a pause */
     s.autoinit = autoinit;
-    s.block_len = len_bytes ? len_bytes : 1;
+    s.block_len = len ? len : 1;
     s.block_left = s.block_len;
 
     if (!silence) {
         read_dma_controller();
         if (!map_dma_buffer()) {
             dbg(1, "SB: DMA buffer %x not in conventional memory\n", s.dma_phys);
-            s.active = 0;
             return;
         }
     }
-    dbg(2, "SB: start %s len=%u rate=%u%s dma=%x/%u\n", autoinit ? "auto" : "single",
-        s.block_len, rate, s.stereo ? " stereo" : "", s.dma_phys, s.dma_len);
+    dbg(2, "SB: %s %s%s len=%u rate=%u%s dma=%x/%u ch%d\n", record ? "record" : "start",
+        autoinit ? "auto" : "single", bits16 ? " 16-bit" : "", s.block_len, rate,
+        s.stereo ? " stereo" : "", s.dma_phys, s.dma_len, s.ch);
 
     /* Detection transfers (a few bytes) finish in microseconds on a real
        card; complete them now so the IRQ arrives before any timeout. */
@@ -151,16 +214,48 @@ void sb_out_start(int autoinit, uint32_t len_bytes, int silence)
             s.dma_pos = s.block_len % (s.dma_len ? s.dma_len : 1);
             if (s.dma_pos == 0) { dma_done = 1; dma_tc = 1; }
         }
-        s.active = 0;
-        irq_pending = 1;
+        raise_irq(bits16);
         return;
     }
     s.active = 1;
+    s.record = record;
+    s.in_acc = s.in_n = 0;
 }
 
-void sb_out_stop(void)            { s.active = 0; irq_pending = 0; }
+static uint32_t tc_rate(void)
+{
+    uint32_t rate = 1000000u / (256 - dsp.time_constant);
+    if (dsp.mixer[0x0E] & 0x02) rate /= 2;  /* TC was set for twice the frame rate */
+    return rate;
+}
+
+void sb_out_start(int autoinit, uint32_t len_bytes, int silence)
+{
+    int stereo = (dsp.mixer[0x0E] & 0x02) != 0;
+    start(0, autoinit, 0, 0, stereo, dsp.sb16 && dsp.rate ? dsp.rate : tc_rate(), len_bytes, silence);
+}
+
+void sb_in_start(int autoinit, uint32_t len_bytes)
+{
+    int stereo = (dsp.mixer[0x0E] & 0x02) != 0;
+    start(1, autoinit, 0, 0, stereo, dsp.sb16 && dsp.rate ? dsp.rate : tc_rate(), len_bytes, 0);
+}
+
+void sb16_start(int record, int autoinit, int bits16, int sign, int stereo, uint32_t len)
+{
+    start(record, autoinit, bits16, sign, stereo, dsp.rate ? dsp.rate : 1000000u / (256 - dsp.time_constant), len, 0);
+}
+
+uint8_t sb_in_sample(void)
+{
+    if (!s.record) last_in = (int16_t)audio_capture_latest(0);
+    return (uint8_t)((last_in >> 8) + 128);
+}
+
+void sb_out_stop(void)            { s.active = 0; s.record = 0; irq_pending = 0; irq_stat = 0; }
 void sb_out_exit_autoinit(void)   { s.autoinit = 0; }
-void sb_out_raise_irq(void)       { irq_pending = 1; }
+void sb_out_raise_irq(void)       { raise_irq(0); }
+void sb_out_raise_irq16(void)     { raise_irq(1); }
 
 int sb_take_irq(void)
 {
@@ -171,32 +266,48 @@ int sb_take_irq(void)
 
 /* ---------------------------------------------------------------- render */
 
-static uint8_t fetch(void)
+/* The end of a sample: DMA position, terminal count, block end and IRQ. */
+static void advance(void)
 {
-    uint8_t b = 0x80;
-    if (!s.silence) {
-        b = s.mem[s.dma_pos];
-        if (++s.dma_pos >= s.dma_len) {                  /* 8237 terminal count */
-            s.dma_pos = 0;
-            dma_tc = 1;
-            if (!s.autoinit) dma_done = 1;
-        }
+    if (++s.dma_pos >= s.dma_len) {                      /* 8237 terminal count */
+        s.dma_pos = 0;
+        dma_tc = 1;
+        if (!s.autoinit) dma_done = 1;
     }
+}
+static void block_step(void)
+{
     if (--s.block_left == 0) {
-        irq_pending = 1;
+        raise_irq(s.bits16);
         if (s.autoinit) s.block_left = s.block_len;
-        else s.active = 0;
+        else { s.active = 0; s.record = 0; }
     }
-    return b;
+}
+
+static int16_t fetch(void)
+{
+    int16_t v = 0;
+    if (!s.silence) {
+        if (s.bits16) {
+            uint16_t w = (uint16_t)(s.mem[s.dma_pos * 2] | s.mem[s.dma_pos * 2 + 1] << 8);
+            v = (int16_t)(s.sign ? w : w ^ 0x8000);
+        } else {
+            uint8_t b = s.mem[s.dma_pos];
+            v = (int16_t)(s.sign ? (int8_t)b * 256 : ((int)b - 128) * 256);
+        }
+        advance();
+    }
+    block_step();
+    return v;
 }
 
 static void next_frame(void)
 {
     s.prev_l = s.cur_l;
     s.prev_r = s.cur_r;
-    int16_t l = (int16_t)(((int)fetch() - 128) * 256);
+    int16_t l = fetch();
     int16_t r = l;
-    if (s.stereo && s.active) r = (int16_t)(((int)fetch() - 128) * 256);
+    if (s.stereo && s.active) r = fetch();
     s.cur_l = l;
     s.cur_r = r;
 }
@@ -214,11 +325,50 @@ static inline int16_t limit(int32_t v)
     return (int16_t)v;
 }
 
+/* One recorded sample into the DMA buffer (the counterpart of fetch). */
+static void store(int16_t v)
+{
+    volatile uint8_t *m = (volatile uint8_t *)s.mem;
+    if (s.bits16) {
+        uint16_t w = (uint16_t)(s.sign ? v : v ^ 0x8000);
+        m[s.dma_pos * 2] = (uint8_t)w;
+        m[s.dma_pos * 2 + 1] = (uint8_t)(w >> 8);
+    } else {
+        int b = (v >> 8);                               /* rounded to 8 bits */
+        if ((v & 0x80) && b < 127) b++;
+        m[s.dma_pos] = (uint8_t)(s.sign ? b : b + 128);
+    }
+    advance();
+    block_step();
+}
+
+/* frames of 48 kHz input: averaged down to the DSP's rate (s.step) */
+static void record_chunk(int frames)
+{
+    static int16_t in[OPL_MAX_FRAMES];
+    int got = audio_capture_read(in, frames);
+    for (int i = got; i < frames; i++) in[i] = got ? in[got - 1] : 0;   /* no mic, or late: hold */
+    if (frames) last_in = in[frames - 1];
+    for (int i = 0; i < frames && s.active && s.record; i++) {
+        s.in_acc += in[i]; s.in_n++;
+        if (dsp.paused) continue;
+        s.frac += s.step;
+        while (s.frac >= 0x10000 && s.active && s.record) {
+            s.frac -= 0x10000;
+            int32_t v = s.in_n ? s.in_acc / s.in_n : 0;
+            s.in_acc = s.in_n = 0;
+            store((int16_t)v);
+            if (s.stereo && s.active) store((int16_t)v);
+        }
+    }
+}
+
 static void render_chunk(int16_t *out, int frames)
 {
+    if (s.active && s.record) record_chunk(frames);
     for (int i = 0; i < frames; i++) {
         int32_t l, r;
-        if (s.active && !dsp.paused) {
+        if (s.active && !s.record && !dsp.paused) {
             s.frac += s.step;
             while (s.frac >= 0x10000 && s.active) {
                 s.frac -= 0x10000;
