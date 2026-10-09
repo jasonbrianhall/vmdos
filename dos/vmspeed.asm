@@ -2,7 +2,7 @@
 ;   VMSPEED 2      run at 2%      VMSPEED 0.5   half a percent
 ;   VMSPEED 100    full speed     VMSPEED       show the current setting
 ; (INT 2Fh AX=5653h, BX = permille or 0; returns AX = permille, BX = 'VM'.)
-; Ctrl+F11 / Ctrl+F12 change it while a program runs.
+; Ctrl+Shift+F11 / Ctrl+Shift+F12 change it while a program runs.
         org 100h
         mov si, 81h
         xor bx, bx                      ; permille
@@ -98,5 +98,5 @@ pnum:   xor cx, cx                      ; print AX in decimal
         ret
 
 msg     db 'vmdos speed: $'
-pct     db '% of full (Ctrl+F11 slower, Ctrl+F12 faster)', 13, 10, '$'
+pct     db '% of full (Ctrl+Shift+F11 slower, +F12 faster)', 13, 10, '$'
 novm    db 'VMSPEED: not running under vmdos', 13, 10, '$'

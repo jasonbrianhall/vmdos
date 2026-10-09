@@ -71,7 +71,7 @@ int sound_port(u16 port, int write, u8 *v)
 
 void cdaudio_mix(int16_t *buf, int n);       /* cd.c: CD audio, mixed in (buf 0: just advance) */
 
-/* Ctrl+F2: play through the next output found at boot (speakers, HDMI,
+/* Ctrl+Shift+F2: play through the next output found at boot (speakers, HDMI,
    another card ...). The key only asks; the switch is made at the start of
    the next sound tick, between two renders. */
 int audio_out_count(void);

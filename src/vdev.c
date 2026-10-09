@@ -291,7 +291,7 @@ static void kq_put(u8 v)
    Old games time themselves by the CPU. After each 1 ms timer tick the
    monitor waits, so the guest runs only a slice of every millisecond:
    speed= on the command line (percent of full speed, e.g. speed=5 or
-   speed=0.3), Ctrl+F11 slower and Ctrl+F12 faster (as in DOSBox), or
+   speed=0.3), Ctrl+Shift+F11 slower and Ctrl+Shift+F12 faster, or
    VMSPEED.COM (INT 2Fh AX=5653h, BX = permille, 0 to ask). */
 static const u16 speed_steps[] = { 1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 700, 1000 };   /* permille */
 #define N_SPEED (sizeof speed_steps / sizeof speed_steps[0])
@@ -358,7 +358,7 @@ void speed_throttle(void)
     last = pit_clock();
 }
 
-/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+F11/F12 and Ctrl+F2 stay here. */
+/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+Shift+F11/F12/F2 stay here. */
 /* For the "vmdos stopped" screen: the next queued keyboard byte, or -1. */
 int vkbd_take(void)
 {
@@ -370,19 +370,24 @@ int vkbd_take(void)
 
 void vkbd_real_scancode(u8 sc)
 {
-    static int ctrl, alt;
+    static int ctrl, alt, lshift, rshift, e0;
     u8 k = sc & 0x7F;
     int up = sc & 0x80;
-    if (sc != 0xE0) {
+    if (sc == 0xE0) e0 = 1;
+    else {
         if (k == 0x1D) ctrl = !up;
         else if (k == 0x38) alt = !up;
+        else if (k == 0x2A && !e0) lshift = !up;               /* E0 2A: a fake shift around grey keys */
+        else if (k == 0x36 && !e0) rshift = !up;
+        e0 = 0;
     }
     (void)alt;
-    if (ctrl && (k == 0x57 || k == 0x58)) {
+    int hot = ctrl && (lshift || rshift);                     /* Ctrl+Shift: games rarely use it with F-keys */
+    if (hot && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
         return;
     }
-    if (ctrl && k == 0x3C) {                                  /* Ctrl+F2: next sound output */
+    if (hot && k == 0x3C) {                                   /* Ctrl+Shift+F2: next sound output */
         void sound_next_output(void);
         if (!up) sound_next_output();
         return;
