@@ -319,6 +319,7 @@ void idle_wait(void) { __asm__ volatile("sti; hlt; cli" ::: "memory"); }
 
 void reboot(void)
 {
+    disk_flush();                                 /* gathered writes first */
     cli();
     for (int i = 0; i < 10000 && (inb(0x64) & 2); i++) ;
     outb(0x64, 0xFE);

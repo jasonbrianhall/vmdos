@@ -163,6 +163,8 @@ void disk_init(void);
 int disk_read(u32 lba, u32 n, void *buf);     /* 0 or a BIOS INT 13h status */
 int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
+void disk_flush(void);                        /* gathered writes out to the disk */
+void disk_tick(void);                         /* timer: flush writes older than 50 ms */
 const char *disk_kind(void);
 
 void cd_add(u8 *data, u32 size, const char *name);

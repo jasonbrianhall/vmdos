@@ -214,7 +214,8 @@ static int int13(struct regs *r)
         return BIOS_DONEF;
     }
     switch (fn) {
-    case 0x00: case 0x04: case 0x0C: case 0x0D: case 0x10: case 0x11: case 0x47: break;
+    case 0x00: case 0x0D: disk_flush(); break;                  /* reset: the disk up to date */
+    case 0x04: case 0x0C: case 0x10: case 0x11: case 0x47: break;
     case 0x01: AH(r) = disk_status; set_cf(r, disk_status != 0); return BIOS_DONEF;
     case 0x02: case 0x03: {
         u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), sec = CL(r) & 63, head = DH(r);
@@ -523,6 +524,7 @@ int bios_restart_floppy(struct regs *r, int d)
 {
     static u8 sec[512];
     if (fd_boot_sector(d, sec)) return -1;
+    disk_flush();
     cdaudio_stop();
     sb_out_stop();
     mouse_restart();
