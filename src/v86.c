@@ -72,6 +72,24 @@ static void dump(struct regs *r, const char *why)
           r->v86_fs & 0xFFFF, r->v86_gs & 0xFFFF, r->eflags);
 }
 
+/* The guest tried to switch the CPU to protected mode itself (LGDT,
+   LIDT, LMSW or MOV CR0 with PE): a virtual-8086 monitor can't hand it
+   the bare CPU. Say so plainly rather than as a generic #GP. */
+int guest_from_floppy;                   /* bios.c: started from a floppy's boot sector */
+static void raw_pm(struct regs *r, const char *insn)
+{
+    char why[400];
+    snprintf(why, sizeof why,
+             "the program switches the CPU to protected mode itself (%s)\n"
+             "vmdos runs it in virtual-8086 mode and can't give it the bare CPU.\n%s",
+             insn, guest_from_floppy
+             ? "This disk is made to boot on the bare machine: boot it with GRUB\n"
+               "(or straight from the firmware) instead of VMFD /BOOT or boot=a.\n"
+             : "DOS programs get protected mode from vmdos's DPMI host (or VCPI);\n"
+               "this one wants the machine to itself.\n");
+    dump(r, why);
+}
+
 /* Wait (real HLT) until the guest has an interrupt it will take. */
 void wait_for_irq(void)
 {
@@ -278,6 +296,13 @@ static void gp_handler(struct regs *r)
         if (op2 == 0x20 || op2 == 0x22) {                           /* MOV r32, CRn / CRn, r32 */
             u8 m = rd8(LIN(r->cs, ip + 1));
             if ((m >> 6) == 3) {
+                if (op2 == 0x22 && ((m >> 3) & 7) == 0 && guest_from_floppy) {
+                    /* MOV CR0 with PE, from a booted floppy: a mode switch. (DOS
+                       programs read CR0 with PE already set and may write it back,
+                       e.g. for cache bits: those writes stay ignored.) */
+                    u32 *g[8] = { &r->eax, &r->ecx, &r->edx, &r->ebx, &r->esp, &r->ebp, &r->esi, &r->edi };
+                    if (*g[m & 7] & 1) raw_pm(r, "MOV CR0 with PE set");
+                }
                 if (op2 == 0x20) {
                     u32 v = 0;
                     if (((m >> 3) & 7) == 0) { __asm__ volatile("mov %%cr0,%0" : "=r"(v)); v &= 0x8005003F; }
@@ -287,6 +312,12 @@ static void gp_handler(struct regs *r)
                 IP(r) = ip + 2;
                 return;
             }
+        }
+        if (op2 == 0x01) {                                          /* LGDT / LIDT / LMSW */
+            u8 m = rd8(LIN(r->cs, ip + 1)), reg = (m >> 3) & 7;
+            if (reg == 2) raw_pm(r, "LGDT");
+            if (reg == 3) raw_pm(r, "LIDT");
+            if (reg == 6) raw_pm(r, "LMSW");
         }
         break; }
     case 0xCE: IP(r) = ip; if (r->eflags & EFL_OF) v86_reflect(r, 4); return;

@@ -491,10 +491,12 @@ extern const u8 fd_boot16[512], fd_boot32[512];
    loaded at 0000:7C00, DL = the drive. Booters ("self-booting" games)
    run without DOS. 0, or -1 when the drive is empty. */
 int fd_boot_sector(int d, u8 *out);
+extern int guest_from_floppy;
 static int boot_floppy(struct regs *r, int d)
 {
     static u8 sec[512];
     if (fd_boot_sector(d, sec)) return -1;
+    guest_from_floppy = 1;
     memcpy(gptr(0x7C00), sec, 512);
     r->cs = 0; r->eip = 0x7C00;
     r->ss = 0; r->esp = 0x7C00;
