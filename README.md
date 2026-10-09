@@ -166,6 +166,12 @@ kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
 images are held in RAM as boot modules instead, one drive each, and
 `VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
+Real CD/DVD drives on SATA (AHCI) get a drive letter each after the image
+drives (E: with one image drive): the disc is read from the drive, swapping
+discs works, and eject/close requests go to the drive. Data tracks only (no
+CD audio playback yet). `cdphys=off` leaves them out. In QEMU:
+`-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso -device ide-cd,drive=cd,bus=ide.2`.
+
 Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
 load options); the log shows every INT 33h call, event-handler call and
 command sent to the PS/2 mouse port. If the built-in driver doesn't satisfy
@@ -269,7 +275,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
-| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM images: monitor side, VMCD.SYS driver, VMCD.COM |
+| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: images and real SATA drives (monitor side), VMCD.SYS driver, VMCD.COM |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
