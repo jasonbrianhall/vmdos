@@ -157,6 +157,10 @@ Slowdown for games that time themselves by the CPU (as MoSlo does):
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
+Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
+DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
+Ctrl+F2 switches to the next one; the new one is shown at the top right.
+
 CD-ROM: any ISO file on C: can be put in the CD drive (D:) while running:
 `VMCD D: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
 names). It is read straight from the disk, nothing is copied to RAM; `VMCD`

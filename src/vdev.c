@@ -358,7 +358,7 @@ void speed_throttle(void)
     last = pit_clock();
 }
 
-/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+F11/F12 stay here. */
+/* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+F11/F12 and Ctrl+F2 stay here. */
 /* For the "vmdos stopped" screen: the next queued keyboard byte, or -1. */
 int vkbd_take(void)
 {
@@ -380,6 +380,11 @@ void vkbd_real_scancode(u8 sc)
     (void)alt;
     if (ctrl && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
+        return;
+    }
+    if (ctrl && k == 0x3C) {                                  /* Ctrl+F2: next sound output */
+        void sound_next_output(void);
+        if (!up) sound_next_output();
         return;
     }
     kq_put(sc);

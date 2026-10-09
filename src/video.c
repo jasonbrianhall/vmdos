@@ -876,21 +876,22 @@ static void refresh_vbe(void)
     sh_ptr_x = px; sh_ptr_y = py;
 }
 
-/* ---------------- on-screen note (speed changes) ---------------- */
-static char osd_msg[32];
+/* ---------------- on-screen note (speed changes, audio output) ---------------- */
+#define OSD_MAX 48
+static char osd_msg[OSD_MAX + 1];
 static u32 osd_until;
 
 void video_osd(const char *msg)
 {
     int i = 0;
-    for (; msg[i] && i < 31; i++) osd_msg[i] = msg[i];
+    for (; msg[i] && i < OSD_MAX; i++) osd_msg[i] = msg[i];
     osd_msg[i] = 0;
     osd_until = ticks + 2000;
 }
 
 static void draw_osd(void)
 {
-    static u32 line[40 * 8 * 2];
+    static u32 line[(OSD_MAX + 2) * 8 * 2];
     if (!osd_msg[0]) return;
     if ((int32_t)(ticks - osd_until) >= 0) {        /* expired: redraw what it covered */
         osd_msg[0] = 0;
@@ -900,7 +901,9 @@ static void draw_osd(void)
     }
     int n = 0;
     while (osd_msg[n]) n++;
-    int s = fb_w >= 1280 ? 2 : 1, w = (n + 2) * 8 * s;
+    int s = fb_w >= 1280 ? 2 : 1;
+    while (n > 0 && (u32)((n + 2) * 8 * s) > fb_w) n--;            /* narrow screen: cut the note */
+    int w = (n + 2) * 8 * s;
     u32 fg = pack(63, 63, 63), bg = pack(0, 0, 42);
     u32 x0 = fb_w > (u32)w + 8 ? fb_w - w - 8 : 0;
     for (int y = 0; y < 20 * s; y++) {
