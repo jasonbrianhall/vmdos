@@ -428,7 +428,8 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x1A: return int1a(r);
     case 0x2F:
         dbg(3, "BIOS INT 2Fh AX=%04x via %s\n", AX(r), via_stub ? "chain" : "direct");
-        if (AX(r) == 0x4300) AL(r) = 0x80;                     /* XMS driver installed */
+        if (xms_hidden) ;                                       /* noxms: none here */
+        else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
         return BIOS_DONE;
     case 0x43: xms_call(r); return BIOS_CONT;                  /* XMS entry, then RETF */

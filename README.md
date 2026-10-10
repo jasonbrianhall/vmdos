@@ -295,6 +295,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   `ems=0`). `VMXMS.SYS`, loaded first in FDCONFIG.SYS, is the HIMEM-style
   front (device XMSXXXX0, INT 2Fh hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH
   and FreeCOM's XMS swapping work: about 620 KB free for programs.
+  `noxms` hides the XMS driver altogether (no installation check answer,
+  VMXMS.SYS doesn't load, DOS loads low), for software that brings its
+  own, such as Windows 3.1x Setup.
 - EMS 4.0 (expanded memory, INT 67h) in the monitor, as EMM386 gives it:
   32 MB (`ems=MB`, `ems=0` for none), page frame E000h, functions 40h-5Ch
   (allocate, map, map multiple, reallocate, save/restore and partial page

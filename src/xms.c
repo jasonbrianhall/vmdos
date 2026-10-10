@@ -27,8 +27,18 @@ void xms_restart(void)
     set_a20(0);
 }
 
+/* noxms on the command line: no XMS driver at all (the installation check
+   says none, VMXMS.SYS doesn't stay), for software that wants its own,
+   such as Windows 3.1 Setup with its HIMEM.SYS. */
+int xms_hidden;
+
 void xms_init(void)
 {
+    if (strstr(cmdline, "noxms")) {
+        xms_hidden = 1;
+        kprintf("XMS: hidden (noxms)\n");
+        return;
+    }
     /* MB; "xms=N" on the command line. By default 1 GB, as DOS memory
        managers give a big machine, but at most half of the kernel's free
        RAM, so DPMI programs (taken as they ask) still find plenty. */

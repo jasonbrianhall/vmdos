@@ -221,6 +221,7 @@ int bios_stub_is_direct(int vec);
 
 /* ---- xms.c: the XMS 3.0 driver (HMA, extended memory blocks, UMBs) ---- */
 void xms_init(void);
+extern int xms_hidden;                         /* noxms: no XMS driver */
 void xms_call(struct regs *r);
 
 /* ---- mouse.c: PS/2 and USB mice, INT 33h ---- */

@@ -148,7 +148,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     /* XMS lives in the monitor: answer its installation check before the
        INT 2Fh chain (DOS's own handler ends the chain without passing
        unknown calls on). */
-    if (n == 0x2F && (AX(r) == 0x4300 || AX(r) == 0x4310)) {
+    if (n == 0x2F && (AX(r) == 0x4300 || AX(r) == 0x4310) && !xms_hidden) {
         bios_service(r, 0x2F, 0);
         return;
     }

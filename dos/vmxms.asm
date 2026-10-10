@@ -41,6 +41,8 @@ interrupt:
         mov word [es:bx+14], resident_end
         mov [es:bx+16], cs
         call init
+        jnc .out
+        mov word [es:bx+14], 0          ; no XMS here (vmdos noxms, or not vmdos): don't stay
         jmp .out
 .unknown:
         mov word [es:bx+3], 0x8103      ; done, error: unknown command
@@ -56,7 +58,18 @@ init:   push ds
         push dx
         push cs
         pop ds
-        mov ax, 0x4310                  ; the monitor answers this at the INT trap
+        mov ax, 0x4300                  ; is there XMS? (vmdos's noxms hides it)
+        int 0x2F
+        cmp al, 0x80
+        je .xms
+        mov dx, msg_none
+        mov ah, 9
+        int 0x21
+        pop dx
+        pop ds
+        stc
+        ret
+.xms:   mov ax, 0x4310                  ; the monitor answers this at the INT trap
         int 0x2F
         mov [entry], bx
         mov [entry+2], es
@@ -72,5 +85,7 @@ init:   push ds
         int 0x21
         pop dx
         pop ds
+        clc
         ret
 msg:    db "vmdos XMS 3.0 (HMA, extended memory, UMBs)", 13, 10, "$"
+msg_none: db "vmdos XMS: hidden (noxms), not loaded", 13, 10, "$"
