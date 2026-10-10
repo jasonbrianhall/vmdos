@@ -387,16 +387,14 @@ static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
 }
 
 // ---------------------------------------------------------------- enumeration
-// Every device gets a reset before it's addressed, USB 3 ones too: a USB 3
-// link stays up through the controller reset, so the stick the firmware
-// booted from would still answer at the address the firmware gave it, not
-// at 0, and Address Device would get nothing back. `warm`: a USB 3 warm
-// reset, for a link a hot reset didn't bring back.
-static bool reset_port(int port, bool warm = false) {
+// Every device gets a reset before it's addressed, USB 3 ones too (as
+// Linux does): a USB 3 link can stay up through the controller reset, with
+// the device still in whatever state the firmware left it.
+static bool reset_port(int port) {
     uint32_t sc = portsc(port);
-    if (!(sc & PORT_CCS) && !warm) return false;
-    set_portsc(port, (sc & PORT_KEEP) | (warm ? 1u << 31 : (uint32_t)PORT_PR));
-    for (int i = 0; i < 500 && !(portsc(port) & (PORT_PRC | (1u << 19))); i++) delay_ms(1);
+    if (!(sc & PORT_CCS)) return false;
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
+    for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++) delay_ms(1);
     for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
     sc = portsc(port);
     set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack change bits
@@ -900,15 +898,18 @@ static void hub_port_change(int h, int port) {
 
 static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
-    for (int attempt = 0; attempt < 2; attempt++) {
-        // A USB 3 device that didn't take an address: once more after a warm reset.
-        if (!reset_port(port, attempt > 0)) return;
-        int speed = (portsc(port) >> 10) & 0xF;         // 1 FS, 2 LS, 3 HS, 4+ SS
-        addr_failed = false;
-        setup_device(port, -1, 0, speed);
-        if (!addr_failed || speed < 4) return;
-        printf("USB: port %d: warm reset, trying again\n", port);
-    }
+    if (!reset_port(port)) return;
+    int speed = (portsc(port) >> 10) & 0xF;             // 1 FS, 2 LS, 3 HS, 4+ SS
+    addr_failed = false;
+    setup_device(port, -1, 0, speed);
+    if (!addr_failed || speed < 4) return;
+    // Some USB 3 sticks never answer on their SuperSpeed link (no Address
+    // Device completion) but work at USB 2 speed, as through a USB 2 hub.
+    // Turn the link off (SS.Disabled): the device then connects on the
+    // port's USB 2 twin, which usb_poll picks up from its connect event.
+    uint32_t sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP & ~(0xFu << 5)) | 4u << 5 | 1u << 16);   // PLS = Disabled, LWS
+    printf("USB: port %d: USB 3 link off, the device should come back at USB 2 speed\n", port);
 }
 
 // ---------------------------------------------------------------- init
