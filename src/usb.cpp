@@ -139,7 +139,17 @@ static uint64_t ring_push(Ring& r, uint32_t d0, uint32_t d1, uint32_t d2, uint32
 // cards, or separate USB 2/USB 3 controllers on some boards); each gets its
 // own registers, command and event rings and device slots. H is the one
 // being worked on: set it before touching a controller or its devices.
+enum { HC_XHCI = 0, HC_EHCI = 1, HC_UHCI = 2 };       // EHCI / UHCI: usb2.inc
 struct Hc {
+    int type;
+    // EHCI / UHCI
+    uint16_t io;                           // UHCI I/O ports
+    volatile uint8_t* eop;                 // EHCI operational registers
+    volatile uint32_t *frames, *qh_int, *qh_ctl, *aqh, *xqh, *tds;
+    volatile uint8_t* sbuf;                // setup packets
+    uint8_t addr_used[128];
+    int ncomp;                             // EHCI: companion controllers
+    // xHCI
     volatile uint8_t *cap, *op, *rt;
     volatile uint32_t* db;
     Ring cmd_ring;
@@ -220,6 +230,13 @@ struct Keyboard {
     uint32_t tag, bsize;
     uint64_t blocks;
     char model[28];
+    // EHCI / UHCI: the bus address (k.slot once set), the default pipe's
+    // packet size, bulk toggles, the interrupt endpoint's queue head and TD
+    uint8_t addr;
+    int mps0, ilen;
+    uint8_t itog, tog_in, tog_out;
+    bool linked;
+    volatile uint32_t *iqh, *itd;
 };
 #define MAX_KBD 32
 static Keyboard kbds[MAX_KBD];
@@ -229,7 +246,18 @@ static Keyboard kbds[MAX_KBD];
 static struct {
     volatile uint8_t *out_ctx, *in_ctx, *reports;
     volatile Trb *ep0, *intr, *bout;
+    volatile uint32_t *iqh, *itd;
 } devmem[MAX_KBD];
+
+// EHCI / UHCI (usb2.inc).
+static bool hc2_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index, uint16_t len, volatile void* buf);
+static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval);
+static int hc2_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t* got);
+static void hc2_clear_halt(Keyboard& k, bool in);
+static bool hc2_address(Keyboard& k);
+static void hc2_release(Keyboard& k);
+static void hc2_poll();
+static uint8_t alloc_addr();
 
 static inline volatile uint32_t* ctx(volatile uint8_t* base, int idx) {
     return (volatile uint32_t*)(base + idx * H->csz);
@@ -426,6 +454,7 @@ static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
 }
 
 static void queue_report(Keyboard& k) {
+    if (k.hc->type != HC_XHCI) return;                  // EHCI / UHCI: armed by usb2.inc
     int idx = k.intr.enq;
     for (int i = 0; i < k.rsize; i++) k.reports[idx * REPORT_MAX + i] = 0;
     uint64_t buf = phys(k.reports + idx * REPORT_MAX);
@@ -511,6 +540,7 @@ static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) 
 // A control transfer on endpoint 0. Returns true on success.
 static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index,
                     uint16_t len, volatile void* buf) {
+    if (H->type != HC_XHCI) return hc2_control(k, type, req, value, index, len, buf);
     bool in = type & 0x80;
     uint32_t trt = len ? (in ? 3 : 2) : 0;
     ring_push(k.ep0, type | req << 8 | (uint32_t)value << 16, index | (uint32_t)len << 16, 8,
@@ -559,6 +589,7 @@ static void fill_slot(const Keyboard& k, int entries) {
 
 // Interrupt IN endpoint `ep_addr` as the device's report/status ring.
 static bool configure_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval) {
+    if (H->type != HC_XHCI) return hc2_intr(k, ep_addr, ep_mps, ep_interval);
     k.dci = (ep_addr & 0xF) * 2 + 1;
     k.mps = ep_mps;
     int interval;
@@ -592,6 +623,7 @@ static void forget(int i);
 static bool setup_slot(Keyboard& k, int ki);
 static bool addr_failed;                               // the last setup_slot's Address Device failed
 static void release_slot(int slot) {
+    if (H->type != HC_XHCI) return;
     H->dcbaa[slot] = 0;
     command(0, 0, 0, 10 << 10 | (uint32_t)slot << 24, nullptr);   // Disable Slot
 }
@@ -622,6 +654,12 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
         }
     }
 
+    if (H->type != HC_XHCI) {                          // EHCI / UHCI: a bus address
+        k.slot = alloc_addr();
+        if (!k.slot) { printf("USB: %s: no free USB address\n", k.where); return; }
+        if (!setup_slot(k, ki)) hc2_release(k);
+        return;
+    }
     Trb ev;
     if (command(0, 0, 0, TRB_ENABLE_SLOT << 10, &ev) != 1) { printf("USB: %s: no slot\n", k.where); return; }
     k.slot = ev.d3 >> 24;
@@ -644,6 +682,7 @@ static volatile int usb_busy;                          // a disk transfer is run
 static int in_poll;                                    // usb_poll running (the stop screen polls too)
 
 static bool configure_bulk(Keyboard& k) {
+    if (H->type != HC_XHCI) { k.tog_in = k.tog_out = 0; return true; }
     k.dci = (k.ep_in & 0xF) * 2 + 1;
     k.dci_out = (k.ep_out & 0xF) * 2;
     int last = k.dci > k.dci_out ? k.dci : k.dci_out;
@@ -668,6 +707,7 @@ static bool configure_bulk(Keyboard& k) {
 
 // One bulk transfer; the completion code (1 ok, 13 short, 6 stall, -1 timeout).
 static int bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t* got) {
+    if (H->type != HC_XHCI) return hc2_bulk(k, in, buf, len, got);
     Ring& r = in ? k.intr : k.bout;
     int dci = in ? k.dci : k.dci_out;
     uint64_t p = phys(buf);
@@ -692,6 +732,7 @@ static int bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t
 
 // A halted bulk endpoint: Reset Endpoint, move its ring on, CLEAR_FEATURE(HALT).
 static void clear_halt(Keyboard& k, bool in) {
+    if (H->type != HC_XHCI) { hc2_clear_halt(k, in); return; }
     Ring& r = in ? k.intr : k.bout;
     int dci = in ? k.dci : k.dci_out;
     command(0, 0, 0, 14u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);       // Reset Endpoint
@@ -864,13 +905,16 @@ static bool setup_slot(Keyboard& k, int ki) {
         m.ep0     = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
         m.intr    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
         m.bout    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
-        if (!m.out_ctx || !m.in_ctx || !m.reports || !m.ep0 || !m.intr || !m.bout) {
+        m.iqh     = (volatile uint32_t*)dma_alloc(128, 64);
+        m.itd     = (volatile uint32_t*)dma_alloc(64, 64);
+        if (!m.out_ctx || !m.in_ctx || !m.reports || !m.ep0 || !m.intr || !m.bout || !m.iqh || !m.itd) {
             printf("USB: %s: out of memory\n", k.where);
             m.out_ctx = nullptr;
             return false;
         }
     }
     k.out_ctx = m.out_ctx; k.in_ctx = m.in_ctx; k.reports = m.reports;
+    k.iqh = m.iqh; k.itd = m.itd;
     memset((void*)k.out_ctx, 0, 32 * 64);
     memset((void*)k.in_ctx, 0, 33 * 64);
     memset((void*)k.reports, 0, RING_TRBS * REPORT_MAX);
@@ -878,52 +922,56 @@ static bool setup_slot(Keyboard& k, int ki) {
     ring_attach(k.ep0, m.ep0);
     ring_attach(k.intr, m.intr);
     ring_attach(k.bout, m.bout);
-    H->dcbaa[k.slot] = phys(k.out_ctx);
-
-    // Address Device: slot context + endpoint 0.
     int mps0 = k.speed == 2 || k.speed == 1 ? 8 : k.speed == 3 ? 64 : 512;
-    ctx(k.in_ctx, 0)[1] = 0x3;                          // add slot + EP0
-    fill_slot(k, 1);
     volatile uint32_t* ep0 = ctx(k.in_ctx, 2);
-    ep0[1] = 3 << 1 | 4 << 3 | (uint32_t)mps0 << 16;    // CErr 3, control, max packet
-    uint64_t r0 = phys(k.ep0.trb) | 1;
-    ep0[2] = (uint32_t)r0; ep0[3] = (uint32_t)(r0 >> 32);
-    ep0[4] = 8;
     uint64_t ic = phys(k.in_ctx);
+    if (H->type != HC_XHCI) {                           // EHCI / UHCI: SET_ADDRESS
+        if (!hc2_address(k)) { addr_failed = true; return false; }
+    } else {
+        H->dcbaa[k.slot] = phys(k.out_ctx);
 
-    // First try the normal Address Device.
-    // If it times out, try the BSR sequence that some broken sticks need:
-    //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
-    //   2. short delay
-    //   3. Address Device with BSR=0 (real SET_ADDRESS)
-    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
-                     TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-    if (cc != 1) {
-        printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
-               k.where, cc);
-        // BSR = 1
-        cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
-                     TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
-        if (cc == 1) {
-            delay_ms(20);
-            // BSR = 0 (real SET_ADDRESS)
-            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+        // Address Device: slot context + endpoint 0.
+        ctx(k.in_ctx, 0)[1] = 0x3;                          // add slot + EP0
+        fill_slot(k, 1);
+        ep0[1] = 3 << 1 | 4 << 3 | (uint32_t)mps0 << 16;    // CErr 3, control, max packet
+        uint64_t r0 = phys(k.ep0.trb) | 1;
+        ep0[2] = (uint32_t)r0; ep0[3] = (uint32_t)(r0 >> 32);
+        ep0[4] = 8;
+
+        // First try the normal Address Device.
+        // If it times out, try the BSR sequence that some broken sticks need:
+        //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
+        //   2. short delay
+        //   3. Address Device with BSR=0 (real SET_ADDRESS)
+        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
                          TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+        if (cc != 1) {
+            printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
+                   k.where, cc);
+            // BSR = 1
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                         TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
+            if (cc == 1) {
+                delay_ms(20);
+                // BSR = 0 (real SET_ADDRESS)
+                cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                             TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+            }
         }
+        if (cc != 1) {
+            printf("USB: %s: address failed (cc=%d, speed=%s)\n",
+                   k.where, cc, speed_name(k.speed));
+            addr_failed = true;
+            return false;
+        }
+        delay_ms(10);
     }
-    if (cc != 1) {
-        printf("USB: %s: address failed (cc=%d, speed=%s)\n",
-               k.where, cc, speed_name(k.speed));
-        addr_failed = true;
-        return false;
-    }
-    delay_ms(10);
 
     static volatile uint8_t desc[256] __attribute__((aligned(64)));
     if (!control(k, 0x80, 6, 0x0100, 0, 8, desc)) { printf("USB: %s: no descriptor\n", k.where); return false; }
     int mps = desc[7];
     bool hub = desc[4] == 9;                            // device class: hub
-    if (mps && mps != mps0 && k.speed < 4) {            // fix EP0 max packet size
+    if (H->type == HC_XHCI && mps && mps != mps0 && k.speed < 4) {   // fix EP0 max packet size
         memset((void*)ctx(k.in_ctx, 0), 0, H->csz);
         ctx(k.in_ctx, 0)[1] = 0x2;
         ep0[1] = (ep0[1] & 0xFFFF) | (uint32_t)mps << 16;
@@ -1007,7 +1055,7 @@ static bool setup_slot(Keyboard& k, int ki) {
         k.pad = slot;
         k.active = true;
         for (int i = 0; i < 8; i++) queue_report(k);
-        H->db[k.slot] = k.dci;
+        if (H->type == HC_XHCI) H->db[k.slot] = k.dci;
         joy_set(slot, 1, 128, 128, 0);
         printf("USB: gamepad %04x:%04x on %s: joystick %c (%s, slot %d, %s speed)\n", vid, pid, k.where, 'A' + slot,
                k.lay.dragonrise ? "SNES layout" : k.lay.hat.bit >= 0 && k.lay.x.bit < 0 ? "hat" : "X/Y", k.slot, speed_name(k.speed));
@@ -1038,7 +1086,7 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (!configure_intr(k, ep_addr, ep_mps, ep_interval)) return false;
         k.active = true;
         for (int i = 0; i < 8; i++) queue_report(k);
-        H->db[k.slot] = k.dci;
+        if (H->type == HC_XHCI) H->db[k.slot] = k.dci;
         printf("USB: hub on %s (%d ports, %s speed)\n", k.where, k.nports, speed_name(k.speed));
         for (int p = 1; p <= k.nports; p++) control(k, 0x23, 3, 8, p, 0, nullptr);   // SET_FEATURE PORT_POWER
         delay_ms((int)k.power_good_ms + 100);           // power good, then connect debounce
@@ -1055,7 +1103,7 @@ static bool setup_slot(Keyboard& k, int ki) {
     if (is_mouse) mouse_usb_attached();
     k.active = true;
     for (int i = 0; i < 8; i++) queue_report(k);
-    H->db[k.slot] = k.dci;
+    if (H->type == HC_XHCI) H->db[k.slot] = k.dci;
     printf("USB: %s on %s (slot %d, %s speed)\n", k.mouse ? "mouse" : "keyboard", k.where, k.slot, speed_name(k.speed));
     return true;
 }
@@ -1069,7 +1117,8 @@ static void forget(int i) {
         if (kbds[j].active && kbds[j].parent == i) forget(j);
     if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
     k.active = false;
-    command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
+    if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
+    else hc2_release(k);
     printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
            k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
 }
@@ -1171,6 +1220,9 @@ static void setup_port(int port) {
                port, portsc(port));
     }
 }
+
+static bool usb_activity;                              // usb_poll handled a connect / disconnect
+#include "usb2.inc"
 
 // ---------------------------------------------------------------- init
 static bool bios_handoff() {
@@ -1304,7 +1356,7 @@ static void warm_reset_stuck() {
 extern "C" void usb_kick_ports(void) {
     if (usb_busy || in_poll) return;
     in_poll = 1;
-    for (int c = 0; c < num_hc; c++) { H = &hcs[c]; warm_reset_stuck(); }
+    for (int c = 0; c < num_hc; c++) { H = &hcs[c]; if (H->type == HC_XHCI) warm_reset_stuck(); }
     in_poll = 0;
 }
 
@@ -1336,17 +1388,42 @@ bool usb_init(const char* cmdline) {
         printf("USB: xHCI %d with %d ports, %d keyboard/mouse device%s, %d disk%s\n", num_hc - 1, H->num_ports, n, n == 1 ? "" : "s",
                nd, nd == 1 ? "" : "s");
     }
-    if (!num_hc) { printf("USB: no xHCI controller\n"); return false; }
+    // EHCI (USB 2), then its UHCI companions, which get the low- and
+    // full-speed devices EHCI hands over. (OHCI companions: not yet.)
+    static const struct { int progif, type; const char* name; } older[] = { { 0x20, HC_EHCI, "EHCI" }, { 0x00, HC_UHCI, "UHCI" } };
+    for (auto& o : older)
+        for (int i = 0; num_hc < MAX_HC && pci_find_class(0x0C, 0x03, o.progif, &d, i); i++) {
+            H = &hcs[num_hc];
+            memset((void*)H, 0, sizeof *H);
+            H->type = o.type;
+            uint32_t vd = pci_read(d, 0);
+            printf("USB: %s %d at PCI %02x:%02x.%x (%04x:%04x)\n", o.name, num_hc, d.bus, d.dev, d.fn, vd & 0xFFFF, vd >> 16);
+            if (!(o.type == HC_EHCI ? e_init(d) : u_init(d))) continue;
+            num_hc++;
+        }
+    for (int c = 0; c < num_hc; c++) {                  // their devices: EHCI's first (it hands some over)
+        H = &hcs[c];
+        if (H->type == HC_XHCI) continue;
+        if (H->type == HC_EHCI) e_root_poll(true); else u_root_poll(true);
+    }
+    for (int c = 0; c < num_hc; c++) {
+        H = &hcs[c];
+        if (H->type == HC_XHCI) continue;
+        int n = 0, nd = 0;
+        for (auto& k : kbds) { n += k.active && k.hc == H && (k.kind == KBD || k.kind == MOUSE || k.kind == JOY); nd += k.active && k.hc == H && k.kind == MSD; }
+        printf("USB: %s %d with %d ports, %d keyboard/mouse/gamepad device%s, %d disk%s\n", H->type == HC_EHCI ? "EHCI" : "UHCI",
+               c, H->num_ports, n, n == 1 ? "" : "s", nd, nd == 1 ? "" : "s");
+    }
+    if (!num_hc) { printf("USB: no USB controller\n"); return false; }
     return true;
 }
-
-static bool usb_activity;                              // usb_poll handled a connect / disconnect
 
 void usb_poll() {
     if (usb_busy || in_poll) return;                    // a disk transfer is waiting on the event ring / re-entered
     in_poll = 1;
     for (int c = 0; c < num_hc; c++) {
         H = &hcs[c];
+        if (H->type != HC_XHCI) { hc2_poll(); continue; }
         Trb e;
         for (int i = 0; i < 64 && next_event(&e); i++) dispatch(e);
         for (int p = 1; p <= H->num_ports; p++) {
