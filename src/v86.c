@@ -154,6 +154,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     }
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     if (n == 0x2F && AX(r) == 0x1680) { idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
+    if (n == 0x21 && AH(r) == 0x4B) hd_dos_up();                        /* a program runs: DOS has its drives */
     if (n == 0x28) guest_idle_poll();                                    /* DOS idle (then the vector, for TSRs) */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */

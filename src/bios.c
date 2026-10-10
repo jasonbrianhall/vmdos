@@ -207,8 +207,8 @@ static int int13(struct regs *r)
     int st = 0;
     u8 fn = AH(r);
     if (DL(r) < 0x80) { fd_int13(r); return BIOS_DONEF; }   /* A:, B: (floppy.c) */
-    if (DL(r) == 0x81 && hd_bios_disks() > 1) { hd_int13(r); wr8(BDA + 0x74, AH(r)); return BIOS_DONEF; }   /* VMHD /FDISK */
-    if (DL(r) != 0x80) {                         /* C:'s disk, and 81h only for VMHD /FDISK */
+    if (DL(r) > 0x80 && DL(r) < 0x80 + hd_bios_disks()) { hd_int13(r); wr8(BDA + 0x74, AH(r)); return BIOS_DONEF; }   /* the other disks (hd.c) */
+    if (DL(r) != 0x80) {
         if (fn == 0x00) { set_cf(r, 0); AH(r) = 0; return BIOS_DONEF; }
         AH(r) = 0x01;
         set_cf(r, 1);

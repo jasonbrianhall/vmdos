@@ -176,7 +176,8 @@ int disk_c_dev(u32 *start, u32 *size);
 
 /* ---- hd.c: VMHD, other disks' partitions as DOS drives ---- */
 void hd_api(struct regs *r);
-int hd_bios_disks(void);                       /* 1, or 2 with VMHD /FDISK's disk as 81h */
+int hd_bios_disks(void);                       /* BIOS hard disks: C:'s, then the others (once DOS is up) */
+void hd_dos_up(void);
 void hd_int13(struct regs *r);
 
 void cd_add(u8 *data, u32 size, const char *name);

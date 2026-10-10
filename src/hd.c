@@ -15,8 +15,10 @@
    VMCD.SYS's go to cd.c. Sectors are relative to the partition: DOS sees
    one FAT volume per drive, and nothing outside it can be reached.
 
-   A new disk: "VMHD /FDISK 3" (after a Y) shows disk 3 to the BIOS as
-   the second hard disk (81h), for FDISK; nothing else uses it. A new
+   The BIOS shows every other disk as hard disk 81h, 82h ..., as on any
+   PC, so FDISK works on them as usual; but only once the DOS kernel has
+   set up its drives (VMHD.SYS loading, or the first program run), so DOS
+   gives none of their partitions a letter by itself. A new
    partition (a DOS type, no file system yet) goes in a drive after a Y,
    and FORMAT works on it: VMHD.SYS answers generic IOCTL (device
    parameters with the BPB FORMAT should make, access flags, locks), and a
@@ -44,7 +46,8 @@ static struct unit {
     struct part p;
     u8 ro, changed;
 } units[HD_MAX];
-static int bios_dev = -1;                 /* the disk shown as BIOS disk 81h (VMHD /FDISK), -1: none */
+static int bios_on;                       /* the other disks are BIOS disks 81h ... (the DOS kernel is up) */
+static int bios_num(int d);
 static int n_units, first_drive;          /* first_drive: 0 = A: */
 
 static u8 sec[512], sec2[512], ents[512];
@@ -247,7 +250,8 @@ static void list(u32 o)
         snprintf(b, sizeof b, "Disk %d: %s, %s, %u %s", d + 1, disk_dev_kind(d), disk_dev_name(d),
                  mib >= 10240 ? mib >> 10 : mib, mib >= 10240 ? "GiB" : "MiB");
         put(&o, b);
-        if (d == bios_dev) put(&o, "  = BIOS disk 2 (FDISK)");
+        int bd = bios_num(d);
+        if (bd) { snprintf(b, sizeof b, "  = BIOS disk %02xh", bd); put(&o, b); }
         int any = 0;
         for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
         put(&o, any ? "\r\n" : !mib ? "  (unplugged)\r\n" : "  (no partitions)\r\n");
@@ -274,19 +278,53 @@ static void list(u32 o)
     wr8(o, '$');
 }
 
-/* ---- BIOS disk 81h, for FDISK ----
-   The disk chosen with VMHD /FDISK, whole, through INT 13h (bios.c sends
-   DL=81h here): CHS (255 heads, 63 sectors) and the LBA extensions. */
+/* ---- BIOS disks 81h ..., for FDISK ----
+   Every disk but C:'s, in disk order, whole, through INT 13h (bios.c sends
+   DL=81h on here): CHS (255 heads, 63 sectors) and the LBA extensions. */
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
-int hd_bios_disks(void) { return bios_dev >= 0 ? 2 : 1; }
+#define BIOS_MAX 15
 
-static int bios_rw(u32 lba, u32 n, u32 buf, int write)
+/* Disk d's BIOS number (81h ...), 0 for none (C:'s disk, or before DOS is up). */
+static int bios_num(int d)
 {
-    u64 total = disk_dev_sectors(bios_dev);
+    if (!bios_on) return 0;
+    u32 cs, cz;
+    int cd = disk_c_dev(&cs, &cz), n = 0x81;
+    for (int i = 0; i < d; i++) if (i != cd) n++;
+    return d == cd || n > 0x80 + BIOS_MAX ? 0 : n;
+}
+/* The disk behind BIOS number dl, -1 for none. */
+static int bios_disk(int dl)
+{
+    if (!bios_on) return -1;
+    int nd = disk_dev_count();
+    for (int d = 0; d < nd; d++) if (bios_num(d) == dl) return d;
+    return -1;
+}
+int hd_bios_disks(void)
+{
+    if (!bios_on) return 1;
+    u32 cs, cz;
+    int n = disk_dev_count() - (disk_c_dev(&cs, &cz) >= 0);
+    return 1 + (n > BIOS_MAX ? BIOS_MAX : n);
+}
+/* The DOS kernel has its drives: from now on the BIOS shows the other disks. */
+void hd_dos_up(void)
+{
+    if (bios_on) return;
+    bios_on = 1;
+    wr8(BDA + 0x75, (u8)hd_bios_disks());
+    if (hd_bios_disks() > 1) kprintf("hd: %d more BIOS hard disk%s (81h on), for FDISK\n", hd_bios_disks() - 1,
+                                     hd_bios_disks() > 2 ? "s" : "");
+}
+
+static int bios_rw(int dev, u32 lba, u32 n, u32 buf, int write)
+{
+    u64 total = disk_dev_sectors(dev);
     if (!n) return 0;
     if (lba >= total || n > total - lba) return 0x04;
     if (buf + n * 512 > GUEST_TOP) return 0x09;
-    return disk_dev_rw(bios_dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
+    return disk_dev_rw(dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
 }
 
 void hd_int13(struct regs *r)
@@ -294,7 +332,8 @@ void hd_int13(struct regs *r)
     static u8 status;
     int st = 0;
     u8 fn = AH(r);
-    u64 total = bios_dev >= 0 ? disk_dev_sectors(bios_dev) : 0;
+    int dev = bios_disk(DL(r));
+    u64 total = dev >= 0 ? disk_dev_sectors(dev) : 0;
     u32 cyls = (total > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)total) / (255 * 63);   /* no 64-bit division here */
     if (cyls > 1024) cyls = 1024;
     if (!total) { AH(r) = 0x80; set_cf(r, 1); return; }             /* gone: time out */
@@ -304,7 +343,7 @@ void hd_int13(struct regs *r)
     case 0x02: case 0x03: {
         u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), sc = CL(r) & 63, head = DH(r);
         if (!sc) { st = 0x04; break; }
-        st = bios_rw((cyl * 255 + head) * 63 + sc - 1, AL(r), LIN(r->v86_es, BX(r)), fn == 3);
+        st = bios_rw(dev, (cyl * 255 + head) * 63 + sc - 1, AL(r), LIN(r->v86_es, BX(r)), fn == 3);
         if (st) AL(r) = 0;
         break; }
     case 0x08: {
@@ -312,7 +351,7 @@ void hd_int13(struct regs *r)
         CH(r) = (u8)mc;
         CL(r) = (u8)(((mc >> 2) & 0xC0) | 63);
         DH(r) = 254;
-        DL(r) = 2;
+        DL(r) = (u8)hd_bios_disks();
         break; }
     case 0x15:
         AH(r) = 3;
@@ -330,7 +369,7 @@ void hd_int13(struct regs *r)
         u16 count = rd16(p + 2);
         u32 buf = LIN(rd16(p + 6), rd16(p + 4));
         if (rd32(p + 12)) { st = 0x04; wr16(p + 2, 0); break; }
-        if (fn != 0x44) st = bios_rw(rd32(p + 8), count, buf, fn == 0x43);
+        if (fn != 0x44) st = bios_rw(dev, rd32(p + 8), count, buf, fn == 0x43);
         if (st) wr16(p + 2, 0);
         break; }
     case 0x48: {
@@ -345,34 +384,6 @@ void hd_int13(struct regs *r)
     status = (u8)st;
     AH(r) = (u8)st;
     set_cf(r, st != 0);
-}
-
-/* VMHD /FDISK n: disk n (1-based, as listed) as BIOS disk 81h; 0: none.
-   0, or 2 no such disk, 3 C:'s disk, 6 confirm first (warning in warn),
-   9 a VMHD drive holds one of its partitions. */
-static int fdisk_disk(int n, int confirmed, u32 warn)
-{
-    if (!n) { if (bios_dev >= 0) kprintf("hd: BIOS disk 2 gone\n"); bios_dev = -1; wr8(BDA + 0x75, 1); return 0; }
-    int d = n - 1;
-    if (d < 0 || d >= disk_dev_count() || !disk_dev_sectors(d)) return 2;
-    u32 cs, cz;
-    if (disk_c_dev(&cs, &cz) == d) return 3;
-    for (int u = 0; u < n_units; u++) if (units[u].in && units[u].p.dev == d) return 9;
-    if (!confirmed) {
-        char b[160];
-        int np = 0;
-        for (int i = 0; i < n_parts; i++) np += parts[i].dev == d && !is_ext(parts[i].type);
-        snprintf(b, sizeof b, "disk %d (%s, %s, %u MiB, %d partition%s)", n, disk_dev_kind(d), disk_dev_name(d),
-                 (u32)(disk_dev_sectors(d) >> 11), np, np == 1 ? "" : "s");
-        put(&warn, b);
-        put(&warn, " becomes BIOS disk 2.\r\nFDISK can then change or delete its partitions, and with them everything\r\non it.");
-        wr8(warn, '$');
-        return 6;
-    }
-    bios_dev = d;
-    wr8(BDA + 0x75, 2);
-    kprintf("hd: BIOS disk 2 (81h) is %s disk %d (%s)\n", disk_dev_kind(d), disk_dev_index(d), disk_dev_name(d));
-    return 0;
 }
 
 /* Put partition k (0-based, of the last scan) in unit u. 0, or an error:
@@ -498,15 +509,14 @@ static void request(struct regs *r)
    the first drive. BX=3: put partition DL (1-based, as listed) in drive
    CL (0 = A:), DH bit 0 read-only, bit 1 confirmed; AX = 0 or an error
    (see attach; 1: not a VMHD drive), a warning in ES:DI for 6. BX=4:
-   take drive CL's partition out; AX = 0 or 1. BX=5: disk CL (as listed;
-   0: none) as BIOS disk 81h for FDISK, DH bit 1 confirmed; AX = 0 or an
-   error (see fdisk_disk), a warning in ES:DI for 6. */
+   take drive CL's partition out; AX = 0 or 1. */
 void hd_api(struct regs *r)
 {
     switch (BX(r)) {
     case 0:
         n_units = CX(r) < 1 ? 1 : CX(r) > HD_MAX ? HD_MAX : CX(r);
         first_drive = DL(r);
+        hd_dos_up();                                                /* CONFIG.SYS: the kernel has its drives */
         kprintf("hd: VMHD drives %c: to %c:, empty\n", 'A' + first_drive, 'A' + first_drive + n_units - 1);
         AX(r) = (u16)n_units;
         return;
@@ -533,10 +543,6 @@ void hd_api(struct regs *r)
         units[u].changed = 1;
         AX(r) = 0;
         return; }
-    case 5:
-        scan();
-        AX(r) = (u16)fdisk_disk(CL(r), DH(r) & 2, LIN(r->v86_es, DI(r)));
-        return;
     }
     AX(r) = 0xFFFF;
 }
