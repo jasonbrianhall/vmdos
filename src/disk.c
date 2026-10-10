@@ -34,6 +34,7 @@ static int n_dev;
 
 u32 disk_sectors;                     /* size DOS sees */
 static int on_dev, cdev;              /* C: is on dev[cdev] */
+static int usb_seen;                  /* USB disks taken into dev[] */
 static const char *dev_kind(int d) { return dev[d].usb ? "USB" : dev[d].ide ? "IDE" : "SATA"; }
 static u32 pstart, psize;
 static u8 vmbr[512];
@@ -366,7 +367,7 @@ void disk_init(void)
            partition it started from (or, without a hint, any) turns up. */
         int boot_usb = strstr(cmdline, "bootdev=usb") != 0;
         int wait_ms = boot_usb ? 10000 : usb_msd_count() || hint ? 2000 : 1000;
-        int bd = -1, bq = 0, usb_seen = 0, waited = 0;
+        int bd = -1, bq = 0, waited = 0;
         u32 bs = 0, bz = 0;
         for (int d = 0; d < n_dev; d++) {
             u32 s = 0, z = 0;
@@ -402,5 +403,33 @@ void disk_init(void)
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
             want_ram ? "" : "; changes are lost at power-off");
 }
+
+/* ---- the other disks, for VMHD (hd.c) ----
+   Any disk by its dev[] index; USB disks plugged in since boot are taken
+   in when the list is asked for. */
+int disk_dev_count(void)
+{
+    while (usb_seen < usb_msd_count() && n_dev < MAX_DEVS) {
+        int i = usb_seen++, d = n_dev++;
+        dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
+    }
+    return n_dev;
+}
+u64 disk_dev_sectors(int d) { return dev[d].usb ? usb_msd_sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
+const char *disk_dev_name(int d) { return dev[d].name; }
+const char *disk_dev_kind(int d) { return dev_kind(d); }
+int disk_dev_index(int d) { return dev[d].idx; }
+int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
+{
+    u8 *b = buf;
+    while (n) {
+        u32 k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
+        if (dev_rw(d, lba, k, b, write)) return -1;
+        lba += k; n -= k; b += k * 512;
+    }
+    return 0;
+}
+/* The disk and partition C: is on; -1 if C: isn't on a real disk. */
+int disk_c_dev(u32 *start, u32 *size) { *start = pstart; *size = psize; return on_dev ? cdev : -1; }
 
 const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : dev[cdev].ide ? "IDE disk" : "SATA disk") : "RAM disk"; }

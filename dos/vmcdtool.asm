@@ -178,7 +178,7 @@ unit    db 1
 letter  db 0
 errs    dw msg_bad, msg_bad, msg_e2, msg_e3, msg_e4, msg_e5, msg_e6, msg_e7, msg_e8
 msg_use  db 'Usage: VMCD [drive] [image number | ISO or CUE file on C:]', 13, 10
-         db '  e.g. VMCD D: C:\ISOS\WAR2.ISO   (no arguments: list)', 13, 10, '$'
+         db '  e.g. VMCD 1 C:\ISOS\WAR2.ISO or VMCD F: WAR2.ISO   (no arguments: list)', 13, 10, '$'
 msg_bad  db 'VMCD: no such drive or image', 13, 10, '$'
 msg_novm db 'VMCD: not running under vmdos', 13, 10, '$'
 msg_nocd db 'VMCD: that is not a vmdos CD-ROM drive', 13, 10, '$'

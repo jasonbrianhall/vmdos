@@ -166,6 +166,16 @@ int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
 void disk_flush(void);                        /* gathered writes out to the disk */
 void disk_tick(void);                         /* timer: flush writes older than 50 ms */
 const char *disk_kind(void);
+int disk_dev_count(void);                      /* every real disk, for hd.c */
+u64 disk_dev_sectors(int d);
+const char *disk_dev_name(int d);
+const char *disk_dev_kind(int d);
+int disk_dev_index(int d);
+int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write);
+int disk_c_dev(u32 *start, u32 *size);
+
+/* ---- hd.c: VMHD, other disks' partitions as DOS drives ---- */
+void hd_api(struct regs *r);
 
 void cd_add(u8 *data, u32 size, const char *name);
 void ems_init(void);                          /* ems.c: LIM 4.0 expanded memory */

@@ -86,12 +86,32 @@ The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
 (parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them) and USB
 sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature); other
-partitions are never touched (DOS sees a one-partition disk and can't write
-outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
+partitions are only touched when you put one in a VMHD drive (below; DOS
+sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
 disk if built with `RAMDISK=1`. To use an
 existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
 COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)
 to the ESP's root and vmdos.efi + dos.img to a folder on it.
+
+#### Other disks: VMHD
+
+Partitions of the other disks (SATA, IDE, USB, sticks plugged in later
+too) become DOS drives only when you ask. VMHD.SYS reserves empty drive
+letters at boot (`DEVICE=C:\VMDOS\VMHD.SYS` in FDCONFIG.SYS: D: and E:;
+`VMHD.SYS 4` for four, up to 8; an install updated from an older one has to
+add the line), and VMHD.COM fills them:
+
+    VMHD                 lists the drives and every disk's partitions
+    VMHD D: 3            puts partition 3 in D:
+    VMHD D: 3 /R         ... read-only
+    VMHD D: /E           takes it out
+
+Only a FAT partition (FAT12/16/32; MBR primary or logical, GPT, or a disk
+without a partition table) goes in, never C: and never one that's in
+another drive. One with FAT but a partition type that isn't DOS's (an EFI
+system partition, a Linux- or hidden-typed one, a GPT partition other than
+basic data) needs a Y first. VMHD's drives come before the CD drives, so
+those move along: the first CD drive is F: with two VMHD drives.
 
 QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
 is many times slower; `ACCEL=` overrides). `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
@@ -162,8 +182,8 @@ Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
 
-CD-ROM: any ISO file on C: can be put in the CD drive (D:) while running:
-`VMCD D: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
+CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
+and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
 names). It is read straight from the disk, nothing is copied to RAM; `VMCD`
 lists the drives. `ISO="game.iso disc2.iso"` copies ISOs to C:\ISOS (8.3
 names) and puts the first in the drive at boot (`cd=/ISOS/GAME.ISO` on the
@@ -191,14 +211,14 @@ restarts the PC from that disk, without DOS (`VMFD A: /BOOT` boots what's in
 A: already); `fda=/DISKS/GAME.IMG boot=a` on the kernel command line boots it
 instead of DOS. To get back to DOS, restart the machine.
 
-CUE/BIN images work like ISOs (`VMCD D: C:\GAMES\QUAKE.CUE`, `cd=` too), with
+CUE/BIN images work like ISOs (`VMCD F: C:\GAMES\QUAKE.CUE`, `cd=` too), with
 their CD audio tracks: one BIN or one per track, MODE1/2048, MODE1/2352,
 MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so
 the BIN names in the sheet have to be 8.3 ones (a single BIN may also just be
 named like the sheet: QUAKE.CUE + QUAKE.BIN).
 
 Real CD/DVD drives on SATA (AHCI), IDE and USB get a drive letter each after the
-image drives (E: with one image drive): the disc is read from the drive,
+image drives (G: with one image drive and VMHD's two before it): the disc is read from the drive,
 swapping discs works, and eject/close requests go to the drive. `cdphys=off`
 leaves them out. In QEMU: `-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso
 -device ide-cd,drive=cd,bus=ide.2`, `-drive file=game.iso,if=ide,index=2,media=cdrom`

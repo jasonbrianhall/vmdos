@@ -40,7 +40,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -f
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -114,6 +114,12 @@ $(BUILD)/VMCD.COM: dos/vmcdtool.asm | $(BUILD)
 $(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMHD.SYS: dos/vmhd.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
+$(BUILD)/VMHD.COM: dos/vmhdtool.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 	nasm -O9 -w-all -Di8086 -i third_party/shsucd/ $< -o $@   # 8086 build: assembles with any NASM
 
@@ -125,7 +131,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
@@ -140,7 +146,7 @@ GRUB_MKRESCUE ?= $(firstword $(shell command -v grub-mkrescue grub2-mkrescue 2>/
 
 # ISO="game.iso disc2.iso": CD-ROM images (no spaces in the names). C=disk:
 # copied to C:\ISOS under 8.3 names, the first one in drive 1 at boot (cd=);
-# VMCD D: C:\ISOS\OTHER.ISO changes the disc while running. C=ram: held in
+# VMCD 1 C:\ISOS\OTHER.ISO changes the disc while running. C=ram: held in
 # RAM as boot modules, one drive each; VMCD 1 2 swaps.
 ISO_MB   := $(if $(ISO),$(shell du -cm $(ISO) | tail -1 | cut -f1),0)
 space    := $(empty) $(empty)
