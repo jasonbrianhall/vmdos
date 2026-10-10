@@ -285,9 +285,14 @@ QSOUND_sb   := $(QAUDIO) -device sb16,audiodev=snd0
 QSOUND_none :=
 # USB=1: keyboard and mouse on an xHCI controller (as on many UEFI PCs).
 QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device usb-mouse)
+# USBHOST=0079:0011 (vendor:product, as lsusb shows it; several with spaces):
+# hands the PC's own USB devices (a gamepad ...) to the guest on an xHCI
+# controller. QEMU needs access to /dev/bus/usb (root, or a udev rule).
+comma    := ,
+QUSBHOST := $(if $(USBHOST),-device qemu-xhci$(comma)id=hostxhci $(foreach d,$(USBHOST),-device usb-host$(comma)bus=hostxhci.0$(comma)vendorid=0x$(word 1,$(subst :, ,$(d)))$(comma)productid=0x$(word 2,$(subst :, ,$(d)))))
 # KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
 ACCEL ?= -accel kvm -accel tcg
-QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QDISPLAY)
+QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)
 # C=disk: esp.img on an AHCI controller (C:), after the CD in the boot order.
 BOOTDISK ?= 1
 QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \

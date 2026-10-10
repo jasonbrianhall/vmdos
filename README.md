@@ -124,7 +124,9 @@ those move along: the first CD drive is F: with two VMHD drives.
 QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
 is many times slower; `ACCEL=` overrides). `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
 (default pa: PulseAudio/PipeWire; wav records vmdos.wav), `USB=1` for a USB
-keyboard and mouse, `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
+keyboard and mouse, `USBHOST=0079:0011` to hand the PC's own USB devices
+(vendor:product as `lsusb` shows them; a gamepad, say) to vmdos on an xHCI
+controller (QEMU needs access to /dev/bus/usb: root or a udev rule), `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
 
 ### UEFI without GRUB
 
