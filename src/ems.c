@@ -1,5 +1,7 @@
 /* EMS: LIM 4.0 expanded memory (INT 67h), as EMM386 provides it.
-   The pages are kernel RAM (ems=MB, default 32; ems=0: none); the 64 KiB
+   The pages are kernel RAM, taken when a program allocates them and given
+   back when it frees them (ems=MB, default 32, is the most there can be;
+   ems=0: none), so EMS, XMS and DPMI share the machine's memory. The 64 KiB
    page frame is E000h, four 16 KiB physical pages whose guest page-table
    entries point at whichever logical pages are mapped (or back at the
    guest's own RAM when nothing is). VMEMS.SYS (dos/vmems.asm) is the
@@ -15,14 +17,21 @@ typedef short s16;
 #define MAX_HANDLES 255
 #define MAX_PAGES 2048                      /* 32 MiB, LIM 4.0's limit */
 
-static u8 *pool;
-static u32 total, nfree;
+static u32 total, used;                     /* pages: the most there can be, allocated */
 static u16 owner[MAX_PAGES];                /* 0 free, else handle + 1 */
+static u8 *mem[MAX_PAGES];                  /* each allocated page's RAM */
 static struct { u8 used, saved; u16 n; u16 *pages; char name[8]; s16 save[NPHYS][2]; } h[MAX_HANDLES];
 static s16 cur[NPHYS][2];                   /* mapped: handle, logical page; -1 none */
 u16 umb_end = 0xF000;                       /* xms.c: UMBs end below the page frame */
 
-int ems_present(void) { return pool != 0; }
+int ems_present(void) { return total != 0; }
+
+/* Pages a program could still get: what's left of ems=, and of the RAM. */
+static u32 nfree(void)
+{
+    u32 m = phys_spare() / PAGE;
+    return total - used < m ? total - used : m;
+}
 
 void ems_init(void)
 {
@@ -32,16 +41,31 @@ void ems_init(void)
     if (!mb) { kprintf("EMS: off\n"); return; }
     total = mb * 64;
     if (total > MAX_PAGES) total = MAX_PAGES;
-    pool = phys_try_alloc(total * PAGE);
-    if (!pool) { kprintf("EMS: no memory for %u MiB\n", mb); total = 0; return; }
-    nfree = total;
     for (int i = 0; i < NPHYS; i++) cur[i][0] = cur[i][1] = -1;
     h[0].used = 1;                          /* handle 0: the OS handle, no pages */
     umb_end = FRAME_SEG;
-    kprintf("EMS: %u KiB, page frame %04x\n", total * 16, FRAME_SEG);
+    kprintf("EMS: up to %u KiB (%u KiB free now), page frame %04x\n", total * 16, nfree() * 16, FRAME_SEG);
 }
 
-static u8 *page_ptr(int hd, int lp) { return pool + (u32)h[hd].pages[lp] * PAGE; }
+static u8 *page_ptr(int hd, int lp) { return mem[h[hd].pages[lp]]; }
+
+/* A page for handle hd (RAM and a number), -1 when there's no RAM. */
+static int take_page(int hd)
+{
+    u32 p = 0;
+    while (owner[p]) p++;
+    if (!(mem[p] = phys_try_alloc(PAGE))) return -1;
+    owner[p] = (u16)(hd + 1);
+    used++;
+    return (int)p;
+}
+static void drop_page(u16 p)
+{
+    phys_release(mem[p], PAGE);
+    mem[p] = 0; owner[p] = 0;
+    used--;
+}
+static u32 list_bytes(u32 n) { return (n * 2 + 4095) & ~4095u; }
 
 static void map_phys(int p, int hd, int lp)
 {
@@ -54,36 +78,45 @@ static void map_phys(int p, int hd, int lp)
 }
 static void flush(void) { tlb_flush(); }
 
+static void free_pages(int hd);
+
 /* A restart into a floppy: the page frame is plain memory again. */
 void ems_restart(void)
 {
     if (!total) return;
     for (int p = 0; p < NPHYS; p++) if (cur[p][0] >= 0) map_phys(p, -1, 0);
     flush();
+    for (int i = 1; i < MAX_HANDLES; i++) if (h[i].used) { free_pages(i); h[i].used = 0; }   /* the old DOS's pages back */
 }
 
-static int alloc_pages(int hd, u32 n)
+/* Handle hd's pages become n (more, or fewer: those past n go back),
+   keeping the first ones; 0x88 when the RAM isn't there. */
+static int resize_pages(int hd, u32 n)
 {
-    u16 *pg = n ? phys_try_alloc((n * 2 + 4095) & ~4095u) : 0;
-    if (n && !pg) return 0x80;
-    for (u32 i = 0, p = 0; i < n; i++) {
-        while (owner[p]) p++;
-        owner[p] = (u16)(hd + 1);
+    u32 old = h[hd].n;
+    u16 *pg = n ? phys_try_alloc(list_bytes(n)) : 0;
+    if (n && !pg) return 0x88;
+    for (u32 i = 0; i < n && i < old; i++) pg[i] = h[hd].pages[i];
+    for (u32 i = old; i < n; i++) {
+        int p = take_page(hd);
+        if (p < 0) {                                         /* out of RAM: undo */
+            while (i-- > old) drop_page(pg[i]);
+            phys_release(pg, list_bytes(n));
+            return 0x88;
+        }
         pg[i] = (u16)p;
     }
-    nfree -= n;
+    for (int p = 0; p < NPHYS; p++)                          /* off the frame before the RAM goes */
+        if (cur[p][0] == hd && cur[p][1] >= (s16)n) map_phys(p, -1, 0);
+    flush();
+    for (u32 i = n; i < old; i++) drop_page(h[hd].pages[i]);
+    if (old) phys_release(h[hd].pages, list_bytes(old));
     h[hd].pages = pg; h[hd].n = (u16)n;
     return 0;
 }
 
-static void free_pages(int hd)
-{
-    for (u32 i = 0; i < h[hd].n; i++) owner[h[hd].pages[i]] = 0;
-    nfree += h[hd].n;
-    h[hd].n = 0;                            /* the page list's memory is not reused (kernel heap) */
-    for (int p = 0; p < NPHYS; p++) if (cur[p][0] == hd) map_phys(p, -1, 0);
-    flush();
-}
+static int alloc_pages(int hd, u32 n) { h[hd].n = 0; h[hd].pages = 0; return resize_pages(hd, n); }
+static void free_pages(int hd) { resize_pages(hd, 0); }
 
 static int new_handle(void)
 {
@@ -165,18 +198,18 @@ void ems_int67(struct regs *r)
 {
     int st = 0;
     u8 fn = AH(r), sub = AL(r);
-    if (!pool) { AH(r) = 0x84; return; }
+    if (!total) { AH(r) = 0x84; return; }
     dbg(2, "EMS %02x%02x BX=%04x CX=%04x DX=%04x\n", fn, sub, BX(r), CX(r), DX(r));
     switch (fn) {
     case 0x40: break;                                         /* status */
     case 0x41: BX(r) = FRAME_SEG; break;                      /* page frame */
-    case 0x42: BX(r) = (u16)nfree; DX(r) = (u16)total; break; /* unallocated / total pages */
+    case 0x42: BX(r) = (u16)nfree(); DX(r) = (u16)(used + nfree()); break;   /* unallocated / total pages */
     case 0x43: case 0x5A: {                                   /* allocate (5Ah: standard/raw, 0 pages allowed) */
         u32 n = BX(r);
         if (fn == 0x5A && sub > 1) { st = 0x8F; break; }
         if (!n && fn == 0x43) { st = 0x89; break; }
-        if (n > total) { st = 0x87; break; }
-        if (n > nfree) { st = 0x88; break; }
+        if (n > used + nfree()) { st = 0x87; break; }
+        if (n > nfree()) { st = 0x88; break; }
         int hd = new_handle();
         if (hd < 0) { st = 0x85; break; }
         st = alloc_pages(hd, n);
@@ -261,17 +294,9 @@ void ems_int67(struct regs *r)
         int hd = DX(r);
         u32 n = BX(r), old = valid(hd) ? h[hd].n : 0;
         if (!valid(hd)) { st = 0x83; break; }
-        if (n > total) { st = 0x87; break; }
-        if (n > old && n - old > nfree) { st = 0x88; break; }
-        u16 *pg = n ? phys_try_alloc((n * 2 + 4095) & ~4095u) : 0;
-        if (n && !pg) { st = 0x80; break; }
-        for (u32 i = 0; i < n && i < old; i++) pg[i] = h[hd].pages[i];
-        for (u32 i = n; i < old; i++) owner[h[hd].pages[i]] = 0;
-        for (u32 i = old, p = 0; i < n; i++) { while (owner[p]) p++; owner[p] = (u16)(hd + 1); pg[i] = (u16)p; }
-        nfree = nfree + old - n;
-        h[hd].pages = pg; h[hd].n = (u16)n;
-        for (int p = 0; p < NPHYS; p++) if (cur[p][0] == hd && cur[p][1] >= (s16)n) map_phys(p, -1, 0);
-        flush();
+        if (n > used + nfree()) { st = 0x87; break; }
+        if (n > old && n - old > nfree()) { st = 0x88; break; }
+        if ((st = resize_pages(hd, n))) break;
         BX(r) = (u16)n;
         break; }
     case 0x52:                                                /* attributes: volatile only */
@@ -327,7 +352,7 @@ void ems_int67(struct regs *r)
         if (sub == 0) {
             u32 a = LIN(r->v86_es, DI(r));
             wr16(a, 0x400); wr16(a + 2, 0); wr16(a + 4, NPHYS * 4); wr16(a + 6, 0); wr16(a + 8, 0);
-        } else if (sub == 1) { BX(r) = (u16)nfree; DX(r) = (u16)total; }
+        } else if (sub == 1) { BX(r) = (u16)nfree(); DX(r) = (u16)(used + nfree()); }
         else st = 0x8F;
         break;
     case 0x5B:                                                /* alternate map register sets: none */
@@ -348,6 +373,6 @@ void ems_int67(struct regs *r)
 /* For VMEMS.SYS (INT 2Fh AX=5645h): AX=0, BX=pages, DX=frame when present. */
 void ems_query(struct regs *r)
 {
-    if (!pool) return;
+    if (!total) return;
     AX(r) = 0; BX(r) = (u16)total; DX(r) = FRAME_SEG;
 }

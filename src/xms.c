@@ -4,7 +4,9 @@
 
    Extended memory isn't in the v86 guest's address space, so it's reached
    through function 0Bh (move), as real-mode programs do anyway. Lock (0Ch)
-   reports the block's physical address. */
+   reports the block's physical address. Each block is kernel RAM taken
+   when it's allocated and given back when it's freed, so XMS, EMS and
+   DPMI share the machine's memory. */
 #include "kernel.h"
 
 #define MAX_HANDLES 64
@@ -12,17 +14,19 @@
 extern u16 umb_end;                         /* ems.c: E000h with an EMS page frame */
 #define UMB_END   umb_end
 
-static u8 *pool;                            /* extended memory */
-static u32 pool_kb;
-static struct { u32 off_kb, size_kb; u8 used, locks; } h[MAX_HANDLES + 1];   /* handle = index, 1.. */
+static u32 cap_kb, used_kb;                 /* the most there can be (xms=), allocated */
+static struct { u8 *mem; u32 size_kb; u8 used, locks; } h[MAX_HANDLES + 1];  /* handle = index, 1.. */
 static int hma_used, a20_global, a20_local;
 static u16 umb_next = UMB_START;
 static struct { u16 seg, paras; } umbs[8];
 
-/* A restart into a floppy: A20 off, the HMA free (the rest of DOS's XMS
-   use is simply left behind). */
+static int set_size(u16 hd, u32 kb);
+
+/* A restart into a floppy: A20 off, the HMA free, the old DOS's blocks
+   given back. */
 void xms_restart(void)
 {
+    for (int i = 1; i <= MAX_HANDLES; i++) if (h[i].used) { set_size((u16)i, 0); h[i].used = 0; h[i].locks = 0; }
     hma_used = 0; a20_global = a20_local = 0;
     set_a20(0);
 }
@@ -40,64 +44,50 @@ void xms_init(void)
         return;
     }
     /* MB; "xms=N" on the command line. By default 1 GB, as DOS memory
-       managers give a big machine, but at most half of the kernel's free
-       RAM, so DPMI programs (taken as they ask) still find plenty. */
+       managers give a big machine, but at most half of the RAM there is,
+       so a program that takes all the XMS it can (and keeps it) leaves
+       DPMI programs plenty. Nothing is set aside until it's allocated. */
     u32 want = 1024;
     char *p = strstr(cmdline, "xms=");
     if (p) { want = 0; for (p += 4; *p >= '0' && *p <= '9'; p++) want = want * 10 + (*p - '0'); }
-    u32 avail = phys_free();
-    avail = avail > (16u << 20) ? avail - (16u << 20) : 0;    /* leave the kernel some room */
-    if (!p) avail /= 2;
     if (want > 3072) want = 3072;
-    u32 bytes = want << 20;
-    if (bytes > avail) bytes = avail & ~0xFFFFFu;
-    if (bytes) {
-        pool = phys_alloc(bytes);
-        set_user((u32)(uintptr_t)pool, bytes, 1);   /* DPMI clients use locked blocks by address */
-    }
-    pool_kb = bytes >> 10;
-    kprintf("XMS: %u KiB extended memory, HMA, %u KiB of UMBs\n", pool_kb, (UMB_END - UMB_START) / 64);
+    cap_kb = want << 10;
+    u32 room = phys_spare() >> 10;
+    if (!p) room /= 2;
+    if (cap_kb > room) cap_kb = room & ~1023u;
+    kprintf("XMS: up to %u KiB extended memory, HMA, %u KiB of UMBs\n", cap_kb, (UMB_END - UMB_START) / 64);
 }
 
-/* First fit over the free gaps between allocated blocks. */
-static int block_overlaps(u32 off, u32 size, int except)
-{
-    for (int i = 1; i <= MAX_HANDLES; i++)
-        if (h[i].used && i != except && h[i].size_kb &&
-            off < h[i].off_kb + h[i].size_kb && h[i].off_kb < off + size) return i;
-    return 0;
-}
+static u32 bytes_of(u32 kb) { return (kb * 1024 + 4095) & ~4095u; }
 
-static u32 find_gap(u32 size_kb, int except)
-{
-    if (!size_kb) return 0;
-    u32 off = 0;
-    for (;;) {
-        if (off + size_kb > pool_kb) return 0xFFFFFFFF;
-        int o = block_overlaps(off, size_kb, except);
-        if (!o) return off;
-        off = h[o].off_kb + h[o].size_kb;
-    }
-}
-
+/* Free KiB: what's left of xms=, and of the RAM; the largest block the RAM can give. */
 static void free_space(u32 *largest, u32 *total)
 {
-    *largest = *total = 0;
-    u32 off = 0;
-    while (off < pool_kb) {
-        u32 next = pool_kb;                  /* start of the nearest block at or after off */
-        int inside = 0;
-        for (int i = 1; i <= MAX_HANDLES; i++) {
-            if (!h[i].used || !h[i].size_kb) continue;
-            if (h[i].off_kb <= off && off < h[i].off_kb + h[i].size_kb) { off = h[i].off_kb + h[i].size_kb; inside = 1; break; }
-            if (h[i].off_kb > off && h[i].off_kb < next) next = h[i].off_kb;
-        }
-        if (inside) continue;
-        u32 gap = next - off;
-        *total += gap;
-        if (gap > *largest) *largest = gap;
-        off = next;
+    u32 spare = phys_spare() >> 10, big = phys_largest() >> 10;
+    *total = cap_kb - used_kb < spare ? cap_kb - used_kb : spare;
+    *largest = big < *total ? big : *total;
+}
+
+/* Block hd's RAM becomes kb KiB, keeping what's in it. */
+static int set_size(u16 hd, u32 kb)
+{
+    u32 nb = bytes_of(kb), ob = h[hd].mem ? bytes_of(h[hd].size_kb) : 0;
+    if (kb > h[hd].size_kb) {
+        u32 lg, tot;
+        free_space(&lg, &tot);
+        if (kb - h[hd].size_kb > tot) return 0;
     }
+    if (nb != ob) {
+        u8 *m = nb ? phys_try_alloc(nb) : 0;
+        if (nb && !m) return 0;
+        if (m && h[hd].mem) memcpy(m, h[hd].mem, ob < nb ? ob : nb);
+        if (m) set_user((u32)(uintptr_t)m, nb, 1);          /* DPMI clients use locked blocks by address */
+        if (h[hd].mem) { set_user((u32)(uintptr_t)h[hd].mem, ob, 0); phys_release(h[hd].mem, ob); }
+        h[hd].mem = m;
+    }
+    used_kb = used_kb - h[hd].size_kb + kb;
+    h[hd].size_kb = kb;
+    return 1;
 }
 
 static int fail(struct regs *r, u8 code) { AX(r) = 0; BL(r) = code; return 0; }
@@ -114,7 +104,7 @@ static u8 *move_ptr(u16 hd, u32 off, u32 len, int *err)
     }
     if (!valid(hd)) { *err = 0xA3; return 0; }
     if (off + len < off || off + len > h[hd].size_kb * 1024) { *err = 0xA7; return 0; }
-    return pool + h[hd].off_kb * 1024 + off;
+    return h[hd].mem + off;
 }
 
 static void alloc_kb(struct regs *r, u32 kb, int wide)
@@ -122,10 +112,9 @@ static void alloc_kb(struct regs *r, u32 kb, int wide)
     int i;
     for (i = 1; i <= MAX_HANDLES && h[i].used; i++) ;
     if (i > MAX_HANDLES) { fail(r, 0xA1); return; }
-    u32 off = find_gap(kb, 0);
-    if (off == 0xFFFFFFFF) { fail(r, 0xA0); return; }
-    h[i].used = 1; h[i].off_kb = off; h[i].size_kb = kb; h[i].locks = 0;
-    memset(pool + off * 1024, 0, kb * 1024);
+    h[i].mem = 0; h[i].size_kb = 0; h[i].locks = 0;
+    if (!set_size((u16)i, kb)) { fail(r, 0xA0); return; }
+    h[i].used = 1;
     AX(r) = 1;
     DX(r) = (u16)i;
     (void)wide;
@@ -135,16 +124,7 @@ static void realloc_kb(struct regs *r, u16 hd, u32 kb)
 {
     if (!valid(hd)) { fail(r, 0xA2); return; }
     if (h[hd].locks) { fail(r, 0xAB); return; }
-    if (kb <= h[hd].size_kb || !block_overlaps(h[hd].off_kb, kb, hd)) {
-        if (h[hd].off_kb + kb > pool_kb) { fail(r, 0xA0); return; }
-        h[hd].size_kb = kb;
-        AX(r) = 1;
-        return;
-    }
-    u32 off = find_gap(kb, hd);
-    if (off == 0xFFFFFFFF) { fail(r, 0xA0); return; }
-    memmove(pool + off * 1024, pool + h[hd].off_kb * 1024, h[hd].size_kb * 1024);
-    h[hd].off_kb = off; h[hd].size_kb = kb;
+    if (!set_size(hd, kb)) { fail(r, 0xA0); return; }
     AX(r) = 1;
 }
 
@@ -172,7 +152,7 @@ void xms_call(struct regs *r)
     case 0x08: case 0x88: {
         u32 largest, total;
         free_space(&largest, &total);
-        if (fn == 0x88) { r->eax = largest; r->edx = total; r->ecx = 0x110000 + pool_kb * 1024 - 1; BL(r) = 0; return; }
+        if (fn == 0x88) { r->eax = largest; r->edx = total; r->ecx = ram_top_addr() - 1; BL(r) = 0; return; }
         AX(r) = (u16)(largest > 0xFFFF ? 0xFFFF : largest);
         DX(r) = (u16)(total > 0xFFFF ? 0xFFFF : total);
         if (!total) BL(r) = 0xA0;
@@ -182,6 +162,7 @@ void xms_call(struct regs *r)
     case 0x0A:
         if (!valid(DX(r))) { fail(r, 0xA2); return; }
         if (h[DX(r)].locks) { fail(r, 0xAB); return; }
+        set_size(DX(r), 0);
         h[DX(r)].used = 0; AX(r) = 1; return;
     case 0x0B: {
         u32 p = LIN(r->v86_ds, SI(r));
@@ -200,7 +181,7 @@ void xms_call(struct regs *r)
         u16 hd = DX(r);
         if (!valid(hd)) { fail(r, 0xA2); return; }
         h[hd].locks++;
-        u32 a = (u32)(uintptr_t)pool + h[hd].off_kb * 1024;
+        u32 a = (u32)(uintptr_t)h[hd].mem;
         DX(r) = (u16)(a >> 16); BX(r) = (u16)a; AX(r) = 1;
         return; }
     case 0x0D:
@@ -248,4 +229,11 @@ void xms_call(struct regs *r)
     fail(r, 0x80);
 }
 
-u8 *xms_pool_range(u32 *len) { *len = pool_kb * 1024; return pool; }
+/* Is [a, a+n) inside an XMS block? (DPMI clients hand locked blocks' addresses over) */
+int xms_range_ok(u32 a, u32 n)
+{
+    for (int i = 1; i <= MAX_HANDLES; i++)
+        if (h[i].used && h[i].mem && a >= (u32)(uintptr_t)h[i].mem && a + n <= (u32)(uintptr_t)h[i].mem + h[i].size_kb * 1024)
+            return 1;
+    return 0;
+}
