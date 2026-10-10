@@ -5,11 +5,11 @@
 // (disk.c, through usb_msd_*).
 //
 // Takes every xHCI controller from the BIOS, resets it, enumerates keyboards and
-// mice on the root ports and behind USB 2 hubs (hubs in hubs too, and ones
+// mice on the root ports and behind hubs (hubs in hubs too, and ones
 // plugged in later), and turns keyboards' 8-byte boot reports into the same
-// PS/2 set-1 scancodes the rest of the kernel already handles. A USB 3
-// hub's SuperSpeed half is left alone: keyboards and mice show up on its
-// USB 2 half, which is an ordinary hub.
+// PS/2 set-1 scancodes the rest of the kernel already handles. A USB 3 hub
+// is two: its USB 2 half (keyboards, mice, USB 2 sticks) and its
+// SuperSpeed half (USB 3 sticks and drives).
 // From baremetaldoom (same author); here the scancodes go to the DOS guest's
 // virtual keyboard controller.
 #include "hw.hpp"
@@ -19,19 +19,45 @@
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
 static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
 
-static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
-static void delay_ms(int ms) { io_delay(ms * 1000); }
+// Delays count port 80h reads, ~1 us each on most PCs but several times
+// faster on some (AMD chipsets): usb_init measures them against the PIT
+// (channel 0, reloaded once a millisecond) and scales.
+static uint32_t io_per_ms = 1000;
+static void io_delay(int us) { for (uint32_t n = (uint32_t)us * io_per_ms / 1000; n; n--) inb(0x80); }
+static void delay_ms(int ms) { while (ms--) io_delay(1000); }
+static uint16_t pit_count() { outb(0x43, 0x00); uint16_t c = inb(0x40); return c | (uint16_t)(inb(0x40) << 8); }
+static void calibrate_delay() {
+    uint16_t prev = pit_count();
+    int ms = -1;
+    uint32_t n = 0;
+    while (ms < 20 && n < 100000000u) {                 // 20 whole milliseconds, counted from a reload
+        uint16_t c = pit_count();
+        if (c > prev) ms++;
+        prev = c;
+        if (ms >= 0) { inb(0x80); n++; }
+    }
+    if (ms == 20 && n / 20 >= 100) io_per_ms = n / 20;
+}
 #define barrier() __asm__ volatile("" ::: "memory")
 
 // ---------------------------------------------------------------- memory
 // All controller-visible structures come from one zeroed, identity-mapped pool.
-static uint8_t pool[2 << 20] __attribute__((aligned(4096)));
-static size_t pool_used;
+// When it runs out (several controllers, each with scratchpad pages), more
+// comes from the kernel heap, which is identity-mapped too.
+static uint8_t pool0[2 << 20] __attribute__((aligned(4096)));
+static uint8_t* pool = pool0;
+static size_t pool_size = sizeof(pool0), pool_used;
 static void* dma_alloc(size_t size, size_t align) {
-    pool_used = (pool_used + align - 1) & ~(align - 1);
-    if (pool_used + size > sizeof(pool)) return nullptr;
-    void* p = pool + pool_used;
-    pool_used += size;
+    uintptr_t at = ((uintptr_t)pool + pool_used + align - 1) & ~(uintptr_t)(align - 1);
+    if (at + size > (uintptr_t)pool + pool_size) {
+        size_t chunk = size + align > (1u << 20) ? size + align : 1u << 20;
+        uint8_t* more = (uint8_t*)phys_try_alloc((uint32_t)chunk);
+        if (!more) return nullptr;
+        pool = more; pool_size = chunk; pool_used = 0;
+        at = ((uintptr_t)pool + align - 1) & ~(uintptr_t)(align - 1);
+    }
+    pool_used = at + size - (uintptr_t)pool;
+    void* p = (void*)at;
     memset(p, 0, size);
     return p;
 }
@@ -320,13 +346,25 @@ static bool wait_event(int type, int slot, int ep, Trb* out, int ms = 500) {
     return false;
 }
 
+// A command and its completion (1 = success), -1 if none came. The
+// controller may take seconds (Address Device retrying a silent device;
+// Linux allows 5), and a command that never finishes is aborted so the
+// ring moves on. Completions are matched by TRB, so a late one for an
+// earlier command isn't taken for this one's.
 static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) {
-    ring_push(H->cmd_ring, d0, d1, d2, d3);
+    uint64_t trb = ring_push(H->cmd_ring, d0, d1, d2, d3);
     H->db[0] = 0;
     Trb e;
-    if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e)) return -1;
+    for (;;) {
+        if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e, 5000)) {
+            wr(H->op, 0x18, 1u << 2);                   // CRCR.CA: abort it
+            for (int i = 0; i < 5000 && (rd(H->op, 0x18) & (1u << 3)); i++) delay_ms(1);
+            return -1;
+        }
+        if ((e.d0 & ~15u) == (uint32_t)trb && e.d1 == (uint32_t)(trb >> 32)) break;
+    }
     if (ev) *ev = e;
-    return e.d2 >> 24;                                  // completion code (1 = success)
+    return e.d2 >> 24;
 }
 
 // A control transfer on endpoint 0. Returns true on success.
@@ -349,16 +387,18 @@ static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
 }
 
 // ---------------------------------------------------------------- enumeration
+// Every device gets a reset before it's addressed, USB 3 ones too (as
+// Linux does): a USB 3 link can stay up through the controller reset, with
+// the device still in whatever state the firmware left it.
 static bool reset_port(int port) {
     uint32_t sc = portsc(port);
     if (!(sc & PORT_CCS)) return false;
-    if (!(sc & PORT_PED)) {                             // USB2 ports need a reset; USB3 enable themselves
-        set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
-        for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++) delay_ms(1);
-    }
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
+    for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++) delay_ms(1);
+    for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
     sc = portsc(port);
     set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack change bits
-    delay_ms(20);                                               // reset recovery
+    delay_ms(100);                                              // reset recovery – some sticks need more
     return portsc(port) & PORT_PED;
 }
 
@@ -409,6 +449,7 @@ static void forget(int i);
 // A device that's just been reset and enabled, wherever it is: give it a
 // slot and an address, and set it up as a keyboard, mouse or hub.
 static bool setup_slot(Keyboard& k, int ki);
+static bool addr_failed;                               // the last setup_slot's Address Device failed
 static void release_slot(int slot) {
     H->dcbaa[slot] = 0;
     command(0, 0, 0, 10 << 10 | (uint32_t)slot << 24, nullptr);   // Disable Slot
@@ -444,6 +485,7 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
     if (command(0, 0, 0, TRB_ENABLE_SLOT << 10, &ev) != 1) { printf("USB: %s: no slot\n", k.where); return; }
     k.slot = ev.d3 >> 24;
     if (k.slot < 1 || k.slot > H->max_slots) return;
+    delay_ms(10);   // let the controller finish enabling the slot
     // Anything that doesn't end up driven gives its slot back: kept, a USB
     // stick plugged in a few dozen times used them all up.
     if (!setup_slot(k, ki)) release_slot(k.slot);
@@ -697,9 +739,34 @@ static bool setup_slot(Keyboard& k, int ki) {
     ep0[2] = (uint32_t)r0; ep0[3] = (uint32_t)(r0 >> 32);
     ep0[4] = 8;
     uint64_t ic = phys(k.in_ctx);
-    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-    if (cc != 1) { printf("USB: %s: address failed (%d)\n", k.where, cc); return false; }
-    delay_ms(2);
+
+    // First try the normal Address Device.
+    // If it times out, try the BSR sequence that some broken sticks need:
+    //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
+    //   2. short delay
+    //   3. Address Device with BSR=0 (real SET_ADDRESS)
+    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                     TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+    if (cc != 1) {
+        printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
+               k.where, cc);
+        // BSR = 1
+        cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                     TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
+        if (cc == 1) {
+            delay_ms(20);
+            // BSR = 0 (real SET_ADDRESS)
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                         TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+        }
+    }
+    if (cc != 1) {
+        printf("USB: %s: address failed (cc=%d, speed=%s)\n",
+               k.where, cc, speed_name(k.speed));
+        addr_failed = true;
+        return false;
+    }
+    delay_ms(10);
 
     static volatile uint8_t desc[256] __attribute__((aligned(64)));
     if (!control(k, 0x80, 6, 0x0100, 0, 8, desc)) { printf("USB: %s: no descriptor\n", k.where); return false; }
@@ -756,20 +823,20 @@ static bool setup_slot(Keyboard& k, int ki) {
         printf("USB: %s: not a keyboard, mouse, hub or mass storage (class %02x/%02x/%02x)\n", k.where, c0 & 0xFF, c1, c2);
         return false;
     }
-    if (hub && k.speed >= 4) {                          // a USB 3 hub's SuperSpeed half
-        printf("USB: %s: USB 3 hub (its USB 2 side carries keyboards and mice)\n", k.where);
-        return false;
-    }
     if (hub && k.depth >= 5) { printf("USB: %s: hubs nested too deep\n", k.where); return false; }
 
     if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;          // SET_CONFIGURATION
 
     if (hub) {
         // Hub descriptor: port count, characteristics (TT think time), power-on delay.
-        if (!control(k, 0xA0, 6, 0x2900, 0, 9, desc)) { printf("USB: %s: no hub descriptor\n", k.where); return false; }
+        // A USB 3 hub's SuperSpeed half has its own descriptor (type 2Ah) and
+        // must be told its depth; USB 3 sticks behind it show up only there.
+        bool ss = k.speed >= 4;
+        if (!control(k, 0xA0, 6, ss ? 0x2A00 : 0x2900, 0, ss ? 12 : 9, desc)) { printf("USB: %s: no hub descriptor\n", k.where); return false; }
+        if (ss && !control(k, 0x20, 12, k.depth, 0, 0, nullptr)) { printf("USB: %s: SET_HUB_DEPTH failed\n", k.where); return false; }
         k.kind = HUB;
         k.nports = desc[2] > 31 ? 31 : desc[2];
-        k.ttt = (desc[3] >> 5) & 3;
+        k.ttt = ss ? 0 : (desc[3] >> 5) & 3;
         k.power_good_ms = desc[5] * 2u;
         if (!configure_intr(k, ep_addr, ep_mps, ep_interval)) return false;
         k.active = true;
@@ -816,9 +883,16 @@ static void hub_port_change(int h, int port) {
     static volatile uint8_t st[4] __attribute__((aligned(64)));
     if (!hb.active || !control(hb, 0xA3, 0, 0, port, 4, st)) return;            // GET_STATUS
     uint16_t status = st[0] | st[1] << 8, change = st[2] | st[3] << 8;
-    static const uint8_t clear[] = {16, 17, 18, 19, 20};                        // C_PORT_* features
-    for (int b = 0; b < 5; b++)
-        if (change & (1 << (b == 4 ? 4 : b))) control(hb, 0x23, 1, clear[b], port, 0, nullptr);
+    // C_PORT_* features by change bit. A USB 3 hub's SuperSpeed ports have
+    // no enable/suspend changes (bits 1, 2) but warm reset, link state and
+    // config error ones (bits 5-7).
+    bool ss = hb.speed >= 4;
+    static const uint8_t clear2[8] = {16, 17, 18, 19, 20, 0, 0, 0};
+    static const uint8_t clear3[8] = {16, 0, 0, 19, 20, 29, 25, 26};
+    for (int b = 0; b < 8; b++) {
+        uint8_t f = ss ? clear3[b] : clear2[b];
+        if (f && (change & (1 << b))) control(hb, 0x23, 1, f, port, 0, nullptr);
+    }
     int existing = -1;
     for (int j = 0; j < MAX_KBD; j++)
         if (kbds[j].active && kbds[j].parent == h && kbds[j].hub_port == port) existing = j;
@@ -827,25 +901,77 @@ static void hub_port_change(int h, int port) {
     if (!connected || existing >= 0) return;
 
     // Reset the port, wait for it to finish, and see how fast the device is.
-    if (!control(hb, 0x23, 3, 4, port, 0, nullptr)) return;                   // SET_FEATURE PORT_RESET
+    // SuperSpeed ports too (see reset_port); a link stuck in SS.Inactive or
+    // Compliance gets a warm (BH) reset.
+    int pls = (status >> 5) & 0xF;
+    bool warm = ss && (pls == 6 || pls == 10);
+    if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
     bool done = false;
     for (int i = 0; i < 50 && !done; i++) {
         delay_ms(10);
         if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
-        done = (st[2] | st[3] << 8) & (1 << 4);                                // C_PORT_RESET
+        done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
     }
-    control(hb, 0x23, 1, 20, port, 0, nullptr);                                 // clear C_PORT_RESET
+    control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
+    if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
     status = st[0] | st[1] << 8;
     if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
-    delay_ms(10);                                                               // reset recovery
-    int speed = (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;         // low / high / full
+    delay_ms(10);                                                           // reset recovery
+    int speed = ss ? 4                                                          // SuperSpeed
+              : (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;        // low / high / full
     setup_device(hb.port, h, port, speed);
 }
 
 static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
     if (!reset_port(port)) return;
-    setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);    // 1 FS, 2 LS, 3 HS, 4+ SS
+    int speed = (portsc(port) >> 10) & 0xF;             // 1 FS, 2 LS, 3 HS, 4+ SS
+    addr_failed = false;
+    setup_device(port, -1, 0, speed);
+    if (!addr_failed || speed < 4) return;
+
+    // SuperSpeed Address Device failed (or timed out).  Many sticks never
+    // answer on the SS link but work fine at USB 2.  Force the link into
+    // SS.Disabled so the device drops to the USB-2 companion of this port.
+    // Then issue a normal port reset so a fresh Connect Status Change is
+    // guaranteed to appear (some controllers stay quiet otherwise).
+
+    uint32_t sc = portsc(port);
+    printf("USB: port %d: SS address failed, forcing USB-2 (PORTSC=%08x)\n",
+           port, sc);
+
+    // 1. Put the SuperSpeed link into Disabled
+    set_portsc(port, (sc & PORT_KEEP & ~(0xFu << 5)) | (4u << 5) | (1u << 16)); // PLS=Disabled, LWS
+    delay_ms(50);                           // give the device time to drop SS
+
+    // 2. Clear any change bits that may have appeared
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+
+    // 3. Force a fresh USB-2 enumeration with a normal port reset
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
+    for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++)
+        delay_ms(1);
+    for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++)
+        delay_ms(1);
+
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack
+    delay_ms(20);                                               // reset recovery
+
+    if (portsc(port) & PORT_CCS) {
+        int new_speed = (portsc(port) >> 10) & 0xF;
+        printf("USB: port %d: device reappeared at %s speed after SS fallback\n",
+               port, speed_name(new_speed));
+        // Do **not** call setup_device here – let the normal Port Status
+        // Change path in usb_poll / setup_port pick it up.  That keeps the
+        // slot bookkeeping clean.
+        H->port_dirty[port] = true;         // make sure usb_poll sees it
+    } else {
+        printf("USB: port %d: nothing after forced USB-2 fallback (PORTSC=%08x)\n",
+               port, portsc(port));
+    }
 }
 
 // ---------------------------------------------------------------- init
@@ -987,6 +1113,8 @@ extern "C" void usb_kick_ports(void) {
 bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
+    calibrate_delay();
+    dbg(1, "USB: %u port 80h reads a millisecond\n", io_per_ms);
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
     PciDevice d;
