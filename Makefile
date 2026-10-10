@@ -248,7 +248,7 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi'; \
 	   echo '  }'; \
-	   echo '  menuentry "FreeDOS (vmdos), no XMS (Windows 3.1 Setup)" {'; \
+	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi noxms'; \
 	   echo '  }'; \
 	   echo 'else'; \
@@ -256,7 +256,7 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
 	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
 	   echo '  }'; \
-	   echo '  menuentry "FreeDOS (vmdos), no XMS (Windows 3.1 Setup)" {'; \
+	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
 	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
 	   echo '  }'; \
