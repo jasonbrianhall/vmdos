@@ -896,6 +896,13 @@ void cd_api(struct regs *r)
     case 2: {
         if (CX(r) == 0) {                                               /* list into ES:DI ($-terminated) */
             u32 o = LIN(r->v86_es, DI(r));
+            /* DX='LE': DS:SI holds the drives' letters (MSCDEX 150Dh, 0 = A:): name them by letter */
+            char nm[MAX_UNITS + MAX_PHYS][12];
+            for (int u = 0; u < n_units + n_phys; u++) {
+                u8 l = DX(r) == 0x4C45 ? rd8(LIN(r->v86_ds, SI(r)) + u) : 0xFF;
+                if (l < 26) { nm[u][0] = (char)('A' + l); nm[u][1] = ':'; nm[u][2] = 0; }
+                else snprintf(nm[u], sizeof nm[u], "drive %d", u + 1);
+            }
             put(&o, "CD images:\r\n");
             for (int i = 0; i < n_img; i++) {
                 int used = 0;
@@ -905,17 +912,15 @@ void cd_api(struct regs *r)
                 put(&o, num);
                 put(&o, img[i].name);
                 for (int u = 0; u < n_units; u++)
-                    if (unit_img[u] == i) { char t[16] = "  (in drive 1)"; t[12] = (char)('1' + u); put(&o, t); }
+                    if (unit_img[u] == i) { put(&o, "  (in "); put(&o, nm[u]); put(&o, ")"); }
                 put(&o, "\r\n");
             }
             for (int u = 0; u < n_units; u++)
-                if (unit_img[u] < 0) { char t[24] = " drive 1: empty\r\n"; t[7] = (char)('1' + u); put(&o, t); }
+                if (unit_img[u] < 0) { put(&o, " "); put(&o, nm[u]); put(&o, " empty\r\n"); }
             for (int d = 0; d < n_phys; d++) {
-                char t[32] = " drive 1: real SATA drive ";
-                t[7] = (char)('1' + n_units + d);
-                if (ph[d].usb) memcpy(t + 15, "USB  drive ", 11);
-                if (ph[d].ide) memcpy(t + 15, "IDE  drive ", 11);
-                put(&o, t); put(&o, pmodel(d)); put(&o, "\r\n");
+                put(&o, " "); put(&o, nm[n_units + d]);
+                put(&o, ph[d].usb ? " real USB drive " : ph[d].ide ? " real IDE drive " : " real SATA drive ");
+                put(&o, pmodel(d)); put(&o, "\r\n");
             }
             wr8(o, '$');
             AX(r) = 0;

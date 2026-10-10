@@ -30,9 +30,16 @@
         je novm
         or ax, ax
         jnz bad
-list:   mov ax, 5644h
+list:   mov ax, 150Dh                   ; the CD drives' letters (SHSUCDX/MSCDEX), so
+        push cs                         ; the list names the drives by letter
+        pop es
+        mov bx, letters
+        int 2Fh
+        mov ax, 5644h
         mov bx, 2
         xor cx, cx
+        mov dx, 4C45h                   ; 'LE': DS:SI = letters
+        mov si, letters
         mov di, buf
         int 2Fh
         cmp ax, 5644h
