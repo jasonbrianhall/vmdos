@@ -16,19 +16,26 @@ int ahci_init(void);
 u64 ahci_sectors(int d);
 const char *ahci_model(int d);
 int ahci_rw(int d, u64 lba, u32 count, void *buf, int write);
+int ide_init(void);
+u64 ide_sectors(int d);
+const char *ide_model(int d);
+int ide_rw(int d, u64 lba, u32 count, void *buf, int write);
 int usb_msd_count(void);
 u64 usb_msd_sectors(int i);
 const char *usb_msd_name(int i);
 int usb_msd_rw(int i, u64 lba, u32 count, void *buf, int write);
 void usb_kick_ports(void);
 
-/* The real disks: AHCI (SATA) disks and USB mass storage, 512-byte sectors. */
-#define MAX_DEVS 12
-static struct { int usb, idx; u64 sectors; const char *name; } dev[MAX_DEVS];
+/* The real disks: AHCI (SATA) disks, IDE disks and USB mass storage,
+   512-byte sectors. */
+#define MAX_DEVS 16
+static struct { int usb, ide, idx; u64 sectors; const char *name; } dev[MAX_DEVS];
 static int n_dev;
 
 u32 disk_sectors;                     /* size DOS sees */
 static int on_dev, cdev;              /* C: is on dev[cdev] */
+static int usb_seen;                  /* USB disks taken into dev[] */
+static const char *dev_kind(int d) { return dev[d].usb ? "USB" : dev[d].ide ? "IDE" : "SATA"; }
 static u32 pstart, psize;
 static u8 vmbr[512];
 static u8 *bounce;                    /* 64 KiB, identity-mapped, for AHCI DMA */
@@ -37,6 +44,7 @@ static u8 *bounce;                    /* 64 KiB, identity-mapped, for AHCI DMA *
 static int dev_rw(int d, u32 lba, u32 n, void *buf, int write)
 {
     if (dev[d].usb) return usb_msd_rw(dev[d].idx, lba, n, buf, write);
+    if (dev[d].ide) return ide_rw(dev[d].idx, lba, n, buf, write);    /* PIO: any buffer */
     if (write) memcpy(bounce, buf, n * 512);
     if (ahci_rw(dev[d].idx, lba, n, bounce, write)) return -1;
     if (!write) memcpy(buf, bounce, n * 512);
@@ -277,7 +285,7 @@ static void use(int d, u32 start, u32 size)
     *(u32 *)(e + 8) = start; *(u32 *)(e + 12) = size;
     vmbr[510] = 0x55; vmbr[511] = 0xAA;
     kprintf("disk: C: is FAT%d partition at LBA %u (%u MiB) on %s disk %d (%s)\n",
-            v.type, start, size >> 11, dev[d].usb ? "USB" : "SATA", dev[d].idx, dev[d].name);
+            v.type, start, size >> 11, dev_kind(d), dev[d].idx, dev[d].name);
     cache_init();
 }
 
@@ -348,13 +356,18 @@ void disk_init(void)
             dev[n_dev].usb = 0; dev[n_dev].idx = i; dev[n_dev].sectors = ahci_sectors(i); dev[n_dev].name = ahci_model(i);
             n_dev++;
         }
+        int ni = !strstr(cmdline, "ide=off") ? ide_init() : 0;
+        for (int i = 0; i < ni && n_dev < MAX_DEVS; i++) {
+            dev[n_dev].ide = 1; dev[n_dev].idx = i; dev[n_dev].sectors = ide_sectors(i); dev[n_dev].name = ide_model(i);
+            n_dev++;
+        }
         /* USB sticks show up a little after the controller reset (USB 3 link
            training, slow sticks): keep polling for a while, longer when
            vmdos.efi says it came from a USB device (bootdev=usb), until the
            partition it started from (or, without a hint, any) turns up. */
         int boot_usb = strstr(cmdline, "bootdev=usb") != 0;
         int wait_ms = boot_usb ? 10000 : usb_msd_count() || hint ? 2000 : 1000;
-        int bd = -1, bq = 0, usb_seen = 0, waited = 0;
+        int bd = -1, bq = 0, waited = 0;
         u32 bs = 0, bz = 0;
         for (int d = 0; d < n_dev; d++) {
             u32 s = 0, z = 0;
@@ -384,11 +397,39 @@ void disk_init(void)
         if (n_dev) kprintf("disk: no FAT partition with KERNEL.SYS on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
     }
     if (!disk_image)
-        panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI) or USB disk, and no RAM disk "
+        panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI), IDE or USB disk, and no RAM disk "
               "(build with RAMDISK=1: dos.img next to vmdos.efi, GRUB module, QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
             want_ram ? "" : "; changes are lost at power-off");
 }
 
-const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : "SATA disk") : "RAM disk"; }
+/* ---- the other disks, for VMHD (hd.c) ----
+   Any disk by its dev[] index; USB disks plugged in since boot are taken
+   in when the list is asked for. */
+int disk_dev_count(void)
+{
+    while (usb_seen < usb_msd_count() && n_dev < MAX_DEVS) {
+        int i = usb_seen++, d = n_dev++;
+        dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
+    }
+    return n_dev;
+}
+u64 disk_dev_sectors(int d) { return dev[d].usb ? usb_msd_sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
+const char *disk_dev_name(int d) { return dev[d].name; }
+const char *disk_dev_kind(int d) { return dev_kind(d); }
+int disk_dev_index(int d) { return dev[d].idx; }
+int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
+{
+    u8 *b = buf;
+    while (n) {
+        u32 k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
+        if (dev_rw(d, lba, k, b, write)) return -1;
+        lba += k; n -= k; b += k * 512;
+    }
+    return 0;
+}
+/* The disk and partition C: is on; -1 if C: isn't on a real disk. */
+int disk_c_dev(u32 *start, u32 *size) { *start = pstart; *size = psize; return on_dev ? cdev : -1; }
+
+const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : dev[cdev].ide ? "IDE disk" : "SATA disk") : "RAM disk"; }

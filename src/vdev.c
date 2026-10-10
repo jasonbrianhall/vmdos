@@ -481,6 +481,7 @@ static u8 in8(u16 port)
     case 0x70: return cmos_index;
     case 0x71: outb(0x70, cmos_index & 0x7F); return inb(0x71);
     case 0x92: return a20_on ? 2 : 0;
+    case 0x201: return joy_port_in();                    /* game port (joy.c) */
     }
     u8 v;
     if (sound_port(port, 0, &v)) return v;
@@ -505,6 +506,7 @@ static void out8(u16 port, u8 v)
     case 0x71: return;                          /* the real CMOS stays untouched */
     case 0x92: set_a20((v & 2) != 0); return;
     case 0x80: case 0xED: return;               /* POST / delay ports */
+    case 0x201: joy_port_out(); return;
     }
     if (sound_port(port, 1, &v)) return;
     if (port >= 0x3B0 && port <= 0x3DF) { video_port_out(port, v); return; }
