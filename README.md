@@ -37,7 +37,7 @@ sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); eve
 ```
 
 Plug it in, pick the stick in the PC's boot menu (UEFI or legacy BIOS). The stick is then
-C: (vmdos reads it through its own USB driver: xHCI, bulk-only mass
+C: (vmdos reads it through its own USB driver: xHCI, EHCI or UHCI, bulk-only mass
 storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
 Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
 Afterwards the stick can be mounted on Linux to add games (it's FAT).
@@ -192,6 +192,11 @@ Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
 
+Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
+with no serial port, when a game misbehaves): the game pauses, the arrow
+keys, PgUp/PgDn and Home/End scroll, and Esc goes back to the game. The
+"vmdos stopped" screen shows the same log.
+
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
 names). It is read straight from the disk, nothing is copied to RAM; `VMCD`
@@ -258,13 +263,22 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   or `vmdos.efi` straight from the UEFI firmware.
 - BIOS: INT 10h (text modes, mode 13h, DAC/palette), 11h, 12h, 13h (CHS and
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
-- Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
+- USB controllers: xHCI (USB 3), EHCI (USB 2) and UHCI (USB 1.1, the
+  companions EHCI hands low/full-speed devices to on Intel boards and in
+  QEMU/libvirt); OHCI (AMD/NVIDIA companions) not yet. Everything below
+  works on any of them.
+- Keyboards: PS/2, and USB (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
 - Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
   first is joystick A, a second joystick B (with one, its buttons 3 and 4
   are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES
   clones (0079:0011) by their own layout: D-pad, B = button 1, A = 2,
-  Y = 3, X = 4. Games calibrate as with any analog stick.
+  Y = 3, X = 4. Games calibrate as with any analog stick. The game port
+  has four buttons, so L, R, Select and Start (other pads: buttons 5, 6,
+  9, 10) do nothing, unless `joykeys=39,2A,01,1C` on the kernel command
+  line (vmdos.cfg) makes them press keys: set-1 scancodes in hex for L,
+  R, Select, Start (here Space, Left Shift, Esc, Enter), 1xx for
+  E0-prefixed ones, 0 for none.
 - Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
   MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
   the program's event handler (0Ch/14h; for DOS extenders' programs too,
@@ -343,7 +357,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
 | `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
-| `src/usb.cpp`, `src/pci.cpp` | xHCI: USB keyboards, mice (from baremetaldoom) and mass storage (C: on a stick) |
+| `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI and UHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |

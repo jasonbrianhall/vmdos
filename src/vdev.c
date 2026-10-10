@@ -376,9 +376,21 @@ int vkbd_take(void)
     return v;
 }
 
+static int ctrl, alt, lshift, rshift, e0;               /* the real keyboard's modifiers */
+
+/* After the log viewer had the keyboard: no modifier is down any more,
+   for us or the guest (it saw them go down, not up). */
+void vkbd_release_mods(void)
+{
+    if (ctrl) kq_put(0x9D);
+    if (lshift) kq_put(0xAA);
+    if (rshift) kq_put(0xB6);
+    if (alt) kq_put(0xB8);
+    ctrl = alt = lshift = rshift = e0 = 0;
+}
+
 void vkbd_real_scancode(u8 sc)
 {
-    static int ctrl, alt, lshift, rshift, e0;
     u8 k = sc & 0x7F;
     int up = sc & 0x80;
     if (sc == 0xE0) e0 = 1;
@@ -393,6 +405,10 @@ void vkbd_real_scancode(u8 sc)
     int hot = ctrl && (lshift || rshift);                     /* Ctrl+Shift: games rarely use it with F-keys */
     if (hot && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
+        return;
+    }
+    if (hot && k == 0x44) {                                   /* Ctrl+Shift+F10: the log */
+        if (!up) log_view_req = 1;
         return;
     }
     if (hot && k == 0x3C) {                                   /* Ctrl+Shift+F2: next sound output */

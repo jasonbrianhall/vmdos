@@ -979,20 +979,45 @@ void video_refresh(void)
     busy = 0;
 }
 
-void video_console(const char *msg)
+/* A full screen of text over whatever the guest shows: title, then msg.
+   attr: 4Fh white on red (vmdos stopped), 1Fh white on blue (the log). */
+void video_console_attr(const char *title, const char *msg, u16 attr)
 {
-    for (int i = 0; i < 80 * 25; i++) console_cells[i] = 0x4F20;
+    u16 a = (u16)(attr << 8);
+    for (int i = 0; i < 80 * 25; i++) console_cells[i] = a | 0x20;
     int row = 1, col = 2;
-    const char *t = "vmdos stopped";
-    for (int i = 0; t[i]; i++) console_cells[row * 80 + col + i] = 0x4F00 | (u8)t[i];
+    for (int i = 0; title[i]; i++) console_cells[row * 80 + col + i] = a | (u8)title[i];
     row = 3;
     for (; *msg && row < 24; msg++) {
         if (*msg == '\n' || col >= 78) { row++; col = 2; if (*msg == '\n') continue; }
-        console_cells[row * 80 + col++] = 0x4F00 | (u8)*msg;
+        console_cells[row * 80 + col++] = a | (u8)*msg;
     }
     console_on = 1;
     if (!is_text(video_mode)) { video_mode = 3; text_cols = 80; }
     default_palette(0);
+    last_layout_mode = -1;
+    video_refresh();
+}
+
+void video_console(const char *msg) { video_console_attr("vmdos stopped", msg, 0x4F); }
+
+/* Around a console the guest gets back (Ctrl+Shift+F10, the log): its
+   mode, text width and palette, then a full redraw. */
+static struct { int on, mode, cols; u8 dac[256][3]; } saved;
+void video_console_save(void)
+{
+    saved.on = 1; saved.mode = video_mode; saved.cols = text_cols;
+    memcpy(saved.dac, vga_dac, sizeof vga_dac);
+}
+void video_console_restore(void)
+{
+    if (!saved.on) return;
+    saved.on = 0;
+    console_on = 0;
+    video_mode = saved.mode; text_cols = saved.cols;
+    memcpy(vga_dac, saved.dac, sizeof vga_dac);
+    palette_dirty = 1;
+    full_redraw = 1;
     last_layout_mode = -1;
     video_refresh();
 }
