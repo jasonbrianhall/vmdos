@@ -14,7 +14,7 @@
    Changing the image is reported to DOS as a media change. There is
    always at least one image drive (cdrives=N, 1-4, for more).
 
-   Real CD/DVD drives on SATA (AHCI, ahci.cpp) and USB (usb.cpp) come after
+   Real CD/DVD drives on SATA (AHCI, ahci.cpp), IDE (ide.cpp) and USB (usb.cpp) come after
    the image drives, one unit each: the disc in the drive, read with SCSI
    commands; eject and close work, a disc swap is a media change.
    cdphys=off leaves them out.
@@ -31,6 +31,11 @@ int ahci_cd_count(void);
 const char *ahci_cd_model(int i);
 int ahci_cd_packet(int i, const u8 *cdb, void *buf, u32 bytes);
 int ahci_cd_asc(void);                   /* ASC of the last failure (sense already read) */
+int ide_init(void);
+int ide_cd_count(void);
+const char *ide_cd_model(int i);
+int ide_cd_packet(int i, const u8 *cdb, void *buf, u32 bytes);
+int ide_cd_asc(void);
 int usb_cd_count(void);
 const char *usb_cd_model(int i);
 int usb_cd_packet(int i, const u8 *cdb, void *buf, u32 bytes);
@@ -381,7 +386,7 @@ static int mount_file(int u, const char *path)
 /* ---------------- real drives ---------------- */
 static int n_phys;
 static struct {
-    int usb, idx;                        /* usb_cd_* or ahci_cd_* drive idx */
+    int usb, ide, idx;                   /* usb_cd_*, ide_cd_* or ahci_cd_* drive idx */
     int present;                         /* a readable disc is in */
     u32 sectors;
     struct toc toc;
@@ -389,10 +394,14 @@ static struct {
 
 static int pkt(int d, const u8 *cdb, void *buf, u32 bytes)
 {
-    return ph[d].usb ? usb_cd_packet(ph[d].idx, cdb, buf, bytes) : ahci_cd_packet(ph[d].idx, cdb, buf, bytes);
+    return ph[d].usb ? usb_cd_packet(ph[d].idx, cdb, buf, bytes) : ph[d].ide ? ide_cd_packet(ph[d].idx, cdb, buf, bytes)
+                     : ahci_cd_packet(ph[d].idx, cdb, buf, bytes);
 }
-static int pkt_asc(int d) { return ph[d].usb ? usb_cd_asc() : ahci_cd_asc(); }
-static const char *pmodel(int d) { return ph[d].usb ? usb_cd_model(ph[d].idx) : ahci_cd_model(ph[d].idx); }
+static int pkt_asc(int d) { return ph[d].usb ? usb_cd_asc() : ph[d].ide ? ide_cd_asc() : ahci_cd_asc(); }
+static const char *pmodel(int d)
+{
+    return ph[d].usb ? usb_cd_model(ph[d].idx) : ph[d].ide ? ide_cd_model(ph[d].idx) : ahci_cd_model(ph[d].idx);
+}
 
 static int packet(int d, u8 c0, u32 lba, u16 len, u8 b9, void *buf, u32 bytes)
 {
@@ -500,9 +509,14 @@ static void units_init(void)
             ahci_init();                                /* already done when C: is on a disk */
             for (int i = 0; i < ahci_cd_count() && n_phys < MAX_PHYS; i++) { ph[n_phys].usb = 0; ph[n_phys].idx = i; n_phys++; }
         }
+        if (!strstr(cmdline, "ide=off")) {
+            ide_init();                                 /* already done when C: is on a disk */
+            for (int i = 0; i < ide_cd_count() && n_phys < MAX_PHYS; i++) { ph[n_phys].ide = 1; ph[n_phys].idx = i; n_phys++; }
+        }
         for (int i = 0; i < usb_cd_count() && n_phys < MAX_PHYS; i++) { ph[n_phys].usb = 1; ph[n_phys].idx = i; n_phys++; }
         for (int d = 0; d < n_phys; d++)
-            kprintf("cd: drive %d is the real %s drive %s\n", n_units + d + 1, ph[d].usb ? "USB" : "SATA", pmodel(d));
+            kprintf("cd: drive %d is the real %s drive %s\n", n_units + d + 1,
+                    ph[d].usb ? "USB" : ph[d].ide ? "IDE" : "SATA", pmodel(d));
     }
 }
 
@@ -898,6 +912,7 @@ void cd_api(struct regs *r)
                 char t[32] = " drive 1: real SATA drive ";
                 t[7] = (char)('1' + n_units + d);
                 if (ph[d].usb) memcpy(t + 15, "USB  drive ", 11);
+                if (ph[d].ide) memcpy(t + 15, "IDE  drive ", 11);
                 put(&o, t); put(&o, pmodel(d)); put(&o, "\r\n");
             }
             wr8(o, '$');

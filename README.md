@@ -3,7 +3,7 @@
 FreeDOS running in virtual-8086 mode under a small 32-bit protected-mode
 kernel. Boots from GRUB (BIOS or UEFI) or QEMU `-kernel`. The kernel emulates
 the BIOS and the PC hardware DOS touches; FreeDOS's kernel and FreeCOM run
-unmodified. Drive C: is the FAT partition of the EFI disk (AHCI/SATA), so
+unmodified. Drive C: is the FAT partition of the EFI disk (SATA, IDE or USB), so
 changes are kept; a RAM disk (dos.img) is the option and the fallback.
 
 ## Build and run
@@ -68,7 +68,7 @@ with vmdos.efi as BOOTX64.EFI.
 The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
 `C=ram`): then esp.img carries EFI/BOOT/dos.img, the ISO carries the GRUB
 module and `make run` passes it to QEMU, as a fallback for machines whose
-disk vmdos can't drive (not SATA/AHCI) and for `c=ram`.
+disk vmdos can't drive (not SATA, IDE or USB) and for `c=ram`.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
@@ -82,7 +82,8 @@ AUTOEXEC.BAT, FDCONFIG.SYS and files already copied from `EXTRA` are kept
 option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
 EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 
-The kernel picks C: from the FAT partitions on SATA (AHCI) disks and USB
+The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
+(parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them) and USB
 sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature); other
 partitions are never touched (DOS sees a one-partition disk and can't write
@@ -196,11 +197,12 @@ MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so
 the BIN names in the sheet have to be 8.3 ones (a single BIN may also just be
 named like the sheet: QUAKE.CUE + QUAKE.BIN).
 
-Real CD/DVD drives on SATA (AHCI) and USB get a drive letter each after the
+Real CD/DVD drives on SATA (AHCI), IDE and USB get a drive letter each after the
 image drives (E: with one image drive): the disc is read from the drive,
 swapping discs works, and eject/close requests go to the drive. `cdphys=off`
 leaves them out. In QEMU: `-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso
--device ide-cd,drive=cd,bus=ide.2`, or `-device qemu-xhci -drive
+-device ide-cd,drive=cd,bus=ide.2`, `-drive file=game.iso,if=ide,index=2,media=cdrom`
+(IDE, the default machine), or `-device qemu-xhci -drive
 if=none,id=ucd,media=cdrom,file=game.iso -device usb-storage,drive=ucd` for USB.
 
 CD audio (MSCDEX play, stop/pause, resume, track position, audio status,
@@ -310,12 +312,12 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
-| `src/disk.c`, `src/ahci.cpp`, `src/fat.c` | drive C: (SATA / USB partition or RAM disk), SATA driver, FAT reader |
+| `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
-| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
+| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
