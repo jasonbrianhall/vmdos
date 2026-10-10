@@ -219,72 +219,116 @@ static void describe(char *b, int n, const struct part *p)
 {
     char k[32];
     kind(k, sizeof k, p);
-    if (p->num) snprintf(b, n, "%s disk %d, partition %d (%s)", disk_dev_kind(p->dev), disk_dev_index(p->dev), p->num, k);
-    else snprintf(b, n, "%s disk %d, whole disk (%s)", disk_dev_kind(p->dev), disk_dev_index(p->dev), k);
+    if (p->num) snprintf(b, n, "disk %d, partition %d (%s)", p->dev + 1, p->num, k);
+    else snprintf(b, n, "disk %d, whole disk (%s)", p->dev + 1, k);
 }
 
-/* VMHD's list: the drives, then each disk (numbered, for VMHD /FDISK) and
-   its partitions (numbered, for "VMHD D: n"):
-     Disk 2: SATA, Samsung SSD 860, 476 GiB
-        2  partition 1  type 06           40 MiB  FAT16 DATA16      = D: */
+/* "1023 MiB", "3 GiB" */
+static void size_str(char *b, int n, u32 sectors)
+{
+    u32 mib = sectors >> 11;
+    snprintf(b, n, "%u %s", mib >= 10240 ? mib >> 10 : mib, mib >= 10240 ? "GiB" : "MiB");
+}
+
+/* What's on p, in words: "FAT32, 100 MiB, label DATA32", "not formatted, 1023 MiB",
+   "Linux (type 83), 20 MiB" ... */
+static void contents(char *b, int n, const struct part *p)
+{
+    char sz[16], what[64];
+    size_str(sz, sizeof sz, p->size);
+    if (p->fat) {
+        if (dos_part(p)) snprintf(what, sizeof what, "FAT%d", p->fat);
+        else if (p->gpt == 2 || p->type == 0xEF) snprintf(what, sizeof what, "FAT%d in an EFI system partition", p->fat);
+        else if (p->gpt) snprintf(what, sizeof what, "FAT%d, but a non-DOS GPT partition type", p->fat);
+        else snprintf(what, sizeof what, "FAT%d, but partition type %02x (not DOS)", p->fat, p->type);
+    } else if (is_ext(p->type)) snprintf(what, sizeof what, "extended partition (holds logical ones)");
+    else if (dos_part(p)) snprintf(what, sizeof what, "not formatted");
+    else if (p->type == 0x83) snprintf(what, sizeof what, "Linux (type 83)");
+    else if (p->type == 0x82) snprintf(what, sizeof what, "Linux swap (type 82)");
+    else if (p->type == 0x07) snprintf(what, sizeof what, "NTFS or exFAT (type 07)");
+    else if (p->gpt == 2 || p->type == 0xEF) snprintf(what, sizeof what, "EFI system partition, no FAT");
+    else if (p->gpt) snprintf(what, sizeof what, "GPT partition, not FAT");
+    else snprintf(what, sizeof what, "type %02x, not FAT", p->type);
+    snprintf(b, n, "%s, %s%s%s", what, sz, p->label[0] ? ", label " : "", p->label);
+}
+
+/* VMHD's list, in words: the drive letters, then every disk and its
+   partitions, each with what can be done with it and the command for it.
+   Partitions are numbered across all disks ([3]): "VMHD D: 3". */
 static void list(u32 o)
 {
-    char b[160];
-    put(&o, "Drives:");
-    for (int u = 0; u < n_units; u++) {
-        snprintf(b, sizeof b, "  %c: %s", 'A' + first_drive + u, units[u].in ? "" : "empty");
-        put(&o, b);
-        if (units[u].in) {
-            int k = -1;
-            for (int i = 0; i < n_parts; i++)
-                if (parts[i].dev == units[u].p.dev && parts[i].start == units[u].p.start) k = i;
-            if (k >= 0) snprintf(b, sizeof b, "%d%s", k + 1, units[u].ro ? " /R" : "");
-            else snprintf(b, sizeof b, "(disk gone)");
+    char b[200], c[96];
+    int nd = disk_dev_count(), free_u = -1;
+    for (int u = n_units - 1; u >= 0; u--) if (!units[u].in) free_u = u;
+    char L = (char)('A' + first_drive + (free_u >= 0 ? free_u : 0));
+    put(&o, "VMHD gives partitions of your other disks a drive letter, so DOS can\r\n"
+            "use them. Nothing gets a letter unless you ask for it here.\r\n\r\n");
+    if (!n_units)
+        put(&o, "There are no drive letters for VMHD: add the line\r\n"
+                "    DEVICE=C:\\VMDOS\\VMHD.SYS\r\nto C:\\FDCONFIG.SYS and restart.\r\n\r\n");
+    else {
+        put(&o, "Drive letters for VMHD:\r\n");
+        for (int u = 0; u < n_units; u++) {
+            snprintf(b, sizeof b, "    %c: ", 'A' + first_drive + u);
             put(&o, b);
-        }
-    }
-    put(&o, "\r\n");
-    int nd = disk_dev_count();
-    for (int d = 0; d < nd; d++) {
-        u32 mib = (u32)(disk_dev_sectors(d) >> 11);
-        snprintf(b, sizeof b, "Disk %d: %s, %s, %u %s", d + 1, disk_dev_kind(d), disk_dev_name(d),
-                 mib >= 10240 ? mib >> 10 : mib, mib >= 10240 ? "GiB" : "MiB");
-        put(&o, b);
-        int bd = bios_num(d);
-        if (bd) { snprintf(b, sizeof b, "  = BIOS disk %02xh", bd); put(&o, b); }
-        int any = 0;
-        for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
-        put(&o, any ? "\r\n" : !mib ? "  (unplugged)\r\n" : "\r\n       no partitions: make one with FDISK, then VMHD again\r\n");
-        for (int i = 0; i < n_parts; i++) {
-            const struct part *p = &parts[i];
-            if (p->dev != d) continue;
-            char k[32], where[16], fs[24];
-            kind(k, sizeof k, p);
-            if (p->num) snprintf(where, sizeof where, "partition %d", p->num); else snprintf(where, sizeof where, "whole disk");
-            if (p->fat) snprintf(fs, sizeof fs, "FAT%d %s", p->fat, p->label);
-            else snprintf(fs, sizeof fs, "%s", is_ext(p->type) ? "" : dos_part(p) ? "not formatted" : "no FAT");
-            u32 pm = p->size >> 11;
-            snprintf(b, sizeof b, "%5d  %-13s%-17s%6u %s  %-18s", i + 1, where, k, pm >= 10240 ? pm >> 10 : pm,
-                     pm >= 10240 ? "GiB" : "MiB", fs);
-            int e = (int)strlen(b);
-            while (e && b[e - 1] == ' ') b[--e] = 0;
-            put(&o, b);
-            int u = unit_of(p);
-            if (is_c(p)) put(&o, "  = C:");
-            else if (u >= 0) { snprintf(b, sizeof b, "  = %c:", 'A' + first_drive + u); put(&o, b); }
-            put(&o, "\r\n");
-            if (!p->fat && dos_part(p) && !is_ext(p->type) && n_units) {
-                if (u >= 0) snprintf(b, sizeof b, "       next: FORMAT %c:\r\n", 'A' + first_drive + u);
-                else snprintf(b, sizeof b, "       next: VMHD %c: %d, then FORMAT %c:\r\n", 'A' + first_drive, i + 1, 'A' + first_drive);
+            if (!units[u].in) put(&o, "empty\r\n");
+            else {
+                describe(c, sizeof c, &units[u].p);
+                snprintf(b, sizeof b, "holds %s%s\r\n", c, units[u].ro ? ", read-only" : "");
                 put(&o, b);
             }
         }
+        put(&o, "\r\n");
     }
-    if (n_units) {
-        snprintf(b, sizeof b, "VMHD %c: n puts partition n in %c:, VMHD %c: /E takes it out.\r\n",
-                 'A' + first_drive, 'A' + first_drive, 'A' + first_drive);
+    for (int d = 0; d < nd; d++) {
+        char sz[16];
+        size_str(sz, sizeof sz, (u32)(disk_dev_sectors(d) >> 32 ? 0xFFFFFFFFu : disk_dev_sectors(d)));
+        snprintf(b, sizeof b, "Disk %d: %s disk, %s, %s.", d + 1, disk_dev_kind(d), disk_dev_name(d), sz);
         put(&o, b);
+        u32 cs, cz;
+        int bd = bios_num(d);
+        if (disk_c_dev(&cs, &cz) == d) put(&o, " vmdos started from it.");
+        else if (bd) { snprintf(b, sizeof b, " FDISK calls it disk %d.", bd - 0x80 + 1); put(&o, b); }
+        put(&o, "\r\n");
+        int any = 0;
+        for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
+        if (!disk_dev_sectors(d)) { put(&o, "      It is unplugged.\r\n\r\n"); continue; }
+        if (!any) {
+            snprintf(b, sizeof b, "      It has no partitions yet. To make one: run FDISK, choose disk %d,\r\n"
+                     "      create a primary DOS partition, then run VMHD again.\r\n", bd ? bd - 0x80 + 1 : 2);
+            put(&o, b);
+        }
+        for (int i = 0; i < n_parts; i++) {
+            const struct part *p = &parts[i];
+            if (p->dev != d) continue;
+            contents(c, sizeof c, p);
+            if (p->num) snprintf(b, sizeof b, "  [%d] partition %d: %s\r\n", i + 1, p->num, c);
+            else snprintf(b, sizeof b, "  [%d] whole disk: %s\r\n", i + 1, c);
+            put(&o, b);
+            int u = unit_of(p);
+            char U = (char)('A' + first_drive + u);
+            if (is_c(p)) put(&o, "      This is drive C:.\r\n");
+            else if (is_ext(p->type)) ;
+            else if (u >= 0 && !p->fat)
+                { snprintf(b, sizeof b, "      This is drive %c:. It has no file system yet: type  FORMAT %c:\r\n", U, U); put(&o, b); }
+            else if (u >= 0)
+                { snprintf(b, sizeof b, "      This is drive %c:. To take it out again, type  VMHD %c: /E\r\n", U, U); put(&o, b); }
+            else if (!p->fat && !dos_part(p))
+                put(&o, "      DOS can't use it (no FAT file system), so VMHD leaves it alone.\r\n");
+            else if (!n_units) ;
+            else if (free_u < 0)
+                { snprintf(b, sizeof b, "      All VMHD letters are taken: free one first (VMHD %c: /E), then VMHD %c: %d\r\n",
+                           'A' + first_drive, 'A' + first_drive, i + 1); put(&o, b); }
+            else if (!p->fat)
+                { snprintf(b, sizeof b, "      To use it, type  VMHD %c: %d  and then  FORMAT %c:\r\n", L, i + 1, L); put(&o, b); }
+            else if (!dos_part(p))
+                { snprintf(b, sizeof b, "      It belongs to another system. VMHD %c: %d puts it in %c: after asking.\r\n", L, i + 1, L); put(&o, b); }
+            else
+                { snprintf(b, sizeof b, "      To use it as drive %c:, type  VMHD %c: %d   (VMHD %c: %d /R: read-only)\r\n", L, L, i + 1, L, i + 1); put(&o, b); }
+        }
+        put(&o, "\r\n");
     }
+    put(&o, "More than a screen? Type  VMHD | MORE\r\n");
     wr8(o, '$');
 }
 
@@ -398,7 +442,8 @@ void hd_int13(struct regs *r)
 
 /* Put partition k (0-based, of the last scan) in unit u. 0, or an error:
    2 no such partition, 3 it's C:, 4 in another drive, 5 no FAT and not
-   a DOS partition, 6 confirm first (the warning in warn), 7 disk error. */
+   a DOS partition, 6 confirm first (the warning in warn), 7 disk error,
+   8 the drive holds another partition. */
 static int attach(int u, int k, int ro, int confirmed, u32 warn)
 {
     if (k < 0 || k >= n_parts) return 2;
@@ -406,14 +451,23 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
     if (is_c(p)) return 3;
     int v = unit_of(p);
     if (v >= 0 && v != u) return 4;
+    if (units[u].in && v != u) return 8;                            /* holds another one: take that out first */
     if (!p->fat && (!dos_part(p) || is_ext(p->type))) return 5;
+    char U = (char)('A' + first_drive + u), d[120], c[96], b[400];
+    describe(d, sizeof d, p);
+    contents(c, sizeof c, p);
     if ((!p->fat || !dos_part(p)) && !confirmed) {
-        char d[120];
-        describe(d, sizeof d, p);
-        put(&warn, d);
-        put(&warn, !p->fat ? ": no file system yet.\r\nFORMAT can make one on it (anything on it now is lost)."
-                           : ": not a DOS partition.\r\nIt holds a FAT file system, but its partition type says it belongs\r\n"
-                             "to something else (another OS, the firmware). Writing to it from DOS\r\ncould damage it.");
+        if (!p->fat)
+            snprintf(b, sizeof b, "Disk %d, partition %d (%s) has no file system yet.\r\n"
+                     "It goes in %c:, and then FORMAT %c: makes a file system on it.\r\n"
+                     "Anything that is on the partition now will be lost when you format it.",
+                     p->dev + 1, p->num, c, U, U);
+        else
+            snprintf(b, sizeof b, "Disk %d, partition %d (%s)\r\n"
+                     "holds a FAT file system, but its partition type says it belongs to\r\n"
+                     "something else: the firmware or another operating system. Changing\r\n"
+                     "files on it from DOS could stop that system from working.", p->dev + 1, p->num, c);
+        put(&warn, b);
         wr8(warn, '$');
         return 6;
     }
@@ -423,8 +477,12 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
     t->ro = (u8)ro;
     t->in = 1;
     t->changed = 1;
-    char d[120];
-    describe(d, sizeof d, p);
+    if (!p->fat)
+        snprintf(b, sizeof b, "%c: now holds %s.\r\nIt has no file system yet. Next, type  FORMAT %c:  to make one.\r\n$", U, d, U);
+    else
+        snprintf(b, sizeof b, "%c: now holds %s:\r\n%s%s.\r\nType  DIR %c:  to see its files. VMHD %c: /E takes it out again.\r\n$",
+                 U, d, c, ro ? ", read-only" : "", U, U);
+    put(&warn, b);
     if (p->fat) kprintf("hd: %c: is %s, FAT%d%s\n", 'A' + first_drive + u, d, p->fat, ro ? ", read-only" : "");
     else kprintf("hd: %c: is %s, not formatted%s\n", 'A' + first_drive + u, d, ro ? ", read-only" : "");
     return 0;
@@ -518,8 +576,9 @@ static void request(struct regs *r)
    (VMHD.COM): list into ES:DI ($-terminated); AX = number of units, DL
    the first drive. BX=3: put partition DL (1-based, as listed) in drive
    CL (0 = A:), DH bit 0 read-only, bit 1 confirmed; AX = 0 or an error
-   (see attach; 1: not a VMHD drive), a warning in ES:DI for 6. BX=4:
-   take drive CL's partition out; AX = 0 or 1. */
+   (see attach; 1: not a VMHD drive), a warning in ES:DI for 6, what was
+   done for 0. BX=4: take drive CL's partition out; AX = 0 (and what was
+   done in ES:DI) or 1. */
 void hd_api(struct regs *r)
 {
     switch (BX(r)) {
@@ -548,7 +607,13 @@ void hd_api(struct regs *r)
     case 4: {
         int u = CL(r) - first_drive;
         if (u < 0 || u >= n_units) { AX(r) = 1; return; }
-        if (units[u].in) kprintf("hd: %c: emptied\n", 'A' + first_drive + u);
+        u32 o = LIN(r->v86_es, DI(r));
+        char b[160];
+        if (units[u].in) {
+            kprintf("hd: %c: emptied\n", 'A' + first_drive + u);
+            snprintf(b, sizeof b, "%c: is empty now (the partition itself is untouched).\r\n$", 'A' + first_drive + u);
+        } else snprintf(b, sizeof b, "%c: was empty already.\r\n$", 'A' + first_drive + u);
+        put(&o, b);
         units[u].in = 0;
         units[u].changed = 1;
         AX(r) = 0;

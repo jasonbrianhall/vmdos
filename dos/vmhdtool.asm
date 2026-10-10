@@ -35,12 +35,14 @@
         mov ax, 5647h                   ; take it out
         mov bx, 4
         mov cl, [drive]
+        mov di, buf
         int 2Fh
         cmp ax, 5647h
         je novm
         or ax, ax
         jnz nodrv
-        jmp list
+        mov dx, buf                     ; what was done
+        jmp out
 .num:   xor dx, dx                      ; partition number
 .dig:   lodsb
         cmp al, '0'
@@ -86,14 +88,15 @@ result: cmp ax, 5647h
         inc dl                          ; INT 25h/26h (FORMAT's writes)
         int 21h
         pop ds
-        jmp list
+        mov dx, buf                     ; what was done, what comes next
+        jmp out
 .notok:
         cmp ax, 6
         jne .err
         call ask                        ; the warning in buf: Y goes on
         or byte [flags], 2
         jmp attach
-.err:   cmp ax, 7
+.err:   cmp ax, 8
         ja .bad
         mov bx, ax
         shl bx, 1
@@ -157,20 +160,30 @@ skipsp: lodsb
 drive   db 0
 part    db 0
 flags   db 0                            ; 1 read-only, 2 confirmed
-errs    dw 0, msg_e1, msg_e2, msg_e3, msg_e4, msg_e5, 0, msg_e7
-msg_use  db 'Usage: VMHD [drive: partition [/R] | drive: /E]', 13, 10
-         db '  VMHD            lists the drives, disks and partitions', 13, 10
-         db '  VMHD D: 3       puts partition 3 in D: (/R read-only)', 13, 10
-         db '  VMHD D: /E      takes it out of D:', 13, 10, '$'
+errs    dw 0, msg_e1, msg_e2, msg_e3, msg_e4, msg_e5, 0, msg_e7, msg_e8
+msg_use  db 'VMHD gives partitions of your other disks a drive letter.', 13, 10
+         db '  VMHD            lists your disks and their partitions, with numbers,', 13, 10
+         db '                  and says what you can do with each one', 13, 10
+         db '  VMHD D: 3       puts partition [3] of that list in drive D:', 13, 10
+         db '  VMHD D: 3 /R    the same, read-only (nothing can be written to it)', 13, 10
+         db '  VMHD D: /E      takes the partition out of D: again', 13, 10, '$'
 msg_novm db 'VMHD: not running under vmdos', 13, 10, '$'
-msg_e1   db 'VMHD: not a VMHD drive (DEVICE=C:\VMDOS\VMHD.SYS in FDCONFIG.SYS gives them)', 13, 10, '$'
-msg_e2   db 'VMHD: no such partition (VMHD alone lists them)', 13, 10, '$'
-msg_e3   db 'VMHD: that partition is C:', 13, 10, '$'
-msg_e4   db 'VMHD: that partition is in another drive already', 13, 10, '$'
-msg_e5   db 'VMHD: no FAT file system and not a DOS partition: DOS can', 39, 't use it', 13, 10, '$'
-msg_e7   db 'VMHD: disk error', 13, 10, '$'
-msg_w1   db 'Warning: ', '$'
-msg_w2   db 13, 10, 'Go on (Y/N)? $'
+msg_e1   db 'VMHD: that drive letter is not one of VMHD', 39, 's. Type VMHD to see which', 13, 10
+         db 'letters it has (none? add DEVICE=C:\VMDOS\VMHD.SYS to C:\FDCONFIG.SYS', 13, 10
+         db 'and restart).', 13, 10, '$'
+msg_e2   db 'VMHD: there is no partition with that number. Type VMHD to see the', 13, 10
+         db 'partitions and their numbers (in [brackets]).', 13, 10, '$'
+msg_e3   db 'VMHD: that partition is drive C: already.', 13, 10, '$'
+msg_e4   db 'VMHD: that partition is in another VMHD drive already. Type VMHD to', 13, 10
+         db 'see which, and take it out there first (VMHD x: /E).', 13, 10, '$'
+msg_e5   db 'VMHD: that partition has no FAT file system and is not a DOS', 13, 10
+         db 'partition, so DOS can', 39, 't use it. Nothing was done.', 13, 10, '$'
+msg_e7   db 'VMHD: the disk could not be read. Nothing was done.', 13, 10, '$'
+msg_e8   db 'VMHD: that drive holds another partition already. Take it out first', 13, 10
+         db '(VMHD x: /E, with its letter), or use another VMHD letter. Type VMHD', 13, 10
+         db 'to see what is where.', 13, 10, '$'
+msg_w1   db 'Please check first:', 13, 10, '$'
+msg_w2   db 13, 10, 'Put it in anyway (Y/N)? $'
 msg_yes  db 'Y', 13, 10, '$'
-msg_no   db 'N', 13, 10, 'VMHD: nothing done', 13, 10, '$'
+msg_no   db 'N', 13, 10, 'Nothing was done.', 13, 10, '$'
 buf:
