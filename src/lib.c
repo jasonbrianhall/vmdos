@@ -172,7 +172,9 @@ static int stop_key(void)
     return vkbd_take();
 }
 
-static void stop_screen(const char *msg)
+/* closable: the Ctrl+Shift+F10 log, which Esc (or F10) closes; else the
+   "vmdos stopped" screen, which never returns. */
+static void log_screen(const char *msg, int closable)
 {
     static char screen[4096];
     log_lines();
@@ -186,11 +188,12 @@ static void stop_screen(const char *msg)
     int top = n_lines > rows ? n_lines - rows : 0, last = -1;
     for (;;) {
         if (top != last) {
-            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End):\n",
-                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines);
+            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End%s):\n",
+                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines, closable ? ", Esc: back" : "");
             for (int i = top; i < top + rows && i < n_lines && n < (int)sizeof screen - 80; i++)
                 n += snprintf(screen + n, sizeof screen - n, "%s\n", loglin + line_at[i]);
-            video_console(screen);
+            if (closable) video_console_attr("vmdos log", screen, 0x1F);
+            else video_console(screen);
             last = top;
         }
         int k = stop_key();
@@ -203,10 +206,25 @@ static void stop_screen(const char *msg)
         case 0x51: top += rows - 1; break;                           /* page down */
         case 0x47: top = 0; break;                                   /* home */
         case 0x4F: top = max; break;                                 /* end */
+        case 0x01: case 0x44: if (closable) return; break;          /* Esc, F10 */
         }
         if (top > max) top = max;
         if (top < 0) top = 0;
     }
+}
+
+/* Ctrl+Shift+F10 (vdev.c asks, the timer tick calls this when USB isn't
+   busy): the log over the game, which waits until Esc. */
+volatile int log_view_req;
+void vkbd_release_mods(void);
+void log_view(void)
+{
+    log_view_req = 0;
+    while (stop_key() >= 0) ;                                       /* the hotkey's own bytes */
+    video_console_save();
+    log_screen("The log so far (the game is paused).", 1);
+    video_console_restore();
+    vkbd_release_mods();                                             /* Ctrl/Shift went up while we had the keyboard */
 }
 
 void panic(const char *fmt, ...)
@@ -218,6 +236,6 @@ void panic(const char *fmt, ...)
     va_end(ap);
     disk_flush();                                 /* don't lose gathered writes (no-op while flushing) */
     kprintf("\n*** vmdos stopped: %s\n", buf);
-    stop_screen(buf);
+    log_screen(buf, 0);
     for (;;) __asm__ volatile("cli; hlt");
 }

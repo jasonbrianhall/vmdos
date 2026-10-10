@@ -1505,6 +1505,7 @@ extern "C" void usb_settle(int max_ms) {
 // C entry points for the kernel.
 extern "C" void usb_start(const char* cmdline) { usb_init(cmdline); }
 extern "C" void usb_tick(void) { usb_poll(); }
+extern "C" int usb_quiet(void) { return !usb_busy && !in_poll; }       // no USB transfer under way
 
 // CD/DVD drives. A SCSI command (cdb; its length from the opcode group)
 // with bytes (<= 64 KiB) of data in to buf. 0, or the sense key of the

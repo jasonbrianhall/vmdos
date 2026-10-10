@@ -192,6 +192,11 @@ Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
 
+Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
+with no serial port, when a game misbehaves): the game pauses, the arrow
+keys, PgUp/PgDn and Home/End scroll, and Esc goes back to the game. The
+"vmdos stopped" screen shows the same log.
+
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
 names). It is read straight from the disk, nothing is copied to RAM; `VMCD`

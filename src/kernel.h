@@ -185,6 +185,7 @@ int joy_bios(struct regs *r);
 void hd_api(struct regs *r);
 int hd_bios_disks(void);                       /* BIOS hard disks: C:'s, then the others (once DOS is up) */
 void hd_dos_up(void);
+int usb_quiet(void);                           /* usb.cpp: no transfer or poll under way */
 void hd_int13(struct regs *r);
 
 void cd_add(u8 *data, u32 size, const char *name);
@@ -262,6 +263,11 @@ void video_set_mode(int mode, int clear);
 u32 video_port_in(u16 port);
 void video_port_out(u16 port, u8 v);
 void video_console(const char *msg);          /* panic screen */
+void video_console_attr(const char *title, const char *msg, u16 attr);
+void video_console_save(void);
+void video_console_restore(void);
+void log_view(void);                           /* Ctrl+Shift+F10: the log, until Esc */
+extern volatile int log_view_req;
 extern int video_mode;
 extern u8 vga_dac[256][3];
 extern u8 crtc[32];
