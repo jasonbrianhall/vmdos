@@ -76,7 +76,7 @@ static void map_phys(int p, int hd, int lp)
     }
     cur[p][0] = (s16)hd; cur[p][1] = (s16)lp;
 }
-static void flush(void) { tlb_flush(); }
+static void flush(void) { tlb_flush_range(FRAME_LIN, NPHYS * PAGE / 4096); }
 
 static void free_pages(int hd);
 

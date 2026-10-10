@@ -406,7 +406,7 @@ static int planar_on, mapped_plane = -1, mapped_ro, modex_trap, readmap_last;
 static void map_window_flags(u32 phys, u32 flags)
 {
     for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, flags);
-    tlb_flush();
+    tlb_flush_range(0xA0000, 16);
 }
 static void map_window(u32 phys) { map_window_flags(phys, 7); }
 
@@ -462,7 +462,7 @@ static void ega_check(void)
     if (want && !ega_on) {
         if (!planes) planes = phys_alloc(4 * 65536);
         for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0);
-        tlb_flush();
+        tlb_flush_range(0xA0000, 16);
         ega_on = 1;
     } else if (!want && ega_on) {
         map_window(guest_phys(0xA0000));
@@ -480,7 +480,7 @@ static void modex_check(void)
                              gc[8] != 0xFF);
     if (want && !modex_trap) {
         for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0);
-        tlb_flush();
+        tlb_flush_range(0xA0000, 16);
         modex_trap = 1;
         mapped_plane = -1;
         mapped_ro = 0;

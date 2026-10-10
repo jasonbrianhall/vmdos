@@ -141,6 +141,25 @@ u32 guest_phys(u32 lin) { return (u32)(uintptr_t)guest_ram + lin; }
 
 void tlb_flush(void) { flush_tlb(); }
 
+/* Just the pages [lin, lin + n pages): INVLPG (486 and up) leaves the rest
+   of the TLB alone, which matters when a page window is remapped often
+   (Mode X plane switches, EMS mapping): a CR3 reload would throw away the
+   program's own pages too, and under QEMU's TCG all its translations.
+   A 386 has no INVLPG (it can't toggle EFLAGS.AC): the whole TLB then. */
+void tlb_flush_range(u32 lin, u32 n)
+{
+    static int invlpg = -1;
+    if (!paging_on) return;
+    if (invlpg < 0) {
+        u32 a, b;
+        __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x40000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                         : "=&r"(a), "=&r"(b));
+        invlpg = ((a ^ b) & 0x40000) != 0;
+    }
+    if (!invlpg || n > 64) { flush_tlb(); return; }
+    for (u32 i = 0; i < n; i++) __asm__ volatile("invlpg (%0)" :: "r"(lin + i * 4096) : "memory");
+}
+
 /* The page table's dirty bit for lin; cleared if clear. */
 int page_dirty(u32 lin, int clear)
 {

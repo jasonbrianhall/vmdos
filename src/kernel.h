@@ -105,6 +105,7 @@ void set_user(u32 lin, u32 len, int user);    /* ring 3 access to these pages */
 void *map_mmio64_user(u64 phys, u32 len);
 u32 guest_phys(u32 lin);                      /* physical page behind guest linear lin */
 void tlb_flush(void);
+void tlb_flush_range(u32 lin, u32 pages);       /* INVLPG each (whole TLB on a 386) */
 int page_dirty(u32 lin, int clear);           /* PTE dirty bit (cleared if clear) */
 void map_page(u32 lin, u32 phys, u32 flags);
 void set_a20(int on);
