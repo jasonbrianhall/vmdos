@@ -346,13 +346,25 @@ static bool wait_event(int type, int slot, int ep, Trb* out, int ms = 500) {
     return false;
 }
 
+// A command and its completion (1 = success), -1 if none came. The
+// controller may take seconds (Address Device retrying a silent device;
+// Linux allows 5), and a command that never finishes is aborted so the
+// ring moves on. Completions are matched by TRB, so a late one for an
+// earlier command isn't taken for this one's.
 static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) {
-    ring_push(H->cmd_ring, d0, d1, d2, d3);
+    uint64_t trb = ring_push(H->cmd_ring, d0, d1, d2, d3);
     H->db[0] = 0;
     Trb e;
-    if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e)) return -1;
+    for (;;) {
+        if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e, 5000)) {
+            wr(H->op, 0x18, 1u << 2);                   // CRCR.CA: abort it
+            for (int i = 0; i < 5000 && (rd(H->op, 0x18) & (1u << 3)); i++) delay_ms(1);
+            return -1;
+        }
+        if ((e.d0 & ~15u) == (uint32_t)trb && e.d1 == (uint32_t)(trb >> 32)) break;
+    }
     if (ev) *ev = e;
-    return e.d2 >> 24;                                  // completion code (1 = success)
+    return e.d2 >> 24;
 }
 
 // A control transfer on endpoint 0. Returns true on success.
@@ -375,13 +387,17 @@ static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
 }
 
 // ---------------------------------------------------------------- enumeration
-static bool reset_port(int port) {
+// Every device gets a reset before it's addressed, USB 3 ones too: a USB 3
+// link stays up through the controller reset, so the stick the firmware
+// booted from would still answer at the address the firmware gave it, not
+// at 0, and Address Device would get nothing back. `warm`: a USB 3 warm
+// reset, for a link a hot reset didn't bring back.
+static bool reset_port(int port, bool warm = false) {
     uint32_t sc = portsc(port);
-    if (!(sc & PORT_CCS)) return false;
-    if (!(sc & PORT_PED)) {                             // USB2 ports need a reset; USB3 enable themselves
-        set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
-        for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++) delay_ms(1);
-    }
+    if (!(sc & PORT_CCS) && !warm) return false;
+    set_portsc(port, (sc & PORT_KEEP) | (warm ? 1u << 31 : (uint32_t)PORT_PR));
+    for (int i = 0; i < 500 && !(portsc(port) & (PORT_PRC | (1u << 19))); i++) delay_ms(1);
+    for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
     sc = portsc(port);
     set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack change bits
     delay_ms(20);                                               // reset recovery
@@ -435,6 +451,7 @@ static void forget(int i);
 // A device that's just been reset and enabled, wherever it is: give it a
 // slot and an address, and set it up as a keyboard, mouse or hub.
 static bool setup_slot(Keyboard& k, int ki);
+static bool addr_failed;                               // the last setup_slot's Address Device failed
 static void release_slot(int slot) {
     H->dcbaa[slot] = 0;
     command(0, 0, 0, 10 << 10 | (uint32_t)slot << 24, nullptr);   // Disable Slot
@@ -724,7 +741,7 @@ static bool setup_slot(Keyboard& k, int ki) {
     ep0[4] = 8;
     uint64_t ic = phys(k.in_ctx);
     int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-    if (cc != 1) { printf("USB: %s: address failed (%d)\n", k.where, cc); return false; }
+    if (cc != 1) { printf("USB: %s: address failed (%d)\n", k.where, cc); addr_failed = true; return false; }
     delay_ms(2);
 
     static volatile uint8_t desc[256] __attribute__((aligned(64)));
@@ -860,24 +877,22 @@ static void hub_port_change(int h, int port) {
     if (!connected || existing >= 0) return;
 
     // Reset the port, wait for it to finish, and see how fast the device is.
-    // A SuperSpeed port enables itself once its link trains: a link stuck in
-    // SS.Inactive or Compliance gets a warm (BH) reset, an enabled one none.
+    // SuperSpeed ports too (see reset_port); a link stuck in SS.Inactive or
+    // Compliance gets a warm (BH) reset.
     int pls = (status >> 5) & 0xF;
     bool warm = ss && (pls == 6 || pls == 10);
-    if (!ss || warm || !(status & 2)) {
-        if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
-        bool done = false;
-        for (int i = 0; i < 50 && !done; i++) {
-            delay_ms(10);
-            if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
-            done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
-        }
-        control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
-        if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
-        status = st[0] | st[1] << 8;
-        if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
-        delay_ms(10);                                                           // reset recovery
+    if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
+    bool done = false;
+    for (int i = 0; i < 50 && !done; i++) {
+        delay_ms(10);
+        if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
+        done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
     }
+    control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
+    if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
+    status = st[0] | st[1] << 8;
+    if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
+    delay_ms(10);                                                           // reset recovery
     int speed = ss ? 4                                                          // SuperSpeed
               : (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;        // low / high / full
     setup_device(hb.port, h, port, speed);
@@ -885,8 +900,15 @@ static void hub_port_change(int h, int port) {
 
 static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
-    if (!reset_port(port)) return;
-    setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);    // 1 FS, 2 LS, 3 HS, 4+ SS
+    for (int attempt = 0; attempt < 2; attempt++) {
+        // A USB 3 device that didn't take an address: once more after a warm reset.
+        if (!reset_port(port, attempt > 0)) return;
+        int speed = (portsc(port) >> 10) & 0xF;         // 1 FS, 2 LS, 3 HS, 4+ SS
+        addr_failed = false;
+        setup_device(port, -1, 0, speed);
+        if (!addr_failed || speed < 4) return;
+        printf("USB: port %d: warm reset, trying again\n", port);
+    }
 }
 
 // ---------------------------------------------------------------- init
