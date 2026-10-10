@@ -7,7 +7,9 @@
      sectors are the real ones, everything else reads as zeros and can't
      be written, so other partitions are safe.
    - the RAM disk (dos.img as a boot module): with c=ram, or when no disk
-     partition qualifies. Changes are lost at power-off.
+     partition qualifies. Changes are lost at power-off. A floppy-sized
+     dos.img (a 1.44M image, say) is drive A: instead, and there is no
+     C: (disk_on_a); vmdos boots from A:.
    vmdos.efi passes esp=LBA and espsig= (the partition it was started from),
    which is preferred over others. */
 #include "kernel.h"
@@ -32,7 +34,8 @@ void usb_kick_ports(void);
 static struct { int usb, ide, idx; u64 sectors; const char *name; } dev[MAX_DEVS];
 static int n_dev;
 
-u32 disk_sectors;                     /* size DOS sees */
+u32 disk_sectors;                     /* size DOS sees (0: no C:) */
+int disk_on_a;                        /* no C:; the RAM disk is A: */
 static int on_dev, cdev;              /* C: is on dev[cdev] */
 static int usb_seen;                  /* USB disks taken into dev[] */
 static const char *dev_kind(int d) { return dev[d].usb ? "USB" : dev[d].ide ? "IDE" : "SATA"; }
@@ -396,6 +399,13 @@ void disk_init(void)
         if (bd >= 0) { use(bd, bs, bz); return; }
         if (n_dev) kprintf("disk: no FAT partition with KERNEL.SYS on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
     }
+    if (disk_image && !fd_ram(0, disk_image, disk_size)) {
+        disk_on_a = 1;
+        disk_sectors = 0;
+        kprintf("disk: no C:; A: is the RAM disk (dos.img, %u KiB), booting from it%s\n", disk_size >> 10,
+                want_ram ? "" : "; changes are lost at power-off");
+        return;
+    }
     if (!disk_image)
         panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI), IDE or USB disk, and no RAM disk "
               "(build with RAMDISK=1: dos.img next to vmdos.efi, GRUB module, QEMU -initrd).");
@@ -432,4 +442,4 @@ int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length 
 /* The disk and partition C: is on; -1 if C: isn't on a real disk. */
 int disk_c_dev(u32 *start, u32 *size) { *start = pstart; *size = psize; return on_dev ? cdev : -1; }
 
-const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : dev[cdev].ide ? "IDE disk" : "SATA disk") : "RAM disk"; }
+const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : dev[cdev].ide ? "IDE disk" : "SATA disk") : disk_on_a ? "no disk" : "RAM disk"; }
