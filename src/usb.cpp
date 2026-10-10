@@ -420,11 +420,11 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
     return app && ((L.x.bit >= 0 && L.y.bit >= 0) || L.hat.bit >= 0);
 }
 
-// The buttons beyond the game port's four (L, R, Select, Start) press
-// keys: Space, Left Shift, Esc, Enter by default; joykeys=L,R,SELECT,START
-// on the kernel command line changes them (set-1 scancodes in hex, 1xx for
-// E0-prefixed ones, 0 for none), e.g. joykeys=39,2A,01,1C.
-static uint16_t padkey[4] = { 0x39, 0x2A, 0x01, 0x1C };
+// The buttons beyond the game port's four (L, R, Select, Start) do nothing,
+// unless joykeys=L,R,SELECT,START on the kernel command line makes them
+// press keys (set-1 scancodes in hex, 1xx for E0-prefixed ones, 0 for
+// none), e.g. joykeys=39,2A,01,1C for Space, Left Shift, Esc, Enter.
+static uint16_t padkey[4];
 static void pad_keys_option(const char* cmdline) {
     const char* o = cmdline ? strstr(cmdline, "joykeys=") : nullptr;
     if (!o) return;
