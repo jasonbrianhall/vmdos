@@ -398,7 +398,7 @@ static bool reset_port(int port) {
     for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
     sc = portsc(port);
     set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack change bits
-    delay_ms(20);                                               // reset recovery
+    delay_ms(100);                                              // reset recovery – some sticks need more
     return portsc(port) & PORT_PED;
 }
 
@@ -485,6 +485,7 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
     if (command(0, 0, 0, TRB_ENABLE_SLOT << 10, &ev) != 1) { printf("USB: %s: no slot\n", k.where); return; }
     k.slot = ev.d3 >> 24;
     if (k.slot < 1 || k.slot > H->max_slots) return;
+    delay_ms(10);   // let the controller finish enabling the slot
     // Anything that doesn't end up driven gives its slot back: kept, a USB
     // stick plugged in a few dozen times used them all up.
     if (!setup_slot(k, ki)) release_slot(k.slot);
@@ -738,9 +739,34 @@ static bool setup_slot(Keyboard& k, int ki) {
     ep0[2] = (uint32_t)r0; ep0[3] = (uint32_t)(r0 >> 32);
     ep0[4] = 8;
     uint64_t ic = phys(k.in_ctx);
-    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-    if (cc != 1) { printf("USB: %s: address failed (%d)\n", k.where, cc); addr_failed = true; return false; }
-    delay_ms(2);
+
+    // First try the normal Address Device.
+    // If it times out, try the BSR sequence that some broken sticks need:
+    //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
+    //   2. short delay
+    //   3. Address Device with BSR=0 (real SET_ADDRESS)
+    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                     TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+    if (cc != 1) {
+        printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
+               k.where, cc);
+        // BSR = 1
+        cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                     TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
+        if (cc == 1) {
+            delay_ms(20);
+            // BSR = 0 (real SET_ADDRESS)
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                         TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+        }
+    }
+    if (cc != 1) {
+        printf("USB: %s: address failed (cc=%d, speed=%s)\n",
+               k.where, cc, speed_name(k.speed));
+        addr_failed = true;
+        return false;
+    }
+    delay_ms(10);
 
     static volatile uint8_t desc[256] __attribute__((aligned(64)));
     if (!control(k, 0x80, 6, 0x0100, 0, 8, desc)) { printf("USB: %s: no descriptor\n", k.where); return false; }
@@ -903,13 +929,49 @@ static void setup_port(int port) {
     addr_failed = false;
     setup_device(port, -1, 0, speed);
     if (!addr_failed || speed < 4) return;
-    // Some USB 3 sticks never answer on their SuperSpeed link (no Address
-    // Device completion) but work at USB 2 speed, as through a USB 2 hub.
-    // Turn the link off (SS.Disabled): the device then connects on the
-    // port's USB 2 twin, which usb_poll picks up from its connect event.
+
+    // SuperSpeed Address Device failed (or timed out).  Many sticks never
+    // answer on the SS link but work fine at USB 2.  Force the link into
+    // SS.Disabled so the device drops to the USB-2 companion of this port.
+    // Then issue a normal port reset so a fresh Connect Status Change is
+    // guaranteed to appear (some controllers stay quiet otherwise).
+
     uint32_t sc = portsc(port);
-    set_portsc(port, (sc & PORT_KEEP & ~(0xFu << 5)) | 4u << 5 | 1u << 16);   // PLS = Disabled, LWS
-    printf("USB: port %d: USB 3 link off, the device should come back at USB 2 speed\n", port);
+    printf("USB: port %d: SS address failed, forcing USB-2 (PORTSC=%08x)\n",
+           port, sc);
+
+    // 1. Put the SuperSpeed link into Disabled
+    set_portsc(port, (sc & PORT_KEEP & ~(0xFu << 5)) | (4u << 5) | (1u << 16)); // PLS=Disabled, LWS
+    delay_ms(50);                           // give the device time to drop SS
+
+    // 2. Clear any change bits that may have appeared
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+
+    // 3. Force a fresh USB-2 enumeration with a normal port reset
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PR);
+    for (int i = 0; i < 500 && !(portsc(port) & PORT_PRC); i++)
+        delay_ms(1);
+    for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++)
+        delay_ms(1);
+
+    sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack
+    delay_ms(20);                                               // reset recovery
+
+    if (portsc(port) & PORT_CCS) {
+        int new_speed = (portsc(port) >> 10) & 0xF;
+        printf("USB: port %d: device reappeared at %s speed after SS fallback\n",
+               port, speed_name(new_speed));
+        // Do **not** call setup_device here – let the normal Port Status
+        // Change path in usb_poll / setup_port pick it up.  That keeps the
+        // slot bookkeeping clean.
+        H->port_dirty[port] = true;         // make sure usb_poll sees it
+    } else {
+        printf("USB: port %d: nothing after forced USB-2 fallback (PORTSC=%08x)\n",
+               port, portsc(port));
+    }
 }
 
 // ---------------------------------------------------------------- init
