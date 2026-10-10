@@ -49,7 +49,8 @@ GRUB, which chainloads `EFI/vmdos/vmdos.efi`; on a legacy BIOS (or CSM),
 GRUB's boot code in the MBR and in the gap before the partition boots
 `boot/vmdos.elf`. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
 own entries go in `boot/grub/custom.cfg` on the stick, which nothing
-overwrites; when it exists, the menu waits 5 s:
+overwrites. The menu waits 5 s; its second entry boots with `noxms` (no
+XMS driver, for Windows 3.1 Setup):
 
 ```
 menuentry "QuickBASIC clone" {
