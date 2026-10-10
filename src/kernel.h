@@ -256,7 +256,6 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec);
 struct regs *dpmi_reflect_irq(struct regs *r, int vec);
 void wait_for_irq(void);
 void dpmi_espfix(struct regs *r);
-void dpmi_step_arm(struct regs *r);              /* step a CLI'd client while an IRQ waits */
 
 /* ---- sound.c ---- */
 void sound_init(void);

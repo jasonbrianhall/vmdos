@@ -491,7 +491,7 @@ out:
         struct regs *sw = dpmi_take_switch();
         if (sw) r = sw;
     }
-    if (from_v86 || from_pm) { r = deliver(r); dpmi_step_arm(r); }
+    if (from_v86 || from_pm) r = deliver(r);
     dpmi_espfix(r);
     return r;
 }

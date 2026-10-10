@@ -54,40 +54,9 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg);
 
 /* After a client's CLI it runs single-stepped (TF), so a POPF or IRET that
    turns interrupts back on is seen: at IOPL 0 those can't change IF
-   themselves, and PUSHF/CLI/.../POPF is common.
-   A trap per instruction is slow, and DOS/4GW runs a few hundred
-   instructions with interrupts off around every DOS call (DOOM loading its
-   WAD: several hundred thousand traps a second), ending them with STI,
-   which traps anyway. So a CLI is stepped for STEP_EAGER instructions
-   (the short PUSHF/CLI/.../POPF), then only while an interrupt is
-   waiting: the only time the client's IF matters. A CLI site whose
-   section turns out to end in POPF or IRET after that (or that is still
-   stepping STEP_LIMIT instructions later, its POPF missed) is
-   remembered and stepped all the way from then on. */
-static int stepping, step_full;
-static u32 step_cs, step_eip, step_ss, step_esp, step_count, step_site;
-#define STEP_EAGER 32
-#define STEP_LIMIT 20000
-#define N_SITES 64
-static u32 full_site[N_SITES], n_full;
-
-static int step_wanted(int vif_now)
-{
-    return stepping && !vif_now && (step_full || step_count < STEP_EAGER || vpic_pending() >= 0);
-}
-static void site_learn(void)
-{
-    if (step_full) return;
-    step_full = 1;
-    full_site[n_full++ % N_SITES] = step_site;
-    dbg(1, "DPMI: CLI at %x ends in POPF/IRET: stepped in full\n", step_site);
-}
-static void cli_seen(u32 lin)
-{
-    stepping = 1; step_count = 0; step_site = lin; step_full = 0;
-    for (u32 i = 0; i < N_SITES && i < n_full; i++)
-        if (full_site[i] == lin) { step_full = 1; break; }
-}
+   themselves, and PUSHF/CLI/.../POPF is common. */
+static int stepping;
+static u32 step_cs, step_eip, step_ss, step_esp;
 
 /* Build the frame for c at the top of the ring-0 stack and resume it. */
 static struct regs *resume(struct ctx *c)
@@ -100,11 +69,11 @@ static struct regs *resume(struct ctx *c)
     r->esi = k.esi; r->edi = k.edi; r->ebp = k.ebp;
     r->eip = k.eip; r->cs = k.cs; r->esp = k.esp; r->ss = k.ss;
     if (k.pm) {
-        if (step_wanted(k.vif)) {
+        if (stepping && !k.vif) {
             k.eflags |= EFL_TF;
             step_cs = k.cs; step_eip = k.eip; step_ss = k.ss; step_esp = k.esp;
         } else if (stepping) {
-            if (k.vif) stepping = 0;
+            stepping = 0;
             k.eflags &= ~EFL_TF;
         }
         r->eflags = (k.eflags & 0x0DD5) | EFL_IF | 2;
@@ -1005,7 +974,7 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
     int sz = op32 ? 4 : 2;
 #define NEXT(x) do { c->eip = (x); if (!code32(c)) c->eip &= 0xFFFF; } while (0)
     switch (op) {
-    case 0xFA: c->vif = 0; cli_seen(base + eip); NEXT(ip); return resume(c);
+    case 0xFA: c->vif = 0; stepping = 1; NEXT(ip); return resume(c);
     case 0xFB: c->vif = 1; NEXT(ip); return resume(c);
     case 0xF4:
         if ((c->cs & 0xFFFF) == HOST_CS) {
@@ -1075,58 +1044,6 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
     return pm_fault(c, 13, 0);
 }
 
-/* While single-stepped (after a CLI), a REP MOVS/STOS traps after every
-   element: DOS/4GW copies each DOS read out of its transfer buffer that
-   way with interrupts off, hundreds of thousands of traps while DOOM loads
-   its WAD. The next instruction is such a string op: do all of it here,
-   then step on. Anything unusual (a byte in the trapped VGA window, memory
-   the client doesn't own) is left to the CPU, one element per step. */
-static void step_rep(struct ctx *c)
-{
-    u32 base = sel_base(c->cs), ip = c->eip;
-    int o32 = code32(c), a32 = o32, rep = 0, seg = -1;
-    u8 op = 0;
-    for (int n = 0; n < 15; n++) {
-        if (!lin_ok(base + ip, 1)) return;
-        op = rd8(base + ip++);
-        if (op == 0x66) o32 ^= 1;
-        else if (op == 0x67) a32 ^= 1;
-        else if (op == 0xF2 || op == 0xF3) rep = 1;
-        else if (op == 0x26) seg = 0; else if (op == 0x2E) seg = 1; else if (op == 0x36) seg = 2;
-        else if (op == 0x3E) seg = 3; else if (op == 0x64) seg = 4; else if (op == 0x65) seg = 5;
-        else break;
-    }
-    if (!rep || (op != 0xA4 && op != 0xA5 && op != 0xAA && op != 0xAB)) return;
-    int s = (op & 1) ? (o32 ? 4 : 2) : 1, movs = op < 0xAA;
-    u32 step = (c->eflags & EFL_DF) ? (u32)-s : (u32)s;
-    u32 db = sel_base(c->es);
-    u32 sb = movs ? sel_base(seg == 0 ? c->es : seg == 1 ? c->cs : seg == 2 ? c->ss :
-                             seg == 4 ? c->fs : seg == 5 ? c->gs : c->ds) : 0;
-    u32 m = a32 ? ~0u : 0xFFFFu;
-    while (c->ecx & m) {
-        u32 d = db + (c->edi & m), v = c->eax, sa = sb + (c->esi & m);
-        if (!lin_ok(d, s) || vga16_window(d) || vga16_window(d + s - 1)) return;
-        if (movs) {
-            if (!lin_ok(sa, s) || vga16_window(sa) || vga16_window(sa + s - 1)) return;
-            v = s == 1 ? rd8(sa) : s == 2 ? rd16(sa) : rd32(sa);
-            c->esi = (c->esi & ~m) | ((c->esi + step) & m);
-        }
-        if (s == 1) wr8(d, (u8)v); else if (s == 2) wr16(d, (u16)v); else wr32(d, v);
-        c->edi = (c->edi & ~m) | ((c->edi + step) & m);
-        c->ecx = (c->ecx & ~m) | ((c->ecx - 1) & m);
-    }
-    c->eip = code32(c) ? ip : (ip & 0xFFFF);            /* past the instruction */
-}
-
-/* An interrupt became pending while a client that did CLI runs (called
-   on the way back to it): start stepping, to see interrupts come back on. */
-void dpmi_step_arm(struct regs *r)
-{
-    if ((r->eflags & EFL_VM) || (r->cs & 3) != 3 || (r->eflags & EFL_TF) || !step_wanted(vif)) return;
-    r->eflags |= EFL_TF;
-    step_cs = r->cs & 0xFFFF; step_eip = r->eip; step_ss = r->ss & 0xFFFF; step_esp = r->esp;
-}
-
 struct regs *dpmi_exception(struct regs *r)
 {
     struct ctx c;
@@ -1172,14 +1089,6 @@ struct regs *dpmi_exception(struct regs *r)
         u32 sp = sel_base(step_ss) + (sel_big(step_ss) ? step_esp : (step_esp & 0xFFFF));
         if (op == 0x9D && lin_ok(sp, 4)) c.vif = (rd16(sp) & EFL_IF) != 0;                 /* POPF */
         else if (op == 0xCF && lin_ok(sp, 12)) c.vif = (rd16(sp + (o32 ? 8 : 4)) & EFL_IF) != 0;   /* IRET */
-        if (c.vif && step_count >= STEP_EAGER) site_learn();
-        if (!c.vif && ++step_count >= STEP_LIMIT && !step_full) {
-            dbg(1, "DPMI: interrupts off for %u instructions with an IRQ waiting, at %x:%x: taken as on\n",
-                step_count, c.cs, c.eip);
-            site_learn();
-            c.vif = 1;
-        }
-        if (!c.vif) step_rep(&c);
         return resume(&c); }
     default: return pm_fault(&c, r->vec, 0);
     }
