@@ -41,14 +41,31 @@ static u8 vmbr[512];
 static u8 *bounce;                    /* 64 KiB, identity-mapped, for AHCI DMA */
 #define BOUNCE_SECS 128
 
+/* SATA and IDE transfers run with interrupts on (once they are set up):
+   a long read (IDE PIO under a VM above all) would otherwise hold off the
+   timer, and with it the sound, for its whole length: a gap you hear, and
+   lost ticks. The timer leaves the disks (and the CD) alone meanwhile.
+   USB stays as it was: usb_tick runs from the timer too. */
+static volatile int dev_busy;
+int disk_busy(void) { return dev_busy; }
+
 static int dev_rw(int d, u32 lba, u32 n, void *buf, int write)
 {
     if (dev[d].usb) return usb_msd_rw(dev[d].idx, lba, n, buf, write);
-    if (dev[d].ide) return ide_rw(dev[d].idx, lba, n, buf, write);    /* PIO: any buffer */
-    if (write) memcpy(bounce, buf, n * 512);
-    if (ahci_rw(dev[d].idx, lba, n, bounce, write)) return -1;
-    if (!write) memcpy(buf, bounce, n * 512);
-    return 0;
+    u32 fl;
+    __asm__ volatile("pushfl; popl %0" : "=r"(fl));
+    dev_busy = 1;
+    if (usb_ready) sti();
+    int e;
+    if (dev[d].ide) e = ide_rw(dev[d].idx, lba, n, buf, write) ? -1 : 0;    /* PIO: any buffer */
+    else {
+        if (write) memcpy(bounce, buf, n * 512);
+        e = ahci_rw(dev[d].idx, lba, n, bounce, write) ? -1 : 0;
+        if (!e && !write) memcpy(buf, bounce, n * 512);
+    }
+    if (!(fl & EFL_IF)) __asm__ volatile("cli" ::: "memory");
+    dev_busy = 0;
+    return e;
 }
 
 /* Raw reads from dev[probe_disk] while probing. */
@@ -121,7 +138,7 @@ void disk_flush(void)
 }
 
 /* Timer tick: a run doesn't wait more than 50 ms. */
-void disk_tick(void) { if (run_n && ticks - run_since > 50) disk_flush(); }
+void disk_tick(void) { if (!dev_busy && run_n && ticks - run_since > 50) disk_flush(); }
 
 /* Sectors of [lba, lba + n) that are in the pending run: copied over buf. */
 static void overlay_run(u32 lba, u32 n, u8 *buf)

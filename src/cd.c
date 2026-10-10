@@ -673,7 +673,8 @@ static u16 play(int unit, u32 start, u32 end)
 void cdaudio_pump(void)
 {
     static int in;
-    if (in || pl.state != 1 || pl.analog || pl.unit < 0) return;
+    int disk_busy(void);
+    if (in || disk_busy() || pl.state != 1 || pl.analog || pl.unit < 0) return;
     if (RING - (wr - rd) < 4 * SPF && pl.fill < pl.end) return;          /* full enough */
     in = 1;
     int e = fill_ring(XFRAMES);
