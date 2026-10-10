@@ -199,6 +199,7 @@ struct Keyboard {
     char where[24];                        // "port 3" / "port 3.2" for messages
     // mass storage
     int dci_out, ep_in, ep_out, iface;
+    int subclass;                          // 2, 5 (ATAPI), 4 (UFI): commands padded to 12 bytes
     Ring bout;                             // bulk OUT (bulk IN uses intr)
     uint32_t tag, bsize;
     uint64_t blocks;
@@ -574,7 +575,9 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
     w[4] = (uint8_t)tag; w[5] = (uint8_t)(tag >> 8); w[6] = (uint8_t)(tag >> 16); w[7] = (uint8_t)(tag >> 24);
     w[8] = (uint8_t)len; w[9] = (uint8_t)(len >> 8); w[10] = (uint8_t)(len >> 16); w[11] = (uint8_t)(len >> 24);
     w[12] = in ? 0x80 : 0;
-    w[14] = (uint8_t)cdb_len;
+    // ATAPI and UFI devices take 12-byte commands only (Linux pads them too):
+    // a USB CD drive behind such a bridge fails a 6-byte INQUIRY.
+    w[14] = (uint8_t)(k.subclass >= 2 && k.subclass <= 5 ? 12 : cdb_len);
     for (int i = 0; i < cdb_len; i++) w[15 + i] = cdb[i];
     int cc = bulk(k, false, w, 31, nullptr);
     if (cc != 1) { if (cc == 6) bot_reset(k); return -1; }
@@ -634,7 +637,14 @@ static bool msd_setup(Keyboard& k) {
     k.active = true;
     msd_buf[0] = 0;
     uint8_t inq[6] = { 0x12, 0, 0, 0, 36, 0 };
-    if (scsi(k, inq, 6, true, 36) == 0) {
+    int ri = -1;
+    for (int t = 0; t < 3 && ri != 0; t++) {                // a drive just plugged in may not answer at first
+        msd_buf[0] = 0;
+        ri = scsi(k, inq, 6, true, 36);
+        if (ri) { request_sense(k); delay_ms(100); }
+    }
+    if (ri) printf("USB: %s: no INQUIRY answer, taken for a disk\n", k.where);
+    if (ri == 0) {
         int n = 0;
         for (int i = 8; i < 32 && n < 27; i++) {
             char c = (char)msd_buf[i];
@@ -787,13 +797,13 @@ static bool setup_slot(Keyboard& k, int ki) {
     // A boot keyboard or mouse interface, or a hub's, and its interrupt IN endpoint.
     int iface = -1, ep_addr = 0, ep_mps = 8, ep_interval = 10;
     bool in_iface = false, is_mouse = false;
-    int ms_iface = -1, ms_in = 0, ms_out = 0, ms_mps = 512;
+    int ms_iface = -1, ms_in = 0, ms_out = 0, ms_mps = 512, ms_sub = 6;
     bool in_ms = false;
     for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
         uint8_t type = desc[i + 1];
         if (type == 4) {                                // mass storage, bulk-only transport
             in_ms = !hub && ms_iface < 0 && desc[i + 5] == 8 && desc[i + 7] == 0x50;
-            if (in_ms) ms_iface = desc[i + 2];
+            if (in_ms) { ms_iface = desc[i + 2]; ms_sub = desc[i + 6]; }
         }
         if (type == 5 && in_ms && (desc[i + 3] & 3) == 2) {
             int a = desc[i + 2], mp = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
@@ -813,7 +823,7 @@ static bool setup_slot(Keyboard& k, int ki) {
     }
     if (ms_iface >= 0 && ms_in && ms_out) {
         if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;      // SET_CONFIGURATION
-        k.iface = ms_iface; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
+        k.iface = ms_iface; k.subclass = ms_sub; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
         return msd_setup(k);
     }
     if (iface < 0 || !ep_addr) {
@@ -1142,6 +1152,8 @@ bool usb_init(const char* cmdline) {
     return true;
 }
 
+static bool usb_activity;                              // usb_poll handled a connect / disconnect
+
 void usb_poll() {
     if (usb_busy || in_poll) return;                    // a disk transfer is waiting on the event ring / re-entered
     in_poll = 1;
@@ -1152,6 +1164,7 @@ void usb_poll() {
         for (int p = 1; p <= H->num_ports; p++) {
             if (!H->port_dirty[p]) continue;
             H->port_dirty[p] = false;
+            usb_activity = true;
             uint32_t sc = portsc(p);
             set_portsc(p, (sc & PORT_KEEP) | (sc & PORT_CHANGES));   // ack
             if (sc & PORT_CCS) {
@@ -1169,11 +1182,26 @@ void usb_poll() {
         while (kbds[h].active && kbds[h].kind == HUB && kbds[h].dirty) {
             uint32_t d = kbds[h].dirty;
             kbds[h].dirty = 0;
+            usb_activity = true;
             for (int p = 1; p <= kbds[h].nports; p++)
                 if (d & (1u << p)) hub_port_change(h, p);
         }
     }
     in_poll = 0;
+}
+
+// Before cd.c counts the USB CD/DVD drives (once, as VMCD.SYS loads): let
+// devices still connecting finish (a slow drive, or one coming back at USB 2
+// speed), until nothing has happened for half a second, up to max_ms.
+extern "C" void usb_settle(int max_ms) {
+    if (!num_hc) return;
+    int quiet = 0;
+    for (int t = 0; t < max_ms && quiet < 500; t += 10) {
+        usb_activity = false;
+        usb_poll();
+        quiet = usb_activity ? 0 : quiet + 10;
+        delay_ms(10);
+    }
 }
 
 // C entry points for the kernel.

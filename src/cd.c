@@ -37,6 +37,7 @@ const char *ide_cd_model(int i);
 int ide_cd_packet(int i, const u8 *cdb, void *buf, u32 bytes);
 int ide_cd_asc(void);
 int usb_cd_count(void);
+void usb_settle(int max_ms);
 const char *usb_cd_model(int i);
 int usb_cd_packet(int i, const u8 *cdb, void *buf, u32 bytes);
 int usb_cd_asc(void);
@@ -513,6 +514,7 @@ static void units_init(void)
             ide_init();                                 /* already done when C: is on a disk */
             for (int i = 0; i < ide_cd_count() && n_phys < MAX_PHYS; i++) { ph[n_phys].ide = 1; ph[n_phys].idx = i; n_phys++; }
         }
+        usb_settle(4000);                               /* drives still connecting */
         for (int i = 0; i < usb_cd_count() && n_phys < MAX_PHYS; i++) { ph[n_phys].usb = 1; ph[n_phys].idx = i; n_phys++; }
         for (int d = 0; d < n_phys; d++)
             kprintf("cd: drive %d is the real %s drive %s\n", n_units + d + 1,
