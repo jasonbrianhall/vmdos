@@ -420,9 +420,34 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
     return app && ((L.x.bit >= 0 && L.y.bit >= 0) || L.hat.bit >= 0);
 }
 
+// The buttons beyond the game port's four (L, R, Select, Start) press
+// keys: Space, Left Shift, Esc, Enter by default; joykeys=L,R,SELECT,START
+// on the kernel command line changes them (set-1 scancodes in hex, 1xx for
+// E0-prefixed ones, 0 for none), e.g. joykeys=39,2A,01,1C.
+static uint16_t padkey[4] = { 0x39, 0x2A, 0x01, 0x1C };
+static void pad_keys_option(const char* cmdline) {
+    const char* o = cmdline ? strstr(cmdline, "joykeys=") : nullptr;
+    if (!o) return;
+    o += 8;
+    for (int i = 0; i < 4; i++) {
+        uint16_t v = 0;
+        for (; (*o >= '0' && *o <= '9') || ((*o | 32) >= 'a' && (*o | 32) <= 'f'); o++)
+            v = (uint16_t)(v * 16 + (*o <= '9' ? *o - '0' : (*o | 32) - 'a' + 10));
+        padkey[i] = v & 0x17F;
+        if (*o != ',') break;
+        o++;
+    }
+}
+static void pad_keys(Keyboard& k, int keys) {           // keys: bit 0 L, 1 R, 2 Select, 3 Start
+    int chg = keys ^ k.prev[0];
+    for (int i = 0; i < 4; i++)
+        if ((chg >> i & 1) && padkey[i]) emit(padkey[i], keys >> i & 1);
+    k.prev[0] = (uint8_t)keys;
+}
+
 static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
     const PadLayout& L = k.lay;
-    int x, y, b = 0;
+    int x, y, b = 0, keys = 0;
     if (L.dragonrise) {
         // 01 7F 7F xx yy bb cc 00: D-pad X in byte 3, Y in byte 4; byte 5
         // bits 4-7 X A B Y, byte 6 bits 0-1 L R, 4-5 Select Start.
@@ -433,6 +458,8 @@ static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
         if (b5 & 0x20) b |= 2;                                    // A: button 2
         if (b5 & 0x80) b |= 4;                                    // Y: button 3
         if (b5 & 0x10) b |= 8;                                    // X: button 4
+        uint8_t b6 = r[6];
+        keys = (b6 & 1) | (b6 & 2) | (b6 & 0x10 ? 4 : 0) | (b6 & 0x20 ? 8 : 0);   // L R Select Start
     } else {
         int off = 0;
         if (L.report_id > 0) { if (len < 1 || r[0] != L.report_id) return; off = 1; }
@@ -449,8 +476,13 @@ static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
         }
         for (int i = 0; i < 4 && i < L.btn_count; i++)
             if (hid_bits(p, n, L.btn_bit + i, 1, false)) b |= 1 << i;
+        // Most pads: buttons 5, 6 the shoulder ones, 9 Select, 10 Start.
+        static const int extra[4] = { 4, 5, 8, 9 };
+        for (int i = 0; i < 4; i++)
+            if (extra[i] < L.btn_count && hid_bits(p, n, L.btn_bit + extra[i], 1, false)) keys |= 1 << i;
     }
     joy_set(k.pad, 1, x, y, b);
+    pad_keys(k, keys);
 }
 
 static void queue_report(Keyboard& k) {
@@ -463,7 +495,7 @@ static void queue_report(Keyboard& k) {
 }
 
 static void release_all(Keyboard& k) {
-    if (k.kind == JOY) { joy_set(k.pad, 0, 128, 128, 0); return; }
+    if (k.kind == JOY) { joy_set(k.pad, 0, 128, 128, 0); pad_keys(k, 0); return; }
     if (k.mouse) { mouse_push(0, 0, 0, 0); return; }
     uint8_t empty[8] = {0};
     handle_report(k, empty);
@@ -1364,6 +1396,7 @@ bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
     calibrate_delay();
+    pad_keys_option(cmdline);
     dbg(1, "USB: %u port 80h reads a millisecond\n", io_per_ms);
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
