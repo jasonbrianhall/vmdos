@@ -15,28 +15,62 @@ u32 disk_size;
 char cmdline[512];
 int a20_on = 1;
 
-/* ---------------- physical memory ---------------- */
-static u32 alloc_next, alloc_end, ram_top;
+/* ---------------- physical memory ----------------
+   Every free stretch of RAM above 16 MiB, as a sorted list of free ranges:
+   first fit, and memory given back (EMS pages, XMS blocks) goes back in. */
+#define MAX_FREE 256
+static struct { u32 lo, hi; } fr[MAX_FREE];
+static int nfr;
+static u32 ram_top;
 
-void *phys_alloc(u32 bytes)
+static void fr_add(u32 lo, u32 hi)
 {
-    bytes = (bytes + 4095) & ~4095u;
-    if (alloc_next + bytes > alloc_end || alloc_next + bytes < alloc_next)
-        panic("out of memory (wanted %u KiB, %u KiB left)", bytes >> 10, (alloc_end - alloc_next) >> 10);
-    void *p = (void *)(uintptr_t)alloc_next;
-    alloc_next += bytes;
-    memset(p, 0, bytes);
-    return p;
+    if (hi <= lo) return;
+    int i = 0;
+    while (i < nfr && fr[i].lo < lo) i++;
+    if (i > 0 && fr[i - 1].hi == lo) {                       /* joins the one before */
+        fr[i - 1].hi = hi;
+        if (i < nfr && fr[i].lo == hi) { fr[i - 1].hi = fr[i].hi; nfr--; for (int k = i; k < nfr; k++) fr[k] = fr[k + 1]; }
+        return;
+    }
+    if (i < nfr && fr[i].lo == hi) { fr[i].lo = lo; return; } /* joins the one after */
+    if (nfr == MAX_FREE) return;                             /* (lost: never happens in practice) */
+    for (int k = nfr; k > i; k--) fr[k] = fr[k - 1];
+    fr[i].lo = lo; fr[i].hi = hi; nfr++;
 }
-
-u32 phys_free(void) { return alloc_end - alloc_next; }
 
 void *phys_try_alloc(u32 bytes)
 {
     bytes = (bytes + 4095) & ~4095u;
-    if (!bytes || bytes > alloc_end - alloc_next) return 0;
-    return phys_alloc(bytes);
+    if (!bytes) return 0;
+    for (int i = 0; i < nfr; i++)
+        if (fr[i].hi - fr[i].lo >= bytes) {
+            void *p = (void *)(uintptr_t)fr[i].lo;
+            fr[i].lo += bytes;
+            if (fr[i].lo == fr[i].hi) { nfr--; for (int k = i; k < nfr; k++) fr[k] = fr[k + 1]; }
+            memset(p, 0, bytes);
+            return p;
+        }
+    return 0;
 }
+
+void *phys_alloc(u32 bytes)
+{
+    void *p = phys_try_alloc(bytes);
+    if (!p) panic("out of memory (wanted %u KiB, %u KiB left)", ((bytes + 4095) & ~4095u) >> 10, phys_free() >> 10);
+    return p;
+}
+
+void phys_release(void *p, u32 bytes)
+{
+    bytes = (bytes + 4095) & ~4095u;
+    if (p && bytes) fr_add((u32)(uintptr_t)p, (u32)(uintptr_t)p + bytes);
+}
+
+u32 phys_free(void) { u32 n = 0; for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo; return n; }
+u32 phys_largest(void) { u32 n = 0; for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo; return n; }
+u32 ram_top_addr(void) { return ram_top; }
+u32 phys_spare(void) { u32 f = phys_free(); return f > HEAP_RESERVE ? f - HEAP_RESERVE : 0; }
 
 #define LOW_END 0x1000000u
 #define ISA_DMA_LEN 0x10000u           /* linear below this: guest + DPMI window, not identity */
@@ -392,7 +426,7 @@ void kmain(u32 magic, struct mb_info *mb)
             if (ex[j].lo < ex[i].lo) { u32 t = ex[i].lo; ex[i].lo = ex[j].lo; ex[j].lo = t;
                                        t = ex[i].hi; ex[i].hi = ex[j].hi; ex[j].hi = t; }
 
-    /* The heap: the largest free stretch of RAM between 1 MiB+64K and 4 GiB. */
+    /* The heap: every free stretch of RAM between 16 MiB and 4 GiB. */
     struct { u32 b, t; } rgn[128];
     int nr = 0;
     if (mb->flags & 64) {
@@ -413,7 +447,7 @@ void kmain(u32 magic, struct mb_info *mb)
         if (lo < LOW_END) lo = LOW_END;              /* below 16 MiB: the guest and DPMI window */
         for (int i = 0; i <= nex && lo < hi; i++) {
             u32 end = i < nex && ex[i].lo < hi ? ex[i].lo : hi;
-            if (end > lo && end - lo > alloc_end - alloc_next) { alloc_next = lo; alloc_end = end; }
+            if (end >= lo + 65536) fr_add(lo, end);
             if (i < nex && ex[i].hi > lo) lo = ex[i].hi;
         }
     }
@@ -434,9 +468,9 @@ void kmain(u32 magic, struct mb_info *mb)
         }
     }
     dbg(1, "ISA DMA buffer at %x\n", isa_dma_phys);
-    kprintf("RAM top %u MiB, heap %x-%x (%u MiB)\n", ram_top >> 20, alloc_next, alloc_end,
-            (alloc_end - alloc_next) >> 20);
-    if (alloc_end <= alloc_next + (2u << 20)) panic("not enough memory");
+    kprintf("RAM top %u MiB, heap %u MiB in %d piece%s\n", ram_top >> 20, phys_free() >> 20, nfr, nfr == 1 ? "" : "s");
+    for (int i = 0; i < nfr; i++) dbg(1, "  heap %x-%x\n", fr[i].lo, fr[i].hi);
+    if (phys_largest() < (2u << 20)) panic("not enough memory");
 
     int have_fb = 0;
     struct mb_info fbi = *mb;

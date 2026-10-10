@@ -158,7 +158,7 @@ KARGS_ALL = $(strip $(KARGS) $(if $(filter ram,$(C)),c=ram,$(if $(ISO),cd=/ISOS/
 iso: vmdos.iso
 # KARGS: kernel command line for the ISO's GRUB entry (e.g. KARGS="debug=2 audio=ac97").
 $(BUILD)/grub.cfg: grub.cfg FORCE | $(BUILD)
-	@sed 's|multiboot /boot/vmdos.elf.*|multiboot /boot/vmdos.elf $(KARGS_ALL)|' $< > $@.new
+	@sed 's|multiboot /boot/vmdos.elf|multiboot /boot/vmdos.elf $(KARGS_ALL)|' $< > $@.new
 	@$(if $(USE_RAM),true,sed -i '/dos.img/d' $@.new)
 	@for f in $(ISO_RAM); do n=$$(basename $$f); sed -i "/^}/i\    module /boot/cd/$$n $$n" $@.new; done
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
@@ -243,14 +243,21 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '# put your own entries in /boot/grub/custom.cfg)'; \
 	   echo 'insmod all_video'; \
 	   echo 'set default=0'; \
-	   echo 'if [ -f $$prefix/custom.cfg ]; then set timeout=5; else set timeout=0; fi'; \
+	   echo 'set timeout=5'; \
 	   echo 'if [ "$$grub_platform" = "efi" ]; then'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi'; \
 	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi noxms'; \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
+	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
 	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
 	   echo '  }'; \
 	   echo 'fi'; \

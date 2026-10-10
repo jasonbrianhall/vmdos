@@ -206,18 +206,14 @@ static u32 lin(u32 sel, u32 off) { return sel_base(sel) + off; }
 /* Is [a, a+n) something the client may hand us? (DOS memory or one of its blocks) */
 #define MAX_BLOCKS 512
 static struct { u32 lin, size; u8 used; } blk[MAX_BLOCKS];
-u8 *xms_pool_range(u32 *len);
+int xms_range_ok(u32 a, u32 n);
 static int alloc_block(u32 size);
 static void merge_free(void);
 static int lin_ok(u32 a, u32 n)
 {
     if (a + n < a) return 0;
     if (a + n <= GUEST_TOP) return 1;
-    {
-        u32 xl;
-        u32 xb = (u32)(uintptr_t)xms_pool_range(&xl);
-        if (xl && a >= xb && a + n <= xb + xl) return 1;
-    }
+    if (xms_range_ok(a, n)) return 1;
     for (int i = 0; i < MAX_BLOCKS; i++)
         if (blk[i].size && blk[i].used && a >= blk[i].lin && a + n <= blk[i].lin + blk[i].size) return 1;
     if (locked_stack && a >= locked_stack && a + n <= locked_stack + LOCKED_SIZE) return 1;
@@ -471,7 +467,7 @@ static int desc_rights_ok(u8 acc) { return (acc & 0x60) == 0x60 && (acc & 0x10);
    "largest block" stays what the window has, so DOS/4GW stays inside it. */
 #define WIN_LO 0x00200000u
 #define WIN_HI 0x01000000u
-#define RESERVE (16u << 20)             /* heap the kernel keeps for itself */
+#define RESERVE HEAP_RESERVE            /* heap the kernel keeps for itself */
 
 static u32 dpmi_cap(void)
 {
@@ -574,6 +570,24 @@ static int reuse(u32 size, int window)
     return fit;
 }
 
+/* RAM behind window pages [lin, lin+size), in as many pieces as the heap
+   has it in (the window maps each page on its own). */
+static int back_window(u32 lin, u32 size)
+{
+    for (u32 o = 0; o < size;) {
+        u32 n = phys_largest() & ~4095u;
+        if (n > size - o) n = size - o;
+        u8 *p = n ? phys_try_alloc(n) : 0;
+        if (!p) {                                   /* (not after the checks: give back what was mapped) */
+            for (u32 k = 0; k < o; k += 4096) map_page(lin + k, guest_phys(0), 0);
+            return 0;
+        }
+        for (u32 k = 0; k < n; k += 4096) map_page(lin + o + k, (u32)(uintptr_t)p + k, 7);
+        o += n;
+    }
+    return 1;
+}
+
 /* Window first (a freed block, then fresh space), memory above 16 MiB only
    when the window can't: DOS/4GW handed an old block from up there (left
    by Quake) fails with "can't lock stack". */
@@ -588,10 +602,12 @@ static int alloc_block(u32 size)
     if (size > dpmi_avail()) return -1;
     if (phys_free() < size + RESERVE) return -1;
     if ((i = new_slot()) < 0) return -1;
-    u8 *p = phys_try_alloc(size);
-    if (!p) return -1;
-    if (lin) for (u32 o = 0; o < size; o += 4096) map_page(lin + o, (u32)(uintptr_t)p + o, 7);
-    else { lin = (u32)(uintptr_t)p; set_user(lin, size, 1); }       /* above 16 MiB, where it is */
+    if (lin) { if (!back_window(lin, size)) return -1; }
+    else {                                          /* above 16 MiB, where it is: one piece */
+        u8 *p = phys_try_alloc(size);
+        if (!p) return -1;
+        lin = (u32)(uintptr_t)p; set_user(lin, size, 1);
+    }
     blk[i].lin = lin; blk[i].size = size; blk[i].used = 1;
     memset(gptr(lin), 0, size);
     return i;
@@ -605,9 +621,7 @@ static int grow_in_place(int o, u32 size)
     for (int i = 0; i < MAX_BLOCKS; i++)
         if (i != o && blk[i].size && blk[i].lin < end + more && end < blk[i].lin + blk[i].size) return 0;
     if (more > dpmi_avail() || phys_free() < more + RESERVE) return 0;
-    u8 *p = phys_try_alloc(more);
-    if (!p) return 0;
-    for (u32 a = 0; a < more; a += 4096) map_page(end + a, (u32)(uintptr_t)p + a, 7);
+    if (!back_window(end, more)) return 0;
     memset(gptr(end), 0, more);
     blk[o].size = size;
     return 1;

@@ -49,7 +49,8 @@ GRUB, which chainloads `EFI/vmdos/vmdos.efi`; on a legacy BIOS (or CSM),
 GRUB's boot code in the MBR and in the gap before the partition boots
 `boot/vmdos.elf`. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
 own entries go in `boot/grub/custom.cfg` on the stick, which nothing
-overwrites; when it exists, the menu waits 5 s:
+overwrites. The menu waits 5 s; its second entry boots with `noxms` (no
+XMS driver):
 
 ```
 menuentry "QuickBASIC clone" {
@@ -290,13 +291,21 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   (`LH C:\VMDOS\CTMOUSE.COM`), which takes over INT 33h. Some games need it
   (Warcraft II), most don't: put REM in front of that line to use the
   built-in driver.
-- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (1 GB or half the free
+- Memory: XMS, EMS and DPMI share the RAM above 16 MiB (every free stretch
+  of it). Nothing is set aside at boot: a program's XMS block or EMS pages
+  take RAM when allocated and give it back when freed; the kernel keeps
+  4 MiB for itself. A 64 MB machine leaves DPMI programs (Quake) about
+  22 MB, 128 MB about 80 MB.
+- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (up to 1 GB or half the free
   RAM below 4 GB, `xms=MB`; the old XMS 2.0 calls report at most 64 MB) and 96 KB of upper memory (C800h-DFFFh; 160 KB to EFFFh with
   `ems=0`). `VMXMS.SYS`, loaded first in FDCONFIG.SYS, is the HIMEM-style
   front (device XMSXXXX0, INT 2Fh hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH
   and FreeCOM's XMS swapping work: about 620 KB free for programs.
+  `noxms` hides the XMS driver altogether (no installation check answer,
+  VMXMS.SYS doesn't load, DOS loads low), for software that brings its
+  own, such as Windows 3.1x Setup.
 - EMS 4.0 (expanded memory, INT 67h) in the monitor, as EMM386 gives it:
-  32 MB (`ems=MB`, `ems=0` for none), page frame E000h, functions 40h-5Ch
+  up to 32 MB (`ems=MB`, `ems=0` for none), page frame E000h, functions 40h-5Ch
   (allocate, map, map multiple, reallocate, save/restore and partial page
   maps, handle names and directory, move/exchange region, mappable pages,
   hardware info). `VMEMS.SYS` is the EMMXXXX0 device programs look for

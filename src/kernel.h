@@ -96,6 +96,11 @@ u32 pit_clock(void);                          /* 1.193182 MHz monotonic clock (w
 void *phys_alloc(u32 bytes);                  /* page-aligned, zeroed */
 u32 phys_free(void);                          /* bytes left in the heap */
 void *phys_try_alloc(u32 bytes);              /* like phys_alloc, NULL when out */
+void phys_release(void *p, u32 bytes);        /* give back (what phys_alloc gave, or a part) */
+u32 phys_largest(void);                       /* the biggest piece phys_alloc could give */
+#define HEAP_RESERVE (4u << 20)                /* kept for the kernel: EMS, XMS, DPMI stop short of it */
+u32 phys_spare(void);                         /* phys_free less HEAP_RESERVE */
+u32 ram_top_addr(void);                       /* the end of RAM below 4 GiB */
 void set_user(u32 lin, u32 len, int user);    /* ring 3 access to these pages */
 void *map_mmio64_user(u64 phys, u32 len);
 u32 guest_phys(u32 lin);                      /* physical page behind guest linear lin */
@@ -221,6 +226,7 @@ int bios_stub_is_direct(int vec);
 
 /* ---- xms.c: the XMS 3.0 driver (HMA, extended memory blocks, UMBs) ---- */
 void xms_init(void);
+extern int xms_hidden;                         /* noxms: no XMS driver */
 void xms_call(struct regs *r);
 
 /* ---- mouse.c: PS/2 and USB mice, INT 33h ---- */
