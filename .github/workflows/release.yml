@@ -8,7 +8,37 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    branches: [ main, dev ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - 'Makefile'
+      - '**/Makefile'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - 'vcpkg.json'
+      - '**.yml'
+      - '**.yaml'
+      - '**.hpp'
+      - '**.S'
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - 'Makefile'
+      - '**/Makefile'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - 'vcpkg.json'
+      - '**.yml'
+      - '**.yaml'
+      - '**.hpp'
+      - '**.S'
+
+
   workflow_dispatch:
 
 permissions:
