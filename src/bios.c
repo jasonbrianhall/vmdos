@@ -176,7 +176,7 @@ static int int16(struct regs *r)
         AX(r) = w;
         break;
     case 0x01: case 0x11:
-        if (!kbuf_get(&w, 0)) { guest_idle_poll(); set_zf(r, 1); break; }   /* no key: polling, maybe idle */
+        if (!kbuf_get(&w, 0)) { set_zf(r, 1); break; }   /* no key */
         if (AH(r) == 0x01 && (w & 0xFF) == 0xE0 && (w >> 8)) w &= 0xFF00;
         AX(r) = w;
         set_zf(r, 0);

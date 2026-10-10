@@ -819,7 +819,7 @@ static struct regs *default_int(struct ctx *c, int n)
         return terminate(c, (u8)c->eax, 0);
     }
     if (n == 0x2F && (c->eax & 0xFFFF) == 0x1686) { SET16(eax, 0); return resume(c); }
-    if (n == 0x2F && (c->eax & 0xFFFF) == 0x1680) { idle_wait(); c->eax &= ~0xFFu; return resume(c); }   /* idle */
+    if (n == 0x2F && (c->eax & 0xFFFF) == 0x1680) { c->eax &= ~0xFFu; return resume(c); }   /* release time slice: no-op */
     return reflect(c, n, X_REFLECT);
 }
 
