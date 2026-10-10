@@ -254,7 +254,7 @@ static void list(u32 o)
         if (bd) { snprintf(b, sizeof b, "  = BIOS disk %02xh", bd); put(&o, b); }
         int any = 0;
         for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
-        put(&o, any ? "\r\n" : !mib ? "  (unplugged)\r\n" : "  (no partitions)\r\n");
+        put(&o, any ? "\r\n" : !mib ? "  (unplugged)\r\n" : "\r\n       no partitions: make one with FDISK, then VMHD again\r\n");
         for (int i = 0; i < n_parts; i++) {
             const struct part *p = &parts[i];
             if (p->dev != d) continue;
@@ -273,7 +273,17 @@ static void list(u32 o)
             if (is_c(p)) put(&o, "  = C:");
             else if (u >= 0) { snprintf(b, sizeof b, "  = %c:", 'A' + first_drive + u); put(&o, b); }
             put(&o, "\r\n");
+            if (!p->fat && dos_part(p) && !is_ext(p->type) && n_units) {
+                if (u >= 0) snprintf(b, sizeof b, "       next: FORMAT %c:\r\n", 'A' + first_drive + u);
+                else snprintf(b, sizeof b, "       next: VMHD %c: %d, then FORMAT %c:\r\n", 'A' + first_drive, i + 1, 'A' + first_drive);
+                put(&o, b);
+            }
         }
+    }
+    if (n_units) {
+        snprintf(b, sizeof b, "VMHD %c: n puts partition n in %c:, VMHD %c: /E takes it out.\r\n",
+                 'A' + first_drive, 'A' + first_drive, 'A' + first_drive);
+        put(&o, b);
     }
     wr8(o, '$');
 }
