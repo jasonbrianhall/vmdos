@@ -9,7 +9,9 @@
 // plugged in later), and turns keyboards' 8-byte boot reports into the same
 // PS/2 set-1 scancodes the rest of the kernel already handles. A USB 3 hub
 // is two: its USB 2 half (keyboards, mice, USB 2 sticks) and its
-// SuperSpeed half (USB 3 sticks and drives).
+// SuperSpeed half (USB 3 sticks and drives). Gamepads and joysticks (any
+// HID one with X/Y or a hat switch; the DragonRise SNES clones by their
+// own layout) become the game port's joysticks (joy.c).
 // From baremetaldoom (same author); here the scancodes go to the DOS guest's
 // virtual keyboard controller.
 #include "hw.hpp"
@@ -174,7 +176,17 @@ static bool next_event(Trb* out) {
 // string down through the hubs (4 bits a tier), and, for a low/full-speed
 // device behind a high-speed hub, that hub's slot and port (its transaction
 // translator).
-enum Kind { KBD, MOUSE, HUB, MSD };
+enum Kind { KBD, MOUSE, HUB, MSD, JOY };
+
+// Where a gamepad's report has its X, Y, hat switch and buttons, from its
+// HID report descriptor. bit < 0: not there.
+struct HidField { int bit, size; int32_t lmin, lmax; };
+struct PadLayout {
+    int report_id;                         // 0: reports have no ID byte
+    HidField x, y, hat;
+    int btn_bit, btn_count;                // buttons 1..n, one bit each from btn_bit
+    bool dragonrise;                       // 0079:0011 SNES clones: fixed layout
+};
 struct Keyboard {
     bool active;
     Hc* hc;                                // the controller it's on
@@ -192,6 +204,10 @@ struct Keyboard {
     Ring ep0, intr;
     volatile uint8_t* reports;             // one 8-byte buffer per ring slot
     uint8_t prev[8];
+    int rsize;                             // bytes a report buffer (8; a gamepad's endpoint size)
+    // gamepads
+    int pad;                               // joystick A (0) or B (1)
+    PadLayout lay;
     // hubs
     int nports, ttt;
     uint32_t dirty;                        // ports with a change waiting (bit n = port n)
@@ -287,15 +303,138 @@ static void handle_report(Keyboard& k, const volatile uint8_t* r) {
     memcpy(k.prev, cur, 8);
 }
 
+#define REPORT_MAX 64                       // a report buffer at most (a full-speed interrupt packet)
+
+// ---------------------------------------------------------------- gamepads
+static int32_t hid_bits(const volatile uint8_t* r, int len, int bit, int size, bool sign) {
+    uint32_t v = 0;
+    for (int i = 0; i < size; i++) {
+        int b = bit + i;
+        if ((b >> 3) < len && (r[b >> 3] >> (b & 7)) & 1) v |= 1u << i;
+    }
+    if (sign && size < 32 && (v >> (size - 1)) & 1) v |= ~0u << size;
+    return (int32_t)v;
+}
+// A field's value as 0..255.
+static int hid_axis(const volatile uint8_t* r, int len, const HidField& f) {
+    if (f.bit < 0 || f.lmax <= f.lmin) return 128;
+    int32_t v = hid_bits(r, len, f.bit, f.size, f.lmin < 0);
+    if (v < f.lmin) v = f.lmin;
+    if (v > f.lmax) v = f.lmax;
+    uint32_t off = (uint32_t)(v - f.lmin), span = (uint32_t)(f.lmax - f.lmin);
+    while (span > 0xFFFFFF) { span >>= 8; off >>= 8; }       // 32-bit math (no 64-bit division here)
+    return span ? (int)(off * 255 / span) : 128;
+}
+
+// The parts of a HID report descriptor a gamepad needs: the first input
+// X, Y, hat switch and buttons (and their report ID). True if it is a
+// joystick or gamepad with something to steer by.
+static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
+    L.report_id = 0; L.x.bit = L.y.bit = L.hat.bit = -1; L.btn_bit = -1; L.btn_count = 0;
+    int page = 0, size = 0, count = 0, rid = 0, ids_used = 0;
+    int32_t lmin = 0, lmax = 0;
+    int usages[16], nu = 0, umin = 0, umax = -1;
+    bool app = false;
+    int bitpos[16] = { 0 };                 // the next bit in each report ID's report
+    for (int i = 0; i < n; ) {
+        uint8_t h = d[i];
+        if (h == 0xFE) { if (i + 2 >= n) break; i += 3 + d[i + 1]; continue; }   // long item
+        int sz = (h & 3) == 3 ? 4 : h & 3;
+        if (i + 1 + sz > n) break;
+        uint32_t u = 0;
+        for (int j = 0; j < sz; j++) u |= (uint32_t)d[i + 1 + j] << (8 * j);
+        int32_t sv = sz == 1 ? (int8_t)u : sz == 2 ? (int16_t)u : (int32_t)u;
+        int tag = h & 0xFC;
+        i += 1 + sz;
+        switch (tag) {
+        case 0x04: page = (int)u; break;                                         // usage page
+        case 0x14: lmin = sv; break;
+        case 0x24: lmax = sv; break;
+        case 0x74: size = (int)u; break;
+        case 0x94: count = (int)u; break;
+        case 0x84: rid = (int)u & 15; ids_used = 1; break;                       // report ID
+        case 0x08: if (nu < 16) usages[nu++] = (int)(u & 0xFFFF) | ((u >> 16) ? (int)(u >> 16) << 16 : page << 16); break;
+        case 0x18: umin = (int)u; break;
+        case 0x28: umax = (int)u; break;
+        case 0xA0:                                                               // collection
+            if (nu && (usages[0] == (1 << 16 | 4) || usages[0] == (1 << 16 | 5))) app = true;   // joystick, gamepad
+            nu = 0; umin = 0; umax = -1;
+            break;
+        case 0x80: {                                                             // input
+            int32_t mx = lmax;
+            if (mx < lmin && size < 32) mx = (int32_t)((uint32_t)lmax & ((1u << size) - 1));   // 0..255 written as -1
+            for (int k = 0; k < count; k++) {
+                int bit = bitpos[rid] + k * size;
+                if (u & 1) continue;                                             // constant: padding
+                int usage = k < nu ? usages[k] : nu ? usages[nu - 1] : umax >= umin ? (page << 16 | (umin + k)) : 0;
+                if (!(u & 2)) usage = 0;                                         // an array: not ours
+                HidField f = { bit, size, lmin, mx };
+                bool take = !L.report_id || L.report_id == rid;
+                if (usage == (1 << 16 | 0x30) && L.x.bit < 0 && take) { L.x = f; L.report_id = rid; }
+                else if (usage == (1 << 16 | 0x31) && L.y.bit < 0 && take) { L.y = f; L.report_id = rid; }
+                else if (usage == (1 << 16 | 0x39) && L.hat.bit < 0 && take) { L.hat = f; L.report_id = rid; }
+                else if (page == 9 && size == 1 && take && umax >= umin) {
+                    if (L.btn_bit < 0) { L.btn_bit = bit; L.report_id = rid; }
+                    if (bit == L.btn_bit + L.btn_count) L.btn_count++;
+                }
+            }
+            bitpos[rid] += size * count;
+            nu = 0; umin = 0; umax = -1;
+            break; }
+        case 0x90: case 0xB0: case 0xC0:                                         // output, feature, end
+            if (tag != 0xC0) bitpos[rid] += 0;                                    // (not in input reports)
+            nu = 0; umin = 0; umax = -1;
+            break;
+        }
+    }
+    if (!ids_used) L.report_id = 0;
+    else if (!L.report_id) L.report_id = -1;                                     // IDs, but ours had none?
+    return app && ((L.x.bit >= 0 && L.y.bit >= 0) || L.hat.bit >= 0);
+}
+
+static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
+    const PadLayout& L = k.lay;
+    int x, y, b = 0;
+    if (L.dragonrise) {
+        // 01 7F 7F xx yy bb cc 00: D-pad X in byte 3, Y in byte 4; byte 5
+        // bits 4-7 X A B Y, byte 6 bits 0-1 L R, 4-5 Select Start.
+        if (len < 7) return;
+        x = r[3]; y = r[4];
+        uint8_t b5 = r[5];
+        if (b5 & 0x40) b |= 1;                                    // B: button 1
+        if (b5 & 0x20) b |= 2;                                    // A: button 2
+        if (b5 & 0x80) b |= 4;                                    // Y: button 3
+        if (b5 & 0x10) b |= 8;                                    // X: button 4
+    } else {
+        int off = 0;
+        if (L.report_id > 0) { if (len < 1 || r[0] != L.report_id) return; off = 1; }
+        const volatile uint8_t* p = r + off;
+        int n = len - off;
+        x = hid_axis(p, n, L.x); y = hid_axis(p, n, L.y);
+        if (L.hat.bit >= 0) {                                     // a hat switch steers too
+            int32_t h = hid_bits(p, n, L.hat.bit, L.hat.size, false) - L.hat.lmin;
+            if (h >= 0 && h < 8) {                                // 0 up, clockwise; else centred
+                static const int8_t hx[8] = { 0, 1, 1, 1, 0, -1, -1, -1 }, hy[8] = { -1, -1, 0, 1, 1, 1, 0, -1 };
+                if (hx[h]) x = hx[h] < 0 ? 0 : 255;
+                if (hy[h]) y = hy[h] < 0 ? 0 : 255;
+            }
+        }
+        for (int i = 0; i < 4 && i < L.btn_count; i++)
+            if (hid_bits(p, n, L.btn_bit + i, 1, false)) b |= 1 << i;
+    }
+    joy_set(k.pad, 1, x, y, b);
+}
+
 static void queue_report(Keyboard& k) {
     int idx = k.intr.enq;
-    for (int i = 0; i < 8; i++) k.reports[idx * 8 + i] = 0;
-    uint64_t buf = phys(k.reports + idx * 8);
-    ring_push(k.intr, (uint32_t)buf, (uint32_t)(buf >> 32), 8,
+    for (int i = 0; i < k.rsize; i++) k.reports[idx * REPORT_MAX + i] = 0;
+    uint64_t buf = phys(k.reports + idx * REPORT_MAX);
+    ring_push(k.intr, (uint32_t)buf, (uint32_t)(buf >> 32), k.rsize,
               TRB_NORMAL << 10 | (1 << 5) | (1 << 2));     // IOC, ISP
 }
 
 static void release_all(Keyboard& k) {
+    if (k.kind == JOY) { joy_set(k.pad, 0, 128, 128, 0); return; }
     if (k.mouse) { mouse_push(0, 0, 0, 0); return; }
     uint8_t empty[8] = {0};
     handle_report(k, empty);
@@ -316,15 +455,16 @@ static void dispatch(const Trb& e) {
         uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
         int idx = (int)((trb - phys(k.intr.trb)) / sizeof(Trb));
         if (idx >= 0 && idx < RING_TRBS && (cc == 1 || cc == 13)) {
-            const volatile uint8_t* r = k.reports + idx * 8;
+            const volatile uint8_t* r = k.reports + idx * REPORT_MAX;
             if (k.kind == HUB) k.dirty |= (uint32_t)(r[0] | r[1] << 8 | r[2] << 16) & ~1u;   // bit 0: the hub itself
+            else if (k.kind == JOY) pad_report(k, r, k.rsize - (int)(e.d2 & 0xFFFFFF));
             else handle_report(k, r);
         }
         if (cc == 1 || cc == 13) queue_report(k);
         else {
             if (k.kind != HUB) release_all(k);
             k.active = false;
-            printf("USB: %s on %s stopped (code %d)\n", k.kind == HUB ? "hub" : k.mouse ? "mouse" : "keyboard", k.where, cc);
+            printf("USB: %s on %s stopped (code %d)\n", k.kind == HUB ? "hub" : k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where, cc);
         }
         H->db[slot] = k.dci;
     }
@@ -720,7 +860,7 @@ static bool setup_slot(Keyboard& k, int ki) {
     if (!m.out_ctx) {                                   // sized for 64-byte contexts, whichever controller
         m.out_ctx = (volatile uint8_t*)dma_alloc(32 * 64, 64);
         m.in_ctx  = (volatile uint8_t*)dma_alloc(33 * 64, 64);
-        m.reports = (volatile uint8_t*)dma_alloc(RING_TRBS * 8, 64);
+        m.reports = (volatile uint8_t*)dma_alloc(RING_TRBS * REPORT_MAX, 64);
         m.ep0     = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
         m.intr    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
         m.bout    = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
@@ -733,7 +873,8 @@ static bool setup_slot(Keyboard& k, int ki) {
     k.out_ctx = m.out_ctx; k.in_ctx = m.in_ctx; k.reports = m.reports;
     memset((void*)k.out_ctx, 0, 32 * 64);
     memset((void*)k.in_ctx, 0, 33 * 64);
-    memset((void*)k.reports, 0, RING_TRBS * 8);
+    memset((void*)k.reports, 0, RING_TRBS * REPORT_MAX);
+    k.rsize = 8;
     ring_attach(k.ep0, m.ep0);
     ring_attach(k.intr, m.intr);
     ring_attach(k.bout, m.bout);
@@ -788,6 +929,8 @@ static bool setup_slot(Keyboard& k, int ki) {
         ep0[1] = (ep0[1] & 0xFFFF) | (uint32_t)mps << 16;
         command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_EVALUATE_CTX << 10 | (uint32_t)k.slot << 24, nullptr);
     }
+    uint16_t vid = 0, pid = 0;
+    if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) { vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; }
     if (!control(k, 0x80, 6, 0x0200, 0, 9, desc)) return false;
     int total = desc[2] | desc[3] << 8;
     if (total > (int)sizeof(desc)) total = sizeof(desc);
@@ -799,8 +942,21 @@ static bool setup_slot(Keyboard& k, int ki) {
     bool in_iface = false, is_mouse = false;
     int ms_iface = -1, ms_in = 0, ms_out = 0, ms_mps = 512, ms_sub = 6;
     bool in_ms = false;
+    // Any other HID interface (a gamepad?): its report descriptor's length, interrupt IN endpoint.
+    int hid_iface = -1, hid_len = 0, hid_ep = 0, hid_mps = 8, hid_interval = 10;
+    bool in_hid = false;
     for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
         uint8_t type = desc[i + 1];
+        if (type == 4) {
+            in_hid = !hub && hid_iface < 0 && desc[i + 5] == 3 && !(desc[i + 6] == 1 && (desc[i + 7] == 1 || desc[i + 7] == 2));
+            if (in_hid) hid_iface = desc[i + 2];
+        } else if (type == 0x21 && in_hid && i + 8 < total) {
+            hid_len = desc[i + 7] | desc[i + 8] << 8;                   // the first class descriptor: the report descriptor
+        } else if (type == 5 && in_hid && !hid_ep && (desc[i + 2] & 0x80) && (desc[i + 3] & 3) == 3) {
+            hid_ep = desc[i + 2];
+            hid_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+            hid_interval = desc[i + 6];
+        }
         if (type == 4) {                                // mass storage, bulk-only transport
             in_ms = !hub && ms_iface < 0 && desc[i + 5] == 8 && desc[i + 7] == 0x50;
             if (in_ms) { ms_iface = desc[i + 2]; ms_sub = desc[i + 6]; }
@@ -825,6 +981,37 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;      // SET_CONFIGURATION
         k.iface = ms_iface; k.subclass = ms_sub; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
         return msd_setup(k);
+    }
+    if ((iface < 0 || !ep_addr) && hid_iface >= 0 && hid_ep && hid_len) {   // a gamepad?
+        if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;      // SET_CONFIGURATION
+        static volatile uint8_t rd[512] __attribute__((aligned(64)));
+        int n = hid_len > (int)sizeof(rd) ? (int)sizeof(rd) : hid_len;
+        if (!control(k, 0x81, 6, 0x2200, hid_iface, n, rd)) { printf("USB: %s: no HID report descriptor\n", k.where); return false; }
+        bool pad = hid_parse(rd, n, k.lay);
+        k.lay.dragonrise = vid == 0x0079 && pid == 0x0011;
+        if (!pad && !k.lay.dragonrise) {
+            printf("USB: %s: HID device %04x:%04x, not a keyboard, mouse or gamepad\n", k.where, vid, pid);
+            return false;
+        }
+        int slot = -1;
+        for (int s2 = 0; s2 < 2 && slot < 0; s2++) {
+            bool used = false;
+            for (auto& o : kbds) used |= o.active && o.kind == JOY && o.pad == s2;
+            if (!used) slot = s2;
+        }
+        if (slot < 0) { printf("USB: %s: a third gamepad (the game port has two)\n", k.where); return false; }
+        control(k, 0x21, 0x0A, 0, hid_iface, 0, nullptr);                  // SET_IDLE 0: reports on changes (may stall)
+        k.rsize = hid_mps < 8 ? 8 : hid_mps > REPORT_MAX ? REPORT_MAX : hid_mps;
+        if (!configure_intr(k, hid_ep, hid_mps, hid_interval)) return false;
+        k.kind = JOY;
+        k.pad = slot;
+        k.active = true;
+        for (int i = 0; i < 8; i++) queue_report(k);
+        H->db[k.slot] = k.dci;
+        joy_set(slot, 1, 128, 128, 0);
+        printf("USB: gamepad %04x:%04x on %s: joystick %c (%s, slot %d, %s speed)\n", vid, pid, k.where, 'A' + slot,
+               k.lay.dragonrise ? "SNES layout" : k.lay.hat.bit >= 0 && k.lay.x.bit < 0 ? "hat" : "X/Y", k.slot, speed_name(k.speed));
+        return true;
     }
     if (iface < 0 || !ep_addr) {
         int c0 = -1, c1 = 0, c2 = 0;                    // the first interface's class / subclass / protocol
@@ -880,10 +1067,11 @@ static void forget(int i) {
     H = k.hc;
     for (int j = 0; j < MAX_KBD; j++)
         if (kbds[j].active && kbds[j].parent == i) forget(j);
-    if (k.kind == KBD || k.kind == MOUSE) release_all(k);
+    if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
     k.active = false;
     command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
-    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") : k.mouse ? "mouse" : "keyboard", k.where);
+    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
+           k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
 // Port `port` of hub h: something plugged in or out (or the first look).

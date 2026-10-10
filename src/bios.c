@@ -293,6 +293,10 @@ static int int15(struct regs *r)
         while ((int32_t)(pit_clock() - end) < 0) idle_wait();
         set_cf(r, 0);
         return BIOS_DONEF; }
+    case 0x84:                                            /* joystick (joy.c) */
+        if (joy_bios(r)) { set_cf(r, 0); return BIOS_DONEF; }
+        set_cf(r, 1);
+        return BIOS_DONEF;
     case 0x88: AX(r) = 0; set_cf(r, 0); return BIOS_DONEF;
     case 0x90: case 0x91: AH(r) = 0; set_cf(r, 0); return BIOS_DONEF;
     case 0xC0:

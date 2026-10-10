@@ -174,6 +174,13 @@ int disk_dev_index(int d);
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write);
 int disk_c_dev(u32 *start, u32 *size);
 
+/* ---- joy.c: game port, USB gamepads ---- */
+void joy_set(int pad, int on, int x, int y, int buttons);
+int joy_present(void);
+u8 joy_port_in(void);
+void joy_port_out(void);
+int joy_bios(struct regs *r);
+
 /* ---- hd.c: VMHD, other disks' partitions as DOS drives ---- */
 void hd_api(struct regs *r);
 int hd_bios_disks(void);                       /* BIOS hard disks: C:'s, then the others (once DOS is up) */

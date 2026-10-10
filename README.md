@@ -258,6 +258,11 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
 - Keyboards: PS/2, and USB on xHCI (boot protocol, hubs, hot-plug; polled).
   `usb=off` on the command line skips USB.
+- Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
+  first is joystick A, a second joystick B (with one, its buttons 3 and 4
+  are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES
+  clones (0079:0011) by their own layout: D-pad, B = button 1, A = 2,
+  Y = 3, X = 4. Games calibrate as with any analog stick.
 - Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
   MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
   the program's event handler (0Ch/14h; for DOS extenders' programs too,
