@@ -6,7 +6,7 @@
 ; Not under vmdos it doesn't stay in memory.
         org 0
 hdr:    dd -1
-        dw 2002h                        ; block device, 32-bit sector numbers, no FAT for BUILD BPB
+        dw 2042h                        ; block device, 32-bit sectors, generic IOCTL (FORMAT), no FAT for BUILD BPB
         dw strategy
         dw interrupt
 units:  db 0                            ; number of drives (set at init)

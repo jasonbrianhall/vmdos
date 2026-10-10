@@ -105,12 +105,21 @@ add the line), and VMHD.COM fills them:
     VMHD D: 3            puts partition 3 in D:
     VMHD D: 3 /R         ... read-only
     VMHD D: /E           takes it out
+    VMHD /FDISK 2        disk 2 becomes BIOS disk 2, for FDISK
 
 Only a FAT partition (FAT12/16/32; MBR primary or logical, GPT, or a disk
 without a partition table) goes in, never C: and never one that's in
 another drive. One with FAT but a partition type that isn't DOS's (an EFI
 system partition, a Linux- or hidden-typed one, a GPT partition other than
-basic data) needs a Y first. VMHD's drives come before the CD drives, so
+basic data) needs a Y first.
+
+A new disk: `VMHD /FDISK 2` (after a Y) shows disk 2 to the BIOS as the
+second hard disk, so FDISK (FreeDOS's, not included) can partition it;
+`VMHD /FDISK OFF` ends that. C:'s disk can't be chosen. Then `VMHD D: 2`
+puts the new partition in D: (it has no file system yet: another Y) and
+`FORMAT D:` formats it (VMHD.SYS gives FORMAT the device parameters, FAT16
+or FAT32 by the partition's type and size). If FDISK restarts the PC, run
+VMHD again afterwards: the partitions are on the disk. VMHD's drives come before the CD drives, so
 those move along: the first CD drive is F: with two VMHD drives.
 
 QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which

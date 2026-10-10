@@ -13,7 +13,14 @@
 
    Every request of VMHD.SYS comes here (INT 2Fh AX=5647h BX=1), as
    VMCD.SYS's go to cd.c. Sectors are relative to the partition: DOS sees
-   one FAT volume per drive, and nothing outside it can be reached. */
+   one FAT volume per drive, and nothing outside it can be reached.
+
+   A new disk: "VMHD /FDISK 3" (after a Y) shows disk 3 to the BIOS as
+   the second hard disk (81h), for FDISK; nothing else uses it. A new
+   partition (a DOS type, no file system yet) goes in a drive after a Y,
+   and FORMAT works on it: VMHD.SYS answers generic IOCTL (device
+   parameters with the BPB FORMAT should make, access flags, locks), and a
+   write to the boot sector makes DOS read the new BPB. */
 #include "kernel.h"
 
 #define HD_MAX 8
@@ -36,8 +43,8 @@ static struct unit {
     int in;                               /* a partition is in */
     struct part p;
     u8 ro, changed;
-    u8 bpb[53];                           /* from its boot sector: DOS's BPB, FAT32 fields too */
 } units[HD_MAX];
+static int bios_dev = -1;                 /* the disk shown as BIOS disk 81h (VMHD /FDISK), -1: none */
 static int n_units, first_drive;          /* first_drive: 0 = A: */
 
 static u8 sec[512], sec2[512], ents[512];
@@ -62,6 +69,52 @@ static int fat_at(int d, u32 start, u32 size, char *label)
         if (!memcmp(label, "NO NAME", 8)) label[0] = 0;
     }
     return v.type;
+}
+
+/* The BPB FORMAT should give partition p (as MS-DOS's FORMAT would):
+   FAT32 for a FAT32 type or 2 GiB and up, FAT12 up to 16 MiB, else FAT16;
+   the cluster size by size. 53 bytes, from offset 11 of a boot sector. */
+static void default_bpb(const struct part *p, u8 *b)
+{
+    u32 n = p->size;
+    int t = p->type == 0x01 || n <= 32680 ? 12 : (p->type == 0x0B || p->type == 0x0C || n >= 4194304) && n >= 66600 ? 32 : 16;
+    u32 spc, res = t == 32 ? 32 : 1, root = t == 32 ? 0 : 512, rds = (root * 32 + 511) / 512, fsz;
+    if (t == 32) spc = n <= 532480 ? 1 : n <= 16777216 ? 8 : n <= 33554432 ? 16 : n <= 67108864 ? 32 : 64;
+    else if (t == 16) spc = n <= 262144 ? 4 : n <= 524288 ? 8 : n <= 1048576 ? 16 : n <= 2097152 ? 32 : 64;
+    else for (spc = 1; spc < 64 && (n - res - rds) / spc > 4084; spc *= 2) ;
+    if (t == 12) {
+        u32 cl = (n - res - rds) / spc;
+        fsz = ((cl + 2) * 3 / 2 + 511) / 512;
+    } else {
+        u32 t1 = n - (res + rds), t2 = 256 * spc + 2;
+        if (t == 32) t2 /= 2;
+        fsz = (t1 + t2 - 1) / t2;
+    }
+    memset(b, 0, 53);
+    b[0] = 0x00; b[1] = 0x02; b[2] = (u8)spc;
+    b[3] = (u8)res; b[4] = (u8)(res >> 8); b[5] = 2;
+    b[6] = (u8)root; b[7] = (u8)(root >> 8);
+    if (n < 65536) { b[8] = (u8)n; b[9] = (u8)(n >> 8); } else *(u32 *)(b + 21) = n;
+    b[10] = 0xF8;
+    if (t != 32) { b[11] = (u8)fsz; b[12] = (u8)(fsz >> 8); }
+    b[13] = 63; b[15] = 255;
+    *(u32 *)(b + 17) = p->start;
+    if (t == 32) {
+        *(u32 *)(b + 25) = fsz;
+        b[33] = 2;                                                  /* root directory: cluster 2 */
+        b[37] = 1; b[39] = 6;                                       /* FS info sector, backup boot sector */
+    }
+}
+
+/* What DOS is to use for p: the BPB of the FAT file system on it, or
+   (none yet: FORMAT comes next) the one FORMAT would make. */
+static void current_bpb(const struct part *p, u8 *b)
+{
+    char label[12];
+    int t = fat_at(p->dev, p->start, p->size, label);
+    if (!t || disk_dev_rw(p->dev, p->start, 1, sec, 0)) { default_bpb(p, b); return; }
+    memcpy(b, sec + 11, 53);
+    if (t != 32) memset(b + 25, 0, 28);                             /* no FAT32 fields */
 }
 
 static void add(int d, int num, u32 start, u32 size, u8 type, u8 gpt)
@@ -167,9 +220,9 @@ static void describe(char *b, int n, const struct part *p)
     else snprintf(b, n, "%s disk %d, whole disk (%s)", disk_dev_kind(p->dev), disk_dev_index(p->dev), k);
 }
 
-/* VMHD's list: the drives, then each disk and its partitions, numbered
-   for "VMHD D: n":
-     SATA disk 1: Samsung SSD 860
+/* VMHD's list: the drives, then each disk (numbered, for VMHD /FDISK) and
+   its partitions (numbered, for "VMHD D: n"):
+     Disk 2: SATA, Samsung SSD 860, 476 GiB
         2  partition 1  type 06           40 MiB  FAT16 DATA16      = D: */
 static void list(u32 o)
 {
@@ -188,35 +241,143 @@ static void list(u32 o)
         }
     }
     put(&o, "\r\n");
-    if (!n_parts) put(&o, "No partitions found on the other disks.\r\n");
-    for (int i = 0; i < n_parts; i++) {
-        const struct part *p = &parts[i];
-        if (!i || parts[i - 1].dev != p->dev) {
-            snprintf(b, sizeof b, "%s disk %d: %s\r\n", disk_dev_kind(p->dev), disk_dev_index(p->dev), disk_dev_name(p->dev));
-            put(&o, b);
-        }
-        char k[32], where[16], fs[24];
-        kind(k, sizeof k, p);
-        if (p->num) snprintf(where, sizeof where, "partition %d", p->num); else snprintf(where, sizeof where, "whole disk");
-        if (p->fat) snprintf(fs, sizeof fs, "FAT%d %s", p->fat, p->label);
-        else snprintf(fs, sizeof fs, "%s", is_ext(p->type) ? "" : "no FAT");
-        u32 mib = p->size >> 11;
-        snprintf(b, sizeof b, "%5d  %-13s%-17s%6u %s  %-18s", i + 1, where, k, mib >= 10240 ? mib >> 10 : mib,
-                 mib >= 10240 ? "GiB" : "MiB", fs);
-        int e = (int)strlen(b);
-        while (e && b[e - 1] == ' ') b[--e] = 0;
+    int nd = disk_dev_count();
+    for (int d = 0; d < nd; d++) {
+        u32 mib = (u32)(disk_dev_sectors(d) >> 11);
+        snprintf(b, sizeof b, "Disk %d: %s, %s, %u %s", d + 1, disk_dev_kind(d), disk_dev_name(d),
+                 mib >= 10240 ? mib >> 10 : mib, mib >= 10240 ? "GiB" : "MiB");
         put(&o, b);
-        int u = unit_of(p);
-        if (is_c(p)) put(&o, "  = C:");
-        else if (u >= 0) { snprintf(b, sizeof b, "  = %c:", 'A' + first_drive + u); put(&o, b); }
-        put(&o, "\r\n");
+        if (d == bios_dev) put(&o, "  = BIOS disk 2 (FDISK)");
+        int any = 0;
+        for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
+        put(&o, any ? "\r\n" : !mib ? "  (unplugged)\r\n" : "  (no partitions)\r\n");
+        for (int i = 0; i < n_parts; i++) {
+            const struct part *p = &parts[i];
+            if (p->dev != d) continue;
+            char k[32], where[16], fs[24];
+            kind(k, sizeof k, p);
+            if (p->num) snprintf(where, sizeof where, "partition %d", p->num); else snprintf(where, sizeof where, "whole disk");
+            if (p->fat) snprintf(fs, sizeof fs, "FAT%d %s", p->fat, p->label);
+            else snprintf(fs, sizeof fs, "%s", is_ext(p->type) ? "" : dos_part(p) ? "not formatted" : "no FAT");
+            u32 pm = p->size >> 11;
+            snprintf(b, sizeof b, "%5d  %-13s%-17s%6u %s  %-18s", i + 1, where, k, pm >= 10240 ? pm >> 10 : pm,
+                     pm >= 10240 ? "GiB" : "MiB", fs);
+            int e = (int)strlen(b);
+            while (e && b[e - 1] == ' ') b[--e] = 0;
+            put(&o, b);
+            int u = unit_of(p);
+            if (is_c(p)) put(&o, "  = C:");
+            else if (u >= 0) { snprintf(b, sizeof b, "  = %c:", 'A' + first_drive + u); put(&o, b); }
+            put(&o, "\r\n");
+        }
     }
     wr8(o, '$');
 }
 
+/* ---- BIOS disk 81h, for FDISK ----
+   The disk chosen with VMHD /FDISK, whole, through INT 13h (bios.c sends
+   DL=81h here): CHS (255 heads, 63 sectors) and the LBA extensions. */
+static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
+int hd_bios_disks(void) { return bios_dev >= 0 ? 2 : 1; }
+
+static int bios_rw(u32 lba, u32 n, u32 buf, int write)
+{
+    u64 total = disk_dev_sectors(bios_dev);
+    if (!n) return 0;
+    if (lba >= total || n > total - lba) return 0x04;
+    if (buf + n * 512 > GUEST_TOP) return 0x09;
+    return disk_dev_rw(bios_dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
+}
+
+void hd_int13(struct regs *r)
+{
+    static u8 status;
+    int st = 0;
+    u8 fn = AH(r);
+    u64 total = bios_dev >= 0 ? disk_dev_sectors(bios_dev) : 0;
+    u32 cyls = (total > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)total) / (255 * 63);   /* no 64-bit division here */
+    if (cyls > 1024) cyls = 1024;
+    if (!total) { AH(r) = 0x80; set_cf(r, 1); return; }             /* gone: time out */
+    switch (fn) {
+    case 0x00: case 0x0D: case 0x04: case 0x0C: case 0x10: case 0x11: case 0x47: break;
+    case 0x01: AH(r) = status; set_cf(r, status != 0); return;
+    case 0x02: case 0x03: {
+        u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), sc = CL(r) & 63, head = DH(r);
+        if (!sc) { st = 0x04; break; }
+        st = bios_rw((cyl * 255 + head) * 63 + sc - 1, AL(r), LIN(r->v86_es, BX(r)), fn == 3);
+        if (st) AL(r) = 0;
+        break; }
+    case 0x08: {
+        u32 mc = cyls ? cyls - 1 : 0;
+        CH(r) = (u8)mc;
+        CL(r) = (u8)(((mc >> 2) & 0xC0) | 63);
+        DH(r) = 254;
+        DL(r) = 2;
+        break; }
+    case 0x15:
+        AH(r) = 3;
+        CX(r) = (u16)(total > 0xFFFFFFFFull ? 0xFFFF : total >> 16);
+        DX(r) = (u16)(total > 0xFFFFFFFFull ? 0xFFFF : total);
+        set_cf(r, 0);
+        return;
+    case 0x41:
+        if (BX(r) != 0x55AA) { st = 1; break; }
+        BX(r) = 0xAA55; AH(r) = 0x21; CX(r) = 1;
+        set_cf(r, 0);
+        return;
+    case 0x42: case 0x43: case 0x44: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        u16 count = rd16(p + 2);
+        u32 buf = LIN(rd16(p + 6), rd16(p + 4));
+        if (rd32(p + 12)) { st = 0x04; wr16(p + 2, 0); break; }
+        if (fn != 0x44) st = bios_rw(rd32(p + 8), count, buf, fn == 0x43);
+        if (st) wr16(p + 2, 0);
+        break; }
+    case 0x48: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        if (rd16(p) < 26) { st = 1; break; }
+        wr16(p, 26); wr16(p + 2, 2);
+        wr32(p + 4, cyls); wr32(p + 8, 255); wr32(p + 12, 63);
+        wr32(p + 16, (u32)total); wr32(p + 20, (u32)(total >> 32)); wr16(p + 24, 512);
+        break; }
+    default: st = 1;
+    }
+    status = (u8)st;
+    AH(r) = (u8)st;
+    set_cf(r, st != 0);
+}
+
+/* VMHD /FDISK n: disk n (1-based, as listed) as BIOS disk 81h; 0: none.
+   0, or 2 no such disk, 3 C:'s disk, 6 confirm first (warning in warn),
+   9 a VMHD drive holds one of its partitions. */
+static int fdisk_disk(int n, int confirmed, u32 warn)
+{
+    if (!n) { if (bios_dev >= 0) kprintf("hd: BIOS disk 2 gone\n"); bios_dev = -1; wr8(BDA + 0x75, 1); return 0; }
+    int d = n - 1;
+    if (d < 0 || d >= disk_dev_count() || !disk_dev_sectors(d)) return 2;
+    u32 cs, cz;
+    if (disk_c_dev(&cs, &cz) == d) return 3;
+    for (int u = 0; u < n_units; u++) if (units[u].in && units[u].p.dev == d) return 9;
+    if (!confirmed) {
+        char b[160];
+        int np = 0;
+        for (int i = 0; i < n_parts; i++) np += parts[i].dev == d && !is_ext(parts[i].type);
+        snprintf(b, sizeof b, "disk %d (%s, %s, %u MiB, %d partition%s)", n, disk_dev_kind(d), disk_dev_name(d),
+                 (u32)(disk_dev_sectors(d) >> 11), np, np == 1 ? "" : "s");
+        put(&warn, b);
+        put(&warn, " becomes BIOS disk 2.\r\nFDISK can then change or delete its partitions, and with them everything\r\non it.");
+        wr8(warn, '$');
+        return 6;
+    }
+    bios_dev = d;
+    wr8(BDA + 0x75, 2);
+    kprintf("hd: BIOS disk 2 (81h) is %s disk %d (%s)\n", disk_dev_kind(d), disk_dev_index(d), disk_dev_name(d));
+    return 0;
+}
+
 /* Put partition k (0-based, of the last scan) in unit u. 0, or an error:
-   2 no such partition, 3 it's C:, 4 in another drive, 5 no FAT, 6 not a
-   DOS partition (confirm), 7 disk error. */
+   2 no such partition, 3 it's C:, 4 in another drive, 5 no FAT and not
+   a DOS partition, 6 confirm first (the warning in warn), 7 disk error. */
 static int attach(int u, int k, int ro, int confirmed, u32 warn)
 {
     if (k < 0 || k >= n_parts) return 2;
@@ -224,26 +385,62 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
     if (is_c(p)) return 3;
     int v = unit_of(p);
     if (v >= 0 && v != u) return 4;
-    if (!p->fat) return 5;
-    if (!dos_part(p) && !confirmed) {
+    if (!p->fat && (!dos_part(p) || is_ext(p->type))) return 5;
+    if ((!p->fat || !dos_part(p)) && !confirmed) {
         char d[120];
         describe(d, sizeof d, p);
         put(&warn, d);
+        put(&warn, !p->fat ? ": no file system yet.\r\nFORMAT can make one on it (anything on it now is lost)."
+                           : ": not a DOS partition.\r\nIt holds a FAT file system, but its partition type says it belongs\r\n"
+                             "to something else (another OS, the firmware). Writing to it from DOS\r\ncould damage it.");
         wr8(warn, '$');
         return 6;
     }
     if (disk_dev_rw(p->dev, p->start, 1, sec, 0)) return 7;
     struct unit *t = &units[u];
     t->p = *p;
-    memcpy(t->bpb, sec + 11, 53);
-    if (p->fat != 32) memset(t->bpb + 25, 0, 28);                  /* no FAT32 fields */
     t->ro = (u8)ro;
     t->in = 1;
     t->changed = 1;
     char d[120];
     describe(d, sizeof d, p);
-    kprintf("hd: %c: is %s, FAT%d%s\n", 'A' + first_drive + u, d, p->fat, ro ? ", read-only" : "");
+    if (p->fat) kprintf("hd: %c: is %s, FAT%d%s\n", 'A' + first_drive + u, d, p->fat, ro ? ", read-only" : "");
+    else kprintf("hd: %c: is %s, not formatted%s\n", 'A' + first_drive + u, d, ro ? ", read-only" : "");
     return 0;
+}
+
+/* Generic IOCTL (INT 21h AX=440Dh), category 08h or 48h (FAT32), function
+   fn, parameter block at pb. */
+static u16 genioctl(struct unit *t, int cat, int fn, u32 pb)
+{
+    if (cat != 0x08 && cat != 0x48) return ST_ERR(3);
+    switch (fn) {
+    case 0x60: {                                                    /* get device parameters */
+        if (!t->in) return ST_ERR(2);
+        u8 b[53];
+        if (rd8(pb) & 1) current_bpb(&t->p, b); else default_bpb(&t->p, b);
+        wr8(pb + 1, 5);                                             /* fixed disk */
+        wr16(pb + 2, 1);                                            /* not removable */
+        u32 cyl = t->p.size / (255 * 63);
+        wr16(pb + 4, (u16)(cyl > 0xFFFF ? 0xFFFF : cyl));
+        wr8(pb + 6, 0);
+        int fat32 = b[11] == 0 && b[12] == 0;
+        if (fat32 && cat == 0x08) b[6] = b[7] = 0;                  /* FAT32: FORMAT asks again, as 4860h */
+        for (int i = 0; i < 25; i++) wr8(pb + 7 + i, b[i]);
+        if (cat == 0x48) for (int i = 25; i < 53; i++) wr8(pb + 7 + i, b[i]);
+        return ST_DONE; }
+    case 0x66: {                                                    /* get media ID: serial, label, FS type */
+        if (!t->in || disk_dev_rw(t->p.dev, t->p.start, 1, sec, 0)) return ST_ERR(2);
+        int o = sec[0x42] == 0x29 ? 0x43 : sec[0x26] == 0x29 ? 0x27 : 0;
+        if (!o) return ST_ERR(3);
+        wr16(pb, 0);
+        for (int i = 0; i < 23; i++) wr8(pb + 2 + i, sec[o + i]);
+        return ST_DONE; }
+    case 0x67: wr8(pb + 1, 1); return ST_DONE;                      /* access flag: on */
+    case 0x40: case 0x47: case 0x4A: case 0x4B: case 0x6A: case 0x6B:   /* set parameters, access flag, (un)lock */
+        return ST_DONE;
+    }
+    return ST_ERR(3);
 }
 
 /* A request from VMHD.SYS: ES:DI request header, DX:SI its BPB slots (64 bytes a unit). */
@@ -261,8 +458,10 @@ static void request(struct regs *r)
         break;
     case 2: {                                                       /* build BPB */
         if (!t->in) { st = ST_ERR(2); break; }
+        u8 bpb[53];
+        current_bpb(&t->p, bpb);
         u32 b = LIN(DX(r), SI(r) + u * 64);
-        for (int i = 0; i < 53; i++) wr8(b + i, t->bpb[i]);
+        for (int i = 0; i < 53; i++) wr8(b + i, bpb[i]);
         wr16(rh + 18, (u16)(SI(r) + u * 64));
         wr16(rh + 20, DX(r));
         t->changed = 0;
@@ -278,10 +477,18 @@ static void request(struct regs *r)
         if (s >= t->p.size || n > t->p.size - s) { st = ST_ERR(8); break; }
         if (buf + n * 512 > GUEST_TOP) { st = ST_ERR(0xC); break; }
         if (disk_dev_rw(t->p.dev, t->p.start + s, n, gptr(buf), write)) { st = ST_ERR(write ? 0xA : 0xB); break; }
+        if (write && s == 0) t->changed = 1;                        /* a new boot sector (FORMAT): DOS reads the BPB again */
         wr16(rh + 18, (u16)n);
         break; }
+    case 19:                                                        /* generic IOCTL (FORMAT) */
+        st = genioctl(t, rd8(rh + 13), rd8(rh + 14), LIN(rd16(rh + 21), rd16(rh + 19)));
+        break;
+    case 23: wr8(rh + 1, 0); break;                                 /* get logical device: one letter a drive */
+    case 24: break;
     default: st = ST_ERR(3);
     }
+    if (st & 0x8000) dbg(1, "hd: %c: request %d (%02x) failed: %x\n", 'A' + first_drive + u, cmd,
+                         cmd == 19 ? rd8(rh + 14) : 0, st & 0xFF);
     wr16(rh + 3, st);
 }
 
@@ -291,7 +498,9 @@ static void request(struct regs *r)
    the first drive. BX=3: put partition DL (1-based, as listed) in drive
    CL (0 = A:), DH bit 0 read-only, bit 1 confirmed; AX = 0 or an error
    (see attach; 1: not a VMHD drive), a warning in ES:DI for 6. BX=4:
-   take drive CL's partition out; AX = 0 or 1. */
+   take drive CL's partition out; AX = 0 or 1. BX=5: disk CL (as listed;
+   0: none) as BIOS disk 81h for FDISK, DH bit 1 confirmed; AX = 0 or an
+   error (see fdisk_disk), a warning in ES:DI for 6. */
 void hd_api(struct regs *r)
 {
     switch (BX(r)) {
@@ -324,6 +533,10 @@ void hd_api(struct regs *r)
         units[u].changed = 1;
         AX(r) = 0;
         return; }
+    case 5:
+        scan();
+        AX(r) = (u16)fdisk_disk(CL(r), DH(r) & 2, LIN(r->v86_es, DI(r)));
+        return;
     }
     AX(r) = 0xFFFF;
 }

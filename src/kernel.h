@@ -176,6 +176,8 @@ int disk_c_dev(u32 *start, u32 *size);
 
 /* ---- hd.c: VMHD, other disks' partitions as DOS drives ---- */
 void hd_api(struct regs *r);
+int hd_bios_disks(void);                       /* 1, or 2 with VMHD /FDISK's disk as 81h */
+void hd_int13(struct regs *r);
 
 void cd_add(u8 *data, u32 size, const char *name);
 void ems_init(void);                          /* ems.c: LIM 4.0 expanded memory */
