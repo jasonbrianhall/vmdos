@@ -357,6 +357,7 @@ static int bios_disk(int dl)
 }
 int hd_bios_disks(void)
 {
+    if (disk_on_a) return 0;                    /* no C:, no BIOS hard disks */
     if (!bios_on) return 1;
     u32 cs, cz;
     int n = disk_dev_count() - (disk_c_dev(&cs, &cz) >= 0);

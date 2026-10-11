@@ -13,7 +13,11 @@
    image put in read-only (VMFD /R) refuses writes too.
 
    Sizes: 160K, 180K, 320K, 360K, 720K, 1.2M, 1.44M, 1.68M/1.72M (DMF),
-   2.88M; anything else is taken from the boot sector's BPB. */
+   2.88M; anything else is taken from the boot sector's BPB.
+
+   A: can also be a RAM disk: when no disk has a C: for vmdos, a floppy-
+   sized boot module (dos.img) goes in A: and vmdos boots from it
+   (fd_ram, disk.c). Changes to it are lost at power-off. */
 #include "kernel.h"
 
 #define BIOS_SEG 0xF000                  /* as bios.c: the BIOS image, its diskette table pointer at +202h */
@@ -22,6 +26,7 @@
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 static struct fd {
     struct extent *ext; int n_ext;
+    u8 *ram;                             /* a RAM disk: the image itself (no file on C:) */
     u32 sectors, size, clus;
     u8 cyls, heads, spt, type;           /* type: INT 13h AH=08h BL (1 360K, 2 1.2M, 3 720K, 4 1.44M, 6 2.88M) */
     u8 in, ro, changed;
@@ -39,6 +44,12 @@ static const struct { u32 kb; u8 cyls, heads, spt, type; } shapes[] = {
 /* count sectors from sector s of drive f's image (runs on C:). */
 static int img_io(struct fd *f, u32 s, u32 count, u8 *buf, int write)
 {
+    if (f->ram) {
+        if (s >= f->sectors || count > f->sectors - s) return 0x04;
+        if (write) memcpy(f->ram + s * 512, buf, count * 512);
+        else memcpy(buf, f->ram + s * 512, count * 512);
+        return 0;
+    }
     u32 base = 0;
     for (int e = 0; e < f->n_ext && count; e++) {
         struct extent *x = &f->ext[e];
@@ -99,6 +110,8 @@ static void dos_bpb(struct fd *f, u8 *bs)
     memcpy(bs + 0x0B, v, sizeof v);
 }
 
+static int fd_insert(int d, struct fd *tp, const char *path);
+
 /* Put the image at path (on C:) in drive d (0 A:, 1 B:). 0, or 2 not
    found, 3 not a floppy image, 4 not on C:, 6 out of memory, 7 disk error. */
 static int fd_mount(int d, const char *path, int ro)
@@ -115,6 +128,16 @@ static int fd_mount(int d, const char *path, int ro)
     if (!ext) return 6;
     fat_extents(&v, clus, size, ext, n);
     struct fd t = { .ext = ext, .n_ext = n, .sectors = size / 512, .size = size, .clus = clus, .ro = (u8)ro };
+    return fd_insert(d, &t, path);
+}
+
+/* Put the image t (its backing, size and ro set) in drive d, named path:
+   its geometry from its size or its boot sector. 0, 3 or 7 as fd_mount. */
+static int fd_insert(int d, struct fd *tp, const char *path)
+{
+    struct fd t = *tp;
+    u32 size = t.size;
+    int ro = t.ro;
     for (unsigned i = 0; i < sizeof shapes / sizeof shapes[0]; i++)
         if (shapes[i].kb * 1024 == size) {
             t.cyls = shapes[i].cyls; t.heads = shapes[i].heads; t.spt = shapes[i].spt; t.type = shapes[i].type;
@@ -159,6 +182,21 @@ static void fd_eject(int d)
     fd[d].changed = 1;
 }
 
+/* The RAM disk image (size bytes) in drive d, if it is a floppy image:
+   0, or 3 (not a floppy: too big, or no size or BPB to go by). */
+int fd_ram(int d, u8 *image, u32 size)
+{
+    if (d < 0 || d >= FD_DRIVES || size < 512 || size % 512 || size > 4u << 20) return 3;
+    const u8 *pe = image + 446;                          /* a hard-disk image (MBR, no BPB) isn't one */
+    if (image[510] == 0x55 && image[511] == 0xAA && (pe[0] == 0 || pe[0] == 0x80) && pe[4] &&
+        !(image[0x0B] == 0 && image[0x0C] == 2 && image[0x15] >= 0xF0)) return 3;
+    struct fd t = { .ram = image, .sectors = size / 512, .size = size };
+    return fd_insert(d, &t, "(RAM disk)");
+}
+
+/* Is drive d's disk a DOS disk (0 for a self-booting one, or empty)? */
+int fd_is_dos(int d) { return d >= 0 && d < FD_DRIVES && fd[d].in && !fd[d].nodos; }
+
 /* fda= / fdb= on the kernel command line. */
 static void fd_boot(void)
 {
@@ -184,6 +222,7 @@ static void fd_boot(void)
    name, size and runs of sectors on C:. */
 static int still_there(struct fd *f)
 {
+    if (f->ram) return 1;
     static struct fatvol v;
     static struct extent now[1024];
     u32 clus, size;

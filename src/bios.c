@@ -208,7 +208,9 @@ static int int13(struct regs *r)
     u8 fn = AH(r);
     if (DL(r) < 0x80) { fd_int13(r); return BIOS_DONEF; }   /* A:, B: (floppy.c) */
     if (DL(r) > 0x80 && DL(r) < 0x80 + hd_bios_disks()) { hd_int13(r); wr8(BDA + 0x74, AH(r)); return BIOS_DONEF; }   /* the other disks (hd.c) */
-    if (DL(r) != 0x80) {
+    if (DL(r) != 0x80 || disk_on_a) {                         /* no such disk (with no C:, not 80h either) */
+        if (fn == 0x15) { AH(r) = 0; set_cf(r, 0); return BIOS_DONEF; }
+        if (fn == 0x08) { DL(r) = (u8)hd_bios_disks(); AH(r) = 0x07; set_cf(r, 1); return BIOS_DONEF; }
         if (fn == 0x00) { set_cf(r, 0); AH(r) = 0; return BIOS_DONEF; }
         AH(r) = 0x01;
         set_cf(r, 1);
@@ -471,7 +473,7 @@ void bios_init(void)
     wr16(BDA + 0x13, 640);
     wr16(BDA + 0x1A, 0x1E); wr16(BDA + 0x1C, 0x1E);
     wr16(BDA + 0x80, 0x1E); wr16(BDA + 0x82, 0x3E);
-    wr8(BDA + 0x75, 1);                                  /* one hard disk */
+    wr8(BDA + 0x75, disk_on_a ? 0 : 1);                  /* one hard disk (C:), or none */
     wr8(BDA + 0x8F, 0x77);                               /* both floppy drives: 80 tracks, change line */
     wr8(BDA + 0x96, 0x10);                               /* 101/102-key keyboard */
     wr8(BDA + 0x17, 0x20);                               /* Num Lock on */
@@ -485,7 +487,7 @@ void bios_init(void)
     disk_cyls = disk_sectors / (DISK_HEADS * DISK_SPT);
     if (disk_cyls > 1024) disk_cyls = 1024;
     if (!disk_cyls) disk_cyls = 1;
-    kprintf("disk: %u sectors (%u MiB), CHS %u/%u/%u\n", disk_sectors, disk_sectors >> 11,
+    if (!disk_on_a) kprintf("disk: %u sectors (%u MiB), CHS %u/%u/%u\n", disk_sectors, disk_sectors >> 11,
             disk_cyls, DISK_HEADS, DISK_SPT);
 }
 
@@ -503,7 +505,9 @@ static int boot_floppy(struct regs *r, int d)
 {
     static u8 sec[512];
     if (fd_boot_sector(d, sec)) return -1;
-    guest_from_floppy = 1;
+    /* DOS booted from the RAM disk in A: runs DOS programs, as from C:;
+       anything else booted from a floppy is a bare-machine booter. */
+    guest_from_floppy = !(disk_on_a && d == 0 && fd_is_dos(0));
     memcpy(gptr(0x7C00), sec, 512);
     r->cs = 0; r->eip = 0x7C00;
     r->ss = 0; r->esp = 0x7C00;
@@ -551,6 +555,10 @@ void bios_boot(struct regs *r)
     if (bo && (bo == cmdline || bo[-1] == ' ') && ((bo[5] | 32) == 'a' || (bo[5] | 32) == 'b')) {
         if (!boot_floppy(r, (bo[5] | 32) - 'a')) return;
         kprintf("boot=%c: the drive is empty (fd%c= for an image); booting C:\n", bo[5], bo[5] | 32);
+    }
+    if (disk_on_a) {                                                /* no C:: the RAM disk in A: */
+        if (!boot_floppy(r, 0)) return;
+        panic("No C: drive, and the RAM disk in A: can't be read");
     }
     if (disk_kind()[0] == 'R' && disk_image[0] == 0x1F && disk_image[1] == 0x8B)
         panic("dos.img is gzip-compressed. GRUB unpacks modules itself; for QEMU -initrd use the plain image.");
