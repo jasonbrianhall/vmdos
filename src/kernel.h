@@ -175,6 +175,7 @@ int disk_dev_count(void);                      /* every real disk, for hd.c */
 u64 disk_dev_sectors(int d);
 const char *disk_dev_name(int d);
 const char *disk_dev_kind(int d);
+u32 disk_dev_gen(int d);
 int disk_dev_index(int d);
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write);
 int disk_c_dev(u32 *start, u32 *size);

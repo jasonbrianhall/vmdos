@@ -714,12 +714,12 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
 static volatile uint8_t* msd_buf;                       // 64 KiB, 64 KiB aligned (a TRB can't cross 64 KiB)
 static volatile uint8_t* msd_cbw;
 // USB disks, by the index disk.c and hd.c know them by. A disk plugged
-// back in takes the slot of the one that went (the same model and size
-// first), so the entry that pointed at it works again instead of a new
-// one turning up beside a dead one. -1: unplugged.
+// in takes the slot of one that went (the same model and size first), so
+// it shows up as that entry again instead of a new one beside a dead one;
+// new slots are only made when none is free. -1: unplugged.
 #define MSD_MAX 4
 static int msd_dev[MSD_MAX], n_msd;
-static struct { char model[28]; uint64_t blocks; } msd_last[MSD_MAX];   // what was in each slot
+static struct { char model[28]; uint64_t blocks; uint32_t gen; } msd_last[MSD_MAX];   // what was in each slot; gen: plug count
 static bool msd_is(int i) {                                 // slot i still holds a plugged-in disk
     if (i < 0 || i >= n_msd || msd_dev[i] < 0) return false;
     Keyboard& k = kbds[msd_dev[i]];
@@ -924,19 +924,21 @@ static bool msd_setup(Keyboard& k) {
     int slot = -1;
     for (int i = 0; i < n_msd && slot < 0; i++)         // this disk, back again
         if (!msd_is(i) && msd_last[i].blocks == k.blocks && !memcmp(msd_last[i].model, k.model, sizeof k.model)) slot = i;
-    if (slot < 0 && n_msd < MSD_MAX) slot = n_msd++;    // a new one
-    for (int i = 0; i < n_msd && slot < 0; i++)         // no room: an unplugged one's slot
+    for (int i = 0; i < n_msd && slot < 0; i++)         // another unplugged one's slot
         if (!msd_is(i)) slot = i;
+    if (slot < 0 && n_msd < MSD_MAX) slot = n_msd++;    // a new one
     if (slot < 0) { k.active = false; return false; }
     msd_dev[slot] = (int)(&k - kbds);
     memcpy(msd_last[slot].model, k.model, sizeof msd_last[slot].model);
     msd_last[slot].blocks = k.blocks;
+    msd_last[slot].gen++;
     printf("USB: %s is USB disk %d\n", k.where, slot);
     return true;
 }
 
 extern "C" int usb_msd_count(void) { return n_msd; }
 extern "C" uint64_t usb_msd_sectors(int i) { return msd_is(i) ? kbds[msd_dev[i]].blocks : 0; }
+extern "C" uint32_t usb_msd_gen(int i) { return i >= 0 && i < n_msd ? msd_last[i].gen : 0; }
 extern "C" const char* usb_msd_name(int i) { return i >= 0 && i < n_msd ? msd_last[i].model : ""; }
 
 // count <= 128 sectors; buf anywhere (copied through the DMA buffer).

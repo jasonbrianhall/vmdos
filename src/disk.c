@@ -25,6 +25,7 @@ int ide_rw(int d, u64 lba, u32 count, void *buf, int write);
 int usb_msd_count(void);
 u64 usb_msd_sectors(int i);
 const char *usb_msd_name(int i);
+u32 usb_msd_gen(int i);
 int usb_msd_rw(int i, u64 lba, u32 count, void *buf, int write);
 void usb_kick_ports(void);
 
@@ -428,6 +429,7 @@ int disk_dev_count(void)
 u64 disk_dev_sectors(int d) { return dev[d].usb ? usb_msd_sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
 const char *disk_dev_name(int d) { return dev[d].usb ? usb_msd_name(dev[d].idx) : dev[d].name; }
 const char *disk_dev_kind(int d) { return dev_kind(d); }
+u32 disk_dev_gen(int d) { return dev[d].usb ? usb_msd_gen(dev[d].idx) : 0; }   /* changes when another disk (or the same one again) is plugged in */
 int disk_dev_index(int d) { return dev[d].idx; }
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
 {
