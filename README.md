@@ -269,7 +269,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   QEMU/libvirt); OHCI (AMD/NVIDIA companions) not yet. Everything below
   works on any of them.
 - Keyboards: PS/2, and USB (boot protocol, hubs, hot-plug; polled).
-  `usb=off` on the command line skips USB.
+  `usb=off` on the command line skips USB; `ehci=off` skips only the EHCI and UHCI controllers, leaving them (and any legacy keyboard/mouse emulation) to the firmware.
 - Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
   first is joystick A, a second joystick B (with one, its buttons 3 and 4
   are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES

@@ -1423,8 +1423,13 @@ bool usb_init(const char* cmdline) {
     }
     // EHCI (USB 2), then its UHCI companions, which get the low- and
     // full-speed devices EHCI hands over. (OHCI companions: not yet.)
+    // ehci=off: leave them to the firmware, as before vmdos drove them (its
+    // legacy USB support may then still type for keyboards on them).
+    bool older_off = cmdline && strstr(cmdline, "ehci=off");
+    if (older_off) printf("USB: EHCI and UHCI left to the firmware (ehci=off)\n");
     static const struct { int progif, type; const char* name; } older[] = { { 0x20, HC_EHCI, "EHCI" }, { 0x00, HC_UHCI, "UHCI" } };
     for (auto& o : older)
+        if (!older_off)
         for (int i = 0; num_hc < MAX_HC && pci_find_class(0x0C, 0x03, o.progif, &d, i); i++) {
             H = &hcs[num_hc];
             memset((void*)H, 0, sizeof *H);
