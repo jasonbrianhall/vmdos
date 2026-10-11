@@ -713,8 +713,18 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
 // data on bulk IN or OUT, a 13-byte status wrapper (CSW) on bulk IN.
 static volatile uint8_t* msd_buf;                       // 64 KiB, 64 KiB aligned (a TRB can't cross 64 KiB)
 static volatile uint8_t* msd_cbw;
+// USB disks, by the index disk.c and hd.c know them by. A disk plugged
+// back in takes the slot of the one that went (the same model and size
+// first), so the entry that pointed at it works again instead of a new
+// one turning up beside a dead one. -1: unplugged.
 #define MSD_MAX 4
 static int msd_dev[MSD_MAX], n_msd;
+static struct { char model[28]; uint64_t blocks; } msd_last[MSD_MAX];   // what was in each slot
+static bool msd_is(int i) {                                 // slot i still holds a plugged-in disk
+    if (i < 0 || i >= n_msd || msd_dev[i] < 0) return false;
+    Keyboard& k = kbds[msd_dev[i]];
+    return k.active && k.kind == MSD && k.bsize == 512;
+}
 static volatile int usb_busy;                          // a disk transfer is running: usb_poll keeps off
 static int in_poll;                                    // usb_poll running (the stop screen polls too)
 
@@ -852,7 +862,9 @@ static bool msd_setup(Keyboard& k) {
         msd_cbw = (volatile uint8_t*)dma_alloc(128, 64);
         if (!msd_buf || !msd_cbw) { printf("USB: out of memory for mass storage\n"); return false; }
     }
-    if (n_msd == MSD_MAX) return false;
+    bool room = n_msd < MSD_MAX;
+    for (int i = 0; i < n_msd && !room; i++) room = !msd_is(i);
+    if (!room) { printf("USB: %s: too many USB disks\n", k.where); return false; }
     k.kind = MSD;
     if (!configure_bulk(k)) return false;
     k.active = true;
@@ -909,23 +921,29 @@ static bool msd_setup(Keyboard& k) {
     printf("USB: disk on %s: %s, %u MiB, %u-byte blocks (slot %d, %s speed)\n", k.where, k.model,
            (uint32_t)(k.blocks * k.bsize >> 20), k.bsize, k.slot, speed_name(k.speed));
     if (k.bsize != 512) { printf("USB: %s: only 512-byte blocks are supported\n", k.where); k.active = false; return false; }
-    msd_dev[n_msd++] = (int)(&k - kbds);
+    int slot = -1;
+    for (int i = 0; i < n_msd && slot < 0; i++)         // this disk, back again
+        if (!msd_is(i) && msd_last[i].blocks == k.blocks && !memcmp(msd_last[i].model, k.model, sizeof k.model)) slot = i;
+    if (slot < 0 && n_msd < MSD_MAX) slot = n_msd++;    // a new one
+    for (int i = 0; i < n_msd && slot < 0; i++)         // no room: an unplugged one's slot
+        if (!msd_is(i)) slot = i;
+    if (slot < 0) { k.active = false; return false; }
+    msd_dev[slot] = (int)(&k - kbds);
+    memcpy(msd_last[slot].model, k.model, sizeof msd_last[slot].model);
+    msd_last[slot].blocks = k.blocks;
+    printf("USB: %s is USB disk %d\n", k.where, slot);
     return true;
 }
 
 extern "C" int usb_msd_count(void) { return n_msd; }
-extern "C" uint64_t usb_msd_sectors(int i) {
-    if (i >= n_msd) return 0;
-    Keyboard& k = kbds[msd_dev[i]];
-    return k.active && k.kind == MSD ? k.blocks : 0;
-}
-extern "C" const char* usb_msd_name(int i) { return i < n_msd ? kbds[msd_dev[i]].model : ""; }
+extern "C" uint64_t usb_msd_sectors(int i) { return msd_is(i) ? kbds[msd_dev[i]].blocks : 0; }
+extern "C" const char* usb_msd_name(int i) { return i >= 0 && i < n_msd ? msd_last[i].model : ""; }
 
 // count <= 128 sectors; buf anywhere (copied through the DMA buffer).
 extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int write) {
-    if (i >= n_msd || !count || count > 128) return -1;
+    if (!msd_is(i) || !count || count > 128) return -1;
     Keyboard& k = kbds[msd_dev[i]];
-    if (!k.active || k.kind != MSD || lba + count > k.blocks || lba > 0xFFFFFFFFull) return -1;
+    if (lba + count > k.blocks || lba > 0xFFFFFFFFull) return -1;
     Hc* saved = H;
     usb_busy = 1;
     H = k.hc;
@@ -1208,6 +1226,7 @@ static void forget(int i) {
     for (int j = 0; j < MAX_KBD; j++)
         if (kbds[j].active && kbds[j].parent == i) forget(j);
     if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
+    for (int j = 0; j < n_msd; j++) if (msd_dev[j] == i) msd_dev[j] = -1;     // its slot waits for it to come back
     k.active = false;
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
