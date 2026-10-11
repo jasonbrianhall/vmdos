@@ -1011,6 +1011,19 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (cc != 1) {
             printf("USB: %s: address failed (cc=%d, speed=%s)\n",
                    k.where, cc, speed_name(k.speed));
+            // What the controller was given, and (behind a hub) what it
+            // holds for that hub: route, root port, translator, hub bits.
+            volatile uint32_t* sl = ctx(k.in_ctx, 1);
+            printf("USB: %s: slot %d: route %x, root port %u, TT hub slot %u port %u (in: %08x %08x %08x)\n",
+                   k.where, k.slot, sl[0] & 0xFFFFF, (sl[1] >> 16) & 0xFF, sl[2] & 0xFF, (sl[2] >> 8) & 0xFF,
+                   sl[0], sl[1], sl[2]);
+            if (k.parent >= 0) {
+                const Keyboard& h = kbds[k.parent];
+                volatile uint32_t* hs = ctx(h.out_ctx, 0);
+                printf("USB: %s: its hub (slot %d, %s speed): hub bit %u, MTT %u, %u ports, TTT %u, state %u (out: %08x %08x %08x %08x)\n",
+                       k.where, h.slot, speed_name(h.speed), (hs[0] >> 26) & 1, (hs[0] >> 25) & 1, hs[1] >> 24,
+                       (hs[2] >> 16) & 3, hs[3] >> 27, hs[0], hs[1], hs[2], hs[3]);
+            }
             addr_failed = true;
             return false;
         }
