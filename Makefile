@@ -21,6 +21,10 @@
 #   are kept; ISO= files go to C:\ISOS (the first in CD drive 1). C=ram: C:
 #   is dos.img in RAM (changes lost), ISO= files are loaded into RAM.
 # FRESH=1: make esp.img anew (else it is updated, keeping what DOS changed)
+# Every image also carries build/floppy.img, a 1.44M FreeDOS boot floppy:
+#   with no C: (no disk with KERNEL.SYS vmdos can drive, no RAM disk dos.img)
+#   vmdos boots it as A: rather than stopping.
+# VERSION: shown by vmdos.efi and the kernel (default: git describe)
 
 FREEDOS  ?= freedos
 DISK_MB  ?= 64
@@ -32,9 +36,11 @@ EXTRA    ?=
 FB_W     ?= 640
 FB_H     ?= 480
 BUILD    := build
+VERSION  ?= $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo unknown)
+FLOPPY   := $(BUILD)/floppy.img
 
 CC       := gcc
-CFLAGS   := -m32 -march=i386 -mtune=i486 -ffreestanding -fno-builtin -fno-pic -fno-pie \
+CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin -fno-pic -fno-pie \
             -fno-stack-protector -fcf-protection=none -mgeneral-regs-only \
             -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
@@ -48,7 +54,13 @@ OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o lib.o v86.o vdev.o bios.o video.o
 FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
 LIBGCC   := $(shell $(CC) -m32 -print-libgcc-file-name)
 
-all: vmdos.elf $(RAM_IMG)
+all: vmdos.elf $(RAM_IMG) $(FLOPPY)
+
+# The version, for vmdos.efi and the kernel (rewritten only when it changes).
+$(BUILD)/version.h: FORCE | $(BUILD)
+	@echo '#define VMDOS_VERSION "$(VERSION)"' > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+$(BUILD)/cpu.o: $(BUILD)/version.h
 
 $(BUILD):
 	mkdir -p $@
@@ -88,6 +100,8 @@ $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
 	nasm -f bin -i boot/ $< -o $@
 $(BUILD)/fat16.bin: boot/boot.asm boot/magic.mac | $(BUILD)
 	nasm -f bin -DISFAT16 -i boot/ $< -o $@
+$(BUILD)/fat12.bin: boot/boot.asm boot/magic.mac | $(BUILD)
+	nasm -f bin -DISFAT12 -i boot/ $< -o $@
 
 $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM:
 	sh tools/fetch-freedos.sh $(FREEDOS)
@@ -137,6 +151,13 @@ DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/A
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
              $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
 
+# The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
+FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT \
+                $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
+$(FLOPPY): $(BUILD)/fat12.bin $(VMDOS_FILES) $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS \
+           dos/floppy/AUTOEXEC.BAT tools/mkfloppy.py
+	python3 tools/mkfloppy.py $@ $(BUILD)/fat12.bin $(FLOPPY_FILES)
+
 dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(DOS_DEPS) tools/mkdisk.py $(BUILD)/extra.stamp
 	python3 tools/mkdisk.py --boot16=$(BUILD)/fat16.bin $@ $(DISK_MB) $(BUILD)/fat32lba.bin $(DOS_FILES) \
 	    $(if $(EXTRA),"--contents=$(EXTRA)")
@@ -159,18 +180,18 @@ iso: vmdos.iso
 # KARGS: kernel command line for the ISO's GRUB entry (e.g. KARGS="debug=2 audio=ac97").
 $(BUILD)/grub.cfg: grub.cfg FORCE | $(BUILD)
 	@sed 's|multiboot /boot/vmdos.elf|multiboot /boot/vmdos.elf $(KARGS_ALL)|' $< > $@.new
-	@$(if $(USE_RAM),true,sed -i '/dos.img/d' $@.new)
+	@$(if $(USE_RAM),true,sed -i 's|module /boot/dos.img.gz dos.img|module /boot/floppy.img floppy.img|' $@.new)
 	@for f in $(ISO_RAM); do n=$$(basename $$f); sed -i "/^}/i\    module /boot/cd/$$n $$n" $@.new; done
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 
-vmdos.iso: vmdos.elf $(RAM_IMG) $(BUILD)/grub.cfg $(ISO_RAM)
+vmdos.iso: vmdos.elf $(RAM_IMG) $(FLOPPY) $(BUILD)/grub.cfg $(ISO_RAM)
 	@test -n "$(GRUB_MKRESCUE)" || { echo "grub-mkrescue / grub2-mkrescue not found."; \
 	  echo "  Debian/Ubuntu: sudo apt install grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools"; \
 	  echo "  Fedora:        sudo dnf install grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools"; \
 	  echo "Or skip GRUB: make efi / make esp"; exit 1; }
 	rm -rf $(BUILD)/iso && mkdir -p $(BUILD)/iso/boot/grub
 	cp vmdos.elf $(BUILD)/iso/boot/
-	$(if $(USE_RAM),gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz)
+	$(if $(USE_RAM),gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz,cp $(FLOPPY) $(BUILD)/iso/boot/floppy.img)
 	cp $(BUILD)/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
 	$(if $(ISO_RAM),mkdir -p $(BUILD)/iso/boot/cd && cp $(ISO_RAM) $(BUILD)/iso/boot/cd/)
 	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
@@ -180,10 +201,10 @@ EFI_INC  ?= $(firstword $(wildcard /usr/include/efi))
 EFI_CRT0 ?= $(firstword $(shell find /usr/lib /usr/lib64 \( -name 'crt0-efi-x86_64.o' -o -path '*gnuefi*x64*crt0.o' \) 2>/dev/null))
 EFI_LDS  ?= $(firstword $(shell find /usr/lib /usr/lib64 \( -name 'elf_x86_64_efi.lds' -o -name 'elf_x64_efi.lds' \) 2>/dev/null))
 EFI_LIBS ?= $(shell find /usr/lib /usr/lib64 \( -name libgnuefi.a -o -name libefi.a \) 2>/dev/null | sort -u)
-EFI_CFLAGS := -I$(EFI_INC) -I$(EFI_INC)/x86_64 -I$(BUILD)/efi -fpic -ffreestanding -fno-stack-protector \
+EFI_CFLAGS := -I$(EFI_INC) -I$(EFI_INC)/x86_64 -I$(BUILD)/efi -I$(BUILD) -fpic -ffreestanding -fno-stack-protector \
               -fno-stack-check -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -O2 -Wall
 
-efi: vmdos.efi $(RAM_IMG)
+efi: vmdos.efi $(RAM_IMG) $(FLOPPY)
 
 $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h: vmdos.elf
 	mkdir -p $(BUILD)/efi
@@ -193,7 +214,7 @@ $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h: vmdos.elf
 	                     / _start$$/         {print "#define KERNEL_ENTRY 0x" $$1}' > $(BUILD)/efi/kernel_layout.h
 	@test $$(grep -c define $(BUILD)/efi/kernel_layout.h) = 3 || { echo "kernel layout symbols missing"; exit 1; }
 
-vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h
+vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h $(BUILD)/version.h
 	@test -n "$(EFI_CRT0)" -a -n "$(EFI_LDS)" || { echo "gnu-efi not found (Debian/Ubuntu: gnu-efi, Fedora: gnu-efi-devel)"; exit 1; }
 	gcc $(EFI_CFLAGS) -c efi/loader.c -o $(BUILD)/efi/loader.o
 	gcc -c efi/tramp.S -o $(BUILD)/efi/tramp.o
@@ -254,11 +275,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
-	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
-	   $(if $(USE_RAM),echo '    module /EFI/vmdos/dos.img dos.img';) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
@@ -267,11 +288,11 @@ ESP_GRUB_DEPS  := $(if $(filter 1,$(GRUB)),vmdos.elf $(BUILD)/grub/core.img $(BU
 ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BOOTX64.EFI vmdos.elf=boot/vmdos.elf \
                     $(BUILD)/grub/grub.cfg=boot/grub/grub.cfg --bios=$(GRUB_LIB)/i386-pc/boot.img$(comma)$(BUILD)/grub/core.img)
 esp: esp.img
-esp.img: vmdos.efi $(RAM_IMG) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
+esp.img: vmdos.efi $(RAM_IMG) $(FLOPPY) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
 	$(if $(filter 1,$(GRUB)),,@echo "esp.img: UEFI only (GRUB=0, or grub-mkimage / GRUB's i386-pc and x86_64-efi modules not found)")
 	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
 	    $(DOS_FILES) vmdos.efi=$(VMDOS_EFI_DIR)/$(if $(filter 1,$(GRUB)),vmdos.efi,BOOTX64.EFI) \
-	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
+	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(FLOPPY)=$(VMDOS_EFI_DIR)/floppy.img $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
 	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
 	$(if $(USE_RAM),,@MTOOLS_SKIP_CHECK=1 mdel -i $@@@1M ::/EFI/BOOT/dos.img ::/EFI/vmdos/dos.img 2>/dev/null || true)
 	@touch $@
@@ -307,8 +328,8 @@ QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \
 QDISK = $(if $(filter ram,$(C)),,$(QESP))
 DISK_DEP := $(if $(filter ram,$(C)),,esp.img)
 
-run: vmdos.elf $(RAM_IMG) $(DISK_DEP)
-	qemu-system-i386 -kernel vmdos.elf $(if $(USE_RAM),-initrd $(subst $(space),$(comma),$(strip dos.img $(ISO_RAM)))) \
+run: vmdos.elf $(RAM_IMG) $(FLOPPY) $(DISK_DEP)
+	qemu-system-i386 -kernel vmdos.elf -initrd $(subst $(space),$(comma),$(strip $(if $(USE_RAM),dos.img,$(FLOPPY)) $(ISO_RAM))) \
 	    -append "$(KARGS_ALL)" $(QDISK) $(QEMU_ARGS)
 run-iso: vmdos.iso $(DISK_DEP)
 	qemu-system-i386 -drive if=none,id=cd0,media=cdrom,file=vmdos.iso -device ide-cd,drive=cd0,bootindex=0 \

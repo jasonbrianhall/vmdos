@@ -1,6 +1,7 @@
 /* Machine setup: multiboot info, physical memory, paging, GDT/TSS/IDT,
    the real PIC and PIT, and kmain(). */
 #include "kernel.h"
+#include "version.h"                /* VMDOS_VERSION (build/version.h, made by make) */
 
 extern u8 __kernel_start[], __kernel_end[];
 extern u64 gdt[];
@@ -382,7 +383,7 @@ static int n_cdmod;
 void kmain(u32 magic, struct mb_info *mb)
 {
     serial_init();
-    kprintf("\nvmdos: 32-bit v86 monitor\n");
+    kprintf("\nvmdos %s: 32-bit v86 monitor\n", VMDOS_VERSION);
     if (magic != 0x2BADB002) panic("not started by a Multiboot loader (magic %x)", magic);
 
     if ((mb->flags & 4) && mb->cmdline) {

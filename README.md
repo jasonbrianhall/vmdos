@@ -71,6 +71,14 @@ The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
 module and `make run` passes it to QEMU, as a fallback for machines whose
 disk vmdos can't drive (not SATA, IDE or USB) and for `c=ram`.
 
+Without a C: (no disk with KERNEL.SYS that vmdos can drive, and no
+dos.img), vmdos boots the built-in boot floppy instead of stopping: every
+image carries floppy.img (FreeDOS and vmdos's tools on a 1.44M disk, next
+to vmdos.efi and as a GRUB module), held in RAM as drive A:. Changes to it
+are lost at power-off; VMHD still reaches the PC's disks. A dos.img that is
+a floppy image (1.44M and so on) is used the same way. vmdos.efi shows its
+version and what it loads before starting the kernel.
+
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
 CTMOUSE) are in C:\VMDOS, which is on the PATH.
