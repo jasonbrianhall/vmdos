@@ -570,7 +570,9 @@ static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) 
     return e.d2 >> 24;
 }
 
-// A control transfer on endpoint 0. Returns true on success.
+// A control transfer on endpoint 0. Returns true on success; ctl_cc: its
+// completion code (-1: none came).
+static int ctl_cc;
 static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index,
                     uint16_t len, volatile void* buf) {
     if (H->type != HC_XHCI) return hc2_control(k, type, req, value, index, len, buf);
@@ -585,8 +587,9 @@ static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
     ring_push(k.ep0, 0, 0, 0, TRB_STATUS << 10 | (1 << 5) | ((len && in) ? 0 : 1 << 16));
     H->db[k.slot] = 1;
     Trb e;
-    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, 1, &e)) return false;
+    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, 1, &e)) { ctl_cc = -1; return false; }
     int cc = e.d2 >> 24;
+    ctl_cc = cc;
     return cc == 1 || cc == 13;
 }
 
@@ -993,9 +996,34 @@ static bool setup_slot(Keyboard& k, int ki) {
         //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
         //   2. short delay
         //   3. Address Device with BSR=0 (real SET_ADDRESS)
-        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+        int cc;
+        if (k.tt_slot) {
+            // Low/full speed behind a USB 2 hub's translator: as Linux and
+            // Windows do, the slot first goes to the default state without
+            // a SET_ADDRESS on the wire (BSR), the device descriptor's first
+            // 8 bytes are read at address 0, and only then SET_ADDRESS.
+            // Some keyboards and mice don't take a SET_ADDRESS that comes
+            // first; done in one go, the controller waited on them for good.
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                         TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
+            if (cc == 1) {
+                static volatile uint8_t d8[8] __attribute__((aligned(64)));
+                d8[7] = 0;
+                bool got = control(k, 0x80, 6, 0x0100, 0, 8, d8);
+                if (!got) printf("USB: %s: no descriptor at address 0 through the hub's translator (cc=%d)\n", k.where, ctl_cc);
+                else if (d8[7] == 8 || d8[7] == 16 || d8[7] == 32 || d8[7] == 64)
+                    ep0[1] = (ep0[1] & 0xFFFF) | (uint32_t)d8[7] << 16;
+                // SET_ADDRESS: EP0 goes on from where its ring is now.
+                uint64_t rq = phys(&k.ep0.trb[k.ep0.enq]) | k.ep0.cycle;
+                ep0[2] = (uint32_t)rq; ep0[3] = (uint32_t)(rq >> 32);
+                delay_ms(10);
+                cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                             TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+            } else printf("USB: %s: Address Device (BSR) failed (cc=%d)\n", k.where, cc);
+        } else
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
                          TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-        if (cc != 1) {
+        if (cc != 1 && !k.tt_slot) {
             printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
                    k.where, cc);
             // BSR = 1
