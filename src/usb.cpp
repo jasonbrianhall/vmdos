@@ -658,6 +658,7 @@ static void forget(int i);
 // slot and an address, and set it up as a keyboard, mouse or hub.
 static bool setup_slot(Keyboard& k, int ki);
 static bool addr_failed;                               // the last setup_slot's Address Device failed
+static bool msd_stuck;                                 // the last setup_slot's mass-storage commands never completed
 static void release_slot(int slot) {
     if (H->type != HC_XHCI) return;
     H->dcbaa[slot] = 0;
@@ -870,9 +871,9 @@ static bool msd_setup(Keyboard& k) {
     // Give up on it rather than retry for minutes; a SuperSpeed one gets
     // another try at USB 2 (setup_port), where many sticks do work.
     if (k.timeouts) {
-        printf("USB: %s: no answer to mass-storage commands: giving up on it%s\n", k.where,
-               k.speed >= 4 && k.parent < 0 ? "; trying it at USB 2 speed" : "");
-        if (k.speed >= 4) addr_failed = true;
+        printf("USB: %s: no answer to mass-storage commands%s\n", k.where,
+               k.speed >= 4 && k.parent < 0 ? "" : ": giving up on it");
+        msd_stuck = true;
         k.active = false;
         return false;
     }
@@ -1264,8 +1265,29 @@ static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
     if (!reset_port(port)) return;
     int speed = (portsc(port) >> 10) & 0xF;             // 1 FS, 2 LS, 3 HS, 4+ SS
-    addr_failed = false;
+    addr_failed = msd_stuck = false;
     setup_device(port, -1, 0, speed);
+    if (speed >= 4 && msd_stuck && !addr_failed) {
+        // A USB 3 stick that took its address but whose transfers never
+        // complete: typically the one the firmware just booted from, still
+        // in the state the firmware left it (plugged in again later, it
+        // works). A warm reset, which a hot reset is not, starts it over;
+        // if it's still stuck, it gets the USB 2 try below.
+        uint32_t sc = portsc(port);
+        printf("USB: port %d: warm reset, then trying it again\n", port);
+        set_portsc(port, (sc & PORT_KEEP) | (1u << 31));          // WPR
+        for (int i = 0; i < 500 && !(portsc(port) & ((1u << 19) | PORT_PRC)); i++) delay_ms(1);
+        for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
+        sc = portsc(port);
+        set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+        delay_ms(100);
+        if ((portsc(port) & (PORT_CCS | PORT_PED)) == (PORT_CCS | PORT_PED)) {
+            speed = (portsc(port) >> 10) & 0xF;
+            msd_stuck = false;
+            setup_device(port, -1, 0, speed);
+        } else printf("USB: port %d: not enabled after the warm reset (PORTSC=%08x)\n", port, portsc(port));
+        if (msd_stuck || !(portsc(port) & PORT_PED)) addr_failed = true;     // on to USB 2
+    }
     if (!addr_failed || speed < 4) return;
 
     // SuperSpeed Address Device failed (or timed out).  Many sticks never
