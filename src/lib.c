@@ -217,15 +217,17 @@ static void log_screen(const char *msg, int closable)
 /* Ctrl+Shift+F10 (vdev.c asks, the timer tick calls this when USB isn't
    busy): the log over the game, which waits until Esc. */
 volatile int log_view_req;
-void vkbd_release_mods(void);
+int vkbd_mods(void);
+void vkbd_release_mods(int m);
 void log_view(void)
 {
+    int mods = vkbd_mods();                                         /* what the guest saw held: Ctrl, Shift */
     log_view_req = 0;
     while (stop_key() >= 0) ;                                       /* the hotkey's own bytes */
     video_console_save();
     log_screen("The log so far (the game is paused).", 1);
     video_console_restore();
-    vkbd_release_mods();                                             /* Ctrl/Shift went up while we had the keyboard */
+    vkbd_release_mods(mods);                                         /* Ctrl/Shift went up while we had the keyboard */
 }
 
 void panic(const char *fmt, ...)

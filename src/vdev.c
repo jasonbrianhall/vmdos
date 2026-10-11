@@ -380,12 +380,18 @@ static int ctrl, alt, lshift, rshift, e0;               /* the real keyboard's m
 
 /* After the log viewer had the keyboard: no modifier is down any more,
    for us or the guest (it saw them go down, not up). */
-void vkbd_release_mods(void)
+/* The modifiers the guest has seen go down (bit 0 Ctrl, 1 left Shift,
+   2 right Shift, 3 Alt). Taken when the Ctrl+Shift+F10 log opens: the
+   releases come while the log has the keyboard (and a USB keyboard's go
+   through here then too, clearing these), so afterwards the guest is
+   given the releases of what was down when it lost the keyboard. */
+int vkbd_mods(void) { return (ctrl ? 1 : 0) | (lshift ? 2 : 0) | (rshift ? 4 : 0) | (alt ? 8 : 0); }
+void vkbd_release_mods(int m)
 {
-    if (ctrl) kq_put(0x9D);
-    if (lshift) kq_put(0xAA);
-    if (rshift) kq_put(0xB6);
-    if (alt) kq_put(0xB8);
+    if (m & 1) kq_put(0x9D);
+    if (m & 2) kq_put(0xAA);
+    if (m & 4) kq_put(0xB6);
+    if (m & 8) kq_put(0xB8);
     ctrl = alt = lshift = rshift = e0 = 0;
 }
 

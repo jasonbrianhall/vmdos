@@ -570,7 +570,9 @@ static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) 
     return e.d2 >> 24;
 }
 
-// A control transfer on endpoint 0. Returns true on success.
+// A control transfer on endpoint 0. Returns true on success; ctl_cc: its
+// completion code (-1: none came).
+static int ctl_cc;
 static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index,
                     uint16_t len, volatile void* buf) {
     if (H->type != HC_XHCI) return hc2_control(k, type, req, value, index, len, buf);
@@ -585,8 +587,9 @@ static bool control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
     ring_push(k.ep0, 0, 0, 0, TRB_STATUS << 10 | (1 << 5) | ((len && in) ? 0 : 1 << 16));
     H->db[k.slot] = 1;
     Trb e;
-    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, 1, &e)) return false;
+    if (!wait_event(TRB_TRANSFER_EVENT, k.slot, 1, &e)) { ctl_cc = -1; return false; }
     int cc = e.d2 >> 24;
+    ctl_cc = cc;
     return cc == 1 || cc == 13;
 }
 
@@ -655,6 +658,7 @@ static void forget(int i);
 // slot and an address, and set it up as a keyboard, mouse or hub.
 static bool setup_slot(Keyboard& k, int ki);
 static bool addr_failed;                               // the last setup_slot's Address Device failed
+static bool msd_stuck;                                 // the last setup_slot's mass-storage commands never completed
 static void release_slot(int slot) {
     if (H->type != HC_XHCI) return;
     H->dcbaa[slot] = 0;
@@ -867,9 +871,9 @@ static bool msd_setup(Keyboard& k) {
     // Give up on it rather than retry for minutes; a SuperSpeed one gets
     // another try at USB 2 (setup_port), where many sticks do work.
     if (k.timeouts) {
-        printf("USB: %s: no answer to mass-storage commands: giving up on it%s\n", k.where,
-               k.speed >= 4 && k.parent < 0 ? "; trying it at USB 2 speed" : "");
-        if (k.speed >= 4) addr_failed = true;
+        printf("USB: %s: no answer to mass-storage commands%s\n", k.where,
+               k.speed >= 4 && k.parent < 0 ? "" : ": giving up on it");
+        msd_stuck = true;
         k.active = false;
         return false;
     }
@@ -993,9 +997,34 @@ static bool setup_slot(Keyboard& k, int ki) {
         //   1. Address Device with BSR=1 (no SET_ADDRESS on the wire)
         //   2. short delay
         //   3. Address Device with BSR=0 (real SET_ADDRESS)
-        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+        int cc;
+        if (k.tt_slot) {
+            // Low/full speed behind a USB 2 hub's translator: as Linux and
+            // Windows do, the slot first goes to the default state without
+            // a SET_ADDRESS on the wire (BSR), the device descriptor's first
+            // 8 bytes are read at address 0, and only then SET_ADDRESS.
+            // Some keyboards and mice don't take a SET_ADDRESS that comes
+            // first; done in one go, the controller waited on them for good.
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                         TRB_ADDRESS_DEVICE << 10 | (1 << 9) | (uint32_t)k.slot << 24, nullptr);
+            if (cc == 1) {
+                static volatile uint8_t d8[8] __attribute__((aligned(64)));
+                d8[7] = 0;
+                bool got = control(k, 0x80, 6, 0x0100, 0, 8, d8);
+                if (!got) printf("USB: %s: no descriptor at address 0 through the hub's translator (cc=%d)\n", k.where, ctl_cc);
+                else if (d8[7] == 8 || d8[7] == 16 || d8[7] == 32 || d8[7] == 64)
+                    ep0[1] = (ep0[1] & 0xFFFF) | (uint32_t)d8[7] << 16;
+                // SET_ADDRESS: EP0 goes on from where its ring is now.
+                uint64_t rq = phys(&k.ep0.trb[k.ep0.enq]) | k.ep0.cycle;
+                ep0[2] = (uint32_t)rq; ep0[3] = (uint32_t)(rq >> 32);
+                delay_ms(10);
+                cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
+                             TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
+            } else printf("USB: %s: Address Device (BSR) failed (cc=%d)\n", k.where, cc);
+        } else
+            cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0,
                          TRB_ADDRESS_DEVICE << 10 | (uint32_t)k.slot << 24, nullptr);
-        if (cc != 1) {
+        if (cc != 1 && !k.tt_slot) {
             printf("USB: %s: Address Device failed (cc=%d), trying BSR sequence\n",
                    k.where, cc);
             // BSR = 1
@@ -1011,6 +1040,19 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (cc != 1) {
             printf("USB: %s: address failed (cc=%d, speed=%s)\n",
                    k.where, cc, speed_name(k.speed));
+            // What the controller was given, and (behind a hub) what it
+            // holds for that hub: route, root port, translator, hub bits.
+            volatile uint32_t* sl = ctx(k.in_ctx, 1);
+            printf("USB: %s: slot %d: route %x, root port %u, TT hub slot %u port %u (in: %08x %08x %08x)\n",
+                   k.where, k.slot, sl[0] & 0xFFFFF, (sl[1] >> 16) & 0xFF, sl[2] & 0xFF, (sl[2] >> 8) & 0xFF,
+                   sl[0], sl[1], sl[2]);
+            if (k.parent >= 0) {
+                const Keyboard& h = kbds[k.parent];
+                volatile uint32_t* hs = ctx(h.out_ctx, 0);
+                printf("USB: %s: its hub (slot %d, %s speed): hub bit %u, MTT %u, %u ports, TTT %u, state %u (out: %08x %08x %08x %08x)\n",
+                       k.where, h.slot, speed_name(h.speed), (hs[0] >> 26) & 1, (hs[0] >> 25) & 1, hs[1] >> 24,
+                       (hs[2] >> 16) & 3, hs[3] >> 27, hs[0], hs[1], hs[2], hs[3]);
+            }
             addr_failed = true;
             return false;
         }
@@ -1223,8 +1265,29 @@ static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
     if (!reset_port(port)) return;
     int speed = (portsc(port) >> 10) & 0xF;             // 1 FS, 2 LS, 3 HS, 4+ SS
-    addr_failed = false;
+    addr_failed = msd_stuck = false;
     setup_device(port, -1, 0, speed);
+    if (speed >= 4 && msd_stuck && !addr_failed) {
+        // A USB 3 stick that took its address but whose transfers never
+        // complete: typically the one the firmware just booted from, still
+        // in the state the firmware left it (plugged in again later, it
+        // works). A warm reset, which a hot reset is not, starts it over;
+        // if it's still stuck, it gets the USB 2 try below.
+        uint32_t sc = portsc(port);
+        printf("USB: port %d: warm reset, then trying it again\n", port);
+        set_portsc(port, (sc & PORT_KEEP) | (1u << 31));          // WPR
+        for (int i = 0; i < 500 && !(portsc(port) & ((1u << 19) | PORT_PRC)); i++) delay_ms(1);
+        for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
+        sc = portsc(port);
+        set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+        delay_ms(100);
+        if ((portsc(port) & (PORT_CCS | PORT_PED)) == (PORT_CCS | PORT_PED)) {
+            speed = (portsc(port) >> 10) & 0xF;
+            msd_stuck = false;
+            setup_device(port, -1, 0, speed);
+        } else printf("USB: port %d: not enabled after the warm reset (PORTSC=%08x)\n", port, portsc(port));
+        if (msd_stuck || !(portsc(port) & PORT_PED)) addr_failed = true;     // on to USB 2
+    }
     if (!addr_failed || speed < 4) return;
 
     // SuperSpeed Address Device failed (or timed out).  Many sticks never
