@@ -77,7 +77,10 @@ image carries floppy.img (FreeDOS and vmdos's tools on a 1.44M disk, next
 to vmdos.efi and as a GRUB module), held in RAM as drive A:. Changes to it
 are lost at power-off; VMHD still reaches the PC's disks. A dos.img that is
 a floppy image (1.44M and so on) is used the same way. vmdos.efi shows its
-version and what it loads before starting the kernel.
+version and what it loads before starting the kernel, and the kernel
+then shows its log on the screen as it starts, until DOS takes over (or
+vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
+more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,

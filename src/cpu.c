@@ -383,6 +383,9 @@ static int n_cdmod;
 void kmain(u32 magic, struct mb_info *mb)
 {
     serial_init();
+    if (magic == 0x2BADB002 && (mb->flags & (1 << 12)) && mb->fb_type == 1 &&
+        !((mb->flags & 4) && mb->cmdline && strstr((const char *)(uintptr_t)mb->cmdline, "bootlog=off")))
+        bootcon_start(mb->fb_addr, mb->fb_pitch, mb->fb_width, mb->fb_height, mb->fb_bpp, mb->rpos, mb->gpos, mb->bpos);
     kprintf("\nvmdos %s: 32-bit v86 monitor\n", VMDOS_VERSION);
     if (magic != 0x2BADB002) panic("not started by a Multiboot loader (magic %x)", magic);
 
@@ -507,6 +510,7 @@ void kmain(u32 magic, struct mb_info *mb)
     }
 
     paging_init();
+    bootcon_remap(fb_len ? fb_lin : 0);
     tables_init();
     pic_init();
     pit_init();
@@ -528,5 +532,7 @@ void kmain(u32 magic, struct mb_info *mb)
     xms_init();
     mouse_ps2_init();
     usb_ready = 1;
+    kprintf("starting DOS\n");
+    bootcon_stop();
     guest_start();
 }

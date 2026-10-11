@@ -133,6 +133,7 @@ void kprintf(const char *fmt, ...)
     for (char *p = buf; *p; p++) {
         if (*p == '\n') serial_putc('\r');
         serial_putc(*p);
+        bootcon_putc(*p);
         logbuf[logpos++ % sizeof logbuf] = *p;
     }
 }
@@ -236,6 +237,8 @@ void panic(const char *fmt, ...)
     va_end(ap);
     disk_flush();                                 /* don't lose gathered writes (no-op while flushing) */
     kprintf("\n*** vmdos stopped: %s\n", buf);
+    if (bootcon_on && !video_fb_ready()) for (;;) __asm__ volatile("cli; hlt");   /* the boot console shows it */
+    bootcon_stop();
     log_screen(buf, 0);
     for (;;) __asm__ volatile("cli; hlt");
 }

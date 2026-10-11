@@ -275,6 +275,13 @@ void video_console(const char *msg);          /* panic screen */
 void video_console_attr(const char *title, const char *msg, u16 attr);
 void video_console_save(void);
 void video_console_restore(void);
+/* ---- bootcon.c: the log on screen while vmdos starts ---- */
+extern int bootcon_on;
+void bootcon_start(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp, u8 rpos, u8 gpos, u8 bpos);
+void bootcon_remap(u32 lin);
+void bootcon_stop(void);
+void bootcon_putc(char c);
+int video_fb_ready(void);                      /* video.c has a framebuffer to draw on */
 void log_view(void);                           /* Ctrl+Shift+F10: the log, until Esc */
 extern volatile int log_view_req;
 extern int video_mode;

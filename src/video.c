@@ -1023,6 +1023,7 @@ void video_console_restore(void)
 }
 
 void video_text_fallback(void) { text_fallback = 1; }
+int video_fb_ready(void) { return fb != 0 || text_fallback; }
 
 void video_init(void)
 {
