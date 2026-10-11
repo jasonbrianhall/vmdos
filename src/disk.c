@@ -426,7 +426,7 @@ int disk_dev_count(void)
     return n_dev;
 }
 u64 disk_dev_sectors(int d) { return dev[d].usb ? usb_msd_sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
-const char *disk_dev_name(int d) { return dev[d].name; }
+const char *disk_dev_name(int d) { return dev[d].usb ? usb_msd_name(dev[d].idx) : dev[d].name; }
 const char *disk_dev_kind(int d) { return dev_kind(d); }
 int disk_dev_index(int d) { return dev[d].idx; }
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
