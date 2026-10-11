@@ -402,13 +402,13 @@ void disk_init(void)
     if (disk_image && !fd_ram(0, disk_image, disk_size)) {
         disk_on_a = 1;
         disk_sectors = 0;
-        kprintf("disk: no C:; A: is the RAM disk (dos.img, %u KiB), booting from it%s\n", disk_size >> 10,
+        kprintf("disk: no C:; A: is the boot floppy in RAM (%u KiB), booting from it%s\n", disk_size >> 10,
                 want_ram ? "" : "; changes are lost at power-off");
         return;
     }
     if (!disk_image)
-        panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI), IDE or USB disk, and no RAM disk "
-              "(build with RAMDISK=1: dos.img next to vmdos.efi, GRUB module, QEMU -initrd).");
+        panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI), IDE or USB disk, and no boot floppy or "
+              "RAM disk to fall back to (floppy.img or dos.img next to vmdos.efi, a GRUB module, or QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
             want_ram ? "" : "; changes are lost at power-off");

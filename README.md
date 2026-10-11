@@ -71,6 +71,17 @@ The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
 module and `make run` passes it to QEMU, as a fallback for machines whose
 disk vmdos can't drive (not SATA, IDE or USB) and for `c=ram`.
 
+Without a C: (no disk with KERNEL.SYS that vmdos can drive, and no
+dos.img), vmdos boots the built-in boot floppy instead of stopping: every
+image carries floppy.img (FreeDOS and vmdos's tools on a 1.44M disk, next
+to vmdos.efi and as a GRUB module), held in RAM as drive A:. Changes to it
+are lost at power-off; VMHD still reaches the PC's disks. A dos.img that is
+a floppy image (1.44M and so on) is used the same way. vmdos.efi shows its
+version and what it loads before starting the kernel, and the kernel
+then shows its log on the screen as it starts, until DOS takes over (or
+vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
+more detail.
+
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
 CTMOUSE) are in C:\VMDOS, which is on the PATH.
@@ -269,7 +280,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   QEMU/libvirt); OHCI (AMD/NVIDIA companions) not yet. Everything below
   works on any of them.
 - Keyboards: PS/2, and USB (boot protocol, hubs, hot-plug; polled).
-  `usb=off` on the command line skips USB.
+  `usb=off` on the command line skips USB; `ehci=off` skips only the EHCI and UHCI controllers, leaving them (and any legacy keyboard/mouse emulation) to the firmware.
 - Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
   first is joystick A, a second joystick B (with one, its buttons 3 and 4
   are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES

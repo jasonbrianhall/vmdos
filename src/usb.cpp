@@ -228,6 +228,7 @@ struct Keyboard {
     int subclass;                          // 2, 5 (ATAPI), 4 (UFI): commands padded to 12 bytes
     Ring bout;                             // bulk OUT (bulk IN uses intr)
     uint32_t tag, bsize;
+    int timeouts;                          // mass storage: bulk transfers that never completed
     uint64_t blocks;
     char model[28];
     // EHCI / UHCI: the bus address (k.slot once set), the default pipe's
@@ -793,9 +794,11 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
     w[14] = (uint8_t)(k.subclass >= 2 && k.subclass <= 5 ? 12 : cdb_len);
     for (int i = 0; i < cdb_len; i++) w[15 + i] = cdb[i];
     int cc = bulk(k, false, w, 31, nullptr);
+    if (cc < 0) { k.timeouts++; return -1; }
     if (cc != 1) { if (cc == 6) bot_reset(k); return -1; }
     if (len) {
         cc = bulk(k, in, msd_buf, len, nullptr);
+        if (cc < 0) { k.timeouts++; return -1; }
         if (cc == 6) clear_halt(k, in);
         else if (cc != 1 && cc != 13) return -1;
     }
@@ -806,6 +809,7 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
         if (cc == 6) { clear_halt(k, true); continue; }
         break;
     }
+    if (cc < 0) { k.timeouts++; return -1; }
     if (cc != 1 && cc != 13) { bot_reset(k); return -1; }
     uint32_t t = csw[4] | csw[5] << 8 | csw[6] << 16 | (uint32_t)csw[7] << 24;
     if (csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S' || t != tag || csw[12] == 2) { bot_reset(k); return -1; }
@@ -851,10 +855,23 @@ static bool msd_setup(Keyboard& k) {
     msd_buf[0] = 0;
     uint8_t inq[6] = { 0x12, 0, 0, 0, 36, 0 };
     int ri = -1;
+    k.timeouts = 0;
     for (int t = 0; t < 3 && ri != 0; t++) {                // a drive just plugged in may not answer at first
         msd_buf[0] = 0;
         ri = scsi(k, inq, 6, true, 36);
+        if (k.timeouts) break;
         if (ri) { request_sense(k); delay_ms(100); }
+    }
+    // A transfer that never completed: the device (or its link) isn't
+    // working, and every later command would wait out the same timeout.
+    // Give up on it rather than retry for minutes; a SuperSpeed one gets
+    // another try at USB 2 (setup_port), where many sticks do work.
+    if (k.timeouts) {
+        printf("USB: %s: no answer to mass-storage commands: giving up on it%s\n", k.where,
+               k.speed >= 4 && k.parent < 0 ? "; trying it at USB 2 speed" : "");
+        if (k.speed >= 4) addr_failed = true;
+        k.active = false;
+        return false;
     }
     if (ri) printf("USB: %s: no INQUIRY answer, taken for a disk\n", k.where);
     if (ri == 0) {
@@ -875,11 +892,12 @@ static bool msd_setup(Keyboard& k) {
         uint8_t tur[6] = { 0 };
         int r = scsi(k, tur, 6, false, 0);
         if (r == 0) ready = true;
+        else if (k.timeouts) break;
         else { request_sense(k); delay_ms(100); }
     }
     uint8_t rc[10] = { 0x25 };
     int r = -1;
-    for (int i = 0; i < 3 && r != 0; i++) { r = scsi(k, rc, 10, true, 8); if (r) request_sense(k); }
+    for (int i = 0; i < 3 && r != 0 && !k.timeouts; i++) { r = scsi(k, rc, 10, true, 8); if (r && !k.timeouts) request_sense(k); }
     if (r != 0) { printf("USB: %s: %s: no capacity (no medium? ready: %d)\n", k.where, k.model, ready); k.active = false; return false; }
     uint32_t last = (uint32_t)msd_buf[0] << 24 | msd_buf[1] << 16 | msd_buf[2] << 8 | msd_buf[3];
     k.bsize = (uint32_t)msd_buf[4] << 24 | msd_buf[5] << 16 | msd_buf[6] << 8 | msd_buf[7];
@@ -1423,8 +1441,13 @@ bool usb_init(const char* cmdline) {
     }
     // EHCI (USB 2), then its UHCI companions, which get the low- and
     // full-speed devices EHCI hands over. (OHCI companions: not yet.)
+    // ehci=off: leave them to the firmware, as before vmdos drove them (its
+    // legacy USB support may then still type for keyboards on them).
+    bool older_off = cmdline && strstr(cmdline, "ehci=off");
+    if (older_off) printf("USB: EHCI and UHCI left to the firmware (ehci=off)\n");
     static const struct { int progif, type; const char* name; } older[] = { { 0x20, HC_EHCI, "EHCI" }, { 0x00, HC_UHCI, "UHCI" } };
     for (auto& o : older)
+        if (!older_off)
         for (int i = 0; num_hc < MAX_HC && pci_find_class(0x0C, 0x03, o.progif, &d, i); i++) {
             H = &hcs[num_hc];
             memset((void*)H, 0, sizeof *H);

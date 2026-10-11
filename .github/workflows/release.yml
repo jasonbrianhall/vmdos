@@ -51,6 +51,8 @@ jobs:
       ESP_MB: 2000          # FAT16 (32 KiB clusters): fits a 4 GB stick, room for games
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # tags, for the version vmdos shows (git describe)
 
       - name: Tools
         run: |

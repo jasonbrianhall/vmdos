@@ -1,7 +1,8 @@
 // vmdos.efi: UEFI loader for the 32-bit vmdos kernel.
 //
-// Reads dos.img (and any *.ISO files, as CD-ROM images) from the folder
-// vmdos.efi was started from, takes the
+// Reads dos.img, or else floppy.img (the boot floppy vmdos falls back to
+// as A: when it finds no C:), and any *.ISO files (CD-ROM images) from the
+// folder vmdos.efi was started from, takes the
 // framebuffer from GOP, places the embedded kernel at its link address
 // (16 MiB), exits boot services, leaves long mode (efi/tramp.S) and enters
 // the kernel with Multiboot information, as GRUB would.
@@ -14,6 +15,7 @@
 extern const UINT8 kernel_image[], kernel_image_end[];
 extern const UINT8 tramp_start[], tramp_end[];
 #include "kernel_layout.h"      // KERNEL_BASE, KERNEL_END, KERNEL_ENTRY
+#include "version.h"            // VMDOS_VERSION
 
 struct __attribute__((packed)) MultibootInfo {
     UINT32 flags, mem_lower, mem_upper, boot_device, cmdline;
@@ -218,6 +220,12 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     ST_ = st;
     uefi_call_wrapper(st->BootServices->SetWatchdogTimer, 4, 0, 0, 0, NULL);
 
+    // The graphics mode first (switching it may clear the screen), then
+    // say who we are before anything slow happens.
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = setup_gop();
+    Print(L"vmdos %a (UEFI loader)\r\n", VMDOS_VERSION);
+    if (!gop) { fail(L"no 32-bit graphics mode (GOP) available"); return EFI_UNSUPPORTED; }
+
     EFI_GUID lip = LOADED_IMAGE_PROTOCOL;
     EFI_LOADED_IMAGE* li;
     uefi_call_wrapper(st->BootServices->HandleProtocol, 3, image, &lip, (void**)&li);
@@ -270,9 +278,21 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     UINTN disk_size = 0;
     UINT8* disk = NULL;
     // dos.img too when it's there: the RAM disk is the fallback if the
-    // kernel can't drive this disk (not AHCI).
+    // kernel can't drive this disk (not SATA, IDE or USB). Without it,
+    // floppy.img: booted as A: when the kernel finds no C:.
+    int floppy = 0;
+    if (disk_c) Print(L"  C: drive:     this partition (LBA %ld), if the kernel's SATA/IDE/USB driver finds it\r\n", esp);
+    Print(L"  loading       %s ...\r\n", img_path);
     disk = read_file(image, img_path, &disk_size);
-    if (!disk && !disk_c) { fail(L"no KERNEL.SYS on this partition and no dos.img next to vmdos.efi (build with RAMDISK=1)"); return EFI_NOT_FOUND; }
+    if (!disk) {
+        StrCpy(img_path + cut, L"floppy.img");
+        Print(L"  loading       %s ...\r\n", img_path);
+        disk = read_file(image, img_path, &disk_size);
+        floppy = disk != NULL;
+    }
+    if (!disk && !disk_c) { fail(L"no KERNEL.SYS on this partition, and neither dos.img nor floppy.img next to vmdos.efi"); return EFI_NOT_FOUND; }
+    if (disk) Print(L"  %s %s, %d KiB\r\n", floppy ? L"boot floppy: " : L"disk image:  ", img_path, disk_size >> 10);
+    else Print(L"  (no dos.img or floppy.img: nothing to fall back to without C:)\r\n");
     if (esp) {
         UINTN n = 0;
         while (opts[n]) n++;
@@ -304,14 +324,6 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         dir[i] = 0;
         load_isos(image, dir);
     }
-
-    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = setup_gop();
-    if (!gop) { fail(L"no 32-bit graphics mode (GOP) available"); return EFI_UNSUPPORTED; }
-
-    Print(L"vmdos UEFI loader\r\n");
-    if (disk_c) Print(L"  C: drive:     this partition (LBA %ld), through the kernel's SATA/USB driver\r\n", esp);
-    if (disk) Print(L"  disk image:   %s, %d KiB at 0x%lx%s\r\n", img_path, disk_size >> 10, (UINT64)(UINTN)disk,
-                    disk_c ? L" (fallback)" : L"");
     Print(L"  graphics:     %dx%d, framebuffer 0x%lx\r\n", gop->Mode->Info->HorizontalResolution,
           gop->Mode->Info->VerticalResolution, (UINT64)gop->Mode->FrameBufferBase);
 
@@ -379,7 +391,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     struct MultibootModule* mod = (struct MultibootModule*)((UINT8*)mbi + 512);
     char* cmdline = (char*)mbi + 1024;
     char* modname = (char*)mbi + 3072;
-    copy(modname, disk ? "dos.img" : "none", disk ? 8 : 5);
+    copy(modname, !disk ? "none" : floppy ? "floppy.img" : "dos.img", 11);
     mod->mod_start = (UINT32)(UINTN)disk;
     mod->mod_end = (UINT32)(UINTN)disk + (UINT32)disk_size;
     mod->string = (UINT32)(UINTN)modname;
@@ -408,6 +420,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     mbi->fb_color[4] = bgr ? 0 : 16;  mbi->fb_color[5] = 8;
 
     Print(L"  command line: %a\r\n", cmdline);
+    Print(L"Starting the vmdos kernel...\r\n");
     if (debug) { Print(L"debug: press any key to start the kernel.\r\n"); wait_key(); }
 
     // Leave boot services. After a failed ExitBootServices only GetMemoryMap
