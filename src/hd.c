@@ -45,6 +45,7 @@ static struct unit {
     int in;                               /* a partition is in */
     struct part p;
     u8 ro, changed;
+    u32 gen;                              /* disk_dev_gen when it went in */
 } units[HD_MAX];
 static int bios_on;                       /* the other disks are BIOS disks 81h ... (the DOS kernel is up) */
 static int bios_num(int d);
@@ -197,6 +198,28 @@ static int is_c(const struct part *p)
     int cd = disk_c_dev(&cs, &cz);
     return cd == p->dev && cs == p->start;
 }
+/* Disk d is plugged in. Unplugged USB disks are left out of the list and
+   the BIOS disks, and the disks after them move up. */
+static int present(int d) { return disk_dev_sectors(d) != 0; }
+static int disk_no(int d)                 /* as the list numbers it, from 1 */
+{
+    int n = 1;
+    for (int i = 0; i < d; i++) n += present(i);
+    return n;
+}
+/* Take out partitions whose disk was unplugged (or unplugged and plugged
+   in again: DOS's idea of it may be stale, and it may be another disk). */
+static void drop_gone(void)
+{
+    for (int u = 0; u < n_units; u++) {
+        struct unit *t = &units[u];
+        if (!t->in || (present(t->p.dev) && disk_dev_gen(t->p.dev) == t->gen)) continue;
+        t->in = 0;
+        t->changed = 1;
+        kprintf("hd: %c: its disk was unplugged, now empty\n", 'A' + first_drive + u);
+    }
+}
+
 static int unit_of(const struct part *p)
 {
     for (int u = 0; u < n_units; u++)
@@ -219,8 +242,8 @@ static void describe(char *b, int n, const struct part *p)
 {
     char k[32];
     kind(k, sizeof k, p);
-    if (p->num) snprintf(b, n, "disk %d, partition %d (%s)", p->dev + 1, p->num, k);
-    else snprintf(b, n, "disk %d, whole disk (%s)", p->dev + 1, k);
+    if (p->num) snprintf(b, n, "disk %d, partition %d (%s)", disk_no(p->dev), p->num, k);
+    else snprintf(b, n, "disk %d, whole disk (%s)", disk_no(p->dev), k);
 }
 
 /* "1023 MiB", "3 GiB" */
@@ -259,6 +282,7 @@ static void list(u32 o)
 {
     char b[200], c[96];
     int nd = disk_dev_count(), free_u = -1;
+    drop_gone();
     for (int u = n_units - 1; u >= 0; u--) if (!units[u].in) free_u = u;
     char L = (char)('A' + first_drive + (free_u >= 0 ? free_u : 0));
     put(&o, "VMHD gives partitions of your other disks a drive letter, so DOS can\r\n"
@@ -281,9 +305,10 @@ static void list(u32 o)
         put(&o, "\r\n");
     }
     for (int d = 0; d < nd; d++) {
+        if (!present(d)) continue;
         char sz[16];
         size_str(sz, sizeof sz, (u32)(disk_dev_sectors(d) >> 32 ? 0xFFFFFFFFu : disk_dev_sectors(d)));
-        snprintf(b, sizeof b, "Disk %d: %s disk, %s, %s.", d + 1, disk_dev_kind(d), disk_dev_name(d), sz);
+        snprintf(b, sizeof b, "Disk %d: %s disk, %s, %s.", disk_no(d), disk_dev_kind(d), disk_dev_name(d), sz);
         put(&o, b);
         u32 cs, cz;
         int bd = bios_num(d);
@@ -292,7 +317,6 @@ static void list(u32 o)
         put(&o, "\r\n");
         int any = 0;
         for (int i = 0; i < n_parts; i++) any |= parts[i].dev == d;
-        if (!disk_dev_sectors(d)) { put(&o, "      It is unplugged.\r\n\r\n"); continue; }
         if (!any) {
             snprintf(b, sizeof b, "      It has no partitions yet. To make one: run FDISK, choose disk %d,\r\n"
                      "      create a primary DOS partition, then run VMHD again.\r\n", bd ? bd - 0x80 + 1 : 2);
@@ -341,10 +365,10 @@ static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->
 /* Disk d's BIOS number (81h ...), 0 for none (C:'s disk, or before DOS is up). */
 static int bios_num(int d)
 {
-    if (!bios_on) return 0;
+    if (!bios_on || !present(d)) return 0;
     u32 cs, cz;
     int cd = disk_c_dev(&cs, &cz), n = 0x81;
-    for (int i = 0; i < d; i++) if (i != cd) n++;
+    for (int i = 0; i < d; i++) if (i != cd && present(i)) n++;
     return d == cd || n > 0x80 + BIOS_MAX ? 0 : n;
 }
 /* The disk behind BIOS number dl, -1 for none. */
@@ -360,7 +384,8 @@ int hd_bios_disks(void)
     if (disk_on_a) return 0;                    /* no C:, no BIOS hard disks */
     if (!bios_on) return 1;
     u32 cs, cz;
-    int n = disk_dev_count() - (disk_c_dev(&cs, &cz) >= 0);
+    int nd = disk_dev_count(), n = -(disk_c_dev(&cs, &cz) >= 0);
+    for (int d = 0; d < nd; d++) n += present(d);
     return 1 + (n > BIOS_MAX ? BIOS_MAX : n);
 }
 /* The DOS kernel has its drives: from now on the BIOS shows the other disks. */
@@ -462,12 +487,12 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
             snprintf(b, sizeof b, "Disk %d, partition %d (%s) has no file system yet.\r\n"
                      "It goes in %c:, and then FORMAT %c: makes a file system on it.\r\n"
                      "Anything that is on the partition now will be lost when you format it.",
-                     p->dev + 1, p->num, c, U, U);
+                     disk_no(p->dev), p->num, c, U, U);
         else
             snprintf(b, sizeof b, "Disk %d, partition %d (%s)\r\n"
                      "holds a FAT file system, but its partition type says it belongs to\r\n"
                      "something else: the firmware or another operating system. Changing\r\n"
-                     "files on it from DOS could stop that system from working.", p->dev + 1, p->num, c);
+                     "files on it from DOS could stop that system from working.", disk_no(p->dev), p->num, c);
         put(&warn, b);
         wr8(warn, '$');
         return 6;
@@ -476,6 +501,7 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
     struct unit *t = &units[u];
     t->p = *p;
     t->ro = (u8)ro;
+    t->gen = disk_dev_gen(p->dev);
     t->in = 1;
     t->changed = 1;
     if (!p->fat)
@@ -529,6 +555,7 @@ static void request(struct regs *r)
     u32 rh = LIN(r->v86_es, DI(r));
     int u = rd8(rh + 1), cmd = rd8(rh + 2);
     u16 st = ST_DONE;
+    drop_gone();
     struct unit *t = u < n_units ? &units[u] : 0;
     if (!t) st = ST_ERR(1);
     else switch (cmd) {
@@ -602,6 +629,7 @@ void hd_api(struct regs *r)
     case 3: {
         int u = CL(r) - first_drive;
         if (u < 0 || u >= n_units) { AX(r) = 1; return; }
+        drop_gone();
         scan();
         AX(r) = (u16)attach(u, DL(r) - 1, DH(r) & 1, DH(r) & 2, LIN(r->v86_es, DI(r)));
         return; }
