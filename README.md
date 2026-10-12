@@ -345,9 +345,14 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   line compare. INT 10h draws pixels and text in all of them, with the
   program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
-  and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through HD
-  Audio, AC'97 or a real Sound Blaster (`audio=hda|hdmi|ac97|sb|off`,
+  and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through USB
+  audio, HD Audio, AC'97 or a real Sound Blaster (`audio=usb|hda|hdmi|ac97|sb|off`,
   `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
+  USB audio (headphones, headsets, DACs; USB Audio Class 1 or 2, on an xHCI
+  controller): plugged in, it's used first; plugged in later, sound switches
+  to it, and back when it's unplugged. 48 kHz 16-bit stereo when the device
+  takes it, else converted (44.1 kHz, 24/32-bit, mono). Test in QEMU:
+  `-device qemu-xhci -device usb-audio,audiodev=a0 -audiodev wav,id=a0,path=out.wav`.
   A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
   Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from the PC's mic jack (else
   internal mic, else line in) when playing through HD Audio analog;

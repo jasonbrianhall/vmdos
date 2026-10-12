@@ -1,11 +1,11 @@
 #pragma once
 #include <stdint.h>
 
-enum AudioDriver { AUDIO_NONE, AUDIO_HDA, AUDIO_AC97, AUDIO_SB };
+enum AudioDriver { AUDIO_NONE, AUDIO_HDA, AUDIO_AC97, AUDIO_SB, AUDIO_USB };
 
-// Detects Intel HD Audio, then AC97, then a Sound Blaster (Pro 2.0 or
-// later, on the ISA bus). The boot command line can force one: audio=hda,
-// audio=ac97, audio=sb or audio=off; sb=220,1 gives the Sound Blaster's
+// Detects USB audio (headphones, headsets, DACs), Intel HD Audio, then AC97,
+// then a Sound Blaster (Pro 2.0 or later, on the ISA bus). The boot command
+// line can force one: audio=usb, audio=hda, audio=ac97, audio=sb or audio=off; sb=220,1 gives the Sound Blaster's
 // port and 8-bit DMA channel (the defaults; BLASTER's A220 D1).
 AudioDriver audio_init(const char* cmdline);
 uint32_t audio_play_pos();
