@@ -231,9 +231,19 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     uefi_call_wrapper(st->BootServices->HandleProtocol, 3, image, &lip, (void**)&li);
     CHAR16* self = DevicePathToStr(li->FilePath);
     static CHAR16 img_path[512];
-    UINTN len = self ? StrLen(self) : 0, cut = 0;
-    for (UINTN i = 0; i < len && i < 400; i++) if (self[i] == L'\\' || self[i] == L'/') cut = i + 1;
-    for (UINTN i = 0; i < cut; i++) img_path[i] = self[i] == L'/' ? L'\\' : self[i];
+    // The folder vmdos.efi is in. FilePath is usually just "\EFI\vmdos\vmdos.efi",
+    // but a loader that chainloads us (some GRUB builds) may leave device
+    // nodes in front ("HD(1,MBR,...)/\EFI\...") or use '/': keep what follows
+    // the last ')', with '\' separators and no doubled ones.
+    UINTN len = self ? StrLen(self) : 0, from = 0, cut = 0, n_p = 0;
+    for (UINTN i = 0; i < len; i++) if (self[i] == L')') from = i + 1;
+    for (UINTN i = from; i < len && n_p < 400; i++) {
+        CHAR16 c = self[i] == L'/' ? L'\\' : self[i];
+        if (c == L'\\' && n_p && img_path[n_p - 1] == L'\\') continue;
+        if (!n_p && c != L'\\') img_path[n_p++] = L'\\';
+        img_path[n_p++] = c;
+    }
+    for (UINTN i = 0; i < n_p; i++) if (img_path[i] == L'\\') cut = i + 1;
     StrCpy(img_path + cut, L"dos.img");
 
     // Load options -> command line; "debug" alone pauses here.
@@ -260,14 +270,26 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         char* cfg = read_file(image, cfg_path, &cs);
         UINTN n = 0;
         while (opts[n]) n++;
-        for (UINTN k = 0; cfg && k < cs && n < sizeof opts - 2; k++) {
-            char c = cfg[k];
+        // Word by word, leaving out those already given (GRUB's menu entry
+        // passes the same options).
+        static char word[128];
+        UINTN wn = 0;
+        for (UINTN k = 0; cfg && k <= cs; k++) {
+            char c = k < cs ? cfg[k] : ' ';
             if (c == '\r' || c == '\n' || c == '\t') c = ' ';
             if (c < 32 || c > 126) continue;
-            if (k == 0 && n) opts[n++] = ' ';
-            opts[n++] = c;
+            if (c != ' ') { if (wn < sizeof word - 1) word[wn++] = c; continue; }
+            word[wn] = 0;
+            if (wn && !has_word(opts, word) && n + wn + 2 < sizeof opts) {
+                if (n) opts[n++] = ' ';
+                for (UINTN j = 0; j < wn; j++) opts[n++] = word[j];
+                opts[n] = 0;
+            }
+            wn = 0;
         }
         opts[n] = 0;
+        if (cfg) Print(L"  options from  %s: %a\r\n", cfg_path, opts);
+        else Print(L"  no %s (no options from it)\r\n", cfg_path);
     }
     // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
     // (the kernel's SATA or USB driver reads it); dos.img only for c=ram or else.

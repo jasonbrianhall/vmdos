@@ -270,10 +270,10 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'set timeout=5'; \
 	   echo 'if [ "$$grub_platform" = "efi" ]; then'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
-	   echo '    chainloader /EFI/vmdos/vmdos.efi'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL)'; \
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
-	   echo '    chainloader /EFI/vmdos/vmdos.efi noxms'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) noxms'; \
 	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
