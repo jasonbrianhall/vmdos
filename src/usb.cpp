@@ -186,7 +186,7 @@ static bool next_event(Trb* out) {
 // string down through the hubs (4 bits a tier), and, for a low/full-speed
 // device behind a high-speed hub, that hub's slot and port (its transaction
 // translator).
-enum Kind { KBD, MOUSE, HUB, MSD, JOY };
+enum Kind { KBD, MOUSE, HUB, MSD, JOY, AUDIO };
 
 // Where a gamepad's report has its X, Y, hat switch and buttons, from its
 // HID report descriptor. bit < 0: not there.
@@ -502,6 +502,7 @@ static void release_all(Keyboard& k) {
     handle_report(k, empty);
 }
 
+static bool ua_dispatch(int slot, int ep, const Trb& e);   // the audio stream's (below)
 // Events that arrive while we're waiting for something else.
 static void dispatch(const Trb& e) {
     int type = (e.d3 >> 10) & 0x3F;
@@ -512,8 +513,9 @@ static void dispatch(const Trb& e) {
     }
     if (type != TRB_TRANSFER_EVENT) return;
     int slot = e.d3 >> 24, ep = (e.d3 >> 16) & 0x1F, cc = e.d2 >> 24;
+    if (ua_dispatch(slot, ep, e)) return;
     for (auto& k : kbds) {
-        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD) continue;
+        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD || k.kind == AUDIO) continue;
         uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
         int idx = (int)((trb - phys(k.intr.trb)) / sizeof(Trb));
         if (idx >= 0 && idx < RING_TRBS && (cc == 1 || cc == 13)) {
@@ -969,6 +971,324 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     return r == 0 ? 0 : -1;
 }
 
+// ---------------------------------------------------------------- audio
+// USB Audio Class 1 and 2 output (USB headphones, headsets, DACs, speaker
+// dongles), xHCI only: one isochronous OUT stream, 16-bit stereo at 48 kHz
+// when the device takes it (else 44.1 kHz, 24/32-bit, mono: converted on
+// the way). audio.cpp writes its usual 48 kHz ring; usb_audio_pump (from
+// the timer interrupt, like the other cards' refills) copies the next few
+// milliseconds of it into packets, one transfer descriptor (TD) per service
+// interval. Completions (every couple of ms) are what moves the play
+// position on. The device is set up (interface, rate, unmuted) when it's
+// plugged in; starting and stopping only start and stop the packets, so
+// nothing here sends a control transfer from the interrupt.
+#define UA_TRBS 512                                    // the stream's ring, link TRB included
+static struct {
+    int dev = -1;                                      // kbds index, -1: none plugged in
+    uint32_t gen;                                      // plug count, for audio.cpp to notice
+    volatile Trb* trb;                                 // own ring (longer than RING_TRBS)
+    volatile uint8_t* pkt;                             // a packet buffer per ring slot
+    int pkt_max;                                       // bytes a packet buffer
+    int enq; uint32_t cycle;
+    int dci;
+    uint32_t td_us;                                    // one TD: a service interval
+    uint32_t rate; int ch, bytes;                      // what the device plays
+    uint32_t seq_of[UA_TRBS];                          // TD number in each ring slot
+    volatile uint32_t seq_done, seq_enq;
+    volatile bool running;
+    const int16_t* src; uint32_t src_frames;           // audio.cpp's ring (48 kHz stereo)
+    uint32_t seq_start, facc;
+    uint32_t src_pos;                                  // ring frame of the next TD
+    uint32_t underruns;
+    char name[64];
+} ua;
+
+static bool ua_is(void) { return ua.dev >= 0 && kbds[ua.dev].active && kbds[ua.dev].kind == AUDIO; }
+
+// A class request on endpoint 0 that the device may stall: on xHCI a STALL
+// halts the default endpoint too, so it's reset and moved on.
+static bool ctl_try(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index, uint16_t len, volatile void* buf) {
+    if (control(k, type, req, value, index, len, buf)) return true;
+    if (H->type == HC_XHCI && ctl_cc == 6) {
+        command(0, 0, 0, 14u << 10 | 1u << 16 | (uint32_t)k.slot << 24, nullptr);            // Reset Endpoint 0
+        uint64_t dq = phys(&k.ep0.trb[k.ep0.enq]) | k.ep0.cycle;
+        command((uint32_t)dq, (uint32_t)(dq >> 32), 0, 16u << 10 | 1u << 16 | (uint32_t)k.slot << 24, nullptr);
+    }
+    return false;
+}
+
+// An audio streaming alternate setting with an isochronous OUT endpoint.
+struct UaAlt {
+    int iface, alt, ep, mps, interval;
+    int ch, bytes, bits;
+    uint32_t rates[8]; int nrates;                     // UAC1: discrete rates; nrates < 0: range rates[0]..rates[1]
+    bool fmt_pcm;
+};
+
+static bool ua_rate_ok(const UaAlt& a, uint32_t r) {
+    if (a.nrates < 0) return r >= a.rates[0] && r <= a.rates[1];
+    for (int i = 0; i < a.nrates; i++) if (a.rates[i] == r) return true;
+    return a.nrates == 0;                              // UAC2: the clock decides
+}
+static int ua_score(const UaAlt& a) {
+    if (!a.fmt_pcm || a.ch < 1 || a.bytes < 2 || a.bytes > 4) return -1;
+    int s = 0;
+    if (ua_rate_ok(a, 48000)) s += 8; else if (ua_rate_ok(a, 44100)) s += 4; else return -1;
+    if (a.ch == 2) s += 4; else if (a.ch == 1) s += 2;
+    if (a.bytes == 2) s += 2;
+    return s;
+}
+
+// Device k's descriptors (config descriptor `d`, `total` bytes): if it plays
+// audio, set it up as the USB audio output. True: driven (as AUDIO).
+static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int config, uint16_t vid, uint16_t pid) {
+    int uac = 0, ac_iface = -1;
+    int fu[8], nfu = 0, clk[4], nclk = 0;
+    UaAlt best{}; int best_score = -1;
+    UaAlt cur{}; bool in_as = false, cur_valid = false;
+    auto finish = [&]() {
+        if (in_as && cur_valid && cur.ep) {
+            int s = ua_score(cur);
+            if (s > best_score) { best = cur; best_score = s; }
+        }
+    };
+    for (int i = 0; i + 1 < total && d[i] >= 2; i += d[i]) {
+        uint8_t type = d[i + 1];
+        if (type == 4 && i + 8 < total) {
+            finish();
+            in_as = false; cur_valid = false;
+            if (d[i + 5] == 1 && d[i + 6] == 1) {          // audio control
+                if (ac_iface < 0) { ac_iface = d[i + 2]; uac = d[i + 7] == 0x20 ? 2 : 1; }
+            } else if (d[i + 5] == 1 && d[i + 6] == 2 && d[i + 2] != 0xFF) {   // audio streaming
+                in_as = d[i + 3] != 0;                         // alt 0: no bandwidth
+                cur = UaAlt{};
+                cur.iface = d[i + 2]; cur.alt = d[i + 3];
+            }
+        } else if (type == 0x24 && ac_iface >= 0 && !in_as && i + 3 < total) {    // AC class-specific
+            int sub = d[i + 2];
+            if (sub == 0x06 && nfu < 8) fu[nfu++] = d[i + 3];                     // feature unit
+            if (uac == 2 && sub == 0x0A && nclk < 4) clk[nclk++] = d[i + 3];       // clock source
+        } else if (type == 0x24 && in_as && i + 3 < total) {                      // AS class-specific
+            int sub = d[i + 2];
+            if (sub == 1) {                                                       // AS_GENERAL
+                if (uac == 2 && i + 10 < total) {
+                    cur.fmt_pcm = d[i + 5] == 1 && (d[i + 6] & 1);                 // type I, PCM
+                    cur.ch = d[i + 10];
+                } else if (i + 6 < total) cur.fmt_pcm = (d[i + 5] | d[i + 6] << 8) == 1;   // PCM
+            } else if (sub == 2 && i + 6 < total && d[i + 3] == 1) {              // FORMAT_TYPE I
+                if (uac == 2) { cur.bytes = d[i + 4]; cur.bits = d[i + 5]; cur.nrates = 0; }
+                else {
+                    cur.ch = d[i + 4]; cur.bytes = d[i + 5]; cur.bits = d[i + 6];
+                    int nf = d[i + 7];
+                    if (nf == 0 && i + 13 < total) {
+                        cur.nrates = -1;
+                        cur.rates[0] = d[i + 8] | d[i + 9] << 8 | d[i + 10] << 16;
+                        cur.rates[1] = d[i + 11] | d[i + 12] << 8 | d[i + 13] << 16;
+                    } else
+                        for (int f = 0; f < nf && f < 8 && i + 10 + f * 3 < total; f++)
+                            cur.rates[cur.nrates++] = d[i + 8 + f * 3] | d[i + 9 + f * 3] << 8 | d[i + 10 + f * 3] << 16;
+                }
+                cur_valid = true;
+            }
+        } else if (type == 5 && in_as && i + 6 < total) {
+            int a = d[i + 2], attr = d[i + 3];
+            if ((attr & 3) == 1 && !(a & 0x80) && !cur.ep) {                      // isochronous OUT (not feedback)
+                cur.ep = a;
+                cur.mps = (d[i + 4] | d[i + 5] << 8) & 0x7FF;
+                cur.interval = d[i + 6] ? d[i + 6] : 1;
+            }
+        }
+    }
+    finish();
+    if (ac_iface < 0) return false;                    // not an audio device
+    if (best_score < 0) {
+        printf("USB: audio device %04x:%04x on %s: no output it can play here (only a microphone?)\n", vid, pid, k.where);
+        return false;
+    }
+    if (H->type != HC_XHCI) {
+        printf("USB: audio device %04x:%04x on %s: USB audio needs a USB 3 (xHCI) controller\n", vid, pid, k.where);
+        return false;
+    }
+    if (k.speed >= 4) { printf("USB: audio device on %s: SuperSpeed audio isn't supported\n", k.where); return false; }
+    if (ua_is()) { printf("USB: audio device on %s: one is plugged in already\n", k.where); return false; }
+    if (!ua.trb) {
+        ua.trb = (volatile Trb*)dma_alloc(UA_TRBS * sizeof(Trb), 64);
+        ua.pkt = (volatile uint8_t*)dma_alloc(UA_TRBS * 1024, 64);
+        if (!ua.trb || !ua.pkt) { printf("USB: %s: out of memory for audio\n", k.where); ua.trb = nullptr; return false; }
+    }
+    if (best.mps > 1024) best.mps = 1024;
+
+    if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;              // SET_CONFIGURATION
+    if (!control(k, 0x01, 11, best.alt, best.iface, 0, nullptr)) {               // SET_INTERFACE
+        printf("USB: %s: audio: SET_INTERFACE %d alt %d failed\n", k.where, best.iface, best.alt);
+        return false;
+    }
+    static volatile uint8_t buf[8] __attribute__((aligned(64)));
+    uint32_t rate = ua_rate_ok(best, 48000) ? 48000 : 44100;
+    if (uac == 1) {
+        // Sampling frequency control on the endpoint (if it has one).
+        buf[0] = (uint8_t)rate; buf[1] = (uint8_t)(rate >> 8); buf[2] = (uint8_t)(rate >> 16);
+        ctl_try(k, 0x22, 0x01, 0x0100, best.ep, 3, buf);
+        if (best.nrates == 1) rate = best.rates[0];
+    } else {
+        // Every clock source to 48 kHz (else 44.1), then what it says it runs at.
+        for (int c = 0; c < nclk; c++) {
+            static const uint32_t wants[2] = {48000, 44100};
+            for (uint32_t want : wants) {
+                buf[0] = (uint8_t)want; buf[1] = (uint8_t)(want >> 8); buf[2] = (uint8_t)(want >> 16); buf[3] = 0;
+                if (ctl_try(k, 0x21, 0x01, 0x0100, (uint16_t)(clk[c] << 8 | ac_iface), 4, buf)) break;
+            }
+            buf[0] = buf[1] = buf[2] = buf[3] = 0;
+            if (ctl_try(k, 0xA1, 0x01, 0x0100, (uint16_t)(clk[c] << 8 | ac_iface), 4, buf)) {
+                uint32_t got = buf[0] | buf[1] << 8 | buf[2] << 16 | (uint32_t)buf[3] << 24;
+                if (got >= 8000 && got <= 192000) rate = got;
+            }
+        }
+    }
+    // Unmuted, at 0 dB (the volume setting is applied to the samples).
+    for (int f = 0; f < nfu; f++)
+        for (int c = 0; c <= 2; c++) {
+            buf[0] = 0;
+            ctl_try(k, 0x21, 0x01, (uint16_t)(1 << 8 | c), (uint16_t)(fu[f] << 8 | ac_iface), 1, buf);     // mute off
+            buf[0] = 0; buf[1] = 0;
+            ctl_try(k, 0x21, 0x01, (uint16_t)(2 << 8 | c), (uint16_t)(fu[f] << 8 | ac_iface), 2, buf);     // volume 0 dB
+        }
+
+    // The isochronous OUT endpoint. Interval: 2^(bInterval-1) frames (full
+    // speed) or microframes (high speed), in xHCI's 125 us units.
+    int interval = k.speed == 3 ? best.interval - 1 : best.interval - 1 + 3;
+    if (interval < 0) interval = 0;
+    if (interval > 15) interval = 15;
+    int dci = (best.ep & 0xF) * 2;
+    memset((void*)k.in_ctx, 0, 33 * H->csz);
+    ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
+    fill_slot(k, dci);
+    volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+    ep[0] = (uint32_t)interval << 16;
+    ep[1] = 1u << 3 | (uint32_t)best.mps << 16;              // isochronous OUT, CErr 0
+    for (int i = 0; i < UA_TRBS; i++) ua.trb[i].d0 = ua.trb[i].d1 = ua.trb[i].d2 = ua.trb[i].d3 = 0;
+    volatile Trb& link = ua.trb[UA_TRBS - 1];
+    link.d0 = (uint32_t)phys(ua.trb); link.d1 = (uint32_t)(phys(ua.trb) >> 32);
+    link.d3 = TRB_LINK << 10 | (1 << 1);
+    uint64_t ri = phys(ua.trb) | 1;
+    ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+    ep[4] = (uint32_t)best.mps | (uint32_t)best.mps << 16;   // average TRB length, max ESIT payload
+    uint64_t ic = phys(k.in_ctx);
+    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+    if (cc != 1) { printf("USB: %s: audio: configure endpoint failed (%d)\n", k.where, cc); return false; }
+
+    ua.running = false;
+    ua.enq = 0; ua.cycle = 1;
+    ua.dci = dci;
+    ua.td_us = 125u << interval;
+    ua.pkt_max = best.mps;
+    ua.rate = rate; ua.ch = best.ch; ua.bytes = best.bytes;
+    ua.seq_done = ua.seq_enq = 0;
+    ua.facc = 0;
+    k.kind = AUDIO;
+    k.dci = dci;
+    k.active = true;
+    ua.dev = (int)(&k - kbds);
+    snprintf(ua.name, sizeof ua.name, "USB audio %04x:%04x on %s", vid, pid, k.where);
+    ua.gen++;
+    printf("USB: audio output on %s: %04x:%04x, UAC%d, %u Hz, %d-bit, %d channel%s, %u us packets (slot %d, %s speed)\n",
+           k.where, vid, pid, uac, rate, best.bits ? best.bits : best.bytes * 8, best.ch, best.ch == 1 ? "" : "s",
+           ua.td_us, k.slot, speed_name(k.speed));
+    return true;
+}
+
+// A transfer event on the stream's endpoint (from dispatch): every TD up to
+// the one it names has been played (or skipped).
+static bool ua_dispatch(int slot, int ep, const Trb& e) {
+    if (!ua_is() || kbds[ua.dev].hc != H || kbds[ua.dev].slot != slot || ep != ua.dci) return false;
+    int cc = e.d2 >> 24;
+    uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
+    int idx = (int)((trb - phys(ua.trb)) / sizeof(Trb));
+    if (cc == 14 || cc == 15) { ua.seq_done = ua.seq_enq; return true; }   // ring under/overrun: all of it went
+    if (idx >= 0 && idx < UA_TRBS - 1 && (int32_t)(ua.seq_of[idx] + 1 - ua.seq_done) > 0) ua.seq_done = ua.seq_of[idx] + 1;
+    return true;
+}
+
+// audio.cpp's side. All of these may run from the timer interrupt: they
+// touch only the stream's own ring and doorbell, never H or the event ring.
+extern "C" int usb_audio_present(void) { return ua_is(); }
+extern "C" uint32_t usb_audio_gen(void) { return ua.gen; }
+extern "C" const char* usb_audio_name(void) { return ua.name; }
+extern "C" int usb_audio_start(const int16_t* ring, uint32_t frames) {
+    if (!ua_is()) return 0;
+    ua.running = false;
+    ua.src = ring; ua.src_frames = frames;
+    ua.seq_start = ua.seq_enq;
+    ua.src_pos = 0;
+    ua.running = true;
+    printf("USB: audio: playing through %s\n", ua.name);
+    return 1;
+}
+extern "C" void usb_audio_stop(void) { ua.running = false; }
+// Ring frames played since usb_audio_start, modulo the ring (a power of
+// two, so the product wrapping round doesn't matter).
+extern "C" uint32_t usb_audio_pos(void) {
+    int32_t n = (int32_t)(ua.seq_done - ua.seq_start);
+    if (n < 0) n = 0;
+    uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
+    return (uint32_t)n * per % ua.src_frames;
+}
+extern "C" uint32_t usb_audio_underruns(void) { return ua.underruns; }
+
+// Keep about 10 ms of packets queued.
+extern "C" void usb_audio_pump(void) {
+    if (!ua.running || !ua_is() || !ua.src) return;
+    Keyboard& k = kbds[ua.dev];
+    uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
+    uint32_t q = 10000 / ua.td_us; if (q < 2) q = 2; if (q > UA_TRBS - 8) q = UA_TRBS - 8;
+    uint32_t ioc_every = 2000 / ua.td_us; if (ioc_every < 1) ioc_every = 1;
+    if ((int32_t)(ua.seq_enq - ua.seq_done) <= 0 && ua.seq_enq != ua.seq_start) ua.underruns++;   // ran dry
+    bool any = false;
+    while ((int32_t)(ua.seq_enq - ua.seq_done) < (int32_t)q) {
+        uint32_t seq = ua.seq_enq;
+        uint32_t src = ua.src_pos;
+        ua.src_pos = (ua.src_pos + per) % ua.src_frames;
+        // Device frames this TD: rate x interval, the remainder carried over.
+        ua.facc += ua.rate * ua.td_us;
+        uint32_t n = ua.facc / 1000000;
+        ua.facc %= 1000000;
+        int fb = ua.ch * ua.bytes;
+        if ((int)n * fb > ua.pkt_max) n = (uint32_t)(ua.pkt_max / fb);
+        volatile uint8_t* p = ua.pkt + ua.enq * 1024;
+        int o = 0;
+        for (uint32_t j = 0; j < n; j++) {
+            // per ring frames stretched to n: linear, in 1/256ths.
+            uint32_t pos = n ? j * per * 256 / n : 0;
+            uint32_t i0 = (src + (pos >> 8)) % ua.src_frames, i1 = (i0 + 1) % ua.src_frames, f = pos & 255;
+            int l = (ua.src[i0 * 2] * (int)(256 - f) + ua.src[i1 * 2] * (int)f) >> 8;
+            int r = (ua.src[i0 * 2 + 1] * (int)(256 - f) + ua.src[i1 * 2 + 1] * (int)f) >> 8;
+            for (int c = 0; c < ua.ch; c++) {
+                int v = ua.ch == 1 ? (l + r) / 2 : c == 0 ? l : c == 1 ? r : 0;
+                if (ua.bytes == 2) { p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+                else if (ua.bytes == 3) { p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+                else { p[o++] = 0; p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+            }
+        }
+        volatile Trb& t = ua.trb[ua.enq];
+        uint64_t a = phys(p);
+        t.d0 = (uint32_t)a; t.d1 = (uint32_t)(a >> 32); t.d2 = (uint32_t)o;
+        ua.seq_of[ua.enq] = seq;
+        barrier();
+        // Isoch TRB, start as soon as possible (after the one before),
+        // interrupt on completion every couple of ms.
+        t.d3 = 5u << 10 | (seq % ioc_every == ioc_every - 1 ? 1u << 5 : 0) | 1u << 31 | ua.cycle;
+        if (++ua.enq == UA_TRBS - 1) {
+            volatile Trb& link = ua.trb[UA_TRBS - 1];
+            link.d3 = (link.d3 & ~1u) | ua.cycle;
+            ua.enq = 0;
+            ua.cycle ^= 1;
+        }
+        ua.seq_enq = seq + 1;
+        any = true;
+    }
+    if (any) k.hc->db[k.slot] = ua.dci;
+}
+
 // The rest of setting up a device that has slot k.slot: its memory, an
 // address, and a keyboard, mouse or hub on top. False: not driven.
 static bool setup_slot(Keyboard& k, int ki) {
@@ -1139,6 +1459,12 @@ static bool setup_slot(Keyboard& k, int ki) {
             ep_interval = desc[i + 6];
         }
     }
+    if (ms_iface < 0 && !hub) {                         // speakers / headphones (a headset's buttons are left alone)
+        bool audio = false;
+        for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i])
+            if (desc[i + 1] == 4 && desc[i + 5] == 1) audio = true;
+        if (audio) return ua_setup(k, desc, total, config, (uint16_t)vid, (uint16_t)pid);
+    }
     if (ms_iface >= 0 && ms_in && ms_out) {
         if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;      // SET_CONFIGURATION
         k.iface = ms_iface; k.subclass = ms_sub; k.ep_in = ms_in; k.ep_out = ms_out; k.mps = ms_mps;
@@ -1231,10 +1557,11 @@ static void forget(int i) {
         if (kbds[j].active && kbds[j].parent == i) forget(j);
     if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
     for (int j = 0; j < n_msd; j++) if (msd_dev[j] == i) msd_dev[j] = -1;     // its slot waits for it to come back
+    if (k.kind == AUDIO && ua.dev == i) { ua.running = false; ua.dev = -1; ua.gen++; }
     k.active = false;
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
-    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
+    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == AUDIO ? "audio device" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
            k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
@@ -1646,6 +1973,7 @@ extern "C" void usb_settle(int max_ms) {
 // C entry points for the kernel.
 extern "C" void usb_start(const char* cmdline) { usb_init(cmdline); }
 extern "C" void usb_tick(void) { usb_poll(); }
+extern "C" int usb_controllers(void) { int n = 0; for (int c = 0; c < num_hc; c++) n += hcs[c].type == HC_XHCI; return n; }
 extern "C" int usb_quiet(void) { return !usb_busy && !in_poll; }       // no USB transfer under way
 
 // CD/DVD drives. A SCSI command (cdb; its length from the opcode group)

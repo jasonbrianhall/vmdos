@@ -804,6 +804,19 @@ static void sb_submit(const int16_t* samples, int n) {
     }
 }
 
+// ================================================================ USB audio
+// usb.cpp's isochronous stream (USB Audio Class 1/2, xHCI): it plays straight
+// from the shared ring, and moves its play position on as packets complete.
+extern "C" {
+int usb_audio_present(void);
+uint32_t usb_audio_gen(void);
+const char* usb_audio_name(void);
+int usb_audio_start(const int16_t* ring, uint32_t frames);
+void usb_audio_stop(void);
+uint32_t usb_audio_pos(void);
+void usb_audio_pump(void);
+}
+
 // ================================================================ common
 static bool arg_is(const char* cmdline, const char* want) {
     if (!cmdline) return false;
@@ -817,7 +830,7 @@ static bool arg_is(const char* cmdline, const char* want) {
 // Audio controller's analog jacks and its HDMI/DisplayPort output (when a
 // monitor is on it), AC'97, a Sound Blaster, and the PC speaker. One plays
 // at a time; audio_select() switches.
-enum OutKind : uint8_t { OUT_SPEAKER, OUT_HDA_ANALOG, OUT_HDA_DIGITAL, OUT_AC97, OUT_SB };
+enum OutKind : uint8_t { OUT_SPEAKER, OUT_HDA_ANALOG, OUT_HDA_DIGITAL, OUT_AC97, OUT_SB, OUT_USB };
 struct AudioOut { OutKind kind; PciDevice d; uint8_t cad, pin; bool monitor; char name[64]; };
 #define MAX_OUTS 24
 static AudioOut outs[MAX_OUTS];
@@ -848,6 +861,7 @@ static void stop_current() {
     case AUDIO_HDA:  hda_stop(); break;
     case AUDIO_AC97: ac97_stop(); break;
     case AUDIO_SB:   sb_stop(); break;
+    case AUDIO_USB:  usb_audio_stop(); break;
     default: break;
     }
     driver = AUDIO_NONE;
@@ -867,6 +881,7 @@ static bool start_out(int i) {
         ok = hda_try(o.d, true); if (ok) driver = AUDIO_HDA; break;
     case OUT_AC97:        ok = ac97_init();         if (ok) driver = AUDIO_AC97; break;
     case OUT_SB:          ok = sb_init(boot_cmdline); if (ok) driver = AUDIO_SB; break;
+    case OUT_USB:         ok = usb_audio_start(ring, RING_FRAMES); if (ok) driver = AUDIO_USB; break;
     case OUT_SPEAKER:     ok = true; break;
     }
     if (!ok) return false;
@@ -882,7 +897,42 @@ static bool start_out(int i) {
     return true;
 }
 
-int audio_output_count() { return nouts; }
+// USB audio comes and goes: one output for it, added the first time a
+// device shows up (and named after the latest one). Plugging one in
+// switches to it; unplugging it goes back to what played before.
+static int usb_out = -1, before_usb = -1;
+static uint32_t usb_gen_seen;
+static void usb_sync() {
+    uint32_t g = usb_audio_gen();
+    if (g == usb_gen_seen) return;
+    usb_gen_seen = g;
+    bool here = usb_audio_present();
+    if (here && usb_out < 0) {
+        AudioOut* o = add_out(OUT_USB, nullptr, usb_audio_name());
+        if (o) usb_out = (int)(o - outs);
+    }
+    if (usb_out < 0) return;
+    if (here) {
+        snprintf(outs[usb_out].name, sizeof outs[usb_out].name, "%s", usb_audio_name());
+        if (cur_out != usb_out) {
+            int was = cur_out;
+            if (start_out(usb_out)) before_usb = was;
+        }
+    } else if (cur_out == usb_out) {
+        int back = before_usb;
+        before_usb = -1;
+        if (back < 0 || back == usb_out || !start_out(back)) {          // else the best of the rest
+            static const OutKind order[] = {OUT_HDA_ANALOG, OUT_HDA_DIGITAL, OUT_AC97, OUT_SB, OUT_SPEAKER};
+            bool done = false;
+            for (OutKind kind : order)
+                for (int i = 0; i < nouts && !done; i++)
+                    if (outs[i].kind == kind) done = start_out(i);
+        }
+        printf("Audio: the USB audio device was unplugged\n");
+    }
+}
+
+int audio_output_count() { usb_sync(); return nouts; }
 int audio_output_current() { return cur_out; }
 const char* audio_output_name(int i) { return i >= 0 && i < nouts ? outs[i].name : ""; }
 // Switch to output i (the note player must be held meanwhile: it calls in
@@ -950,6 +1000,13 @@ AudioDriver audio_init(const char* cmdline) {
         }
     }
     if (ac97_init()) { ac97_stop(); add_out(OUT_AC97, nullptr, "AC'97"); }
+    bool want_usb = arg_is(cmdline, "usb");
+    usb_gen_seen = usb_audio_gen();
+    if (usb_audio_present()) {
+        AudioOut* o = add_out(OUT_USB, nullptr, usb_audio_name());
+        if (o) usb_out = (int)(o - outs);
+    }
+    if (want_usb && usb_out >= 0) any = false;          // audio=usb and none plugged in: the usual order
     if (sb_init(cmdline)) { sb_stop(); add_out(OUT_SB, nullptr, "Sound Blaster"); }
     add_out(OUT_SPEAKER, nullptr, "PC speaker");
 
@@ -959,6 +1016,8 @@ AudioDriver audio_init(const char* cmdline) {
     static const OutKind analog_first[] = {OUT_HDA_ANALOG, OUT_HDA_DIGITAL, OUT_AC97, OUT_SB};
     static const OutKind hdmi_first[]   = {OUT_HDA_DIGITAL, OUT_HDA_ANALOG, OUT_AC97, OUT_SB};
     const OutKind* order = want_hdmi ? hdmi_first : analog_first;
+    // USB audio first: plugged in, it's what's wanted (unless audio= says otherwise).
+    if (!want_off && usb_out >= 0 && (any || want_usb)) start_out(usb_out);
     if (!want_off)
         for (int k = 0; k < 4 && cur_out < 0; k++) {
             OutKind kind = order[k];
@@ -984,6 +1043,7 @@ uint32_t audio_play_pos() {
     case AUDIO_HDA:  return hda_play_pos();
     case AUDIO_AC97: return ac97_play_pos();
     case AUDIO_SB:   return sb_play_pos();
+    case AUDIO_USB:  return usb_audio_pos();
     default:         return 0;
     }
 }
@@ -997,6 +1057,8 @@ uint32_t audio_play_pos() {
 static uint32_t underruns;
 uint32_t audio_underruns() { return underruns; }
 int audio_frames_wanted(int nominal) {
+    usb_sync();
+    if (driver == AUDIO_USB) usb_audio_pump();
     if (driver == AUDIO_NONE || nominal <= 0) return nominal;
     if (driver == AUDIO_SB) return sb_frames_wanted(nominal, &underruns);
     uint32_t play = audio_play_pos();
@@ -1059,10 +1121,14 @@ void audio_submit_stereo(const int16_t* lr, int n) {
         ring[write_pos * 2 + 1] = (int16_t)(lr[2 * i + 1] * gain / 10000);
         write_pos = (write_pos + 1) % RING_FRAMES;
     }
+    if (driver == AUDIO_USB) usb_audio_pump();
 }
 
 // C entry points for the kernel.
-extern "C" int audio_start(const char* cmdline) { return audio_init(cmdline) != AUDIO_NONE; }
+// True when there's sound to drive: a card now, or one that may be plugged
+// in later (USB audio, with a USB controller up).
+extern "C" int usb_controllers(void);
+extern "C" int audio_start(const char* cmdline) { return audio_init(cmdline) != AUDIO_NONE || usb_controllers() > 0; }
 extern "C" int audio_out_count(void) { return audio_output_count(); }
 extern "C" int audio_out_current(void) { return audio_output_current(); }
 extern "C" const char* audio_out_name(int i) { return audio_output_name(i); }
@@ -1077,6 +1143,6 @@ uint32_t audio_delay_ms() {
 }
 
 const char* audio_name() {
-    return driver == AUDIO_HDA ? "HD Audio" : driver == AUDIO_AC97 ? "AC97" :
+    return driver == AUDIO_HDA ? "HD Audio" : driver == AUDIO_AC97 ? "AC97" : driver == AUDIO_USB ? "USB audio" :
            driver == AUDIO_SB ? "Sound Blaster" : "none";
 }
