@@ -1,16 +1,16 @@
-vmdos - quick reference
+Virtual Monitor DOS - Quick References
 =======================
 
 KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
 
-  Ctrl+Shift+F2    Next sound output (speakers, HDMI, USB, ...)
+  Ctrl+Shift+F2    Next sound output (PC Speaker, AC97, HDA, SB, or USB Audio)
   Ctrl+Shift+F3    Volume down 10%
   Ctrl+Shift+F4    Volume up 10%
   Ctrl+Shift+F5    Mute / unmute
-  Ctrl+Shift+F8    Smooth scaling on / off
+  Ctrl+Shift+F8    Smooth scaling on / off (games like Warcraft 2 look much better but games like DOOM do not)
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
   Ctrl+Shift+F10   vmdos log (game pauses; arrows/PgUp/PgDn scroll,
-                   Esc goes back)
+                     Esc goes back)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
   Ctrl+Alt+Del     Restart
@@ -20,16 +20,17 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
 DOS COMMANDS (in C:\VMDOS, on the PATH)
 
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
-                        (default VMSHOT.BMP)
+                          (default VMSHOT.BMP)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 100)
   VMCD                  List CD drives and images
-  VMCD F: C:\ISOS\X.ISO Put an ISO (or CUE sheet) in a CD drive
+  VMCD F: C:\ISOS\X.ISO Put an ISO (or CUE sheet) in a CD drive (has to be on C:)
   VMFD A: DISK1.IMG     Put a floppy image in A: or B: (/E takes it out,
-                        /R read-only, /BOOT boots it)
+                          /R read-only, /BOOT boots it; will only boot 16 bit code)
   VMHD                  List other disks' partitions
   VMHD D: 3             Put partition 3 in D: (/R read-only, /E out)
   VMSB 16 | PRO         Sound Blaster 16 or Pro (VMSB alone shows which)
-  VMSB MIC              Mic level meter
+  VMSB MIC              Mic level meter (written for parrot but the parrot game doesn't
+                          work because of the way it handles audio)
 
 BOOT OPTIONS
 
