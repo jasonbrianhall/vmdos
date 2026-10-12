@@ -240,6 +240,7 @@ static void sync_cursor_crtc(void)
 }
 
 static void vbe_off(void);
+static int vbe_setting;                    /* vbe_set is setting up the VGA state under a VESA mode */
 static int reg_mode;                       /* graphics turned on through the registers, not the BIOS */
 void video_set_mode(int mode, int clear)
 {
@@ -303,7 +304,8 @@ void video_set_mode(int mode, int clear)
         else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
         else memset(gptr(0xA0000), 0, 0x10000);
     }
-    dac8 = 0;                                      /* a mode set: 6-bit DAC, all pixel bits */
+    if (dac8 && !vbe_setting) kprintf("video: mode %02x set: DAC back to 6 bits\n", mode);
+    dac8 = 0;                                      /* a VGA mode set: 6-bit DAC, all pixel bits (vbe_set keeps 8) */
     dac_mask = 0xFF;
     default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
     if (!is_text(mode) && mode != 0x13) atc[0x10] = 0x01;   /* graphics, as the BIOS sets it */
@@ -768,7 +770,18 @@ static void vbe_mode_info(int m, u32 a)
 
 static void vbe_set(int m, int clear)
 {
+    /* A VESA mode set keeps the DAC width, as most SVGA BIOSes do: games
+       switch to 8 bits before setting their mode as often as after. The
+       default palette it loads is widened to match. */
+    int keep8 = dac8;
+    vbe_setting = 1;
     video_set_mode(0x13, 0);                    /* VGA state, default 256-colour palette */
+    vbe_setting = 0;
+    if (keep8) {
+        for (int i = 0; i < 256; i++)
+            for (int c = 0; c < 3; c++) { u8 v = vga_dac[i][c]; vga_dac[i][c] = (u8)(v << 2 | v >> 4); }
+        dac8 = 1;
+    }
     video_mode = vmodes[m].no;
     vbe_cur = vmodes[m].no;
     vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
@@ -1059,10 +1072,11 @@ void video_console(const char *msg) { video_console_attr("vmdos stopped", msg, 0
 
 /* Around a console the guest gets back (Ctrl+Shift+F10, the log): its
    mode, text width and palette, then a full redraw. */
-static struct { int on, mode, cols; u8 dac[256][3]; } saved;
+static struct { int on, mode, cols, dac8; u8 mask; u8 dac[256][3]; } saved;
 void video_console_save(void)
 {
     saved.on = 1; saved.mode = video_mode; saved.cols = text_cols;
+    saved.dac8 = dac8; saved.mask = dac_mask;                  /* the 8-bit DAC too: the console's is 6-bit */
     memcpy(saved.dac, vga_dac, sizeof vga_dac);
 }
 void video_console_restore(void)
@@ -1071,6 +1085,7 @@ void video_console_restore(void)
     saved.on = 0;
     console_on = 0;
     video_mode = saved.mode; text_cols = saved.cols;
+    dac8 = saved.dac8; dac_mask = saved.mask;
     memcpy(vga_dac, saved.dac, sizeof vga_dac);
     palette_dirty = 1;
     full_redraw = 1;
