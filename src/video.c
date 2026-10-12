@@ -321,9 +321,9 @@ static u16 shadow_text[132 * 60];
 static u8 shadow_gfx[640 * 480];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
-static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, or all of it (aspect=fill) */
+static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
 static u16 xmap[4096], txmap[4096];
-static int aspect_fill = -1;
+static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
 
@@ -332,19 +332,30 @@ static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols *
 static void layout(void)
 {
     static int last_w, last_h;
-    int cw = is_text(video_mode) || vbe_on ? 0 : gfx_w(), ch = is_text(video_mode) || vbe_on ? 0 : gfx_h();
-    if (last_layout_mode == video_mode && cw == last_w && ch == last_h) return;
+    if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
+    if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
+    int text = is_text(video_mode);
+    u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
+    u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
+    if (last_layout_mode == video_mode && (int)w == last_w && (int)h == last_h) return;
     last_layout_mode = video_mode;
-    last_w = cw; last_h = ch;
+    last_w = (int)w; last_h = (int)h;
     full_redraw = 1;
     clear_fb();
-    if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     g_h = fb_h; g_w = fb_h * 4 / 3;
     if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * 3 / 4; }
+    if (no_scale) {
+        /* scale=off: the size a VGA card puts out (low resolutions doubled,
+           as it does), times the largest whole number that fits. Too big
+           for the screen even at 1: scaled down as without the option. */
+        u32 ow = w < 400 ? w * 2 : w, oh = h < 300 ? h * 2 : h;
+        u32 s = fb_w / ow < fb_h / oh ? fb_w / ow : fb_h / oh;
+        if (s && ow * s <= 4096) { g_w = ow * s; g_h = oh * s; }
+    }
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
-    u32 w = vbe_on ? vbe_w : is_text(video_mode) ? 320 : (u32)gfx_w();
-    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * w / g_w);
+    u32 xw = vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
+    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * xw / g_w);
     u32 tw = text_pixels_w();
     for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
 }
