@@ -80,6 +80,11 @@ int palette_dirty = 1;
 static u8 crtc_idx, seq_idx, gc_idx, atc_idx, atc_flip, misc_out = 0x67;
 static u8 seq[8], gc[16], atc[21];
 static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
+/* DAC width: 6 bits a primary as on a VGA, or 8 once a program asks for it
+   through VESA (4F08h), as most SVGA cards allow; a mode set goes back to
+   6. vga_dac holds the values at the width they were written in. */
+static int dac8;
+static u8 dac_in(u8 v) { return dac8 ? v : v & 63; }
 static u32 pal[256];
 
 /* VESA BIOS state (see the VBE section) */
@@ -266,6 +271,8 @@ void video_set_mode(int mode, int clear)
         else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
         else memset(gptr(0xA0000), 0, 0x10000);
     }
+    dac8 = 0;                                      /* a mode set: 6-bit DAC, all pixel bits */
+    dac_mask = 0xFF;
     default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
     if (is_cga(mode)) cga_color_select(mode == 6 ? 0x3F : 0x30);
     full_redraw = 1;
@@ -765,9 +772,9 @@ void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
     } else if (id == 0x49 && pal_lin) {
         u32 n = ecx & 0xFFFF, first = edx & 0xFFFF;
         for (u32 i = 0; i < n && first + i < 256; i++) {
-            vga_dac[first + i][0] = rd8(pal_lin + i * 4 + 2) & 63;
-            vga_dac[first + i][1] = rd8(pal_lin + i * 4 + 1) & 63;
-            vga_dac[first + i][2] = rd8(pal_lin + i * 4) & 63;
+            vga_dac[first + i][0] = dac_in(rd8(pal_lin + i * 4 + 2));
+            vga_dac[first + i][1] = dac_in(rd8(pal_lin + i * 4 + 1));
+            vga_dac[first + i][2] = dac_in(rd8(pal_lin + i * 4));
         }
         palette_dirty = 1;
     }
@@ -786,7 +793,7 @@ static void vbe_call(struct regs *r)
         wr32(es_di, 0x41534556u);                /* "VESA" */
         wr16(es_di + 4, 0x0200);
         wr32(es_di + 6, 0xF0000000u | (VBE_DATA & 0xFFFF));
-        wr32(es_di + 0x0A, 0);
+        wr32(es_di + 0x0A, 1);                   /* capabilities: DAC switchable to 8 bits */
         wr32(es_di + 0x0E, 0xF0000000u | ((VBE_DATA + 0x80) & 0xFFFF));
         wr16(es_di + 0x12, VRAM_SIZE >> 16);
         if (v2) {
@@ -834,7 +841,19 @@ static void vbe_call(struct regs *r)
         }
         AX(r) = 0x004F; return; }
     case 0x08:
-        if (BL(r) <= 1) { BH(r) = 6; AX(r) = 0x004F; } else AX(r) = 0x014F;   /* 6-bit DAC only */
+        /* BL=0: set the width (BH: 8 for 8 bits, anything less: 6), BL=1: get it.
+           Switching rescales what's loaded, so the colours on screen stay. */
+        if (BL(r) == 0) {
+            int want = BH(r) >= 8;
+            if (want != dac8) {
+                for (int i = 0; i < 256; i++)
+                    for (int c = 0; c < 3; c++) { u8 v = vga_dac[i][c]; vga_dac[i][c] = want ? (u8)(v << 2 | v >> 4) : v >> 2; }
+                dac8 = want;
+                palette_dirty = 1;
+                kprintf("video: %d-bit DAC\n", dac8 ? 8 : 6);
+            }
+        }
+        if (BL(r) <= 1) { BH(r) = dac8 ? 8 : 6; AX(r) = 0x004F; } else AX(r) = 0x014F;
         return;
     case 0x0A:                                   /* protected-mode interface (bios.asm vbe_pmi) */
         if (BL(r) != 0) { AX(r) = 0x014F; return; }
@@ -845,9 +864,9 @@ static void vbe_call(struct regs *r)
         u32 n = CX(r), first = DX(r);
         if ((BL(r) & 0x7F) == 0)
             for (u32 i = 0; i < n && first + i < 256; i++) {
-                vga_dac[first + i][0] = rd8(es_di + i * 4 + 2) & 63;
-                vga_dac[first + i][1] = rd8(es_di + i * 4 + 1) & 63;
-                vga_dac[first + i][2] = rd8(es_di + i * 4) & 63;
+                vga_dac[first + i][0] = dac_in(rd8(es_di + i * 4 + 2));
+                vga_dac[first + i][1] = dac_in(rd8(es_di + i * 4 + 1));
+                vga_dac[first + i][2] = dac_in(rd8(es_di + i * 4));
             }
         else if (BL(r) == 1)
             for (u32 i = 0; i < n && first + i < 256; i++) {
@@ -963,7 +982,10 @@ void video_refresh(void)
     if (!fb) { busy = 0; return; }
     layout();
     if (palette_dirty) {
-        for (int i = 0; i < 256; i++) pal[i] = pack(vga_dac[i][0], vga_dac[i][1], vga_dac[i][2]);
+        for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
+            const u8 *d = vga_dac[i & dac_mask];
+            pal[i] = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+        }
         palette_dirty = 0;
         full_redraw = 1;
     }
@@ -994,6 +1016,7 @@ void video_console_attr(const char *title, const char *msg, u16 attr)
     }
     console_on = 1;
     if (!is_text(video_mode)) { video_mode = 3; text_cols = 80; }
+    dac8 = 0; dac_mask = 0xFF;
     default_palette(0);
     last_layout_mode = -1;
     video_refresh();
@@ -1084,11 +1107,11 @@ void video_port_out(u16 port, u8 v)
         if ((seq_idx & 7) == 4) planar_check();
         else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); }
         return;
-    case 0x3C6: dac_mask = v; return;
+    case 0x3C6: dac_mask = v; palette_dirty = 1; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
     case 0x3C8: dac_widx = v; dac_wc = 0; return;
     case 0x3C9:
-        vga_dac[dac_widx][dac_wc] = v & 63;
+        vga_dac[dac_widx][dac_wc] = dac_in(v);
         if (++dac_wc == 3) { dac_wc = 0; dac_widx++; }
         palette_dirty = 1;
         return;
@@ -1330,12 +1353,12 @@ void video_int10(struct regs *r)
         case 0x08: BH(r) = atc[0x11]; break;
         case 0x09: for (int i = 0; i < 16; i++) wr8(LIN(r->v86_es, DX(r)) + i, atc[i]);
                    wr8(LIN(r->v86_es, DX(r)) + 16, atc[0x11]); break;
-        case 0x10: vga_dac[BL(r)][0] = DH(r) & 63; vga_dac[BL(r)][1] = CH(r) & 63; vga_dac[BL(r)][2] = CL(r) & 63;
+        case 0x10: vga_dac[BL(r)][0] = dac_in(DH(r)); vga_dac[BL(r)][1] = dac_in(CH(r)); vga_dac[BL(r)][2] = dac_in(CL(r));
                    palette_dirty = 1; break;
         case 0x12: {
             u32 a = LIN(r->v86_es, DX(r));
             for (u32 i = 0; i < CX(r) && BX(r) + i < 256; i++)
-                for (int c = 0; c < 3; c++) vga_dac[BX(r) + i][c] = rd8(a + i * 3 + c) & 63;
+                for (int c = 0; c < 3; c++) vga_dac[BX(r) + i][c] = dac_in(rd8(a + i * 3 + c));
             palette_dirty = 1;
             break; }
         case 0x15: DH(r) = vga_dac[BL(r)][0]; CH(r) = vga_dac[BL(r)][1]; CL(r) = vga_dac[BL(r)][2]; break;
