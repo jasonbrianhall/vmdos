@@ -32,6 +32,17 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSB MIC              Mic level meter (written for parrot but the parrot game doesn't
                           work because of the way it handles audio)
 
+SCREEN RESOLUTION AND SCALING
+
+  vmdos can't switch the PC's real screen mode while DOS runs: the
+  firmware only sets modes before the kernel starts, and switching later
+  would need a driver for each graphics card. So the screen mode is
+  picked once at boot (boot menu, "screen resolution", or vga=) and every
+  DOS mode is scaled into it. Your monitor would scale anyway: a flat
+  panel only shows its own size. 640x480 games look best at vga=640x480
+  (drawn 1:1, the monitor stretches it) or vga=max (vmdos scales, the
+  monitor doesn't).
+
 BOOT OPTIONS
 
   Set when building the stick:  make esp KARGS="scale=sharp speed=50"
@@ -47,6 +58,12 @@ BOOT OPTIONS
                    black borders (whole multiples on bigger screens)
     aspect=fill    Stretch to the whole screen
     nowc           Framebuffer not write-combining
+    vga=ask        UEFI: list the screen modes at boot and ask which
+    vga=N          UEFI: screen mode N (the number vga=ask shows)
+    vga=WxH        UEFI: the mode of that size (vga=640x480)
+    vga=max        UEFI: the largest mode (usually the panel's own size)
+                   On a legacy BIOS boot, pick the size in the boot menu
+                   instead ("screen resolution"), which UEFI has too.
   Speed
     speed=N        Run at N% of full speed from boot
   Sound
