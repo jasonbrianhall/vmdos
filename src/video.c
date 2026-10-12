@@ -240,6 +240,7 @@ static void sync_cursor_crtc(void)
 }
 
 static void vbe_off(void);
+static int vbe_setting;                    /* vbe_set is setting up the VGA state under a VESA mode */
 static int reg_mode;                       /* graphics turned on through the registers, not the BIOS */
 void video_set_mode(int mode, int clear)
 {
@@ -303,8 +304,8 @@ void video_set_mode(int mode, int clear)
         else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
         else memset(gptr(0xA0000), 0, 0x10000);
     }
-    if (dac8) kprintf("video: mode %02x set: DAC back to 6 bits\n", mode);
-    dac8 = 0;                                      /* a mode set: 6-bit DAC, all pixel bits */
+    if (dac8 && !vbe_setting) kprintf("video: mode %02x set: DAC back to 6 bits\n", mode);
+    dac8 = 0;                                      /* a VGA mode set: 6-bit DAC, all pixel bits (vbe_set keeps 8) */
     dac_mask = 0xFF;
     default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
     if (!is_text(mode) && mode != 0x13) atc[0x10] = 0x01;   /* graphics, as the BIOS sets it */
@@ -769,7 +770,18 @@ static void vbe_mode_info(int m, u32 a)
 
 static void vbe_set(int m, int clear)
 {
+    /* A VESA mode set keeps the DAC width, as most SVGA BIOSes do: games
+       switch to 8 bits before setting their mode as often as after. The
+       default palette it loads is widened to match. */
+    int keep8 = dac8;
+    vbe_setting = 1;
     video_set_mode(0x13, 0);                    /* VGA state, default 256-colour palette */
+    vbe_setting = 0;
+    if (keep8) {
+        for (int i = 0; i < 256; i++)
+            for (int c = 0; c < 3; c++) { u8 v = vga_dac[i][c]; vga_dac[i][c] = (u8)(v << 2 | v >> 4); }
+        dac8 = 1;
+    }
     video_mode = vmodes[m].no;
     vbe_cur = vmodes[m].no;
     vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
