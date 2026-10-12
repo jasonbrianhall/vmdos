@@ -327,8 +327,10 @@ static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
 
-/* scale=smooth: graphics enlarged with bilinear blending (as a QEMU window
-   does) instead of whole pixels. Each source row that changed is scaled
+/* Smooth scaling (the default; scale=sharp or scale=off turn it off): the
+   picture enlarged with bilinear blending, as a QEMU window does, instead
+   of by whole pixels, which at sizes like 1.6x makes some pixels one wide
+   and some two (dithering breaks up, letters come out uneven). Each source row that changed is scaled
    across into hs (g_w wide, kept for the next frame), then every screen
    row is blended from the two source rows it falls between. Needs 8 bits
    a primary in the framebuffer's low three bytes (24 and 32 bpp). */
@@ -409,7 +411,7 @@ static void layout(void)
     static int last_w, last_h;
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
-    if (smooth_opt < 0) smooth_opt = strstr(cmdline, "scale=smooth") != 0;
+    if (smooth_opt < 0) smooth_opt = !strstr(cmdline, "scale=sharp") && !no_scale;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
@@ -434,8 +436,7 @@ static void layout(void)
     for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * xw / g_w);
     u32 tw = text_pixels_w();
     for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
-    if (text) smooth = 0;
-    else smooth_setup(xw, h);
+    smooth_setup(w, h);
 }
 
 static int sh_mouse = -1, sh_blink = -1;
@@ -470,6 +471,10 @@ static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_a
                 if (cw == 16) *p++ = col;
             }
         }
+    }
+    if (smooth) {
+        for (int gy = 0; gy < 16; gy++) smooth_row((u32)(r * 16 + gy), band[gy]);
+        return;
     }
     u32 th = (u32)text_rows * 16;
     u32 y0 = ((u32)r * 16 * g_h + th - 1) / th, y1 = ((u32)(r + 1) * 16 * g_h + th - 1) / th;
@@ -509,6 +514,7 @@ static void refresh_text(const u16 *cells, int cursor_off)
     }
     for (int r = 0; r < text_rows; r++)
         if (dirty[r]) text_row(cells, r, cursor_off, mcell, m_and, m_xor);
+    if (smooth) smooth_out();
     sh_cursor = cursor_off;
     sh_mouse = mcell;
     sh_blink = blink_phase;

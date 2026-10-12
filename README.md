@@ -190,15 +190,15 @@ menuentry "FreeDOS (vmdos)" {
 ```
 
 Screen: the picture is scaled to the largest 4:3 box that fits (text too),
-black bars at the sides of a wide screen; `aspect=fill` on the kernel command
-line (KARGS, or EFI/vmdos/vmdos.cfg on the stick) stretches it to the whole
-screen. `scale=off` draws it without resampling: at the size a VGA card puts
-out (320x200 doubled to 640x400 as it does, 640x480 as is), times the largest
-whole number that fits, centered with black borders (640x480 is drawn 1:1 on a
-1024x768 screen). `scale=smooth` enlarges graphics modes with bilinear
-blending, as a QEMU window does: dithered art (Warcraft II) blends instead of
-breaking into uneven blocks at sizes like 1.6x (text stays sharp; needs a 24-
-or 32-bit framebuffer). Set either with `make esp KARGS="scale=smooth"`.
+black bars at the sides of a wide screen, with bilinear blending as a QEMU
+window does (needs a 24- or 32-bit framebuffer): at sizes like 1.6x, whole
+pixels would come out one wide and some two, breaking up dithered art and
+making letters uneven. `scale=sharp` scales by whole pixels instead;
+`scale=off` draws without resampling, at the size a VGA card puts out
+(320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
+whole number that fits, centered with black borders. `aspect=fill` stretches
+the picture to the whole screen. Set them on the kernel command line
+(`make esp KARGS="scale=sharp"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
@@ -215,6 +215,11 @@ kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
+Ctrl+Shift+F3 / Ctrl+Shift+F4 turn the volume down / up 10% and
+Ctrl+Shift+F5 mutes and unmutes.
+
+C:\README.TXT lists the shortcuts, vmdos's DOS commands and the main boot
+options (`dos/README.TXT`).
 
 Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
 with no serial port, when a game misbehaves): the game pauses, the arrow

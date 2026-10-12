@@ -1,0 +1,68 @@
+vmdos - quick reference
+=======================
+
+KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
+
+  Ctrl+Shift+F2    Next sound output (speakers, HDMI, USB, ...)
+  Ctrl+Shift+F3    Volume down 10%
+  Ctrl+Shift+F4    Volume up 10%
+  Ctrl+Shift+F5    Mute / unmute
+  Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
+  Ctrl+Shift+F10   vmdos log (game pauses; arrows/PgUp/PgDn scroll,
+                   Esc goes back)
+  Ctrl+Shift+F11   Slower (for games that run too fast)
+  Ctrl+Shift+F12   Faster
+  Ctrl+Alt+Del     Restart
+
+  Changes show briefly at the top right of the screen.
+
+DOS COMMANDS (in C:\VMDOS, on the PATH)
+
+  VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
+                        (default VMSHOT.BMP)
+  VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 100)
+  VMCD                  List CD drives and images
+  VMCD F: C:\ISOS\X.ISO Put an ISO (or CUE sheet) in a CD drive
+  VMFD A: DISK1.IMG     Put a floppy image in A: or B: (/E takes it out,
+                        /R read-only, /BOOT boots it)
+  VMHD                  List other disks' partitions
+  VMHD D: 3             Put partition 3 in D: (/R read-only, /E out)
+  VMSB 16 | PRO         Sound Blaster 16 or Pro (VMSB alone shows which)
+  VMSB MIC              Mic level meter
+
+BOOT OPTIONS
+
+  Set when building the stick:  make esp KARGS="scale=sharp speed=50"
+  or add them on the stick: EFI\VMDOS\VMDOS.CFG (one line, options
+  separated by spaces) for a UEFI boot, the multiboot lines in
+  BOOT\GRUB\GRUB.CFG for a legacy BIOS boot. The log's "cmdline:" line
+  shows what the kernel got.
+
+  Screen
+    (default)      Smooth scaling to the largest 4:3 box that fits
+    scale=sharp    Whole-pixel scaling, no blending
+    scale=off      No resampling: 640x480 is drawn 1:1, centered, with
+                   black borders (whole multiples on bigger screens)
+    aspect=fill    Stretch to the whole screen
+    nowc           Framebuffer not write-combining
+  Speed
+    speed=N        Run at N% of full speed from boot
+  Sound
+    audio=usb|hda|hdmi|ac97|sb|off   Pick the sound output
+    latency=ms     Sound buffer length
+    sb16=1         Sound Blaster 16 instead of Pro
+  Memory
+    noxms          No XMS driver (also in the boot menu)
+    xms=MB  ems=MB  ems=0  dpmi=MB
+  Disks
+    cd=/ISOS/GAME.ISO     ISO in the CD drive at boot
+    cdrives=N             Up to 4 CD drives
+    fda=/DISKS/BOOT.IMG   Floppy image in A: at boot (boot=a boots it)
+    diskcache=MB          C: cache (0 turns it off)
+    usb=off  ide=off  ehci=off  c=ram
+  Trouble
+    debug=1|2|3    More in the log
+    mouselog       Log the mouse driver's calls
+    bootlog=off    No boot messages on screen
+
+More: README.md at https://github.com/jasonbrianhall/vmdos
