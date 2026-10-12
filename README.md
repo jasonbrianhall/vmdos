@@ -83,7 +83,7 @@ vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
 more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
-vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
+vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
 CTMOUSE) are in C:\VMDOS, which is on the PATH.
 
 `C=disk` (default): C: is the FAT partition of `esp.img`, which the run
@@ -196,6 +196,11 @@ screen. `scale=off` draws it without resampling: at the size a VGA card puts
 out (320x200 doubled to 640x400 as it does, 640x480 as is), times the largest
 whole number that fits, centered with black borders (640x480 is drawn 1:1 on a
 1024x768 screen). The framebuffer is mapped write-combining (`nowc` turns that off).
+
+Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
+the display, at the screen's size, in memory until the next one; after
+quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current
+directory (`VMSHOT WAR2.BMP` names it).
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):
 `VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,

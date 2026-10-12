@@ -268,6 +268,7 @@ int sound_port(u16 port, int write, u8 *v);   /* 1 if it's a sound port */
 
 /* ---- video.c ---- */
 void video_init(void);
+void video_shot_api(struct regs *r);           /* INT 2Fh AX=5650h: VMSHOT */
 void video_refresh(void);                     /* called at ~60 Hz */
 void video_set_mode(int mode, int clear);
 u32 video_port_in(u16 port);

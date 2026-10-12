@@ -1028,6 +1028,57 @@ static void draw_osd(void)
     }
 }
 
+/* Ctrl+Shift+F9: the screen as it goes to the display (read back from the
+   framebuffer), kept in RAM as a 24-bit BMP until the next one; VMSHOT.COM
+   saves it to a file (INT 2Fh AX=5650h, video_shot_api). */
+volatile int shot_req;
+static u8 *shot;
+static u32 shot_len;
+
+static u8 widen(u32 v, u32 sz) { return sz >= 8 ? (u8)v : (u8)(v << (8 - sz) | v >> (2 * sz - 8)); }
+
+static void take_shot(void)
+{
+    shot_req = 0;
+    u32 row = (fb_w * 3 + 3) & ~3u, len = 54 + row * fb_h;
+    if (!shot) shot = phys_try_alloc(len);
+    if (!shot) { video_osd("Screenshot: no memory"); return; }
+    memset(shot, 0, 54);
+    shot[0] = 'B'; shot[1] = 'M';
+    *(u32 *)(shot + 2) = len; *(u32 *)(shot + 10) = 54; *(u32 *)(shot + 14) = 40;
+    *(u32 *)(shot + 18) = fb_w; *(u32 *)(shot + 22) = fb_h;
+    *(u16 *)(shot + 26) = 1; *(u16 *)(shot + 28) = 24; *(u32 *)(shot + 34) = row * fb_h;
+    u32 B = (fb_bpp + 7) / 8;
+    for (u32 y = 0; y < fb_h; y++) {
+        const u8 *s = fb + y * fb_pitch;
+        u8 *d = shot + 54 + (fb_h - 1 - y) * row;                   /* BMP rows go bottom up */
+        for (u32 x = 0; x < fb_w; x++, s += B, d += 3) {
+            u32 v = B == 4 ? *(const u32 *)s : B == 3 ? (u32)(s[0] | s[1] << 8 | s[2] << 16) : *(const u16 *)s;
+            u32 r = (v >> rpos) & ((1u << rsz) - 1), g = (v >> gpos) & ((1u << gsz) - 1), b = (v >> bpos) & ((1u << bsz) - 1);
+            d[0] = widen(b, bsz); d[1] = widen(g, gsz); d[2] = widen(r, rsz);
+        }
+    }
+    shot_len = len;
+    kprintf("video: screenshot %ux%u kept (VMSHOT saves it)\n", fb_w, fb_h);
+    video_osd("Screenshot kept: VMSHOT saves it");
+}
+
+/* BL=0: DX:CX = the BMP's size (0: none yet). BL=1: copy CX bytes from
+   offset DX:SI to ES:DI; CX = what was copied. BX = 'VM' either way. */
+void video_shot_api(struct regs *r)
+{
+    u32 off = (u32)DX(r) << 16 | SI(r);
+    if (BL(r) == 1) {
+        u32 n = CX(r);
+        if (off >= shot_len) n = 0;
+        else if (n > shot_len - off) n = shot_len - off;
+        memcpy(gptr(LIN(r->v86_es, DI(r))), shot + off, n);
+        CX(r) = (u16)n;
+    } else { DX(r) = (u16)(shot_len >> 16); CX(r) = (u16)shot_len; }
+    AX(r) = 0;
+    BX(r) = 0x564D;
+}
+
 void video_refresh(void)
 {
     static int busy;
@@ -1054,6 +1105,7 @@ void video_refresh(void)
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
+    if (shot_req) take_shot();                     /* before the note goes on top */
     draw_osd();
     busy = 0;
 }
