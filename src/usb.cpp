@@ -658,6 +658,7 @@ static void forget(int i);
 // slot and an address, and set it up as a keyboard, mouse or hub.
 static bool setup_slot(Keyboard& k, int ki);
 static bool addr_failed;                               // the last setup_slot's Address Device failed
+static int addr_cc;                                    // and its completion code (-1: no answer at all)
 static bool msd_stuck;                                 // the last setup_slot's mass-storage commands never completed
 static void release_slot(int slot) {
     if (H->type != HC_XHCI) return;
@@ -1060,6 +1061,7 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (cc != 1) {
             printf("USB: %s: address failed (cc=%d, speed=%s)\n",
                    k.where, cc, speed_name(k.speed));
+            addr_cc = cc;
             // What the controller was given, and (behind a hub) what it
             // holds for that hub: route, root port, translator, hub bits.
             volatile uint32_t* sl = ctx(k.in_ctx, 1);
@@ -1263,23 +1265,37 @@ static void hub_port_change(int h, int port) {
     // Reset the port, wait for it to finish, and see how fast the device is.
     // SuperSpeed ports too (see reset_port); a link stuck in SS.Inactive or
     // Compliance gets a warm (BH) reset.
+    // A device that never answers Address Device (cc=-1) gets one more
+    // try after a warm (BH) reset on a USB 3 hub, or another port reset on
+    // a USB 2 one (warm reset is USB 3 only).
     int pls = (status >> 5) & 0xF;
     bool warm = ss && (pls == 6 || pls == 10);
-    if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
-    bool done = false;
-    for (int i = 0; i < 50 && !done; i++) {
-        delay_ms(10);
-        if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
-        done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
+    for (int attempt = 0; attempt < 2; attempt++) {
+        H = hb.hc;
+        if (!control(hb, 0x23, 3, warm ? 28 : 4, port, 0, nullptr)) return;  // SET_FEATURE (BH_)PORT_RESET
+        bool done = false;
+        for (int i = 0; i < 50 && !done; i++) {
+            delay_ms(10);
+            if (!control(hb, 0xA3, 0, 0, port, 4, st)) return;
+            done = (st[2] | st[3] << 8) & (warm ? 3 << 4 : 1 << 4);           // C_(BH_)PORT_RESET
+        }
+        control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
+        if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
+        status = st[0] | st[1] << 8;
+        if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
+        delay_ms(10);                                                           // reset recovery
+        int speed = ss ? 4                                                          // SuperSpeed
+                  : (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;        // low / high / full
+        addr_failed = false;
+        addr_cc = 0;
+        setup_device(hb.port, h, port, speed);
+        if (!addr_failed || addr_cc != -1) return;
+        if (attempt) { printf("USB: %s.%d: still no address after the %s\n", hb.where, port, warm ? "warm reset" : "port reset"); return; }
+        warm = ss;
+        if (warm) printf("USB: %s.%d: no answer to Address Device (cc=-1): doing a WARM RESET, then trying again\n", hb.where, port);
+        else printf("USB: %s.%d: no answer to Address Device (cc=-1); warm reset is USB 3 only, "
+                    "doing a port reset and trying again\n", hb.where, port);
     }
-    control(hb, 0x23, 1, 20, port, 0, nullptr);                             // clear C_PORT_RESET
-    if (warm) control(hb, 0x23, 1, 29, port, 0, nullptr);                   // and C_BH_PORT_RESET
-    status = st[0] | st[1] << 8;
-    if (!done || !(status & 2)) { printf("USB: %s.%d: port didn't enable\n", hb.where, port); return; }
-    delay_ms(10);                                                           // reset recovery
-    int speed = ss ? 4                                                          // SuperSpeed
-              : (status & (1 << 9)) ? 2 : (status & (1 << 10)) ? 3 : 1;        // low / high / full
-    setup_device(hb.port, h, port, speed);
 }
 
 static void setup_port(int port) {
@@ -1287,15 +1303,32 @@ static void setup_port(int port) {
     if (!reset_port(port)) return;
     int speed = (portsc(port) >> 10) & 0xF;             // 1 FS, 2 LS, 3 HS, 4+ SS
     addr_failed = msd_stuck = false;
+    addr_cc = 0;
     setup_device(port, -1, 0, speed);
-    if (speed >= 4 && msd_stuck && !addr_failed) {
-        // A USB 3 stick that took its address but whose transfers never
-        // complete: typically the one the firmware just booted from, still
-        // in the state the firmware left it (plugged in again later, it
-        // works). A warm reset, which a hot reset is not, starts it over;
-        // if it's still stuck, it gets the USB 2 try below.
+    bool no_addr = addr_failed && addr_cc == -1;          // Address Device never completed
+    if (no_addr && speed < 4) {
+        // A USB 2 port has no warm reset (that's USB 3 only): the nearest
+        // thing is another port reset, then one more try.
+        printf("USB: port %d: no answer to Address Device (cc=-1); warm reset is USB 3 only, "
+               "doing a port reset and trying again\n", port);
+        addr_failed = false;
+        addr_cc = 0;
+        if (reset_port(port)) setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
+        if (addr_failed) printf("USB: port %d: still no address after the port reset\n", port);
+        return;
+    }
+    if (speed >= 4 && ((msd_stuck && !addr_failed) || no_addr)) {
+        // A USB 3 device that never answered Address Device (cc=-1), or a
+        // stick that took its address but whose transfers never complete:
+        // typically the one the firmware just booted from, still in the
+        // state the firmware left it (plugged in again later, it works).
+        // A warm reset, which a hot reset is not, starts it over; if it's
+        // still stuck, it gets the USB 2 try below.
         uint32_t sc = portsc(port);
-        printf("USB: port %d: warm reset, then trying it again\n", port);
+        if (no_addr) printf("USB: port %d: no answer to Address Device (cc=-1): doing a WARM RESET, then trying again\n", port);
+        else printf("USB: port %d: mass-storage commands never completed: doing a WARM RESET, then trying again\n", port);
+        addr_failed = false;
+        addr_cc = 0;
         set_portsc(port, (sc & PORT_KEEP) | (1u << 31));          // WPR
         for (int i = 0; i < 500 && !(portsc(port) & ((1u << 19) | PORT_PRC)); i++) delay_ms(1);
         for (int i = 0; i < 100 && (portsc(port) & PORT_PR); i++) delay_ms(1);
@@ -1306,6 +1339,7 @@ static void setup_port(int port) {
             speed = (portsc(port) >> 10) & 0xF;
             msd_stuck = false;
             setup_device(port, -1, 0, speed);
+            if (addr_failed) printf("USB: port %d: still no address after the warm reset (cc=%d)\n", port, addr_cc);
         } else printf("USB: port %d: not enabled after the warm reset (PORTSC=%08x)\n", port, portsc(port));
         if (msd_stuck || !(portsc(port) & PORT_PED)) addr_failed = true;     // on to USB 2
     }
