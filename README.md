@@ -197,7 +197,8 @@ making letters uneven. `scale=sharp` scales by whole pixels instead;
 `scale=off` draws without resampling, at the size a VGA card puts out
 (320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
 whole number that fits, centered with black borders. `aspect=fill` stretches
-the picture to the whole screen. Set them on the kernel command line
+the picture to the whole screen. Ctrl+Shift+F8 turns smoothing on and off
+while a program runs. Set them on the kernel command line
 (`make esp KARGS="scale=sharp"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 

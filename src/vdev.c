@@ -422,6 +422,11 @@ void vkbd_real_scancode(u8 sc)
         if (!up) sound_volume_key(k == 0x3D ? -1 : k == 0x3E ? 1 : 0);
         return;
     }
+    if (hot && k == 0x42) {                                   /* Ctrl+Shift+F8: smooth scaling on/off (video.c) */
+        extern volatile int smooth_toggle_req;
+        if (!up) smooth_toggle_req = 1;
+        return;
+    }
     if (hot && k == 0x43) {                                   /* Ctrl+Shift+F9: screenshot (video.c) */
         extern volatile int shot_req;
         if (!up) shot_req = 1;

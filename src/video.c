@@ -335,6 +335,7 @@ static int console_on;
    row is blended from the two source rows it falls between. Needs 8 bits
    a primary in the framebuffer's low three bytes (24 and 32 bpp). */
 static int smooth_opt = -1, smooth;
+volatile int smooth_toggle_req;
 static u32 *hs, hs_cap;
 static u16 hx0[4096], vy0[4096];
 static u8 hxf[4096], vyf[4096], sdirty[1024];
@@ -1186,6 +1187,15 @@ void video_refresh(void)
     if ((frame_no & 15) == 0) blink_phase ^= 1;
     if (text_fallback) { refresh_fallback(); busy = 0; return; }
     if (!fb) { busy = 0; return; }
+    if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
+        smooth_toggle_req = 0;
+        if (smooth_opt < 0) layout();              /* the command line's choice first */
+        smooth_opt = !smooth_opt;
+        last_layout_mode = -1;
+        layout();
+        video_osd(smooth ? "Smooth scaling on" : smooth_opt ? "Smooth scaling: not on this screen" : "Smooth scaling off");
+        kprintf("video: smooth scaling %s\n", smooth ? "on" : "off");
+    }
     layout();
     if (palette_dirty) {
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */

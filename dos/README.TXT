@@ -7,6 +7,7 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F3    Volume down 10%
   Ctrl+Shift+F4    Volume up 10%
   Ctrl+Shift+F5    Mute / unmute
+  Ctrl+Shift+F8    Smooth scaling on / off
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
   Ctrl+Shift+F10   vmdos log (game pauses; arrows/PgUp/PgDn scroll,
                    Esc goes back)
