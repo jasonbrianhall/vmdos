@@ -303,6 +303,7 @@ void video_set_mode(int mode, int clear)
         else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
         else memset(gptr(0xA0000), 0, 0x10000);
     }
+    if (dac8) kprintf("video: mode %02x set: DAC back to 6 bits\n", mode);
     dac8 = 0;                                      /* a mode set: 6-bit DAC, all pixel bits */
     dac_mask = 0xFF;
     default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
@@ -1059,10 +1060,11 @@ void video_console(const char *msg) { video_console_attr("vmdos stopped", msg, 0
 
 /* Around a console the guest gets back (Ctrl+Shift+F10, the log): its
    mode, text width and palette, then a full redraw. */
-static struct { int on, mode, cols; u8 dac[256][3]; } saved;
+static struct { int on, mode, cols, dac8; u8 mask; u8 dac[256][3]; } saved;
 void video_console_save(void)
 {
     saved.on = 1; saved.mode = video_mode; saved.cols = text_cols;
+    saved.dac8 = dac8; saved.mask = dac_mask;                  /* the 8-bit DAC too: the console's is 6-bit */
     memcpy(saved.dac, vga_dac, sizeof vga_dac);
 }
 void video_console_restore(void)
@@ -1071,6 +1073,7 @@ void video_console_restore(void)
     saved.on = 0;
     console_on = 0;
     video_mode = saved.mode; text_cols = saved.cols;
+    dac8 = saved.dac8; dac_mask = saved.mask;
     memcpy(vga_dac, saved.dac, sizeof vga_dac);
     palette_dirty = 1;
     full_redraw = 1;

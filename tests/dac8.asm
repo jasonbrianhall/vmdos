@@ -3,7 +3,7 @@
 ; palette values: rows 0-49 grey, set through ports 3C8h/3C9h; rows 50-99
 ; red, set through 4F09h. Both must run smoothly from black to full
 ; brightness; with a 6-bit-only DAC they repeat four times instead. Rows
-; 100-101: the DAC width the BIOS reported (bar: 8 bits). Key: text mode.
+; 100-101: the DAC width the BIOS reported (bar: 8 bits). Q: text mode.
         org 100h
         mov ax, 4F02h
         mov bx, 0101h
@@ -74,8 +74,11 @@
         shl cx, 3
         mov al, 127
         rep stosb
-        xor ax, ax
-        int 16h
+.key:   xor ax, ax                  ; Q: back to text (other keys: ignored,
+        int 16h                     ; so the log, Ctrl+Shift+F10, can be
+        or al, 20h                  ; opened and closed over it)
+        cmp al, 'q'
+        jne .key
         mov ax, 3
         int 10h
         ret
