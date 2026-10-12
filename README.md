@@ -342,7 +342,11 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   every access to A000h faults and the instruction is emulated against the
   four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
   and read modes; the screen honors the CRTC start/offset, pel panning and
-  line compare. INT 10h draws pixels and text in all of them, with the
+  line compare, and takes its size from the CRTC, so a 640x480 (or other)
+  screen a game sets up through the registers itself, from mode 0Dh or from
+  text mode, is shown whole (Genesia; test: `tests/reg640.asm`). A graphics
+  mode turned on through the registers with no INT 10h mode set is picked
+  up too. INT 10h draws pixels and text in all of them, with the
   program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through USB

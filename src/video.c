@@ -172,15 +172,38 @@ static void m13_geom(int *w, int *h)
     if (ww < 128 || ww > 640 || hh < 100 || hh > 480 || !crtc[0x13]) { ww = 320; hh = 200; }
     *w = ww; *h = hh;
 }
+/* 16-colour planar screens (0Dh, 0Eh, 10h, 12h) as the CRTC describes them
+   too: games that program the registers themselves (640x480 from mode 0Dh
+   or from text mode, 640x400, 320x240 ...) come out at the size they set.
+   Width: 8 pixels a character clock (the 320-wide modes halve the dot
+   clock, so each is twice as wide on the monitor, but 40 clocks are still
+   320 of them); height as for mode 13h. Unprogrammed or mid-tweak: the
+   BIOS mode's size. */
+static int scan_per_row(void) { return ((crtc[0x09] & 0x1F) + 1) * ((crtc[0x09] & 0x80) ? 2 : 1); }
+static void ega_geom(int *w, int *h)
+{
+    int ww = (crtc[0x01] + 1) * 8;
+    int lines = (crtc[0x12] | (crtc[0x07] & 0x02) << 7 | (crtc[0x07] & 0x40) << 3) + 1;
+    int hh = lines / scan_per_row();
+    if (!crtc[0x01] || ww < 160 || ww > 640 || hh < 100 || hh > 480 || !crtc[0x13]) {
+        ww = video_mode == 0x0D ? 320 : 640;
+        hh = video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200;
+    }
+    *w = ww; *h = hh;
+}
 static int gfx_w(void)
 {
-    if (video_mode == 0x13) { int w, h; m13_geom(&w, &h); return w; }
-    return video_mode == 6 || video_mode == 0x0E || video_mode == 0x10 || video_mode == 0x12 ? 640 : 320;
+    int w, h;
+    if (video_mode == 0x13) { m13_geom(&w, &h); return w; }
+    if (is_ega(video_mode)) { ega_geom(&w, &h); return w; }
+    return video_mode == 6 ? 640 : 320;
 }
 static int gfx_h(void)
 {
-    if (video_mode == 0x13) { int w, h; m13_geom(&w, &h); return h; }
-    return video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200;
+    int w, h;
+    if (video_mode == 0x13) { m13_geom(&w, &h); return h; }
+    if (is_ega(video_mode)) { ega_geom(&w, &h); return h; }
+    return 200;
 }
 int video_gfx_height(void) { return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h(); }
 
@@ -212,6 +235,7 @@ static void sync_cursor_crtc(void)
 }
 
 static void vbe_off(void);
+static int reg_mode;                       /* graphics turned on through the registers, not the BIOS */
 void video_set_mode(int mode, int clear)
 {
     mode &= 0x7F;
@@ -253,6 +277,14 @@ void video_set_mode(int mode, int clear)
     seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) ? 0x06 : 0x02;   /* chain-4 in mode 13h */
     crtc[0x13] = text_cols == 40 && (is_text(mode) || mode == 0x0D) ? 0x14 : 0x28;
     crtc[0x18] = 0xFF; crtc[0x07] = 0x10; crtc[0x09] = 0x40;    /* line compare off */
+    seq[1] = mode == 0x0D || mode == 4 || mode == 5 || (is_text(mode) && text_cols == 40) ? 0x09 : 0x01;   /* dot clock halved: 320 wide */
+    reg_mode = 0;
+    if (is_ega(mode)) {                            /* as the BIOS programs them: width, height, scan doubling */
+        crtc[0x01] = mode == 0x0D ? 0x27 : 0x4F;
+        crtc[0x12] = mode == 0x10 ? 0x5D : mode == 0x12 ? 0xDF : 0x8F;
+        crtc[0x07] = mode == 0x12 ? 0x3E : 0x1F;
+        crtc[0x09] = mode == 0x0D || mode == 0x0E ? 0xC0 : 0x40;
+    }
     if (mode == 0x13) {                            /* as the BIOS programs it: 320 wide, 400 lines doubled */
         crtc[0x01] = 0x4F; crtc[0x12] = 0x8F; crtc[0x07] = 0x1F; crtc[0x09] = 0x41;
         crtc[0x14] = 0x40; crtc[0x17] = 0xA3;
@@ -267,6 +299,7 @@ void video_set_mode(int mode, int clear)
         else memset(gptr(0xA0000), 0, 0x10000);
     }
     default_palette(mode == 0x13 ? 1 : is_cga(mode) || mode == 0x0D || mode == 0x0E ? 2 : 0);
+    if (!is_text(mode) && mode != 0x13) atc[0x10] = 0x01;   /* graphics, as the BIOS sets it */
     if (is_cga(mode)) cga_color_select(mode == 6 ? 0x3F : 0x30);
     full_redraw = 1;
     last_layout_mode = -1;
@@ -542,7 +575,7 @@ static void ega_row(int y, u8 *out, int w)
     u32 start = (u32)(crtc[0x0C] << 8 | crtc[0x0D]), pitch = crtc[0x13] * 2u;
     int pan = atc[0x13] & 7;
     int lc = crtc[0x18] | (crtc[0x07] & 0x10) << 4 | (crtc[0x09] & 0x40) << 3;
-    if (video_mode == 0x0D || video_mode == 0x0E) lc >>= 1;   /* double-scanned 200-line modes */
+    lc /= scan_per_row();                              /* double-scanned 200-line modes */
     u32 o;
     if (y > lc) { o = (y - lc - 1) * pitch; if (atc[0x10] & 0x20) pan = 0; }
     else o = start + y * pitch;
@@ -1068,12 +1101,35 @@ u32 video_port_in(u16 port)
     return 0xFF;
 }
 
+/* A program that sets a graphics mode through the registers itself, with
+   no INT 10h (or from text mode with one): graphics on in both the graphics
+   controller and the attribute controller. 256-colour (attribute mode bit 6)
+   is drawn as mode 13h, else as 16-colour planar; its size then comes from
+   the CRTC (ega_geom, m13_geom). Turned back off: text mode 3. */
+static void reg_mode_check(void)
+{
+    if (console_on || vbe_on) return;
+    int gfx = (gc[6] & 1) && (atc[0x10] & 1), c256 = atc[0x10] & 0x40;
+    int want = !gfx ? (reg_mode ? 3 : -1) :
+               is_text(video_mode) || reg_mode ? (c256 ? 0x13 : 0x12) :
+               video_mode == 0x13 && !c256 ? 0x12 : -1;
+    if (want < 0 || want == video_mode) return;
+    kprintf("video: mode set through the registers: %s\n", want == 3 ? "back to text" : want == 0x13 ? "256-colour" : "16-colour planar");
+    video_mode = want;
+    reg_mode = want != 3;
+    if (want == 3) { text_cols = 80; text_base = 0xB8000; }
+    planar_check();
+    ega_check();
+    last_layout_mode = -1;
+    full_redraw = 1;
+}
+
 void video_port_out(u16 port, u8 v)
 {
     switch (port) {
     case 0x3C0:
         if (!atc_flip) atc_idx = v & 0x1F;
-        else if (atc_idx < 21) { atc[atc_idx] = v; palette_dirty = 1; }
+        else if (atc_idx < 21) { atc[atc_idx] = v; palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
@@ -1097,6 +1153,7 @@ void video_port_out(u16 port, u8 v)
         gc[gc_idx & 15] = v;
         if ((gc_idx & 15) == 4) readmap_last = 1;
         apply_map_mask();
+        if ((gc_idx & 15) == 6) reg_mode_check();
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
