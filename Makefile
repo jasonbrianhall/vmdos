@@ -116,6 +116,9 @@ FORCE:
 $(BUILD)/VMSPEED.COM: dos/vmspeed.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMSHOT.COM: dos/vmshot.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMSB.COM: dos/vmsb.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -145,10 +148,10 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM
-DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT $(VMDOS_FILES)
-DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT \
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT $(VMDOS_FILES)
+DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT \
              $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
 
 # The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
@@ -267,10 +270,10 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'set timeout=5'; \
 	   echo 'if [ "$$grub_platform" = "efi" ]; then'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
-	   echo '    chainloader /EFI/vmdos/vmdos.efi'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL)'; \
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
-	   echo '    chainloader /EFI/vmdos/vmdos.efi noxms'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) noxms'; \
 	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \

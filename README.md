@@ -83,7 +83,7 @@ vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
 more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
-vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, SHSUCDX,
+vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
 CTMOUSE) are in C:\VMDOS, which is on the PATH.
 
 `C=disk` (default): C: is the FAT partition of `esp.img`, which the run
@@ -190,9 +190,22 @@ menuentry "FreeDOS (vmdos)" {
 ```
 
 Screen: the picture is scaled to the largest 4:3 box that fits (text too),
-black bars at the sides of a wide screen; `aspect=fill` on the kernel command
-line (KARGS, or EFI/vmdos/vmdos.cfg on the stick) stretches it to the whole
-screen. The framebuffer is mapped write-combining (`nowc` turns that off).
+black bars at the sides of a wide screen, with bilinear blending as a QEMU
+window does (needs a 24- or 32-bit framebuffer): at sizes like 1.6x, whole
+pixels would come out one wide and some two, breaking up dithered art and
+making letters uneven. `scale=sharp` scales by whole pixels instead;
+`scale=off` draws without resampling, at the size a VGA card puts out
+(320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
+whole number that fits, centered with black borders. `aspect=fill` stretches
+the picture to the whole screen. Ctrl+Shift+F8 turns smoothing on and off
+while a program runs. Set them on the kernel command line
+(`make esp KARGS="scale=sharp"`, or EFI/vmdos/vmdos.cfg on the stick).
+The framebuffer is mapped write-combining (`nowc` turns that off).
+
+Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
+the display, at the screen's size, in memory until the next one; after
+quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current
+directory (`VMSHOT WAR2.BMP` names it).
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):
 `VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,
@@ -203,6 +216,11 @@ kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
+Ctrl+Shift+F3 / Ctrl+Shift+F4 turn the volume down / up 10% and
+Ctrl+Shift+F5 mutes and unmutes.
+
+C:\README.TXT lists the shortcuts, vmdos's DOS commands and the main boot
+options (`dos/README.TXT`).
 
 Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
 with no serial port, when a game misbehaves): the game pauses, the arrow

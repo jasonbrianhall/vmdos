@@ -321,32 +321,123 @@ static u16 shadow_text[132 * 60];
 static u8 shadow_gfx[640 * 480];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
-static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, or all of it (aspect=fill) */
+static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
 static u16 xmap[4096], txmap[4096];
-static int aspect_fill = -1;
+static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
+
+/* Smooth scaling (the default; scale=sharp or scale=off turn it off): the
+   picture enlarged with bilinear blending, as a QEMU window does, instead
+   of by whole pixels, which at sizes like 1.6x makes some pixels one wide
+   and some two (dithering breaks up, letters come out uneven). Each source row that changed is scaled
+   across into hs (g_w wide, kept for the next frame), then every screen
+   row is blended from the two source rows it falls between. Needs 8 bits
+   a primary in the framebuffer's low three bytes (24 and 32 bpp). */
+static int smooth_opt = -1, smooth;
+volatile int smooth_toggle_req;
+static u32 *hs, hs_cap;
+static u16 hx0[4096], vy0[4096];
+static u8 hxf[4096], vyf[4096], sdirty[1024];
+static u32 s_w, s_h;                           /* the source size the tables are for */
+
+static u32 lerp(u32 a, u32 b, u32 f)            /* f/256 of the way from a to b */
+{
+    return (((a & 0xFF00FF) * (256 - f) + (b & 0xFF00FF) * f) >> 8 & 0xFF00FF) |
+           (((a & 0xFF00) * (256 - f) + (b & 0xFF00) * f) >> 8 & 0xFF00);
+}
+
+/* Where screen pixel i of n falls between source pixels (of w): the lower one and the weight of the next. */
+static void smooth_map(u32 n, u32 w, u16 *i0, u8 *fr)
+{
+    for (u32 i = 0; i < n; i++) {
+        int32_t v = (int32_t)(((2 * i + 1) * w * 256) / (2 * n)) - 128;
+        if (v < 0) v = 0;
+        u32 a = (u32)v >> 8, f = (u32)v & 255;
+        if (a >= w - 1) { a = w - 1; f = 0; }
+        i0[i] = (u16)a; fr[i] = (u8)f;
+    }
+}
+
+static void smooth_setup(u32 w, u32 h)
+{
+    smooth = 0;
+    if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
+    if (h > sizeof sdirty || g_h > 4096 || w < 2 || h < 2) return;
+    u32 need = g_w * h * 4;
+    if (need > hs_cap) {
+        if (hs) phys_release(hs, hs_cap);
+        hs = phys_try_alloc(need);
+        hs_cap = hs ? need : 0;
+        if (!hs) { kprintf("video: no memory for scale=smooth\n"); return; }
+    }
+    smooth_map(g_w, w, hx0, hxf);
+    smooth_map(g_h, h, vy0, vyf);
+    s_w = w; s_h = h;
+    smooth = 1;
+}
+
+/* Source row y (s_w pixels, framebuffer format) has changed. */
+static void smooth_row(u32 y, const u32 *src)
+{
+    u32 *d = hs + y * g_w;
+    for (u32 x = 0; x < g_w; x++) {
+        u32 a = hx0[x];
+        d[x] = hxf[x] ? lerp(src[a], src[a + 1], hxf[x]) : src[a];
+    }
+    sdirty[y] = 1;
+}
+
+/* The screen rows that depend on a changed source row. */
+static void smooth_out(void)
+{
+    static u32 line[4096];
+    for (u32 Y = 0; Y < g_h; Y++) {
+        u32 y0 = vy0[Y], y1 = y0 + 1 < s_h ? y0 + 1 : y0, f = vyf[Y];
+        if (!sdirty[y0] && !(f && sdirty[y1])) continue;
+        const u32 *a = hs + y0 * g_w, *b = hs + y1 * g_w;
+        if (!f) put_row(a, g_w, g_x, g_y + Y);
+        else {
+            for (u32 x = 0; x < g_w; x++) line[x] = lerp(a[x], b[x], f);
+            put_row(line, g_w, g_x, g_y + Y);
+        }
+    }
+    memset(sdirty, 0, s_h);
+}
 
 static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols * 8; }
 
 static void layout(void)
 {
     static int last_w, last_h;
-    int cw = is_text(video_mode) || vbe_on ? 0 : gfx_w(), ch = is_text(video_mode) || vbe_on ? 0 : gfx_h();
-    if (last_layout_mode == video_mode && cw == last_w && ch == last_h) return;
+    if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
+    if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
+    if (smooth_opt < 0) smooth_opt = !strstr(cmdline, "scale=sharp") && !no_scale;
+    int text = is_text(video_mode);
+    u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
+    u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
+    if (last_layout_mode == video_mode && (int)w == last_w && (int)h == last_h) return;
     last_layout_mode = video_mode;
-    last_w = cw; last_h = ch;
+    last_w = (int)w; last_h = (int)h;
     full_redraw = 1;
     clear_fb();
-    if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     g_h = fb_h; g_w = fb_h * 4 / 3;
     if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * 3 / 4; }
+    if (no_scale) {
+        /* scale=off: the size a VGA card puts out (low resolutions doubled,
+           as it does), times the largest whole number that fits. Too big
+           for the screen even at 1: scaled down as without the option. */
+        u32 ow = w < 400 ? w * 2 : w, oh = h < 300 ? h * 2 : h;
+        u32 s = fb_w / ow < fb_h / oh ? fb_w / ow : fb_h / oh;
+        if (s && ow * s <= 4096) { g_w = ow * s; g_h = oh * s; }
+    }
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
-    u32 w = vbe_on ? vbe_w : is_text(video_mode) ? 320 : (u32)gfx_w();
-    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * w / g_w);
+    u32 xw = vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
+    for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * xw / g_w);
     u32 tw = text_pixels_w();
     for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
+    smooth_setup(w, h);
 }
 
 static int sh_mouse = -1, sh_blink = -1;
@@ -381,6 +472,10 @@ static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_a
                 if (cw == 16) *p++ = col;
             }
         }
+    }
+    if (smooth) {
+        for (int gy = 0; gy < 16; gy++) smooth_row((u32)(r * 16 + gy), band[gy]);
+        return;
     }
     u32 th = (u32)text_rows * 16;
     u32 y0 = ((u32)r * 16 * g_h + th - 1) / th, y1 = ((u32)(r + 1) * 16 * g_h + th - 1) / th;
@@ -420,6 +515,7 @@ static void refresh_text(const u16 *cells, int cursor_off)
     }
     for (int r = 0; r < text_rows; r++)
         if (dirty[r]) text_row(cells, r, cursor_off, mcell, m_and, m_xor);
+    if (smooth) smooth_out();
     sh_cursor = cursor_off;
     sh_mouse = mcell;
     sh_blink = blink_phase;
@@ -634,6 +730,7 @@ static void refresh_gfx(void)
     static u32 line[4096];
     static u8 ovr[640];
     static u8 rowbuf[640];
+    static u32 srow[640];
     int w = gfx_w(), h = gfx_h();
     int px = 0, py = -100;
     u16 ma, mxr;
@@ -653,6 +750,16 @@ static void refresh_gfx(void)
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
         if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w)) continue;
         memcpy(sh, rowbuf, w);
+        if (smooth) {
+            for (int x = 0; x < w; x++) srow[x] = pal[rowbuf[x]];
+            if (in_new) {
+                const char *a = arrow[y - py];
+                for (int i = 0; a[i] && px + i < w; i++)
+                    if (a[i] == '1') srow[px + i] = black; else if (a[i] == '2') srow[px + i] = white;
+            }
+            smooth_row((u32)y, srow);
+            continue;
+        }
         for (u32 x = 0; x < g_w; x++) line[x] = pal[rowbuf[xmap[x]]];
         if (in_new) {
             memset(ovr, 0, sizeof ovr);
@@ -665,6 +772,7 @@ static void refresh_gfx(void)
         if (y1 == y0) continue;
         for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);   /* from RAM: never read the framebuffer */
     }
+    if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
 }
 
@@ -951,7 +1059,7 @@ static void refresh_vbe(void)
         if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb)) continue;
         memcpy(sh, src, rowb);
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
-        if (y1 == y0) continue;
+        if (y1 == y0 && !smooth) continue;
         for (u32 x = 0; x < w; x++) {
             u32 c;
             if (B == 1) c = pal[src[x]];
@@ -970,9 +1078,11 @@ static void refresh_vbe(void)
             for (int i = 0; a[i] && px + i < (int)w; i++)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
+        if (smooth) { smooth_row(y, cvt); continue; }
         for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
         for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);
     }
+    if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
 }
 
@@ -1017,6 +1127,57 @@ static void draw_osd(void)
     }
 }
 
+/* Ctrl+Shift+F9: the screen as it goes to the display (read back from the
+   framebuffer), kept in RAM as a 24-bit BMP until the next one; VMSHOT.COM
+   saves it to a file (INT 2Fh AX=5650h, video_shot_api). */
+volatile int shot_req;
+static u8 *shot;
+static u32 shot_len;
+
+static u8 widen(u32 v, u32 sz) { return sz >= 8 ? (u8)v : (u8)(v << (8 - sz) | v >> (2 * sz - 8)); }
+
+static void take_shot(void)
+{
+    shot_req = 0;
+    u32 row = (fb_w * 3 + 3) & ~3u, len = 54 + row * fb_h;
+    if (!shot) shot = phys_try_alloc(len);
+    if (!shot) { video_osd("Screenshot: no memory"); return; }
+    memset(shot, 0, 54);
+    shot[0] = 'B'; shot[1] = 'M';
+    *(u32 *)(shot + 2) = len; *(u32 *)(shot + 10) = 54; *(u32 *)(shot + 14) = 40;
+    *(u32 *)(shot + 18) = fb_w; *(u32 *)(shot + 22) = fb_h;
+    *(u16 *)(shot + 26) = 1; *(u16 *)(shot + 28) = 24; *(u32 *)(shot + 34) = row * fb_h;
+    u32 B = (fb_bpp + 7) / 8;
+    for (u32 y = 0; y < fb_h; y++) {
+        const u8 *s = fb + y * fb_pitch;
+        u8 *d = shot + 54 + (fb_h - 1 - y) * row;                   /* BMP rows go bottom up */
+        for (u32 x = 0; x < fb_w; x++, s += B, d += 3) {
+            u32 v = B == 4 ? *(const u32 *)s : B == 3 ? (u32)(s[0] | s[1] << 8 | s[2] << 16) : *(const u16 *)s;
+            u32 r = (v >> rpos) & ((1u << rsz) - 1), g = (v >> gpos) & ((1u << gsz) - 1), b = (v >> bpos) & ((1u << bsz) - 1);
+            d[0] = widen(b, bsz); d[1] = widen(g, gsz); d[2] = widen(r, rsz);
+        }
+    }
+    shot_len = len;
+    kprintf("video: screenshot %ux%u kept (VMSHOT saves it)\n", fb_w, fb_h);
+    video_osd("Screenshot kept: VMSHOT saves it");
+}
+
+/* BL=0: DX:CX = the BMP's size (0: none yet). BL=1: copy CX bytes from
+   offset DX:SI to ES:DI; CX = what was copied. BX = 'VM' either way. */
+void video_shot_api(struct regs *r)
+{
+    u32 off = (u32)DX(r) << 16 | SI(r);
+    if (BL(r) == 1) {
+        u32 n = CX(r);
+        if (off >= shot_len) n = 0;
+        else if (n > shot_len - off) n = shot_len - off;
+        memcpy(gptr(LIN(r->v86_es, DI(r))), shot + off, n);
+        CX(r) = (u16)n;
+    } else { DX(r) = (u16)(shot_len >> 16); CX(r) = (u16)shot_len; }
+    AX(r) = 0;
+    BX(r) = 0x564D;
+}
+
 void video_refresh(void)
 {
     static int busy;
@@ -1026,6 +1187,15 @@ void video_refresh(void)
     if ((frame_no & 15) == 0) blink_phase ^= 1;
     if (text_fallback) { refresh_fallback(); busy = 0; return; }
     if (!fb) { busy = 0; return; }
+    if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
+        smooth_toggle_req = 0;
+        if (smooth_opt < 0) layout();              /* the command line's choice first */
+        smooth_opt = !smooth_opt;
+        last_layout_mode = -1;
+        layout();
+        video_osd(smooth ? "Smooth scaling on" : smooth_opt ? "Smooth scaling: not on this screen" : "Smooth scaling off");
+        kprintf("video: smooth scaling %s\n", smooth ? "on" : "off");
+    }
     layout();
     if (palette_dirty) {
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
@@ -1043,6 +1213,7 @@ void video_refresh(void)
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
+    if (shot_req) take_shot();                     /* before the note goes on top */
     draw_osd();
     busy = 0;
 }

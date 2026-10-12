@@ -82,6 +82,22 @@ static volatile int switch_req;
 
 void sound_next_output(void) { switch_req = 1; }
 
+/* Ctrl+Shift+F3 / F4: volume down / up 10 %, F5: mute on and off (the
+   samples are scaled on their way to the card; see audio.cpp). */
+int audio_vol(void);
+int audio_is_muted(void);
+void audio_vol_set(int v);
+void audio_mute_set(int m);
+void sound_volume_key(int k)
+{
+    char msg[32];
+    if (k == 0) audio_mute_set(!audio_is_muted());
+    else { audio_vol_set((audio_vol() + 5) / 10 * 10 + k * 10); audio_mute_set(0); }
+    if (audio_is_muted()) snprintf(msg, sizeof msg, "Sound muted");
+    else snprintf(msg, sizeof msg, "Volume %d%%", audio_vol());
+    video_osd(msg);
+}
+
 static void switch_output(void)
 {
     char msg[64];

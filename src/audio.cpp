@@ -1135,6 +1135,10 @@ extern "C" const char* audio_out_name(int i) { return audio_output_name(i); }
 extern "C" int audio_out_select(int i) { return audio_select(i); }
 extern "C" int audio_wanted(int nominal) { return audio_frames_wanted(nominal); }
 extern "C" void audio_put_stereo(const int16_t* lr, int n) { audio_submit_stereo(lr, n); }
+extern "C" int audio_vol(void) { return audio_volume_setting(); }
+extern "C" int audio_is_muted(void) { return audio_muted(); }
+extern "C" void audio_vol_set(int v) { audio_set_volume(v); }
+extern "C" void audio_mute_set(int m) { audio_set_muted(m != 0); }
 
 uint32_t audio_delay_ms() {
     if (driver == AUDIO_NONE) return 0;
