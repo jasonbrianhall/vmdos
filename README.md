@@ -195,7 +195,11 @@ line (KARGS, or EFI/vmdos/vmdos.cfg on the stick) stretches it to the whole
 screen. `scale=off` draws it without resampling: at the size a VGA card puts
 out (320x200 doubled to 640x400 as it does, 640x480 as is), times the largest
 whole number that fits, centered with black borders (640x480 is drawn 1:1 on a
-1024x768 screen). The framebuffer is mapped write-combining (`nowc` turns that off).
+1024x768 screen). `scale=smooth` enlarges graphics modes with bilinear
+blending, as a QEMU window does: dithered art (Warcraft II) blends instead of
+breaking into uneven blocks at sizes like 1.6x (text stays sharp; needs a 24-
+or 32-bit framebuffer). Set either with `make esp KARGS="scale=smooth"`.
+The framebuffer is mapped write-combining (`nowc` turns that off).
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
 the display, at the screen's size, in memory until the next one; after

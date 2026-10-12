@@ -327,6 +327,81 @@ static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
 
+/* scale=smooth: graphics enlarged with bilinear blending (as a QEMU window
+   does) instead of whole pixels. Each source row that changed is scaled
+   across into hs (g_w wide, kept for the next frame), then every screen
+   row is blended from the two source rows it falls between. Needs 8 bits
+   a primary in the framebuffer's low three bytes (24 and 32 bpp). */
+static int smooth_opt = -1, smooth;
+static u32 *hs, hs_cap;
+static u16 hx0[4096], vy0[4096];
+static u8 hxf[4096], vyf[4096], sdirty[1024];
+static u32 s_w, s_h;                           /* the source size the tables are for */
+
+static u32 lerp(u32 a, u32 b, u32 f)            /* f/256 of the way from a to b */
+{
+    return (((a & 0xFF00FF) * (256 - f) + (b & 0xFF00FF) * f) >> 8 & 0xFF00FF) |
+           (((a & 0xFF00) * (256 - f) + (b & 0xFF00) * f) >> 8 & 0xFF00);
+}
+
+/* Where screen pixel i of n falls between source pixels (of w): the lower one and the weight of the next. */
+static void smooth_map(u32 n, u32 w, u16 *i0, u8 *fr)
+{
+    for (u32 i = 0; i < n; i++) {
+        int32_t v = (int32_t)(((2 * i + 1) * w * 256) / (2 * n)) - 128;
+        if (v < 0) v = 0;
+        u32 a = (u32)v >> 8, f = (u32)v & 255;
+        if (a >= w - 1) { a = w - 1; f = 0; }
+        i0[i] = (u16)a; fr[i] = (u8)f;
+    }
+}
+
+static void smooth_setup(u32 w, u32 h)
+{
+    smooth = 0;
+    if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
+    if (h > sizeof sdirty || g_h > 4096 || w < 2 || h < 2) return;
+    u32 need = g_w * h * 4;
+    if (need > hs_cap) {
+        if (hs) phys_release(hs, hs_cap);
+        hs = phys_try_alloc(need);
+        hs_cap = hs ? need : 0;
+        if (!hs) { kprintf("video: no memory for scale=smooth\n"); return; }
+    }
+    smooth_map(g_w, w, hx0, hxf);
+    smooth_map(g_h, h, vy0, vyf);
+    s_w = w; s_h = h;
+    smooth = 1;
+}
+
+/* Source row y (s_w pixels, framebuffer format) has changed. */
+static void smooth_row(u32 y, const u32 *src)
+{
+    u32 *d = hs + y * g_w;
+    for (u32 x = 0; x < g_w; x++) {
+        u32 a = hx0[x];
+        d[x] = hxf[x] ? lerp(src[a], src[a + 1], hxf[x]) : src[a];
+    }
+    sdirty[y] = 1;
+}
+
+/* The screen rows that depend on a changed source row. */
+static void smooth_out(void)
+{
+    static u32 line[4096];
+    for (u32 Y = 0; Y < g_h; Y++) {
+        u32 y0 = vy0[Y], y1 = y0 + 1 < s_h ? y0 + 1 : y0, f = vyf[Y];
+        if (!sdirty[y0] && !(f && sdirty[y1])) continue;
+        const u32 *a = hs + y0 * g_w, *b = hs + y1 * g_w;
+        if (!f) put_row(a, g_w, g_x, g_y + Y);
+        else {
+            for (u32 x = 0; x < g_w; x++) line[x] = lerp(a[x], b[x], f);
+            put_row(line, g_w, g_x, g_y + Y);
+        }
+    }
+    memset(sdirty, 0, s_h);
+}
+
 static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols * 8; }
 
 static void layout(void)
@@ -334,6 +409,7 @@ static void layout(void)
     static int last_w, last_h;
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
+    if (smooth_opt < 0) smooth_opt = strstr(cmdline, "scale=smooth") != 0;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
@@ -358,6 +434,8 @@ static void layout(void)
     for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * xw / g_w);
     u32 tw = text_pixels_w();
     for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
+    if (text) smooth = 0;
+    else smooth_setup(xw, h);
 }
 
 static int sh_mouse = -1, sh_blink = -1;
@@ -645,6 +723,7 @@ static void refresh_gfx(void)
     static u32 line[4096];
     static u8 ovr[640];
     static u8 rowbuf[640];
+    static u32 srow[640];
     int w = gfx_w(), h = gfx_h();
     int px = 0, py = -100;
     u16 ma, mxr;
@@ -664,6 +743,16 @@ static void refresh_gfx(void)
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
         if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w)) continue;
         memcpy(sh, rowbuf, w);
+        if (smooth) {
+            for (int x = 0; x < w; x++) srow[x] = pal[rowbuf[x]];
+            if (in_new) {
+                const char *a = arrow[y - py];
+                for (int i = 0; a[i] && px + i < w; i++)
+                    if (a[i] == '1') srow[px + i] = black; else if (a[i] == '2') srow[px + i] = white;
+            }
+            smooth_row((u32)y, srow);
+            continue;
+        }
         for (u32 x = 0; x < g_w; x++) line[x] = pal[rowbuf[xmap[x]]];
         if (in_new) {
             memset(ovr, 0, sizeof ovr);
@@ -676,6 +765,7 @@ static void refresh_gfx(void)
         if (y1 == y0) continue;
         for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);   /* from RAM: never read the framebuffer */
     }
+    if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
 }
 
@@ -962,7 +1052,7 @@ static void refresh_vbe(void)
         if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb)) continue;
         memcpy(sh, src, rowb);
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
-        if (y1 == y0) continue;
+        if (y1 == y0 && !smooth) continue;
         for (u32 x = 0; x < w; x++) {
             u32 c;
             if (B == 1) c = pal[src[x]];
@@ -981,9 +1071,11 @@ static void refresh_vbe(void)
             for (int i = 0; a[i] && px + i < (int)w; i++)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
+        if (smooth) { smooth_row(y, cvt); continue; }
         for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
         for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);
     }
+    if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
 }
 
