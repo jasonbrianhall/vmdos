@@ -208,6 +208,121 @@ static int has_word(const char* s, const char* w) {
     return 0;
 }
 
+// vga= (kernel options): the screen mode to boot in. vmdos can't change it
+// once the kernel runs (GOP is a boot service; the README says why), so it
+// is picked here: vga=ask lists the modes and asks, vga=N takes mode N from
+// that list, vga=WxH the mode of that size, vga=max the largest (usually the
+// panel's own). The first vga= given wins: GRUB's menu entry, then KARGS,
+// then vmdos.cfg.
+static const char* opt_value(const char* s, const char* key) {
+    UINTN kl = 0;
+    while (key[kl]) kl++;
+    for (const char* p = s; *p; p++) {
+        if (p != s && p[-1] != ' ') continue;
+        UINTN i = 0;
+        while (i < kl && p[i] == key[i]) i++;
+        if (i == kl) return p + kl;
+    }
+    return NULL;
+}
+
+static int mode_ok(EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info) {
+    return gop_format_ok(info->PixelFormat) && info->HorizontalResolution >= 640 && info->VerticalResolution >= 400;
+}
+
+static void list_modes(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
+    int col = 0;
+    for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
+        UINTN size;
+        if (EFI_ERROR(uefi_call_wrapper(gop->QueryMode, 4, gop, m, &size, &info)) || !mode_ok(info)) continue;
+        UINT32 h = info->VerticalResolution;
+        Print(L"  %2d: %4dx%d%c%s", m, info->HorizontalResolution, h, m == gop->Mode->Mode ? L'*' : L' ',
+              h >= 1000 ? L"" : h >= 100 ? L" " : L"  ");          // heights padded to 4
+        if (++col == 4) { Print(L"\r\n"); col = 0; }
+    }
+    if (col) Print(L"\r\n");
+}
+
+static int find_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop, UINT32 w, UINT32 h, int largest) {
+    int best = -1;
+    UINT64 best_px = 0;
+    for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
+        UINTN size;
+        if (EFI_ERROR(uefi_call_wrapper(gop->QueryMode, 4, gop, m, &size, &info)) || !mode_ok(info)) continue;
+        UINT64 px = (UINT64)info->HorizontalResolution * info->VerticalResolution;
+        if (largest ? px > best_px : (info->HorizontalResolution == w && info->VerticalResolution == h)) {
+            best = (int)m; best_px = px;
+            if (!largest) break;
+        }
+    }
+    return best;
+}
+
+// A mode number typed at the keyboard; Enter alone, Esc or 15 s with no key: -1.
+static int read_mode_number(void) {
+    int v = -1, waited = 0, typed = 0;
+    uefi_call_wrapper(ST_->ConIn->Reset, 2, ST_->ConIn, FALSE);
+    for (;;) {
+        EFI_INPUT_KEY k;
+        if (EFI_ERROR(uefi_call_wrapper(ST_->ConIn->ReadKeyStroke, 2, ST_->ConIn, &k))) {
+            uefi_call_wrapper(ST_->BootServices->Stall, 1, 10000);
+            if (!typed && ++waited > 1500) { Print(L"\r\n"); return -1; }
+            continue;
+        }
+        typed = 1;
+        if (k.UnicodeChar == L'\r') { Print(L"\r\n"); return v; }
+        if (k.ScanCode == 0x17) { Print(L"\r\n"); return -1; }          // Esc
+        if ((k.UnicodeChar == 8 || k.ScanCode == 0x08) && v >= 0) {   // backspace
+            v = v >= 10 ? v / 10 : -1;
+            Print(L"\b \b");
+        } else if (k.UnicodeChar >= L'0' && k.UnicodeChar <= L'9' && v < 1000) {
+            v = (v < 0 ? 0 : v * 10) + (k.UnicodeChar - L'0');
+            Print(L"%c", k.UnicodeChar);
+        }
+    }
+}
+
+static void apply_vga(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop, const char* opts) {
+    const char* v = opt_value(opts, "vga=");
+    if (!v) return;
+    int m = -1;
+    if (v[0] == 'a' && v[1] == 's' && v[2] == 'k') {
+        Print(L"\r\nScreen modes (* = now):\r\n");
+        list_modes(gop);
+        Print(L"Mode number, then Enter (Enter alone or 15 s: keep %dx%d): ",
+              gop->Mode->Info->HorizontalResolution, gop->Mode->Info->VerticalResolution);
+        m = read_mode_number();
+        if (m < 0) return;
+    } else if (v[0] == 'm' && v[1] == 'a' && v[2] == 'x') {
+        m = find_mode(gop, 0, 0, 1);
+    } else {
+        UINT32 a = 0, b = 0;
+        const char* p = v;
+        while (*p >= '0' && *p <= '9') a = a * 10 + (UINT32)(*p++ - '0');
+        if (*p == 'x' || *p == 'X') {
+            p++;
+            while (*p >= '0' && *p <= '9') b = b * 10 + (UINT32)(*p++ - '0');
+            m = find_mode(gop, a, b, 0);
+            if (m < 0) Print(L"  vga=%dx%d: no such mode here (vga=ask lists them)\r\n", a, b);
+        } else if (p != v) m = (int)a;
+    }
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
+    UINTN size;
+    if (m < 0 || (UINT32)m >= gop->Mode->MaxMode ||
+        EFI_ERROR(uefi_call_wrapper(gop->QueryMode, 4, gop, (UINT32)m, &size, &info)) || !mode_ok(info)) {
+        if (m >= 0) Print(L"  vga=%d: not a usable mode (vga=ask lists them)\r\n", m);
+        return;
+    }
+    if ((UINT32)m != gop->Mode->Mode && EFI_ERROR(uefi_call_wrapper(gop->SetMode, 2, gop, (UINT32)m))) {
+        Print(L"  mode %d (%dx%d) would not set\r\n", m, info->HorizontalResolution, info->VerticalResolution);
+        return;
+    }
+    Print(L"  screen:       %dx%d (mode %d; vga=%dx%d keeps it)\r\n", gop->Mode->Info->HorizontalResolution,
+          gop->Mode->Info->VerticalResolution, m, gop->Mode->Info->HorizontalResolution, gop->Mode->Info->VerticalResolution);
+}
+
 static int usable_after_exit(UINT32 t) {
     return t == EfiConventionalMemory || t == EfiBootServicesCode || t == EfiBootServicesData ||
            t == EfiLoaderCode || t == EfiLoaderData;
@@ -291,6 +406,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (cfg) Print(L"  options from  %s: %a\r\n", cfg_path, opts);
         else Print(L"  no %s (no options from it)\r\n", cfg_path);
     }
+    apply_vga(gop, opts);
     // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
     // (the kernel's SATA or USB driver reads it); dos.img only for c=ram or else.
     UINT8 esp_sig[16];

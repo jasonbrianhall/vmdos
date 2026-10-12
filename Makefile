@@ -261,6 +261,10 @@ $(BUILD)/grub/core.img: $(BUILD)/grub/early.cfg
 	$(GRUB_MKIMAGE) -O i386-pc -d $(GRUB_LIB)/i386-pc -o $@ -c $< -p /boot/grub biosdisk vbe vga $(GRUB_MODS)
 $(BUILD)/grub/BOOTX64.EFI: $(BUILD)/grub/early.cfg
 	$(GRUB_MKIMAGE) -O x86_64-efi -d $(GRUB_LIB)/x86_64-efi -o $@ -c $< -p /boot/grub efi_gop efi_uga $(GRUB_MODS)
+# The fixed choices in the boot menu's screen resolution submenu.
+GRUB_RES ?= 640x480 800x600 1024x768 1280x1024
+VGA_TITLE_ask := Ask: list the modes this screen has
+VGA_TITLE_max := Largest (usually the panel native size)
 $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	@mkdir -p $(BUILD)/grub
 	@{ echo '# vmdos boot menu (made by make esp: changes here are overwritten;'; \
@@ -275,6 +279,10 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) noxms'; \
 	   echo '  }'; \
+	   echo '  submenu "FreeDOS (vmdos), screen resolution" {'; \
+	   $(foreach v,ask max $(GRUB_RES),echo '    menuentry "$(or $(VGA_TITLE_$(v)),$(v))" {'; \
+	     echo '      chainloader /EFI/vmdos/vmdos.efi vga=$(v) $(KARGS_ALL)'; echo '    }';) \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
@@ -283,6 +291,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
+	   echo '  }'; \
+	   echo '  submenu "FreeDOS (vmdos), screen resolution" {'; \
+	   $(foreach r,$(GRUB_RES),echo '    menuentry "$(r)" {'; \
+	     echo '      multiboot /boot/vmdos.elf $(KARGS_ALL)'; echo '      set gfxpayload=$(r)x32,$(r)'; \
+	     echo '      module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; echo '    }';) \
 	   echo '  }'; \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new

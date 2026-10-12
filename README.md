@@ -189,7 +189,22 @@ menuentry "FreeDOS (vmdos)" {
 }
 ```
 
-Screen: the picture is scaled to the largest 4:3 box that fits (text too),
+Screen resolution: the screen mode is picked once, at boot, and every DOS
+mode is drawn into it, scaled. vmdos doesn't switch the PC's real mode as a
+VGA card would: the firmware's graphics service (UEFI GOP, or the VESA BIOS
+GRUB uses) only sets modes before the kernel starts, and switching later
+would need a driver for each graphics card (Intel, AMD, NVIDIA). Firmware
+doesn't offer DOS's own sizes (320x200, 640x400) anyway, and a flat panel
+shows only its own size, so something scales either way. The boot menu has
+a "screen resolution" submenu (640x480 up to 1280x1024; on UEFI also "Ask"
+and "Largest"); on UEFI the `vga=` kernel option picks it too:
+`vga=ask` lists the modes the screen has and asks for a number, `vga=N`
+takes mode N from that list, `vga=640x480` the mode of that size, and
+`vga=max` the largest, usually the panel's own (vmdos then does all the
+scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
+submenu's sizes.
+
+The picture is scaled to the largest 4:3 box that fits (text too),
 black bars at the sides of a wide screen, with bilinear blending as a QEMU
 window does (needs a 24- or 32-bit framebuffer): at sizes like 1.6x, whole
 pixels would come out one wide and some two, breaking up dithered art and
