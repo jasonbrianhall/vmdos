@@ -427,7 +427,7 @@ V86 mode.
     vmhv / vmhv=n   on the kernel command line: boot straight into it
 
 The VM boots C: again. vmdos's FDCONFIG.SYS has a menu for that: choice 1
-(the default, no pause) is vmdos as usual, choice 2 leaves out vmdos's
+(the default after 5 seconds) is vmdos as usual, choice 2 leaves out vmdos's
 own drivers and loads FreeDOS's HimemX and JEMM386 (in C:\VMDOS,
 `third_party/`) instead; VMHV picks the choice whose MENU line mentions
 VMHV. MS-DOS's HIMEM.SYS and EMM386.EXE can take their place. A C: made
