@@ -218,7 +218,11 @@ static int gview_begin(void)
     u64 *pt0 = hv_host_pt0();
     for (u32 i = 0; i < 512; i++) {
         u32 lin = i << 12, gpa;
-        u64 e = 0;
+        /* Not mapped by the guest (Windows leaves video memory unmapped
+           in its DOS sessions to catch the first touch): the VM's own page
+           at that address, where the write would go once it is mapped.
+           The host must never fault on the guest's behalf. */
+        u64 e = pt0[i];
         if (lin < GUEST_TOP && !gwalk(lin, &gpa)) {
             if (gpa < 0x200000) e = pt0[gpa >> 12];             /* as the VM sees it (A20, VGA window) */
             else { u8 *p = gpa_ptr(gpa & ~0xFFFu); if (p) e = (u32)(uintptr_t)p | 7; }
