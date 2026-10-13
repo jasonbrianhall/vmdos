@@ -24,6 +24,29 @@ static uint32_t target_ahead;     // desired latency in frames
 
 static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
 
+// Some HD Audio controllers (older Intel ones among them) can read memory
+// without snooping the CPU's caches: sound still sitting in the cache never
+// reaches them, and they play whatever RAM held, heard as static. hda_open
+// asks for snooping; as well, what is written for the card is pushed out to
+// RAM (CLFLUSH, Pentium 4 / Pentium M and later; without it, nothing).
+static int has_clflush = -1;
+static uint32_t clflush_line = 64;
+static bool clflush_ok() {
+    if (has_clflush < 0) {
+        uint32_t a = 1, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+        has_clflush = (d >> 19) & 1;
+        uint32_t line = ((b >> 8) & 0xFF) * 8;
+        if (line >= 16) clflush_line = line;
+    }
+    return has_clflush;
+}
+static void flush_lines(const volatile void* p, uint32_t bytes) {
+    if (!bytes || !clflush_ok()) return;
+    uintptr_t a = (uintptr_t)p & ~(uintptr_t)(clflush_line - 1), end = (uintptr_t)p + bytes;
+    for (; a < end; a += clflush_line) __asm__ volatile("clflush %0" :: "m"(*(volatile char*)a));
+}
+
 // ================================================================ AC'97
 struct __attribute__((packed)) AcBDL { uint32_t addr; uint16_t samples; uint16_t flags; };
 static AcBDL ac_bdl[RING_BUFS] __attribute__((aligned(8)));
@@ -104,6 +127,7 @@ static bool wait_bits32(uint32_t off, uint32_t mask, uint32_t want, int us) {
 static bool hda_cmd(uint32_t verb, uint32_t* resp) {
     uint16_t wp = (r16(0x48) + 1) & 0xFF;
     corb[wp] = verb;
+    flush_lines(&corb[wp], 4);
     w16(0x48, wp);
     for (int i = 0; i < 20000; i++) {
         uint16_t rwp = r16(0x58) & 0xFF;
@@ -405,6 +429,27 @@ static uint16_t hda_open(const PciDevice& d) {
         uint32_t v = pci_read(d, 0x40);
         pci_write(d, 0x40, (v & ~(0x07u << 16)) | (0x02u << 16));
     }
+    // Intel: traffic class 0 (TCSEL, offset 44h, bits 0-2), which Linux
+    // sets because otherwise some play static.
+    if (vendor == 0x8086) {
+        uint32_t v = pci_read(d, 0x44);
+        pci_write(d, 0x44, v & ~0x07u);
+    }
+    // PCI Express: no "no snoop" requests (Device Control bit 11), so the
+    // controller's reads see what is in the CPU's caches. (Intel's SCH and
+    // PCH controllers, for which Linux clears bit 11 at 78h, are this.)
+    if (pci_read(d, 0x04) & (1u << 20)) {             // status: a capability list
+        int cap = pci_read(d, 0x34) & 0xFC;
+        for (int n = 0; cap >= 0x40 && n < 48; n++) {
+            uint32_t h = pci_read(d, cap);
+            if ((h & 0xFF) == 0x10) {                 // PCI Express
+                uint32_t dc = pci_read(d, cap + 8);   // device control (low 16 bits)
+                if (dc & (1u << 11)) pci_write(d, cap + 8, dc & ~(1u << 11) & 0xFFFFu);
+                break;
+            }
+            cap = (h >> 8) & 0xFC;
+        }
+    }
 
     // Controller reset.
     w32(0x08, r32(0x08) & ~1u);
@@ -483,6 +528,8 @@ static bool hda_try(const PciDevice& d, bool digital) {
         hda_bdl[i].len = CHUNK_FRAMES * 4;
         hda_bdl[i].ioc = 0;
     }
+    flush_lines(hda_bdl, sizeof hda_bdl);
+    flush_lines(ring, sizeof ring);
     w32(sd + 0x18, (uint32_t)(uintptr_t)hda_bdl);
     w32(sd + 0x1C, 0);
     w32(sd + 0x08, sizeof(ring));                     // cyclic buffer length
@@ -531,15 +578,9 @@ static uint32_t cap_pos() { return (r32(0x80 + 0x04) / 4) % RING_FRAMES; }
 // input FIFO is written out in bursts): stay this far behind it.
 static const uint32_t CAP_SAFE = 1024;                 // ~21 ms
 static uint32_t cap_peak, cap_clips, cap_resyncs;       // for VMSB MIC
-static int has_clflush = -1;
 static int16_t cap_frame(uint32_t f) {
     volatile int16_t* p = &cap_ring[f * 2];
-    if (has_clflush < 0) {
-        uint32_t a = 1, b, c, d;
-        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
-        has_clflush = (d >> 19) & 1;
-    }
-    if (has_clflush && ((f & 15) == 0 || f == cap_read))   // in case the controller doesn't snoop
+    if (clflush_ok() && ((f & 15) == 0 || f == cap_read))   // in case the controller doesn't snoop
         __asm__ volatile("clflush %0" :: "m"(*(volatile char*)p));
     int l = p[0], r = p[1];
     int v = (l + r) / 2;
@@ -1069,6 +1110,11 @@ int audio_frames_wanted(int nominal) {
         write_pos = (play + target_ahead + RING_FRAMES - nominal % RING_FRAMES) % RING_FRAMES;   // restart the gap
         for (uint32_t f = play; f != write_pos; f = (f + 1) % RING_FRAMES)   // silence, not a lap-old echo
             ring[f * 2] = ring[f * 2 + 1] = 0;
+        if (driver == AUDIO_HDA)
+            for (uint32_t f = play, k; f != write_pos; f = (f + k) % RING_FRAMES) {
+                k = (write_pos > f ? write_pos : RING_FRAMES) - f;
+                flush_lines(&ring[f * 2], k * 4);
+            }
         return nominal;
     }
     int err = (int)(ahead + nominal) - (int)target_ahead;      // + : more delay than wanted
@@ -1125,6 +1171,7 @@ void audio_submit_stereo(const int16_t* lr, int n) {
         int16_t* d = &ring[write_pos * 2];
         if (gain == 10000) memcpy(d, lr, (size_t)k * 4);
         else for (int i = 0; i < k * 2; i++) d[i] = (int16_t)(lr[i] * gain / 10000);
+        if (driver == AUDIO_HDA) flush_lines(d, (uint32_t)k * 4);
         lr += k * 2; n -= k;
         write_pos = (write_pos + k) % RING_FRAMES;
     }
