@@ -412,18 +412,45 @@ static void msr_exit(void)
    The trapped VGA window (planar modes), and writes to the empty upper
    memory area: guest-physical C0000-EFFFF reads FFh like a PC's empty bus
    (so EMM386 finds it free for UMBs and the EMS page frame) and drops
-   writes. Both emulate the instruction (mememu.c), which needs its code
-   below 1 MiB of linear address. */
+   writes. Both emulate the instruction (mememu.c), reading the guest's
+   memory through its own page tables (emu_ptr). */
 static u8 *hole_page;
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u
 
+/* The emulator's view of guest memory: guest linear -> guest physical
+   (the guest's paging), then the VGA window's logic, or the page the VM
+   has there (below 2 MB as the host's page table maps it now: A20, a
+   mapped VGA plane, the read-only empty area). */
+static u8 *emu_ptr(u32 lin, u32 *gpa, int write)
+{
+    if (gwalk(lin, gpa)) return 0;
+    if (*gpa < 0x200000) {
+        u64 e = hv_host_pt0()[*gpa >> 12];
+        if (!(e & 1) || (write && !(e & 2))) return 0;
+        return (u8 *)(uintptr_t)((u32)(e & ~0xFFFull) + (*gpa & 0xFFF));
+    }
+    return gpa_ptr(*gpa);
+}
+u8 hv_emu_rd8(u32 lin)
+{
+    u32 gpa;
+    u8 *p = emu_ptr(lin, &gpa, 0);
+    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) return vga16_read(gpa);
+    return p ? *p : 0xFF;
+}
+void hv_emu_wr8(u32 lin, u8 v)
+{
+    u32 gpa;
+    u8 *p = emu_ptr(lin, &gpa, 1);
+    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) vga16_write(gpa, v);
+    else if (p) *p = v;                                           /* else dropped (empty space) */
+}
+
 static void emulate_at(u32 gpa, int vga)
 {
     u32 csb = (u32)V64(S_CS + 8), eip = V32(S_RIP);
-    if (csb + eip >= GUEST_TOP)
-        hv_stop("%s from code above 1 MB (not supported yet), address %x", vga ? "planar VGA" : "a write to empty memory", gpa);
-    if (gview_begin()) hv_stop("the guest uses PAE paging (not supported yet)");
+    if (V32(S_CR4) & 0x20) hv_stop("the guest uses PAE paging (not supported yet)");
     u32 r[8] = { V32(S_RAX), g[1], g[2], g[0], V32(S_RSP), g[5], g[3], g[4] };
     u32 rip = eip, fl = V32(S_RFLAGS);
     int code32 = !real_or_v86() && (V16(S_CS + 2) & 0x400);

@@ -270,6 +270,8 @@ int hv_start(int key);                        /* only returns on failure: an err
 void hv_hotkey(void);                         /* Ctrl+Alt+End */
 u32 hv_ext_kb(void);                          /* the VM's extended memory (0: no VM) */
 int hv_e820(struct regs *r);
+u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
+void hv_emu_wr8(u32 lin, u8 v);
 
 /* ---- sound.c ---- */
 void sound_init(void);

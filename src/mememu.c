@@ -19,18 +19,20 @@ static u8 fetch8(void)
 {
     u32 a = E->seg_base[CS] + (E->code32 ? ip : (ip & 0xFFFF));
     ip++;
-    return rd8(a);
+    return hv_active ? hv_emu_rd8(a) : rd8(a);
 }
 static u16 fetch16(void) { u16 v = fetch8(); return v | (u16)(fetch8() << 8); }
 static u32 fetch32(void) { u32 v = fetch16(); return v | (u32)fetch16() << 16; }
 
 /* ---------------- memory ---------------- */
-static u8 mrd8(u32 a) { return vga16_window(a) ? vga16_read(a) : rd8(a); }
-int page_writable(u32 lin);
+/* In VMHV the addresses are the guest's linear ones: hv.c walks its page
+   tables and finds the window by guest-physical address. */
+static u8 mrd8(u32 a) { return hv_active ? hv_emu_rd8(a) : vga16_window(a) ? vga16_read(a) : rd8(a); }
 static void mwr8(u32 a, u8 v)
 {
-    if (vga16_window(a)) vga16_write(a, v);
-    else if (!hv_active || page_writable(a)) wr8(a, v);     /* VMHV: writes to empty address space vanish */
+    if (hv_active) hv_emu_wr8(a, v);
+    else if (vga16_window(a)) vga16_write(a, v);
+    else wr8(a, v);
 }
 static u32 mrd(u32 a, int sz)
 {

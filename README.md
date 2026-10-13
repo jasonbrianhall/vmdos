@@ -452,10 +452,14 @@ kernel and over VCPI, Ctrl+Alt+End restarts. `make run-hv` runs it;
 QEMU 8.2's TCG doesn't apply nested paging to a guest that hasn't turned
 paging on (current QEMU does), so use a newer QEMU or 8.2 with `tools/qemu-8.2-npt-unpaged.patch` (`QEMU=path`).
 
+Trapped VGA memory (the planar modes, DOOM's Mode X) is emulated from
+any code, paged or not: the emulator reads the guest's memory through
+its own page tables (test: `tests/hvplanar.asm`, protected mode with
+paging, code above 1 MB).
+
 Not yet: Intel VT-x; SD/32A gets stuck in a loop in DOS/32A's kernel; a
-PAE-paging guest; planar VGA modes and writes to C000-EFFF from code
-above 1 MB (Windows' own drivers); the CD-ROM (VMCD) inside the VM;
-Windows 3.x and 9x are untested.
+PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
+untested.
 
 ## Not yet
 

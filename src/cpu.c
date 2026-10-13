@@ -158,12 +158,7 @@ u64 hv_host_pde(u32 lin)                      /* the PDE (making its table if ne
     return pae_pd[lin >> 30][(lin >> 21) & 511];
 }
 u64 *hv_host_pt0(void) { return (u64 *)pt_for(0); }
-int page_writable(u32 lin)                    /* mememu.c: drop writes to read-only pages (VMHV's empty UMB area) */
-{
-    if (pae) { u64 e = ((u64 *)pt_for(lin))[(lin >> 12) & 511]; return (e & 3) == 3; }
-    u32 e = ((u32 *)pt_for(lin))[(lin >> 12) & 1023];
-    return (e & 3) == 3;
-}
+
 /* Swap the table for linear 0-2 MiB (pde != 0), or put the real one back
    (pde == 0). Only the host's view changes: the VM's tables point at the
    real table directly. */
