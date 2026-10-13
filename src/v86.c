@@ -273,6 +273,44 @@ static void string_wrap(struct regs *r, u8 op, int s, int seg, int rep)
     }
 }
 
+/* hv.c (VMHV): the same for a guest in real or V86 mode in the VM, whose
+   #GP the VM intercepts before the guest's own handler (EMM386's, which
+   doesn't do this) sees it. 1 if it was such a string instruction. */
+int v86_wrap_string(struct regs *r)
+{
+    u16 ip = IP(r);
+    int op32 = 0, a32 = 0, rep = 0, seg = 3;
+    u8 op;
+    for (int n = 0; n < 15; n++) {
+        op = rd8(LIN(r->cs, ip));
+        ip++;
+        switch (op) {
+        case 0x66: op32 = 1; continue;
+        case 0x67: a32 = 1; continue;
+        case 0xF2: rep = 1; continue;
+        case 0xF3: rep = 2; continue;
+        case 0xF0: continue;
+        case 0x26: seg = 0; continue;
+        case 0x2E: seg = 1; continue;
+        case 0x36: seg = 2; continue;
+        case 0x3E: seg = 3; continue;
+        case 0x64: seg = 4; continue;
+        case 0x65: seg = 5; continue;
+        }
+        break;
+    }
+    if (a32) return 0;
+    switch (op) {
+    case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB:
+    case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+        dbg(1, "segment wrap: string op %02x at %04x:%04x, SI=%04x DI=%04x CX=%04x\n", op, r->cs, IP(r), SI(r), DI(r), CX(r));
+        string_wrap(r, op, (op & 1) ? (op32 ? 4 : 2) : 1, seg, rep);
+        IP(r) = ip;
+        return 1;
+    }
+    return 0;
+}
+
 static void gp_handler(struct regs *r)
 {
     u16 ip0 = IP(r), ip = ip0;

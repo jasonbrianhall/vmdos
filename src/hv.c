@@ -388,6 +388,21 @@ static int vbe_pm_stub(void)
     return 1;
 }
 
+/* A string instruction that ran off the end of a 64 KB segment in real or
+   V86 mode: an 8086 wraps the offset around, a 386 raises #GP, and old
+   programs (Caveman Ugh-Lympics) count on the wrap. vmdos's V86 monitor
+   emulates it; in the VM the #GP is intercepted before EMM386 gets it
+   (which doesn't), and the same code runs here. 1 if it was one. */
+static int wrap_string(void)
+{
+    if (gview_begin()) return 0;
+    struct regs r;
+    get_regs(&r);
+    if (!v86_wrap_string(&r)) return 0;
+    put_regs(&r);
+    return 1;
+}
+
 /* ---------------- I/O ---------------- */
 static void io_exit(void)
 {
@@ -757,6 +772,7 @@ int hv_start(int key)
             break;
         case X_EXC(13):
             if ((V32(S_RFLAGS) & EFL_VM) ? bios_stub() : vbe_pm_stub()) break;
+            if (real_or_v86() && wrap_string()) break;
             if (debug_level >= 2) {
                 static int shown;
                 if (shown++ < 8) {
