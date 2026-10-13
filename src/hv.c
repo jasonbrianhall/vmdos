@@ -424,7 +424,8 @@ static void msr_exit(void)
    (so EMM386 finds it free for UMBs and the EMS page frame) and drops
    writes. Both emulate the instruction (mememu.c), reading the guest's
    memory through its own page tables (emu_ptr). */
-static u8 *hole_page;
+static u8 *hole_page, *vrom;
+#define VROM_SIZE 0x8000u
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u
 
@@ -656,7 +657,24 @@ int hv_start(int key)
     memset(ext, 0, VM_TOP - EXT_START);
     if (!hole_page) { hole_page = phys_alloc(4096); memset(hole_page, 0xFF, 4096); }
     for (u32 a = HOLE_LO; a < HOLE_HI; a += 4096) map_page(a, (u32)(uintptr_t)hole_page, 5);   /* read-only */
+    /* A video BIOS ROM at C000h (32 KB), as on any PC with a VGA card: the
+       55AAh signature, a checksum, and INT 10h entering it (a far jump to
+       vmdos's INT 10h stub). Windows' display code expects one there. */
+    if (!vrom) {
+        vrom = phys_alloc(VROM_SIZE);
+        memset(vrom, 0xFF, VROM_SIZE);
+        u16 svc10 = rd16(0xF0000u + 0x10 * 2);
+        u8 hdr[] = { 0x55, 0xAA, VROM_SIZE / 512, 0xCB,          /* init entry: RETF */
+                     0xEA, (u8)svc10, (u8)(svc10 >> 8), 0x00, 0xF0 };   /* C000:0004: JMP F000:int10 */
+        memcpy(vrom, hdr, sizeof hdr);
+        memcpy(vrom + 0x1E, "IBM VGA", 7);            /* where some software looks for the name */
+        u8 sum = 0;
+        for (u32 i = 0; i < VROM_SIZE - 1; i++) sum += vrom[i];
+        vrom[VROM_SIZE - 1] = (u8)-sum;
+    }
+    for (u32 a = 0; a < VROM_SIZE; a += 4096) map_page(HOLE_LO + a, (u32)(uintptr_t)vrom + a, 5);
     tlb_flush();
+    wr16(0x10 * 4, 0x0004); wr16(0x10 * 4 + 2, 0xC000);     /* INT 10h into the ROM */
     menu_wait = !key;
     menu_t0 = 0;
     if (!key) key = menu_choice();

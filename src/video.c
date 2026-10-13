@@ -88,6 +88,7 @@ u8 crtc[32];
 int palette_dirty = 1;
 static u8 crtc_idx, seq_idx, gc_idx, atc_idx, atc_flip, misc_out = 0x67;
 static u8 seq[8], gc[16], atc[21];
+static u8 atc_pas = 0x20;            /* attribute index bit 5: palette address source (screen on) */
 static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 /* DAC width: 6 bits a primary as on a VGA, or 8 once a program asks for it
    through VESA (4F08h), as most SVGA cards allow; a mode set goes back to
@@ -1293,11 +1294,11 @@ void video_init(void)
 u32 video_port_in(u16 port)
 {
     switch (port) {
-    case 0x3C0: return atc_idx;
+    case 0x3C0: return atc_idx | atc_pas;
     case 0x3C1: return atc[atc_idx % 21];
     case 0x3C2: return 0x10;
     case 0x3D9: return cga_sel;
-    case 0x3C4: return seq_idx;
+    case 0x3C4: return seq_idx & 7;
     case 0x3C5: return seq[seq_idx & 7];
     case 0x3C6: return dac_mask;
     case 0x3C7: return 3;
@@ -1308,7 +1309,7 @@ u32 video_port_in(u16 port)
         return v; }
     case 0x3CA: return 0;
     case 0x3CC: return misc_out;
-    case 0x3CE: return gc_idx;
+    case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
     case 0x3B5: case 0x3D5: return crtc[crtc_idx & 31];
@@ -1350,7 +1351,7 @@ void video_port_out(u16 port, u8 v)
 {
     switch (port) {
     case 0x3C0:
-        if (!atc_flip) atc_idx = v & 0x1F;
+        if (!atc_flip) { atc_idx = v & 0x1F; atc_pas = v & 0x20; }
         else if (atc_idx < 21) { atc[atc_idx] = v; palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
         atc_flip ^= 1;
         return;
@@ -1542,6 +1543,81 @@ static void teletype(u8 ch, int page, u8 color)
     set_cursor(page, row, col);
 }
 
+/* INT 10h AH=1Bh: functionality and state information (64 bytes at
+   ES:DI), with the static functionality table at F000:F000. */
+#define STATIC_FUNC 0xFF000u
+static void state_info(u32 a)
+{
+    static const u8 sft[16] = { 0xFF, 0xE0, 0x0F, 0, 0, 0, 0, 0x07, 0x02, 0x08, 0xFF, 0x0E, 0, 0, 0, 0 };
+    for (int i = 0; i < 16; i++) wr8(STATIC_FUNC + i, sft[i]);
+    for (int i = 0; i < 64; i++) wr8(a + i, 0);
+    wr16(a, STATIC_FUNC & 0xFFFF); wr16(a + 2, 0xF000);
+    wr8(a + 4, (u8)video_mode);
+    wr16(a + 5, (u16)text_cols);
+    wr16(a + 7, rd16(BDA + 0x4C));
+    wr16(a + 9, rd16(BDA + 0x4E));
+    for (int i = 0; i < 16; i++) wr8(a + 0x0B + i, rd8(BDA + 0x50 + i));
+    wr8(a + 0x1B, rd8(BDA + 0x61)); wr8(a + 0x1C, rd8(BDA + 0x60));
+    wr8(a + 0x1D, rd8(BDA + 0x62));
+    wr16(a + 0x1E, 0x3D4);
+    wr8(a + 0x20, rd8(BDA + 0x65)); wr8(a + 0x21, rd8(BDA + 0x66));
+    wr8(a + 0x22, (u8)text_rows);
+    wr16(a + 0x23, rd16(BDA + 0x85) ? rd16(BDA + 0x85) : 16);
+    wr8(a + 0x25, 0x08);                          /* VGA, colour */
+    wr16(a + 0x27, video_mode == 0x13 ? 256 : is_cga(video_mode) ? (video_mode == 6 ? 2 : 4) : 16);
+    wr8(a + 0x29, is_text(video_mode) ? 8 : 1);
+    wr8(a + 0x2A, video_mode == 0x12 || video_mode == 0x11 ? 3 : video_mode == 0x10 || video_mode == 0x0F ? 1 : is_text(video_mode) ? 2 : 0);
+    wr8(a + 0x2D, 0x20);                          /* blink */
+    wr8(a + 0x31, 3);                             /* 256 KB */
+}
+
+/* INT 10h AH=1Ch: video state size, save, restore (CX bit 0 registers,
+   bit 1 BIOS data, bit 2 DAC). Windows saves the screen state this way
+   when it switches to and from DOS. */
+static void video_state(struct regs *r)
+{
+    u16 m = CX(r) & 7;
+    u32 hw = 4 + 8 + 16 + 32 + 21 + 8, bd = 0x6A - 0x49 + 8, dac = 4 + 768;
+    if (AL(r) == 0) {
+        u32 n = (m & 1 ? hw : 0) + (m & 2 ? bd : 0) + (m & 4 ? dac : 0);
+        BX(r) = (u16)((n + 63) / 64);
+        AL(r) = 0x1C;
+        return;
+    }
+    if (AL(r) != 1 && AL(r) != 2) return;
+    int save = AL(r) == 1;
+    u32 a = LIN(r->v86_es, BX(r));
+#define XFER(buf, n) do { for (u32 _i = 0; _i < (n); _i++) { if (save) wr8(a + _i, (buf)[_i]); else (buf)[_i] = rd8(a + _i); } a += (n); } while (0)
+    if (m & 1) {
+        u8 idx[4] = { seq_idx, gc_idx, crtc_idx, (u8)(atc_idx | atc_pas) };
+        u8 mo[8] = { misc_out };
+        XFER(idx, 4); XFER(mo, 8); XFER(gc, 16); XFER(crtc, 32); XFER(atc, 21); XFER(seq, 8);
+        if (!save) {
+            seq_idx = idx[0]; gc_idx = idx[1]; crtc_idx = idx[2]; atc_idx = idx[3] & 0x1F; atc_pas = idx[3] & 0x20;
+            misc_out = mo[0];
+            planar_check(); ega_check(); reg_mode_check(); apply_map_mask();
+            palette_dirty = 1; full_redraw = 1;
+        }
+    }
+    if (m & 2) {
+        u8 b[0x6A - 0x49 + 8];
+        for (u32 i = 0; i < 0x6A - 0x49; i++) b[i] = rd8(BDA + 0x49 + i);
+        for (u32 i = 0; i < 8; i++) b[0x6A - 0x49 + i] = rd8(BDA + 0x84 + i);
+        XFER(b, sizeof b);
+        if (!save) {
+            for (u32 i = 0; i < 0x6A - 0x49; i++) wr8(BDA + 0x49 + i, b[i]);
+            for (u32 i = 0; i < 8; i++) wr8(BDA + 0x84 + i, b[0x6A - 0x49 + i]);
+        }
+    }
+    if (m & 4) {
+        u8 st[4] = { dac_mask, dac_widx, dac_ridx, 0 };
+        XFER(st, 4); XFER(&vga_dac[0][0], 768);
+        if (!save) { dac_mask = st[0]; dac_widx = st[1]; dac_ridx = st[2]; palette_dirty = 1; }
+    }
+#undef XFER
+    AL(r) = 0x1C;
+}
+
 void video_int10(struct regs *r)
 {
     int page = BH(r) & 7;
@@ -1659,6 +1735,8 @@ void video_int10(struct regs *r)
     case 0x1A:
         if (AL(r) == 0) { AL(r) = 0x1A; BX(r) = 0x0008; }
         break;
+    case 0x1B: if (BX(r) == 0) { state_info(LIN(r->v86_es, DI(r))); AL(r) = 0x1B; } break;
+    case 0x1C: video_state(r); break;
     case 0x4F: vbe_call(r); break;             /* VESA BIOS */
     default:
         dbg(1, "INT 10h AX=%04x unsupported\n", AX(r));
