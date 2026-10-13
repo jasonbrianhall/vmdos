@@ -350,6 +350,50 @@ u32 pit_clock(void)
     return now;
 }
 
+/* A long stretch with interrupts off (a full-screen redraw on a slow
+   machine) loses timer ticks: the PIC holds only one, so the clock, the
+   guest's timer and the sound all fall behind. Called often enough (well
+   under a tick apart) between tick_poll_begin and tick_poll_end, tick_poll
+   counts the ticks the PIC would drop. Not with interrupts on: then they
+   are taken as they come. */
+static int tp_on, tp_pending;
+static u32 tp_count;
+
+static u32 pit_count0(void)
+{
+    outb(0x43, 0x00);
+    u32 c = inb(0x40);
+    return c | inb(0x40) << 8;
+}
+
+void tick_poll_begin(void)
+{
+    u32 fl;
+    __asm__ volatile("pushf; pop %0" : "=r"(fl));
+    tp_on = !(fl & EFL_IF);
+    if (!tp_on) return;
+    tp_count = pit_count0();
+    outb(0x20, 0x0A);
+    tp_pending = inb(0x20) & 1;                       /* a tick already waiting */
+}
+
+void tick_poll(void)
+{
+    if (!tp_on) return;
+    u32 c = pit_count0();
+    if (c > tp_count) {                               /* reloaded: a tick went by */
+        if (tp_pending) ticks++;                      /* one already waits: the PIC drops this one */
+        else tp_pending = 1;
+    }
+    tp_count = c;
+}
+
+void tick_poll_end(void)
+{
+    tick_poll();
+    tp_on = 0;
+}
+
 void idle_wait(void) { __asm__ volatile("sti; hlt; cli" ::: "memory"); }
 
 void reboot(void)

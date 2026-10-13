@@ -11,7 +11,6 @@ inline void *operator new(size_t, void *p) noexcept { return p; }
 alignas(8) static unsigned char handler_mem[OPL_CHIPS][sizeof(DBOPL::Handler)];
 static DBOPL::Handler *chips[OPL_CHIPS];
 static Bit32s buf[2 * OPL_MAX_FRAMES];
-extern "C" { int32_t opl_peak; }            /* largest |sample| since last read (debug) */
 
 extern "C" void gm_tables_init(int opl_rate_x100);   /* gmsynth tables, uses the FPU */
 
@@ -39,26 +38,23 @@ extern "C" void midi_opl_write(int chip, uint32_t reg, uint8_t val)
 }
 
 /* gain: x/4. The MIDI synth plays up to 18 voices at once, so it is mixed
-   a little lower than a game's own FM chip. */
+   a little lower than a game's own FM chip. A chip with every voice silent
+   (the MIDI synth when no MIDI plays, the game's chip between tunes) is
+   skipped: it would only add zeros. */
 static void mix_chip(DBOPL::Handler *h, int32_t *out, int frames, int gain)
 {
+    if (h->chip.Silent()) return;
     h->Generate(buf, (Bitu)frames);
-    if (gain != 4)
-        for (int i = 0; i < (h->chip.opl3Active ? frames * 2 : frames); i++)
-            buf[i] = buf[i] * gain / 4;
-    int stereo = h->chip.opl3Active;
-    int n = stereo ? frames * 2 : frames;
-    for (int i = 0; i < n; i++) {
-        int32_t v = buf[i] < 0 ? -buf[i] : buf[i];
-        if (v > opl_peak) opl_peak = v;
-    }
-    if (stereo) {
-        for (int i = 0; i < frames * 2; i++) out[i] += buf[i];
+    const Bit32s *b = buf;
+    if (h->chip.opl3Active) {
+        int n = frames * 2;
+        if (gain == 4) for (int i = 0; i < n; i++) out[i] += b[i];
+        else           for (int i = 0; i < n; i++) out[i] += b[i] * gain >> 2;
     } else {
-        for (int i = 0; i < frames; i++) {
-            out[i * 2] += buf[i];
-            out[i * 2 + 1] += buf[i];
-        }
+        if (gain == 4)
+            for (int i = 0; i < frames; i++, out += 2) { out[0] += b[i]; out[1] += b[i]; }
+        else
+            for (int i = 0; i < frames; i++, out += 2) { int32_t v = b[i] * gain >> 2; out[0] += v; out[1] += v; }
     }
 }
 

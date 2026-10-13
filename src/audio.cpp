@@ -780,6 +780,7 @@ static int sb_frames_wanted(int nominal, uint32_t* underruns) {
     if (ahead < sb_ahead / 8 || ahead > sb_ahead * 2) {
         if (ahead < sb_ahead / 8 || ahead >= SB_RING / 2) (*underruns)++;
         sb_write = (play + sb_ahead + SB_RING - nom % SB_RING) % SB_RING;
+        for (uint32_t f = play; f != sb_write; f = (f + 1) % SB_RING) sb_ring[f] = 128;   // silence, not a lap-old echo
         return nominal;
     }
     int err = (int)(ahead + nom) - (int)sb_ahead;
@@ -1066,6 +1067,8 @@ int audio_frames_wanted(int nominal) {
     if (ahead < target_ahead / 8 || ahead > target_ahead * 2) {
         if (ahead < target_ahead / 8 || ahead >= RING_FRAMES / 2) underruns++;   // ran dry: a gap you can hear
         write_pos = (play + target_ahead + RING_FRAMES - nominal % RING_FRAMES) % RING_FRAMES;   // restart the gap
+        for (uint32_t f = play; f != write_pos; f = (f + 1) % RING_FRAMES)   // silence, not a lap-old echo
+            ring[f * 2] = ring[f * 2 + 1] = 0;
         return nominal;
     }
     int err = (int)(ahead + nominal) - (int)target_ahead;      // + : more delay than wanted
@@ -1116,10 +1119,14 @@ void audio_submit_stereo(const int16_t* lr, int n) {
         sb_submit(tmp, n);
         return;
     }
-    for (int i = 0; i < n; i++) {
-        ring[write_pos * 2] = (int16_t)(lr[2 * i] * gain / 10000);
-        ring[write_pos * 2 + 1] = (int16_t)(lr[2 * i + 1] * gain / 10000);
-        write_pos = (write_pos + 1) % RING_FRAMES;
+    while (n > 0) {                                    // up to the ring's end, then from its start
+        int k = (int)(RING_FRAMES - write_pos);
+        if (k > n) k = n;
+        int16_t* d = &ring[write_pos * 2];
+        if (gain == 10000) memcpy(d, lr, (size_t)k * 4);
+        else for (int i = 0; i < k * 2; i++) d[i] = (int16_t)(lr[i] * gain / 10000);
+        lr += k * 2; n -= k;
+        write_pos = (write_pos + k) % RING_FRAMES;
     }
     if (driver == AUDIO_USB) usb_audio_pump();
 }

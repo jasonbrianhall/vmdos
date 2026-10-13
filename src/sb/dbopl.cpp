@@ -539,6 +539,15 @@ INLINE bool Operator::Silent() const {
 	return true;
 }
 
+//vmdos: every operator silent with an envelope that won't move, the state
+//in which BlockTemplate skips a channel: Generate would only write zeros.
+bool Chip::Silent() const {
+	for ( int i = 0; i < 18; i++ )
+		if ( !chan[i].op[0].Silent() || !chan[i].op[1].Silent() )
+			return false;
+	return true;
+}
+
 INLINE void Operator::Prepare( const Chip* chip )  {
 	currentLevel = totalLevel + (chip->tremoloValue & tremoloMask);
 	waveCurrent = waveAdd;
