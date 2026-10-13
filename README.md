@@ -430,7 +430,13 @@ The VM boots C: again. vmdos's FDCONFIG.SYS has a menu for that: choice 1
 (the default after 5 seconds) is vmdos as usual, choice 2 leaves out vmdos's
 own drivers and loads FreeDOS's HimemX and JEMM386 (in C:\VMDOS,
 `third_party/`) instead; VMHV picks the choice whose MENU line mentions
-VMHV. MS-DOS's HIMEM.SYS and EMM386.EXE can take their place. A C: made
+VMHV. Choice 3 loads HimemX only, for Windows 3.x (`VMHV 3`): JEMM386
+doesn't do the handshake (INT 2Fh 1605h) by which Windows takes over from
+an EMM386 for 386 Enhanced mode, and Windows says it can't run while
+protected-mode software is running; without EMM386 the CPU is in real
+mode in the VM and Windows takes it itself. MS-DOS's HIMEM.SYS and
+EMM386.EXE (which has the handshake) can take HimemX's and JEMM386's
+place. A C: made
 before this keeps its FDCONFIG.SYS (`make esp` doesn't overwrite it):
 `FRESH=1`, or copy the menu over. With it, a program gets about 618 KB
 of conventional memory in the VM.
