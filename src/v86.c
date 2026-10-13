@@ -182,6 +182,11 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x5650) { video_shot_api(r); return; }   /* VMSHOT */
+    if (n == 0x2F && AX(r) == 0x5648) {                                 /* VMHV: only returns on failure */
+        AX(r) = (u16)hv_start(BL(r));
+        BX(r) = 0x564D;
+        return;
+    }
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;
@@ -510,6 +515,11 @@ void guest_start(void)
     memset(r, 0, sizeof *r);
     r->eflags = EFL_VM | EFL_IF | 2;
     vif = 1;
+    const char *hv = strstr(cmdline, "vmhv");             /* vmhv / vmhv=2: boot DOS in VMHV's VM */
+    if (hv && (hv == cmdline || hv[-1] == ' ')) {
+        int e = hv_start(hv[4] == '=' ? hv[5] : 0);
+        kprintf("vmhv: %d; booting DOS as usual\n", e);
+    }
     bios_boot(r);
     kprintf("starting guest at %04x:%04x\n", r->cs, IP(r));
     v86_enter(r);

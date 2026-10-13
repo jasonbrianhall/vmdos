@@ -26,7 +26,12 @@ static u32 fetch32(void) { u32 v = fetch16(); return v | (u32)fetch16() << 16; }
 
 /* ---------------- memory ---------------- */
 static u8 mrd8(u32 a) { return vga16_window(a) ? vga16_read(a) : rd8(a); }
-static void mwr8(u32 a, u8 v) { if (vga16_window(a)) vga16_write(a, v); else wr8(a, v); }
+int page_writable(u32 lin);
+static void mwr8(u32 a, u8 v)
+{
+    if (vga16_window(a)) vga16_write(a, v);
+    else if (!hv_active || page_writable(a)) wr8(a, v);     /* VMHV: writes to empty address space vanish */
+}
 static u32 mrd(u32 a, int sz)
 {
     u32 v = 0;

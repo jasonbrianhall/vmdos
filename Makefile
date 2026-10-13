@@ -46,7 +46,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin 
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o hv.o hvasm.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -122,6 +122,12 @@ $(BUILD)/VMSHOT.COM: dos/vmshot.asm | $(BUILD)
 $(BUILD)/VMSB.COM: dos/vmsb.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMHV.COM: dos/vmhv.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
+$(BUILD)/hvasm.o: src/hvasm.S | $(BUILD)
+	$(CC) -m32 -c $< -o $@
+
 $(BUILD)/VMCD.SYS: dos/vmcd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -148,7 +154,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT \
@@ -347,6 +353,14 @@ DISK_DEP := $(if $(filter ram,$(C)),,esp.img)
 run: vmdos.elf $(RAM_IMG) $(FLOPPY) $(DISK_DEP)
 	qemu-system-i386 -kernel vmdos.elf -initrd $(subst $(space),$(comma),$(strip $(if $(USE_RAM),dos.img,$(FLOPPY)) $(ISO_RAM))) \
 	    -append "$(KARGS_ALL)" $(QDISK) $(QEMU_ARGS)
+# VMHV (src/hv.c): boot straight into the AMD-V virtual machine. Needs a
+# QEMU whose TCG applies nested paging to guests that haven't turned
+# paging on (current QEMU; 8.2 doesn't), or KVM on an AMD host with
+# nested virtualization. QEMU=path picks the binary; VMHV=2 types menu choice 2.
+QEMU ?= qemu-system-i386
+run-hv: vmdos.elf $(RAM_IMG) $(FLOPPY) $(DISK_DEP)
+	$(QEMU) -cpu EPYC -kernel vmdos.elf -initrd $(subst $(space),$(comma),$(strip $(if $(USE_RAM),dos.img,$(FLOPPY)) $(ISO_RAM))) \
+	    -append "$(KARGS_ALL) vmhv$(if $(VMHV),=$(VMHV))" $(QDISK) $(QEMU_ARGS)
 run-iso: vmdos.iso $(DISK_DEP)
 	qemu-system-i386 -drive if=none,id=cd0,media=cdrom,file=vmdos.iso -device ide-cd,drive=cd0,bootindex=0 \
 	    $(QDISK) $(QEMU_ARGS)
@@ -368,5 +382,5 @@ run-usb: esp.img
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
-.PHONY: FORCE all iso efi esp run run-iso run-efi run-efi-app run-usb run-bios clean
+.PHONY: FORCE all iso efi esp run run-hv run-iso run-efi run-efi-app run-usb run-bios clean
 -include $(OBJS:.o=.d)

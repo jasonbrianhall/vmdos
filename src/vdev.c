@@ -395,6 +395,8 @@ void vkbd_release_mods(int m)
     ctrl = alt = lshift = rshift = e0 = 0;
 }
 
+void vkbd_inject(u8 sc) { kq_put(sc); }       /* hv.c: keys typed for the guest */
+
 void vkbd_real_scancode(u8 sc)
 {
     u8 k = sc & 0x7F;
@@ -407,7 +409,10 @@ void vkbd_real_scancode(u8 sc)
         else if (k == 0x36 && !e0) rshift = !up;
         e0 = 0;
     }
-    (void)alt;
+    if (hv_active && ctrl && alt && k == 0x4F) {               /* Ctrl+Alt+End: leave VMHV (hv.c) */
+        if (!up) hv_hotkey();
+        return;
+    }
     int hot = ctrl && (lshift || rshift);                     /* Ctrl+Shift: games rarely use it with F-keys */
     if (hot && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
@@ -516,7 +521,13 @@ static u8 in8(u16 port)
         return v; }
     case 0x64: return (kbd_full ? 1 : 0) | (kbd_full && kbd_aux ? 0x20 : 0) | 0x14;
     case 0x70: return cmos_index;
-    case 0x71: outb(0x70, cmos_index & 0x7F); return inb(0x71);
+    case 0x71: {
+        u32 kb = hv_ext_kb();                       /* VMHV: the VM's extended memory, not the PC's */
+        u8 ix = cmos_index & 0x7F;
+        if (kb && (ix == 0x17 || ix == 0x30)) return (u8)kb;
+        if (kb && (ix == 0x18 || ix == 0x31)) return (u8)(kb >> 8);
+        if (kb && (ix == 0x34 || ix == 0x35)) return 0;
+        outb(0x70, ix); return inb(0x71); }
     case 0x92: return a20_on ? 2 : 0;
     case 0x201: return joy_port_in();                    /* game port (joy.c) */
     }

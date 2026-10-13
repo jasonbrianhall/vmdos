@@ -1,0 +1,26 @@
+QEMU 8.2's TCG skips nested paging (AMD NPT) for a guest that hasn't turned
+paging on, so a real-mode VMHV guest would see the host's raw memory.
+Apply to QEMU 8.2 to test VMHV in TCG: patch -p1 < this file
+
+--- a/target/i386/tcg/sysemu/excp_helper.c	2024-03-04 12:48:16.000000000 -0500
++++ b/target/i386/tcg/sysemu/excp_helper.c	2026-10-13 14:56:07.440268304 -0400
+@@ -578,6 +578,19 @@
+             }
+             return mmu_translate(env, &in, out, err);
+         }
++        if (use_stage2) {
++            /* Unpaged guest under NPT: guest-physical = linear, walk NPT. */
++            in.addr = addr & x86_get_a20_mask(env);
++            in.cr3 = env->nested_cr3;
++            in.pg_mode = env->nested_pg_mode;
++            in.mmu_idx = MMU_USER_IDX;
++            in.ptw_idx = MMU_PHYS_IDX;
++            if (!mmu_translate(env, &in, out, err)) {
++                err->stage2 = S2_GPA;
++                return false;
++            }
++            return true;
++        }
+         break;
+     }
+ 

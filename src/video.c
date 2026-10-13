@@ -842,6 +842,7 @@ static void vbe_tables(void)
 }
 
 /* DPMI 0800h: the framebuffer is mapped already, at its own address. */
+u32 video_vram_base(u32 *size) { *size = vram ? VRAM_SIZE : 0; return (u32)(uintptr_t)vram; }   /* hv.c */
 int video_vram_range(u32 p, u32 n) { return vram && p >= (u32)(uintptr_t)vram && p + n <= (u32)(uintptr_t)vram + VRAM_SIZE; }
 
 static void vbe_off(void)

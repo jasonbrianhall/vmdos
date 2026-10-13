@@ -264,6 +264,13 @@ struct regs *dpmi_reflect_irq(struct regs *r, int vec);
 void wait_for_irq(void);
 void dpmi_espfix(struct regs *r);
 
+/* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
+extern int hv_active;
+int hv_start(int key);                        /* only returns on failure: an error code */
+void hv_hotkey(void);                         /* Ctrl+Alt+End */
+u32 hv_ext_kb(void);                          /* the VM's extended memory (0: no VM) */
+int hv_e820(struct regs *r);
+
 /* ---- sound.c ---- */
 void sound_init(void);
 void sound_tick(void);                        /* every timer tick */

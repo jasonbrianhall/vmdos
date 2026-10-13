@@ -409,6 +409,54 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
   above 4 GiB too, via PAE), or Bochs VBE under QEMU `-kernel`.
 
+## VMHV: DOS in a virtual machine (draft, AMD-V)
+
+Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
+extenders' raw and VCPI kernels (DOS/32A's own, its SD/32A debugger),
+games that are their own memory manager. vmdos can't give them that in
+virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
+machine (AMD-V with nested paging) where it can. The guest sees a 386
+with 640 KB and 8 MB of extended memory (1-9 MB) and nothing else at
+C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
+EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
+vmdos's: the BIOS stubs and every I/O port exit to the same code as in
+V86 mode.
+
+    VMHV            restart DOS in the VM
+    VMHV 2          ... and pick choice 2 in FDCONFIG.SYS's menu
+    vmhv / vmhv=2   on the kernel command line: boot straight into it
+
+The VM boots C: again, so give FDCONFIG.SYS a menu entry without vmdos's
+own drivers (VMXMS.SYS, VMEMS.SYS, VMCD.SYS) and with your memory
+managers, e.g. FreeDOS's HimemX and JEMM386 or MS-DOS's HIMEM and EMM386:
+
+    MENU 1 = FreeDOS on vmdos
+    MENU 2 = VMHV: HIMEM + EMM386
+    MENUDEFAULT = 1, 5
+    1?DEVICE=C:\VMDOS\VMXMS.SYS
+    1?DEVICE=C:\VMDOS\VMEMS.SYS
+    2?DEVICE=C:\HV\HIMEMX.EXE
+    2?DEVICE=C:\HV\JEMM386.EXE
+    DOS=HIGH,UMB
+    1?DEVICE=C:\VMDOS\VMCD.SYS
+
+The VM keeps the machine until it reboots, which restarts vmdos.
+Ctrl+Alt+End sends Ctrl+Alt+Del into it (DOS and SMARTDRV write their
+buffers first; Windows shows its own restart screen); pressed twice
+within 3 seconds it offers a forced restart, which loses whatever the VM
+hadn't written. A triple fault or `HLT` with interrupts off ends it too.
+
+Tested in QEMU (TCG, `-cpu EPYC`): FreeDOS boots in the VM, HimemX and
+JEMM386 load (EMS, VCPI, UMBs at C800-DFFF), DOS/32A runs its own raw
+kernel and over VCPI, Ctrl+Alt+End restarts. `make run-hv` runs it;
+QEMU 8.2's TCG doesn't apply nested paging to a guest that hasn't turned
+paging on (current QEMU does), so use a newer QEMU or 8.2 with `tools/qemu-8.2-npt-unpaged.patch` (`QEMU=path`).
+
+Not yet: Intel VT-x; SD/32A gets stuck in a loop in DOS/32A's kernel; a
+PAE-paging guest; planar VGA modes and writes to C000-EFFF from code
+above 1 MB (Windows' own drivers); the CD-ROM (VMCD) inside the VM;
+Windows 3.x and 9x are untested.
+
 ## Not yet
 
 - Mode X's 240-line timing, VBE 3.0, EMS, SB16 (16-bit)
@@ -432,6 +480,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
 | `src/dpmi.c` | DPMI host |
+| `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
