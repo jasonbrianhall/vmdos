@@ -336,7 +336,7 @@ static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
 
-/* Smooth scaling (the default; scale=sharp or scale=off turn it off): the
+/* Smooth scaling (scale=smooth, or Ctrl+Shift+F8; off by default): the
    picture enlarged with bilinear blending, as a QEMU window does, instead
    of by whole pixels, which at sizes like 1.6x makes some pixels one wide
    and some two (dithering breaks up, letters come out uneven). Each source row that changed is scaled
@@ -422,7 +422,7 @@ static void layout(void)
     static int last_w, last_h;
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
-    if (smooth_opt < 0) smooth_opt = !strstr(cmdline, "scale=sharp") && !no_scale;
+    if (smooth_opt < 0) smooth_opt = strstr(cmdline, "scale=smooth") && !no_scale;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();

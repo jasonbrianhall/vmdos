@@ -205,16 +205,17 @@ scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
 submenu's sizes.
 
 The picture is scaled to the largest 4:3 box that fits (text too),
-black bars at the sides of a wide screen, with bilinear blending as a QEMU
-window does (needs a 24- or 32-bit framebuffer): at sizes like 1.6x, whole
-pixels would come out one wide and some two, breaking up dithered art and
-making letters uneven. `scale=sharp` scales by whole pixels instead;
+black bars at the sides of a wide screen, by whole pixels. `scale=smooth`
+blends instead, as a QEMU window does (needs a 24- or 32-bit framebuffer):
+at sizes like 1.6x, whole pixels come out one wide and some two, which can
+break up dithered art and make letters uneven, but blending costs a lot of
+CPU on a slow machine. `scale=sharp` is the default, whole pixels;
 `scale=off` draws without resampling, at the size a VGA card puts out
 (320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
 whole number that fits, centered with black borders. `aspect=fill` stretches
 the picture to the whole screen. Ctrl+Shift+F8 turns smoothing on and off
 while a program runs. Set them on the kernel command line
-(`make esp KARGS="scale=sharp"`, or EFI/vmdos/vmdos.cfg on the stick).
+(`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
