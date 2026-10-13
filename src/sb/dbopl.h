@@ -259,6 +259,8 @@ struct Chip {
 	void UpdateSynths();
 	void Generate( Bit32u samples );
 	void Setup( Bit32u r );
+	//vmdos: no operator can make a sound until a register write changes that
+	bool Silent() const;
 
 	Chip();
 };

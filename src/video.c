@@ -30,8 +30,17 @@ static u32 pack(u8 r6, u8 g6, u8 b6)        /* 6-bit DAC values to a pixel */
     return (r >> (8 - rsz)) << rpos | (g >> (8 - gsz)) << gpos | (b >> (8 - bsz)) << bpos;
 }
 
+/* Every few rows of a redraw: count timer ticks the redraw would lose
+   (it runs with interrupts off; a full screen can take several ms). */
+static inline void row_poll(void)
+{
+    static u32 rows;
+    if ((++rows & 7) == 0) tick_poll();
+}
+
 static void put_row(const u32 *px, u32 n, u32 x, u32 y)
 {
+    row_poll();
     if (y >= fb_h || x >= fb_w) return;
     if (x + n > fb_w) n = fb_w - x;
     u8 *d = fb + y * fb_pitch;
@@ -327,7 +336,7 @@ static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
 
-/* Smooth scaling (the default; scale=sharp or scale=off turn it off): the
+/* Smooth scaling (scale=smooth, or Ctrl+Shift+F8; off by default): the
    picture enlarged with bilinear blending, as a QEMU window does, instead
    of by whole pixels, which at sizes like 1.6x makes some pixels one wide
    and some two (dithering breaks up, letters come out uneven). Each source row that changed is scaled
@@ -381,6 +390,7 @@ static void smooth_setup(u32 w, u32 h)
 static void smooth_row(u32 y, const u32 *src)
 {
     u32 *d = hs + y * g_w;
+    row_poll();
     for (u32 x = 0; x < g_w; x++) {
         u32 a = hx0[x];
         d[x] = hxf[x] ? lerp(src[a], src[a + 1], hxf[x]) : src[a];
@@ -412,7 +422,7 @@ static void layout(void)
     static int last_w, last_h;
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
-    if (smooth_opt < 0) smooth_opt = !strstr(cmdline, "scale=sharp") && !no_scale;
+    if (smooth_opt < 0) smooth_opt = strstr(cmdline, "scale=smooth") && !no_scale;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
@@ -1187,6 +1197,7 @@ void video_refresh(void)
     if ((frame_no & 15) == 0) blink_phase ^= 1;
     if (text_fallback) { refresh_fallback(); busy = 0; return; }
     if (!fb) { busy = 0; return; }
+    tick_poll_begin();
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
@@ -1215,6 +1226,7 @@ void video_refresh(void)
     full_redraw = 0;
     if (shot_req) take_shot();                     /* before the note goes on top */
     draw_osd();
+    tick_poll_end();
     busy = 0;
 }
 

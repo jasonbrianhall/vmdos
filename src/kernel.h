@@ -93,6 +93,9 @@ extern volatile u32 ticks;                    /* real timer ticks (TICK_HZ) */
 #define PIT_HZ 1193182u
 #define PIT_PER_TICK 1193u
 u32 pit_clock(void);                          /* 1.193182 MHz monotonic clock (wraps) */
+void tick_poll_begin(void);                   /* around long work with interrupts off: */
+void tick_poll(void);                         /*   call well under a tick apart, so no tick is lost */
+void tick_poll_end(void);
 void *phys_alloc(u32 bytes);                  /* page-aligned, zeroed */
 u32 phys_free(void);                          /* bytes left in the heap */
 void *phys_try_alloc(u32 bytes);              /* like phys_alloc, NULL when out */

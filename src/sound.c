@@ -120,16 +120,22 @@ static void switch_output(void)
     video_osd("No other output would start");
 }
 
+/* Every TICKS_PER_RENDER ticks: render the time that has passed. By the
+   tick count, not by calls, so ticks counted in arrears (tick_poll, after a
+   long stretch with interrupts off) are made up here too. */
 void sound_tick(void)
 {
-    static u32 div;
+    static u32 last;
     if (switch_req) { switch_req = 0; switch_output(); }
-    if (++div < TICKS_PER_RENDER) return;
-    div = 0;
-    if (!sb_ready) { cdaudio_mix(0, 48000 * TICKS_PER_RENDER / TICK_HZ); return; }
-    static int16_t buf[2 * 1024];
-    int n = sound_on ? audio_wanted(48000 * TICKS_PER_RENDER / TICK_HZ) : 48000 * TICKS_PER_RENDER / TICK_HZ;
-    if (n > 1024) n = 1024;
+    u32 el = ticks - last;
+    if (el < TICKS_PER_RENDER) return;
+    last = ticks;
+    if (el > 40) el = 40;                          /* a long stall: no point making it all up */
+    int nominal = (int)(48000 / TICK_HZ * el);
+    if (!sb_ready) { cdaudio_mix(0, nominal); return; }
+    static int16_t buf[2 * 2048];
+    int n = sound_on ? audio_wanted(nominal) : nominal;
+    if (n > 2048) n = 2048;
     if (n > 0) {
         sb_render(buf, n);
         cdaudio_mix(buf, n);

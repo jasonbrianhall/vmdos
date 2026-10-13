@@ -45,15 +45,16 @@ SCREEN RESOLUTION AND SCALING
 
 BOOT OPTIONS
 
-  Set when building the stick:  make esp KARGS="scale=sharp speed=50"
+  Set when building the stick:  make esp KARGS="scale=smooth speed=50"
   or add them on the stick: EFI\VMDOS\VMDOS.CFG (one line, options
   separated by spaces) for a UEFI boot, the multiboot lines in
   BOOT\GRUB\GRUB.CFG for a legacy BIOS boot. The log's "cmdline:" line
   shows what the kernel got.
 
   Screen
-    (default)      Smooth scaling to the largest 4:3 box that fits
-    scale=sharp    Whole-pixel scaling, no blending
+    (default)      Whole-pixel scaling to the largest 4:3 box that fits
+    scale=smooth   Blended (bilinear) scaling; Ctrl+Shift+F8 toggles it
+    scale=sharp    Whole-pixel scaling, no blending (the default)
     scale=off      No resampling: 640x480 is drawn 1:1, centered, with
                    black borders (whole multiples on bigger screens)
     aspect=fill    Stretch to the whole screen
