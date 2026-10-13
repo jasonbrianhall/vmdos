@@ -409,13 +409,14 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
   above 4 GiB too, via PAE), or Bochs VBE under QEMU `-kernel`.
 
-## VMHV: DOS in a virtual machine (draft, AMD-V)
+## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
 Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
 extenders' raw and VCPI kernels (DOS/32A's own, its SD/32A debugger),
 games that are their own memory manager. vmdos can't give them that in
 virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
-machine (AMD-V with nested paging) where it can. The guest sees a 386
+machine (AMD-V with nested paging, or Intel VT-x with EPT and unrestricted
+guest: Intel CPUs from 2010 on) where it can. The guest sees a 386
 with 640 KB and 8 MB of extended memory (1-9 MB) and nothing else at
 C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
 EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
@@ -460,7 +461,14 @@ any code, paged or not: the emulator reads the guest's memory through
 its own page tables (test: `tests/hvplanar.asm`, protected mode with
 paging, code above 1 MB).
 
-Not yet: Intel VT-x; SD/32A gets stuck in a loop in DOS/32A's kernel; a
+On Intel, `src/hvvmx.c` keeps the VMCS and translates its exits into
+AMD-V's terms, so both share the exit handling in `src/hv.c`; EPT mirrors
+the host's mappings of the VM's memory. Tested in Bochs 3.1 (built with
+`--enable-vmx=2`, `cpu: model=corei7_sandy_bridge_2600k`): FreeDOS, HimemX,
+JEMM386 and DOS/32A over VCPI run in the VM; `debug=3` writes the text
+screen to the log every 20 s.
+
+Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
 PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
 untested.
 

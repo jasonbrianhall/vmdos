@@ -54,4 +54,61 @@ svm_run:
     pop  %ebp
     ret
 
+# int vmx_enter(u32 *r, int launched)   (Intel VT-x, hvvmx.c)
+#   r[0..6] = the guest's EAX EBX ECX EDX ESI EDI EBP; VMLAUNCH the first
+#   time, VMRESUME after. Returns 0 after a VM exit (through
+#   vmx_exit_entry, the host RIP in the VMCS, on the stack as it was
+#   here: the host RSP is written just before entering), 1 if the entry
+#   itself failed.
+.global vmx_enter, vmx_exit_entry
+vmx_enter:
+    push %ebp
+    push %ebx
+    push %esi
+    push %edi
+    mov  20(%esp), %eax          # r
+    push %eax                    # (%esp) = r; launched at 28(%esp)
+    mov  $0x6C14, %edx           # HOST_RSP
+    vmwrite %esp, %edx
+    mov  28(%esp), %ecx
+    mov  (%esp), %edi
+    mov  4(%edi), %ebx
+    mov  12(%edi), %edx
+    mov  16(%edi), %esi
+    mov  24(%edi), %ebp
+    mov  0(%edi), %eax
+    test %ecx, %ecx
+    mov  8(%edi), %ecx
+    mov  20(%edi), %edi
+    jnz  1f
+    vmlaunch
+    jmp  2f
+1:  vmresume
+2:  add  $4, %esp                # the entry failed (the guest's registers are lost: r keeps them)
+    pop  %edi
+    pop  %esi
+    pop  %ebx
+    pop  %ebp
+    mov  $1, %eax
+    ret
+
+vmx_exit_entry:                  # interrupts off (RFLAGS = 2), ESP as written above
+    push %edi
+    mov  4(%esp), %edi           # r
+    mov  %eax, 0(%edi)
+    mov  %ebx, 4(%edi)
+    mov  %ecx, 8(%edi)
+    mov  %edx, 12(%edi)
+    mov  %esi, 16(%edi)
+    mov  %ebp, 24(%edi)
+    pop  %eax
+    mov  %eax, 20(%edi)
+    add  $4, %esp
+    pop  %edi
+    pop  %esi
+    pop  %ebx
+    pop  %ebp
+    xor  %eax, %eax
+    ret
+
 .section .note.GNU-stack,"",@progbits
