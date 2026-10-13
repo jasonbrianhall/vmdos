@@ -5,7 +5,14 @@
 extern u8 v86_stack_top[];
 
 int vif;                    /* guest's IF */
-static u32 vflags_hi;       /* guest's IOPL/NT bits as it last set them (CPU detection) */
+/* Guest's NT bit as it last set it (CPU detection) plus IOPL, which reads
+   as 3 whatever the guest writes: in virtual-8086 mode POPF/IRET can't
+   change IOPL, and DOS extenders use exactly that to tell real mode from
+   V86. DOS/32A clears IOPL and, if it stays 0, takes the machine for real
+   mode and starts its own raw/XMS kernel (LGDT, LIDT, MOV CR0); seeing it
+   stuck at 3 it asks for VCPI and DPMI instead and runs on our DPMI host. */
+#define VIOPL 0x3000u
+static u32 vflags_hi = VIOPL;
 
 #define FLAGS_USER 0x0DD5u  /* CF PF AF ZF SF TF DF OF */
 
@@ -18,7 +25,7 @@ static void set_guest_flags(struct regs *r, u32 v)
 {
     r->eflags = (r->eflags & ~FLAGS_USER) | (v & FLAGS_USER);
     vif = !!(v & EFL_IF);
-    vflags_hi = v & 0x7000;
+    vflags_hi = (v & 0x4000) | VIOPL;
 }
 
 void v86_push16(struct regs *r, u16 v)

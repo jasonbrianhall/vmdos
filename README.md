@@ -364,7 +364,11 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
   now loads at 16 MiB; what doesn't fit there comes from above 16 MiB, up to
   1 GB in all (`dpmi=MB`), and 0503h grows blocks in place where it can
-  (DJGPP programs such as Quake). Not yet: DOS/32A (it insists on its own XMS mode).
+  (DJGPP programs such as Quake). DOS/32A runs on it too: the guest's
+  IOPL reads as 3 and can't be cleared (as in any V86 mode), so DOS/32A
+  sees it isn't in real mode and takes the DPMI host instead of starting
+  its own kernel (test: `tests/iopltest.asm`). Its debugger SD/32A, which
+  needs DOS/32A's own kernel, refuses as it does under Windows.
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
