@@ -364,6 +364,30 @@ static int bios_stub(void)
     return 1;
 }
 
+/* The VESA protected-mode interface (INT 10h 4F0Ah): programs copy its
+   routines ("HLT; db id; RET") into their own code and call them near, in
+   protected mode at any privilege level: HLT exits at ring 0 and faults at
+   ring 3. Set window, display start, palette (from ES:EDI, copied out of
+   the guest through its page tables). 1 if it was one. */
+static int vbe_pm_stub(void)
+{
+    if (real_or_v86()) return 0;
+    u32 a = (u32)V64(S_CS + 8) + V32(S_RIP);
+    u8 *p0 = glin(a), *p1 = glin(a + 1), *p2 = glin(a + 2);
+    if (!p0 || !p1 || !p2 || *p0 != 0xF4 || *p1 < 0x47 || *p1 > 0x49 || *p2 != 0xC3) return 0;
+    static u8 pal[256 * 4];
+    u32 pal_lin = 0;
+    if (*p1 == 0x49) {
+        u32 src = (u32)V64(S_ES + 8) + ((V16(S_CS + 2) & 0x400) ? g[4] : (g[4] & 0xFFFF));
+        u32 n = (g[1] & 0xFFFF) > 256 ? 256 : (g[1] & 0xFFFF);
+        for (u32 i = 0; i < n * 4; i++) { u8 *q = glin(src + i); pal[i] = q ? *q : 0; }
+        pal_lin = (u32)(uintptr_t)pal;
+    }
+    video_vbe_pm(*p1, g[0], g[1], g[2], pal_lin);
+    V32(S_RIP) += 2;                                              /* on to the RET */
+    return 1;
+}
+
 /* ---------------- I/O ---------------- */
 static void io_exit(void)
 {
@@ -726,13 +750,13 @@ int hv_start(int key)
         case X_IOIO: io_exit(); break;
         case X_MSR: msr_exit(); break;
         case X_HLT:
-            if (bios_stub()) break;
+            if (bios_stub() || vbe_pm_stub()) break;
             V32(S_RIP) += 1;
             if (!(V32(S_RFLAGS) & EFL_IF)) hv_stop("the guest has halted (HLT with interrupts off): it is safe to restart");
             wait_irq = 1;
             break;
         case X_EXC(13):
-            if ((V32(S_RFLAGS) & EFL_VM) && bios_stub()) break;
+            if ((V32(S_RFLAGS) & EFL_VM) ? bios_stub() : vbe_pm_stub()) break;
             if (debug_level >= 2) {
                 static int shown;
                 if (shown++ < 8) {
