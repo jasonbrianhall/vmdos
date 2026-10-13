@@ -1,0 +1,11 @@
+HimemX 3.37, the FreeDOS XMS memory manager (HimemX.asm, Readme.txt here).
+Derived from FreeDOS Himem (Till Gerken, Tom Ehlert; GPL and/or Artistic
+license); HimemX's own changes are public domain (Readme.txt, section 4).
+Source: https://github.com/FDOS/himemx, commit f5f2314d64cd0e59b4062e53f9c1e30bbe0d2c9b.
+
+HIMEMX.EXE is prebuilt, unmodified: jwasm -mz -Fo HIMEMX.EXE HimemX.asm
+(JWasm: https://github.com/Baron-von-Riedesel/JWasm).
+
+vmdos doesn't use it in V86 mode (it has its own XMS); it is for VMHV's
+virtual machine, where DOS brings its own memory managers (FDCONFIG.SYS
+menu choice 2, see README.md).

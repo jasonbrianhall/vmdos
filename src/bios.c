@@ -299,7 +299,19 @@ static int int15(struct regs *r)
         if (joy_bios(r)) { set_cf(r, 0); return BIOS_DONEF; }
         set_cf(r, 1);
         return BIOS_DONEF;
-    case 0x88: AX(r) = 0; set_cf(r, 0); return BIOS_DONEF;
+    case 0x88: AX(r) = (u16)hv_ext_kb(); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
+    case 0xE8:
+        if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, none above */
+            AX(r) = CX(r) = (u16)hv_ext_kb(); BX(r) = DX(r) = 0;
+            set_cf(r, 0);
+            return BIOS_DONEF;
+        }
+        if (hv_ext_kb() && AL(r) == 0x20 && r->edx == 0x534D4150) {
+            set_cf(r, hv_e820(r) != 0);
+            if (r->eflags & EFL_CF) AH(r) = 0x86;
+            return BIOS_DONEF;
+        }
+        break;
     case 0x90: case 0x91: AH(r) = 0; set_cf(r, 0); return BIOS_DONEF;
     case 0xC0:
         r->v86_es = BIOS_SEG;

@@ -92,9 +92,15 @@ static u32 mmio_window = LOW_ALIAS;   /* MMIO above 4 GiB gets linear space belo
 static u8 *guest_ram;
 static int paging_on;
 
+/* hv.c (VMHV) points the PDE for linear 0-2 MiB at a temporary table
+   while it services the VM's BIOS calls; the real table stays here. */
+static u64 pde0_real, *pde0_temp_on;
+volatile int hv_tlb_dirty;            /* hv.c: host page tables changed; flush the VM's TLB too */
+
 static void *pt_for(u32 lin)
 {
     if (pae) {
+        if (pde0_temp_on && lin < 0x200000) return (void *)(uintptr_t)(u32)(pde0_real & ~0xFFFull);
         u64 *pde = &pae_pd[lin >> 30][(lin >> 21) & 511];
         if (!(*pde & 1)) *pde = (u32)(uintptr_t)phys_alloc(4096) | 7;
         return (void *)(uintptr_t)(u32)(*pde & ~0xFFFull);
@@ -124,6 +130,7 @@ static void map_range(u32 lin, u64 phys, u32 len, u32 flags)
 
 static void flush_tlb(void)
 {
+    hv_tlb_dirty = 1;
     if (paging_on) __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
 }
 
@@ -141,6 +148,32 @@ void *phys_low(u32 phys) { return (void *)(uintptr_t)(LOW_ALIAS + phys); }
 u32 guest_phys(u32 lin) { return (u32)(uintptr_t)guest_ram + lin; }
 
 void tlb_flush(void) { flush_tlb(); }
+
+/* ---- for hv.c (VMHV): its nested page tables share the host's page
+   tables for linear 0-10 MiB, which hold the VM's memory ---- */
+int hv_host_pae(void) { return pae; }
+u64 hv_host_pde(u32 lin)                      /* the PDE (making its table if needed) */
+{
+    pt_for(lin);
+    return pae_pd[lin >> 30][(lin >> 21) & 511];
+}
+u64 *hv_host_pt0(void) { return (u64 *)pt_for(0); }
+
+/* Swap the table for linear 0-2 MiB (pde != 0), or put the real one back
+   (pde == 0). Only the host's view changes: the VM's tables point at the
+   real table directly. */
+void hv_swap_pde0(u64 pde)
+{
+    if (pde) {
+        if (!pde0_temp_on) pde0_real = pae_pd[0][0];
+        pde0_temp_on = &pae_pd[0][0];
+        pae_pd[0][0] = pde;
+    } else if (pde0_temp_on) {
+        pae_pd[0][0] = pde0_real;
+        pde0_temp_on = 0;
+    }
+    __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
+}
 
 /* The page table's dirty bit for lin; cleared if clear. */
 int page_dirty(u32 lin, int clear)

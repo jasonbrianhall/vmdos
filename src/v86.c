@@ -182,6 +182,11 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x5650) { video_shot_api(r); return; }   /* VMSHOT */
+    if (n == 0x2F && AX(r) == 0x5648) {                                 /* VMHV: only returns on failure */
+        AX(r) = (u16)hv_start(BL(r));
+        BX(r) = 0x564D;
+        return;
+    }
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;
@@ -266,6 +271,44 @@ static void string_wrap(struct regs *r, u8 op, int s, int seg, int rep)
         if (rep) CX(r)--;
         if (rep && cmp && ((rep == 2) != ((r->eflags & EFL_ZF) != 0))) break;   /* REPE stops on NZ, REPNE on Z */
     }
+}
+
+/* hv.c (VMHV): the same for a guest in real or V86 mode in the VM, whose
+   #GP the VM intercepts before the guest's own handler (EMM386's, which
+   doesn't do this) sees it. 1 if it was such a string instruction. */
+int v86_wrap_string(struct regs *r)
+{
+    u16 ip = IP(r);
+    int op32 = 0, a32 = 0, rep = 0, seg = 3;
+    u8 op;
+    for (int n = 0; n < 15; n++) {
+        op = rd8(LIN(r->cs, ip));
+        ip++;
+        switch (op) {
+        case 0x66: op32 = 1; continue;
+        case 0x67: a32 = 1; continue;
+        case 0xF2: rep = 1; continue;
+        case 0xF3: rep = 2; continue;
+        case 0xF0: continue;
+        case 0x26: seg = 0; continue;
+        case 0x2E: seg = 1; continue;
+        case 0x36: seg = 2; continue;
+        case 0x3E: seg = 3; continue;
+        case 0x64: seg = 4; continue;
+        case 0x65: seg = 5; continue;
+        }
+        break;
+    }
+    if (a32) return 0;
+    switch (op) {
+    case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB:
+    case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+        dbg(1, "segment wrap: string op %02x at %04x:%04x, SI=%04x DI=%04x CX=%04x\n", op, r->cs, IP(r), SI(r), DI(r), CX(r));
+        string_wrap(r, op, (op & 1) ? (op32 ? 4 : 2) : 1, seg, rep);
+        IP(r) = ip;
+        return 1;
+    }
+    return 0;
 }
 
 static void gp_handler(struct regs *r)
@@ -510,6 +553,11 @@ void guest_start(void)
     memset(r, 0, sizeof *r);
     r->eflags = EFL_VM | EFL_IF | 2;
     vif = 1;
+    const char *hv = strstr(cmdline, "vmhv");             /* vmhv / vmhv=2: boot DOS in VMHV's VM */
+    if (hv && (hv == cmdline || hv[-1] == ' ')) {
+        int e = hv_start(hv[4] == '=' ? hv[5] : 0);
+        kprintf("vmhv: %d; booting DOS as usual\n", e);
+    }
     bios_boot(r);
     kprintf("starting guest at %04x:%04x\n", r->cs, IP(r));
     v86_enter(r);

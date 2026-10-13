@@ -1,0 +1,9 @@
+JEMM386 5.87, the FreeDOS EMS/VCPI/UMB memory manager, Artistic License
+(Artistic.txt; Readme.txt section 9).
+Source: https://github.com/Baron-von-Riedesel/Jemm, commit e96bb6bb80cbdc3e6585544db79a6b133a5566dd.
+
+JEMM386.EXE is prebuilt, unmodified: make -f Linux.mak with JWasm and
+JWlink (https://github.com/Baron-von-Riedesel/JWasm, .../JWlink).
+
+For VMHV's virtual machine only (FDCONFIG.SYS menu choice 2, README.md);
+in V86 mode vmdos provides EMS itself.
