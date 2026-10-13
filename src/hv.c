@@ -110,7 +110,9 @@ static u64 *gview_pt;
 static u32 g[6];                      /* guest EBX ECX EDX ESI EDI EBP */
 int hv_active;
 static volatile int hv_force;
-static u8 menu_key;                   /* VMHV n: the FDCONFIG menu choice to type */
+static u8 menu_key;                   /* the FDCONFIG menu choice to type (scan code) */
+static int menu_wait;                 /* found by VMHV, not given: let the user pick first */
+static u32 menu_t0, menu_ms = 3000;  /* how long it waits: MENUDEFAULT's timeout less 1/2 s */
 
 void svm_run(u32 vmcb_pa, u32 host_save_pa, u32 *g);
 int hv_host_pae(void);
@@ -334,9 +336,17 @@ static int bios_stub(void)
     int id = rd8(a + 1);
     struct regs r;
     get_regs(&r);
-    if (id == 0x16 && menu_key) {                                   /* VMHV n: type the menu choice */
-        vkbd_inject(menu_key); vkbd_inject(menu_key | 0x80);
-        menu_key = 0;
+    if (id == 0x16 && menu_key) {                                   /* type the menu choice */
+        int now = !menu_wait;                                       /* VMHV n: at once */
+        if (menu_wait) {                                            /* VMHV: the user may pick first */
+            if (!menu_t0) menu_t0 = ticks | 1;                      /* the menu's first look at the keyboard */
+            if (rd16(BDA + 0x1A) != rd16(BDA + 0x1C)) menu_key = 0; /* a key is waiting: theirs */
+            else if (ticks - menu_t0 >= menu_ms) now = 1;
+        }
+        if (now && menu_key) {
+            vkbd_inject(menu_key); vkbd_inject(menu_key | 0x80);
+            menu_key = 0;
+        }
     }
     int res = bios_service(&r, id, 1);
     switch (res) {
@@ -582,7 +592,8 @@ static void vmcb_init(struct regs *r)
 }
 
 /* The FDCONFIG.SYS menu choice for the VM: the first "MENU n = ..." line
-   that mentions VMHV. '0' if none (or no FDCONFIG.SYS). */
+   that mentions VMHV. 0 if none (or no FDCONFIG.SYS). Also notes
+   MENUDEFAULT's timeout, so the choice goes in just before it runs out. */
 static int menu_choice(void)
 {
     static struct fatvol v;
@@ -596,15 +607,26 @@ static int menu_choice(void)
     if (disk_read(ext1[0].lba, secs, buf)) return 0;
     if (n > secs * 512) n = secs * 512;
     buf[n] = 0;
+    int choice = 0;
     for (char *l = (char *)buf; *l; ) {
-        if ((l[0] | 32) == 'm' && (l[1] | 32) == 'e' && (l[2] | 32) == 'n' && (l[3] | 32) == 'u' &&
+        if (!strncmp(l, "MENUDEFAULT", 11) || !strncmp(l, "menudefault", 11)) {
+            char *c = l;
+            while (*c && *c != '\n' && *c != ',') c++;
+            if (*c == ',') {
+                u32 sec = 0;
+                for (c++; *c == ' '; c++) ;
+                while (*c >= '0' && *c <= '9') sec = sec * 10 + (u32)(*c++ - '0');
+                menu_ms = sec ? sec * 1000 - 500 : 0;
+            }
+        }
+        if (!choice && (l[0] | 32) == 'm' && (l[1] | 32) == 'e' && (l[2] | 32) == 'n' && (l[3] | 32) == 'u' &&
             l[4] == ' ' && l[5] >= '1' && l[5] <= '9')
             for (char *p = l; *p && *p != '\n'; p++)
-                if ((p[0] | 32) == 'v' && (p[1] | 32) == 'm' && (p[2] | 32) == 'h' && (p[3] | 32) == 'v') return l[5];
+                if ((p[0] | 32) == 'v' && (p[1] | 32) == 'm' && (p[2] | 32) == 'h' && (p[3] | 32) == 'v') { choice = l[5]; break; }
         while (*l && *l != '\n') l++;
         if (*l) l++;
     }
-    return 0;
+    return choice;
 }
 
 /* Restart the PC's DOS in the VM. Returns only on failure (an hv_err code). */
@@ -635,7 +657,10 @@ int hv_start(int key)
     if (!hole_page) { hole_page = phys_alloc(4096); memset(hole_page, 0xFF, 4096); }
     for (u32 a = HOLE_LO; a < HOLE_HI; a += 4096) map_page(a, (u32)(uintptr_t)hole_page, 5);   /* read-only */
     tlb_flush();
+    menu_wait = !key;
+    menu_t0 = 0;
     if (!key) key = menu_choice();
+    dbg(1, "VMHV: menu choice %c, after %u ms\n", key ? key : '-', menu_ms);
     if (key >= '1' && key <= '9') menu_key = (u8)(key - '1' + 2); /* scan codes 02h-0Ah */
     static struct regs r0;
     memset(&r0, 0, sizeof r0);

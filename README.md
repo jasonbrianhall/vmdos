@@ -422,15 +422,17 @@ EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
 vmdos's: the BIOS stubs and every I/O port exit to the same code as in
 V86 mode.
 
-    VMHV            restart DOS in the VM
-    VMHV n          ... picking choice n in FDCONFIG.SYS's menu
+    VMHV            restart DOS in the VM; pick at FDCONFIG.SYS's menu,
+                    or let the countdown run out for the VMHV choice
+    VMHV n          ... picking choice n at once
     vmhv / vmhv=n   on the kernel command line: boot straight into it
 
 The VM boots C: again. vmdos's FDCONFIG.SYS has a menu for that: choice 1
 (the default after 5 seconds) is vmdos as usual, choice 2 leaves out vmdos's
 own drivers and loads FreeDOS's HimemX and JEMM386 (in C:\VMDOS,
-`third_party/`) instead; VMHV picks the choice whose MENU line mentions
-VMHV. Choice 3 loads HimemX only, for Windows 3.x (`VMHV 3`): JEMM386
+`third_party/`) instead. In the VM the menu waits as usual; if no key is
+pressed, VMHV types the choice whose MENU line mentions VMHV just before
+MENUDEFAULT's timeout would pick choice 1. Choice 3 loads HimemX only, for Windows 3.x (`VMHV 3`): JEMM386
 doesn't do the handshake (INT 2Fh 1605h) by which Windows takes over from
 an EMM386 for 386 Enhanced mode, and Windows says it can't run while
 protected-mode software is running; without EMM386 the CPU is in real
