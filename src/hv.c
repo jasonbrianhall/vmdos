@@ -581,6 +581,32 @@ static void vmcb_init(struct regs *r)
     g[0] = r->ebx; g[1] = r->ecx; g[2] = r->edx; g[3] = r->esi; g[4] = r->edi; g[5] = r->ebp;
 }
 
+/* The FDCONFIG.SYS menu choice for the VM: the first "MENU n = ..." line
+   that mentions VMHV. '0' if none (or no FDCONFIG.SYS). */
+static int menu_choice(void)
+{
+    static struct fatvol v;
+    static u8 buf[4096 + 1];
+    u32 clus, size;
+    struct extent ext1[1];
+    if (disk_volume(&v) || fat_lookup(&v, "\\FDCONFIG.SYS", &clus, &size) || !size) return 0;
+    if (fat_extents(&v, clus, size, ext1, 1) < 1) return 0;
+    u32 n = size < 4096 ? size : 4096, secs = (n + 511) / 512;
+    if (secs > ext1[0].count) secs = ext1[0].count;
+    if (disk_read(ext1[0].lba, secs, buf)) return 0;
+    if (n > secs * 512) n = secs * 512;
+    buf[n] = 0;
+    for (char *l = (char *)buf; *l; ) {
+        if ((l[0] | 32) == 'm' && (l[1] | 32) == 'e' && (l[2] | 32) == 'n' && (l[3] | 32) == 'u' &&
+            l[4] == ' ' && l[5] >= '1' && l[5] <= '9')
+            for (char *p = l; *p && *p != '\n'; p++)
+                if ((p[0] | 32) == 'v' && (p[1] | 32) == 'm' && (p[2] | 32) == 'h' && (p[3] | 32) == 'v') return l[5];
+        while (*l && *l != '\n') l++;
+        if (*l) l++;
+    }
+    return 0;
+}
+
 /* Restart the PC's DOS in the VM. Returns only on failure (an hv_err code). */
 void vpic_reset(void);
 void xms_restart(void);
@@ -609,6 +635,7 @@ int hv_start(int key)
     if (!hole_page) { hole_page = phys_alloc(4096); memset(hole_page, 0xFF, 4096); }
     for (u32 a = HOLE_LO; a < HOLE_HI; a += 4096) map_page(a, (u32)(uintptr_t)hole_page, 5);   /* read-only */
     tlb_flush();
+    if (!key) key = menu_choice();
     if (key >= '1' && key <= '9') menu_key = (u8)(key - '1' + 2); /* scan codes 02h-0Ah */
     static struct regs r0;
     memset(&r0, 0, sizeof r0);

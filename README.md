@@ -423,22 +423,17 @@ vmdos's: the BIOS stubs and every I/O port exit to the same code as in
 V86 mode.
 
     VMHV            restart DOS in the VM
-    VMHV 2          ... and pick choice 2 in FDCONFIG.SYS's menu
-    vmhv / vmhv=2   on the kernel command line: boot straight into it
+    VMHV n          ... picking choice n in FDCONFIG.SYS's menu
+    vmhv / vmhv=n   on the kernel command line: boot straight into it
 
-The VM boots C: again, so give FDCONFIG.SYS a menu entry without vmdos's
-own drivers (VMXMS.SYS, VMEMS.SYS, VMCD.SYS) and with your memory
-managers, e.g. FreeDOS's HimemX and JEMM386 or MS-DOS's HIMEM and EMM386:
-
-    MENU 1 = FreeDOS on vmdos
-    MENU 2 = VMHV: HIMEM + EMM386
-    MENUDEFAULT = 1, 5
-    1?DEVICE=C:\VMDOS\VMXMS.SYS
-    1?DEVICE=C:\VMDOS\VMEMS.SYS
-    2?DEVICE=C:\HV\HIMEMX.EXE
-    2?DEVICE=C:\HV\JEMM386.EXE
-    DOS=HIGH,UMB
-    1?DEVICE=C:\VMDOS\VMCD.SYS
+The VM boots C: again. vmdos's FDCONFIG.SYS has a menu for that: choice 1
+(the default, no pause) is vmdos as usual, choice 2 leaves out vmdos's
+own drivers and loads FreeDOS's HimemX and JEMM386 (in C:\VMDOS,
+`third_party/`) instead; VMHV picks the choice whose MENU line mentions
+VMHV. MS-DOS's HIMEM.SYS and EMM386.EXE can take their place. A C: made
+before this keeps its FDCONFIG.SYS (`make esp` doesn't overwrite it):
+`FRESH=1`, or copy the menu over. With it, a program gets about 618 KB
+of conventional memory in the VM.
 
 The VM keeps the machine until it reboots, which restarts vmdos.
 Ctrl+Alt+End sends Ctrl+Alt+Del into it (DOS and SMARTDRV write their
@@ -485,6 +480,7 @@ untested.
 | `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
+| `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
