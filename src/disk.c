@@ -286,6 +286,15 @@ static int candidate(int d, u64 start, u64 size, const u8 *sig, int sig_len)
     return q;
 }
 
+/* LBA -> the 3 CHS bytes of a partition entry, in the 255-head, 63-sector
+   geometry INT 13h reports (bios.c); past cylinder 1023: FE FF FF. */
+static void chs(u8 *p, u32 lba)
+{
+    u32 c = lba / (255 * 63), h = lba / 63 % 255, s = lba % 63 + 1;
+    if (c > 1023) { p[0] = 0xFE; p[1] = 0xFF; p[2] = 0xFF; return; }
+    p[0] = (u8)h; p[1] = (u8)(s | (c >> 2 & 0xC0)); p[2] = (u8)c;
+}
+
 static void use(int d, u32 start, u32 size)
 {
     static struct fatvol v;
@@ -297,8 +306,13 @@ static void use(int d, u32 start, u32 size)
     vmbr[0] = 0xCD; vmbr[1] = 0x18;                             /* INT 18h */
     u8 *e = vmbr + 446;
     e[0] = 0x80;
-    e[1] = 0xFE; e[2] = 0xFF; e[3] = 0xFF; e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;
-    e[4] = v.type == 32 ? 0x0C : v.type == 16 ? 0x0E : 0x01;
+    chs(e + 1, start); chs(e + 5, start + size - 1);
+    /* MS-DOS before 7.0 (and PC DOS) knows only 01h, 04h and 06h: with
+       0Eh (FAT16 LBA, Windows 95) its IO.SYS finds no C: partition.
+       FAT16 never reaches past CHS's 8 GiB, so 04h/06h always fit. */
+    int lba_only = (u64)start + size > 1024u * 255 * 63;
+    e[4] = v.type == 32 ? 0x0C : v.type == 12 ? 0x01
+         : lba_only ? 0x0E : size < 65536 ? 0x04 : 0x06;
     *(u32 *)(e + 8) = start; *(u32 *)(e + 12) = size;
     vmbr[510] = 0x55; vmbr[511] = 0xAA;
     kprintf("disk: C: is FAT%d partition at LBA %u (%u MiB) on %s disk %d (%s)\n",
