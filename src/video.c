@@ -1479,8 +1479,10 @@ void video_port_out(u16 port, u8 v)
         if (ix >= 0) kprintf("vga %04x:%08x out %03x[%02x] <- %02x\n", cs, eip, port, ix, v);
         else kprintf("vga %04x:%08x out %03x <- %02x\n", cs, eip, port, v);
         static int dumped;
-        if (port == 0x3CF && (gc_idx & 15) == 6 && v == 0x0D && !(dumped & 1)) { dumped |= 1; hv_dump_here("GC6 <- 0D"); }
-        if (port == 0x3C0 && v == 0x20 && !atc_flip && !(dumped & 2) && (dumped & 1)) { dumped |= 2; hv_dump_here("ATC <- 20"); kprintf("VDD data:\n"); hv_dump_lin(0x80285000, 0x200); }
+        static u32 gc6_eip;
+        if (port == 0x3CF && (gc_idx & 15) == 6 && v == 0x0D && !(dumped & 1)) { dumped |= 1; gc6_eip = eip; hv_dump_here("GC6 <- 0D"); }
+        if (port == 0x3C0 && v == 0x20 && !atc_flip && !(dumped & 2) && (dumped & 1)) { dumped |= 2; hv_dump_here("ATC <- 20"); kprintf("VDD data:\n"); hv_dump_lin(0x80285000, 0x200);
+            kprintf("VDD code after (int 20h calls that ran are patched):\n"); hv_dump_lin(gc6_eip - 0x40, 0x180); }
     }
     video_port_out_(port, v);
 }
