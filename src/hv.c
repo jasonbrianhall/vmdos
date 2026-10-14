@@ -451,6 +451,14 @@ static int bios_stub(void)
             menu_key = 0;
         }
     }
+    {
+        static int holelog = -1, n;
+        if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;
+        int es_u = r.v86_es >= 0xC800 && r.v86_es < 0xF000, ds_u = r.v86_ds >= 0xC800 && r.v86_ds < 0xF000;
+        if (holelog && (es_u || ds_u) && n++ < 300)
+            kprintf("hole: BIOS %02x AX=%04x BX=%04x CX=%04x DX=%04x ES=%04x DS=%04x SI=%04x DI=%04x\n", id, AX(&r), BX(&r),
+                    CX(&r), DX(&r), r.v86_es, r.v86_ds, SI(&r), DI(&r));
+    }
     if (buffer_fault(&r, id)) return 1;                           /* the guest maps the page, then INT 13h again */
     int res = bios_service(&r, id, 1);
     switch (res) {
