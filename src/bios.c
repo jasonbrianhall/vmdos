@@ -201,7 +201,39 @@ static int disk_rw(u32 lba, u32 count, u32 buf, int write)
     return write ? disk_write(lba, count, gptr(buf)) : disk_read(lba, count, gptr(buf));
 }
 
+static int disklog = -1;
+static void int13_log(struct regs *r, u8 fn, int st)
+{
+    if (disklog < 0) disklog = strstr(cmdline, "disklog") != 0;
+    if (!disklog) return;
+    static int n;
+    if (n++ >= 3000) return;
+    if (fn == 0x02 || fn == 0x03) {
+        u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), head = DH(r), sec = CL(r) & 63;
+        kprintf("disk: INT 13h %02x DL=%02x CHS %u/%u/%u n=%u buf %04x:%04x -> %02x\n", fn, DL(r), cyl, head, sec, AL(r),
+                r->v86_es, BX(r), st);
+    } else if (fn == 0x42 || fn == 0x43) {
+        u32 p = LIN(r->v86_ds, SI(r));
+        kprintf("disk: INT 13h %02x DL=%02x LBA %u n=%u buf %04x:%04x -> %02x\n", fn, DL(r), rd32(p + 8), rd16(p + 2),
+                rd16(p + 6), rd16(p + 4), st);
+    } else kprintf("disk: INT 13h %02x DL=%02x -> %02x\n", fn, DL(r), st);
+}
+
+static int int13_(struct regs *r);
 static int int13(struct regs *r)
+{
+    u8 fn = AH(r);
+    struct regs in = *r;
+    int res = int13_(r);
+    int13_log(&in, fn, AH(r));
+    return res;
+}
+void bios_disklog_fault(u32 lin, int write)
+{
+    if (disklog < 0) disklog = strstr(cmdline, "disklog") != 0;
+    if (disklog) kprintf("disk: buffer page %x not the guest's yet (%s): #PF to the guest\n", lin, write ? "read into it" : "write from it");
+}
+static int int13_(struct regs *r)
 {
     int st = 0;
     u8 fn = AH(r);

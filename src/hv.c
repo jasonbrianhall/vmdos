@@ -421,6 +421,7 @@ static int buffer_fault(struct regs *r, int id)
     for (u32 a = lin & ~0xFFFu; a < lin + len; a += 4096) {
         u32 at = a < lin ? lin : a;
         if (gpage_ok(at, write)) continue;
+        bios_disklog_fault(at, write);
         V64(S_CR2) = at;
         V64(C_EVENT) = 14 | EV_EXC | EV_ERR | EV_VALID | (u64)(4u | (write ? 2u : 0u) | (gpage_ok(at, 0) ? 1u : 0u)) << 32;
         return 1;

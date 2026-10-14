@@ -271,6 +271,7 @@ void dpmi_espfix(struct regs *r);
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
 u8 *hv_hole_page(void);
+void bios_disklog_fault(u32 lin, int write);  /* disklog: a disk buffer page faulted to the guest */
 u32 hv_lfb(void);                             /* VMHV: the VESA framebuffer's guest-physical address */
 u32 hv_vm_top(void);                          /* VMHV: the top of the VM's RAM */
 u8 *hv_gpa_ptr(u32 gpa);                      /* VMHV: host pointer for guest-physical memory (0: none) */                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
