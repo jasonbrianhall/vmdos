@@ -248,7 +248,8 @@ int disk_volume(struct fatvol *v)
 }
 
 /* ---- choosing the partition ----
-   Each FAT partition holding KERNEL.SYS scores: the one vmdos.efi started
+   Each FAT partition holding DOS (FreeDOS's KERNEL.SYS, MS-DOS's and
+   Windows 9x's IO.SYS, PC DOS's IBMBIO.COM) scores: the one vmdos.efi started
    from (esp=LBA and espsig=, the disk signature or GPT partition GUID from
    its device path) far above the rest; without a hint (GRUB), a USB stick
    before an internal disk. */
@@ -256,14 +257,26 @@ static u32 hint;
 static u8 hint_sig[16];
 static int hint_sig_len;              /* 0 none, 4 MBR disk signature, 16 GPT partition GUID */
 
+/* Which DOS a FAT partition holds, by its kernel file (NULL: none). */
+const char *dos_kind(struct fatvol *v)
+{
+    u32 c, sz;
+    if (!fat_lookup(v, "\\KERNEL.SYS", &c, &sz)) return "FreeDOS";
+    if (!fat_lookup(v, "\\IBMBIO.COM", &c, &sz)) return "PC DOS";
+    if (!fat_lookup(v, "\\IO.SYS", &c, &sz)) return !fat_lookup(v, "\\MSDOS.SYS", &c, &sz) && sz < 1024 ? "Windows 9x" : "MS-DOS";
+    return 0;
+}
+
+static const char *cand_os;           /* candidate(): the DOS it found */
+
 static int candidate(int d, u64 start, u64 size, const u8 *sig, int sig_len)
 {
     if (!size || start + size > dev[d].sectors || start + size > 0xFFFFFFFFull) return 0;
     static struct fatvol v;
     probe_disk = d;
     if (fat_mount(&v, probe_rd, (u32)start)) return 0;
-    u32 c, sz;
-    if (fat_lookup(&v, "\\KERNEL.SYS", &c, &sz)) return 0;
+    cand_os = dos_kind(&v);
+    if (!cand_os) return 0;
     int q = dev[d].usb ? 3 : 2;
     if (hint && hint == start) {
         q = 6;
@@ -293,13 +306,13 @@ static void use(int d, u32 start, u32 size)
     cache_init();
 }
 
-static int scan(int d, u32 *bs, u32 *bz)
+static int scan(int d, u32 *bs, u32 *bz, const char **os)
 {
     static u8 s0[512], s1[512], ent[512];
     probe_disk = d;
     if (probe_rd(0, 1, s0) || s0[510] != 0x55 || s0[511] != 0xAA) return 0;
     int best = 0;
-    #define TRY(st, sz, sg, sl) do { int q = candidate(d, st, sz, sg, sl); if (q > best) { best = q; *bs = (u32)(st); *bz = (u32)(sz); } } while (0)
+    #define TRY(st, sz, sg, sl) do { int q = candidate(d, st, sz, sg, sl); if (q > best) { best = q; *bs = (u32)(st); *bz = (u32)(sz); *os = cand_os; } } while (0)
     if (s0[446 + 4] == 0xEE && !probe_rd(1, 1, s1) && !memcmp(s1, "EFI PART", 8)) {
         u64 el = *(u64 *)(s1 + 72);
         u32 ne = *(u32 *)(s1 + 80), es = *(u32 *)(s1 + 84);
@@ -338,18 +351,18 @@ static void sleep_ms(int ms)
 }
 
 /* ---- more than one disk with FreeDOS: ask ----
-   Every disk with a FAT partition holding KERNEL.SYS is noted; with two or
+   Every disk with a FAT partition holding DOS is noted; with two or
    more, a menu on the boot log lets the user pick C: (1-9), the best guess
    (the partition vmdos.efi started from, else a USB stick) after a
    countdown or on Enter. cmenu=N: seconds (default 5), cmenu=0: no menu.
    Shown on the boot log, so not with bootlog=off. */
 #define MAX_CANDS 9
-static struct { int d, q; u32 start, size; } cands[MAX_CANDS];
+static struct { int d, q; u32 start, size; const char *os; } cands[MAX_CANDS];
 static int n_cands;
 
-static void note(int d, u32 start, u32 size, int q)
+static void note(int d, u32 start, u32 size, int q, const char *os)
 {
-    if (n_cands < MAX_CANDS) { cands[n_cands].d = d; cands[n_cands].q = q; cands[n_cands].start = start; cands[n_cands].size = size; n_cands++; }
+    if (n_cands < MAX_CANDS) { cands[n_cands].d = d; cands[n_cands].q = q; cands[n_cands].start = start; cands[n_cands].size = size; cands[n_cands].os = os; n_cands++; }
 }
 
 static int poll_key(void)                       /* interrupts are off here: PS/2 polled, USB through usb_tick */
@@ -376,9 +389,9 @@ static int choose(int bd, u32 bs)
     if (secs <= 0 || secs > 9) return -1;
     int def = 0;
     for (int i = 0; i < n_cands; i++) if (cands[i].d == bd && cands[i].start == bs) def = i;
-    kprintf("disk: FreeDOS (KERNEL.SYS) is on more than one disk. C: is:\n");
+    kprintf("disk: more than one disk has DOS on it. C: is:\n");
     for (int i = 0; i < n_cands; i++)
-        kprintf("  %d. %s disk %d (%s), partition at LBA %u, %u MiB%s\n", i + 1, dev_kind(cands[i].d),
+        kprintf("  %d. %s on %s disk %d (%s), partition at LBA %u, %u MiB%s\n", i + 1, cands[i].os, dev_kind(cands[i].d),
                 dev[cands[i].d].idx, dev[cands[i].d].name, cands[i].start, cands[i].size >> 11,
                 cands[i].q >= 8 ? " - vmdos started from here" : i == def ? " - the best guess" : "");
     while (vkbd_take() >= 0) ;
@@ -437,8 +450,9 @@ void disk_init(void)
         u32 bs = 0, bz = 0;
         for (int d = 0; d < n_dev; d++) {
             u32 s = 0, z = 0;
-            int q = scan(d, &s, &z);
-            if (q) note(d, s, z, q);
+            const char *os = 0;
+            int q = scan(d, &s, &z, &os);
+            if (q) note(d, s, z, q, os);
             if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
         }
         for (;;) {
@@ -446,10 +460,11 @@ void disk_init(void)
                 int i = usb_seen++, d = n_dev++;
                 dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
                 u32 s = 0, z = 0;
-                int q = scan(d, &s, &z);
-                kprintf("disk: USB disk %d (%s, %u MiB): %s\n", i, dev[d].name, (u32)(dev[d].sectors >> 11),
-                        q >= 8 ? "the boot partition" : q ? "has KERNEL.SYS" : "no FAT partition with KERNEL.SYS");
-                if (q) note(d, s, z, q);
+                const char *os = 0;
+                int q = scan(d, &s, &z, &os);
+                kprintf("disk: USB disk %d (%s, %u MiB): %s%s\n", i, dev[d].name, (u32)(dev[d].sectors >> 11),
+                        q >= 8 ? "the boot partition, " : "", q ? os : "no FAT partition with DOS");
+                if (q) note(d, s, z, q, os);
                 if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
             }
             int good = hint ? bq >= (hint_sig_len ? 8 : 6) : bq > 0;
@@ -467,7 +482,7 @@ void disk_init(void)
             use(bd, bs, bz);
             return;
         }
-        if (n_dev) kprintf("disk: no FAT partition with KERNEL.SYS on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
+        if (n_dev) kprintf("disk: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
     }
     if (disk_image && !fd_ram(0, disk_image, disk_size)) {
         disk_on_a = 1;
@@ -477,7 +492,7 @@ void disk_init(void)
         return;
     }
     if (!disk_image)
-        panic("No C: drive: no FAT partition with KERNEL.SYS on a SATA (AHCI), IDE or USB disk, and no boot floppy or "
+        panic("No C: drive: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on a SATA (AHCI), IDE or USB disk, and no boot floppy or "
               "RAM disk to fall back to (floppy.img or dos.img next to vmdos.efi, a GRUB module, or QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,

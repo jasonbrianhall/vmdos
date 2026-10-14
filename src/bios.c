@@ -578,7 +578,9 @@ void bios_boot(struct regs *r)
     u8 m[512];
     if (disk_read(0, 1, m) || m[510] != 0x55 || m[511] != 0xAA) panic("C: has no boot signature in sector 0");
     if (disk_volume(&v)) panic("C: has no FAT partition");
-    if (v.type == 12) panic("C: is FAT12; FreeDOS needs FAT16 or FAT32 here");
+    const char *os = dos_kind(&v);
+    int freedos = !os || os[0] == 'F';                        /* "FreeDOS" */
+    if (v.type == 12 && freedos) panic("C: is FAT12; FreeDOS needs FAT16 or FAT32 here");
     int part = -1;
     if (v.base) {
         for (int i = 0; i < 4; i++) if (*(u32 *)(m + 446 + i * 16 + 8) == v.base) part = i;
@@ -586,13 +588,22 @@ void bios_boot(struct regs *r)
     }
     u8 *b = gptr(0x7C00);
     if (disk_read(v.base, 1, b)) panic("C: boot sector unreadable");
-    const u8 *code = v.type == 32 ? fd_boot32 : fd_boot16;
-    int bpb_end = v.type == 32 ? 0x5A : 0x3E;
-    memcpy(b, code, 3);
-    memcpy(b + bpb_end, code + bpb_end, 510 - bpb_end);
+    if (freedos) {                                   /* FreeDOS's boot code: loads KERNEL.SYS */
+        const u8 *code = v.type == 32 ? fd_boot32 : fd_boot16;
+        int bpb_end = v.type == 32 ? 0x5A : 0x3E;
+        memcpy(b, code, 3);
+        memcpy(b + bpb_end, code + bpb_end, 510 - bpb_end);
+    } else {
+        /* MS-DOS, PC DOS, Windows 9x: their own boot sector (it loads
+           IO.SYS / IBMBIO.COM), with the geometry vmdos's INT 13h reports:
+           MS-DOS's reads by CHS from these fields */
+        if (b[510] != 0x55 || b[511] != 0xAA) panic("C: (%s) has no boot sector: run SYS C: on it", os);
+        *(u16 *)(b + 0x18) = DISK_SPT;
+        *(u16 *)(b + 0x1A) = DISK_HEADS;
+    }
     *(u32 *)(b + 0x1C) = v.base;                     /* hidden sectors = partition start */
     b[v.type == 32 ? 0x40 : 0x24] = 0x80;            /* drive number */
-    kprintf("booting FAT%d partition %d at LBA %u (%s)\n", v.type, part, v.base, disk_kind());
+    kprintf("booting %s, FAT%d partition %d at LBA %u (%s)\n", os ? os : "C:", v.type, part, v.base, disk_kind());
 
     r->cs = 0; r->eip = 0x7C00;
     r->ss = 0; r->esp = 0x7C00;

@@ -71,7 +71,7 @@ The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
 module and `make run` passes it to QEMU, as a fallback for machines whose
 disk vmdos can't drive (not SATA, IDE or USB) and for `c=ram`.
 
-Without a C: (no disk with KERNEL.SYS that vmdos can drive, and no
+Without a C: (no disk with DOS that vmdos can drive, and no
 dos.img), vmdos boots the built-in boot floppy instead of stopping: every
 image carries floppy.img (FreeDOS and vmdos's tools on a 1.44M disk, next
 to vmdos.efi and as a GRUB module), held in RAM as drive A:. Changes to it
@@ -96,11 +96,14 @@ EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
 (parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them) and USB
-sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
+sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
+Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature);
 when more than one disk has such a partition, the boot log lists them and
 waits 5 s for a number (Enter or the countdown: the preferred one;
-`cmenu=N` seconds, `cmenu=0` no menu); other
+`cmenu=N` seconds, `cmenu=0` no menu). FreeDOS boots through vmdos's
+own boot code; other DOSes through the partition's boot sector (`SYS C:`;
+MS-DOS 6.22 needs FAT12/FAT16 of at most 2 GB); other
 partitions are only touched when you put one in a VMHD drive (below; DOS
 sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
 disk if built with `RAMDISK=1`. To use an

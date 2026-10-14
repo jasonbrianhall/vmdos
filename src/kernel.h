@@ -162,6 +162,7 @@ struct fatvol {
 };
 struct extent { u32 lba, count; };
 int fat_mount(struct fatvol *v, int (*rd)(u32 lba, u32 n, void *buf), u32 base);
+const char *dos_kind(struct fatvol *v);       /* disk.c: "FreeDOS", "MS-DOS", ... or NULL */
 int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size);
 int fat_extents(struct fatvol *v, u32 clus, u32 bytes, struct extent *ext, int max);
 
