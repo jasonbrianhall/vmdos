@@ -170,6 +170,8 @@ static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x
 static void planar_check(void);
 static void ega_check(void);
 static void modex_check(void);
+static int vga_logging(u16 *cs, u32 *eip);
+static int vgalog = -1;
 
 /* Graphics mode size in pixels. */
 /* 256-colour (mode 13h based) screens as the CRTC describes them, so
@@ -639,6 +641,7 @@ static void ega_bmap(void)
     }
     tlb_flush();
     b_trap = want;
+    if (vgalog > 0) kprintf("vga: memory map %d, B000h/B800h trapped %d\n", map, want);
 }
 
 static void ega_check(void)
@@ -688,7 +691,20 @@ static void modex_check(void)
     } else if (!want && modex_trap) modex_trap = 0;   /* apply_map_mask maps the window */
 }
 
+static int vgamem_log(void)
+{
+    static int n;
+    u16 cs; u32 eip;
+    return vga_logging(&cs, &eip) && n++ < 400;
+}
+static u8 vga16_read_(u32 lin);
 u8 vga16_read(u32 lin)
+{
+    u8 v = vga16_read_(lin);
+    if (vgamem_log()) kprintf("vga mem rd %05x -> %02x (GC6 %02x GC5 %02x GC4 %02x)\n", lin, v, gc[6], gc[5], gc[4]);
+    return v;
+}
+static u8 vga16_read_(u32 lin)
 {
     int oo = vga16_off(lin);
     if (oo < 0) return 0xFF;
@@ -703,6 +719,7 @@ u8 vga16_read(u32 lin)
 
 void vga16_write(u32 lin, u8 v)
 {
+    if (vgamem_log()) kprintf("vga mem wr %05x <- %02x (GC6 %02x GC5 %02x SEQ2 %02x)\n", lin, v, gc[6], gc[5], seq[2]);
     int oo = vga16_off(lin);
     if (oo < 0) return;
     u32 o = (u32)oo;
@@ -1350,7 +1367,6 @@ void video_init(void)
 /* vgalog (command line): every VGA port access the VMHV guest makes from
    protected mode (Windows' display VxD, not DOS programs or the BIOS), with
    the register index for the data ports, and every INT 10h call. */
-static int vgalog = -1;
 static int vga_logging(u16 *cs, u32 *eip)
 {
     if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
