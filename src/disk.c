@@ -337,6 +337,68 @@ static void sleep_ms(int ms)
     }
 }
 
+/* ---- more than one disk with FreeDOS: ask ----
+   Every disk with a FAT partition holding KERNEL.SYS is noted; with two or
+   more, a menu on the boot log lets the user pick C: (1-9), the best guess
+   (the partition vmdos.efi started from, else a USB stick) after a
+   countdown or on Enter. cmenu=N: seconds (default 5), cmenu=0: no menu.
+   Shown on the boot log, so not with bootlog=off. */
+#define MAX_CANDS 9
+static struct { int d, q; u32 start, size; } cands[MAX_CANDS];
+static int n_cands;
+
+static void note(int d, u32 start, u32 size, int q)
+{
+    if (n_cands < MAX_CANDS) { cands[n_cands].d = d; cands[n_cands].q = q; cands[n_cands].start = start; cands[n_cands].size = size; n_cands++; }
+}
+
+static int poll_key(void)                       /* interrupts are off here: PS/2 polled, USB through usb_tick */
+{
+    u8 st = inb(0x64);
+    if (st & 1) {
+        u8 b = inb(0x60);
+        if (!(st & 0x20)) vkbd_real_scancode(b);   /* not a mouse byte */
+    }
+    usb_tick();
+    int k;
+    while ((k = vkbd_take()) >= 0) {
+        if (k >= 0x02 && k <= 0x0A) return k - 1;  /* 1-9 */
+        if (k == 0x1C) return 0;                   /* Enter */
+    }
+    return -1;
+}
+
+static int choose(int bd, u32 bs)
+{
+    if (n_cands < 2 || !bootcon_on) return -1;    /* no boot log on the screen (bootlog=off, no framebuffer): nobody sees a menu */
+    const char *m = strstr(cmdline, "cmenu=");
+    int secs = m ? m[6] - '0' : 5;
+    if (secs <= 0 || secs > 9) return -1;
+    int def = 0;
+    for (int i = 0; i < n_cands; i++) if (cands[i].d == bd && cands[i].start == bs) def = i;
+    kprintf("disk: FreeDOS (KERNEL.SYS) is on more than one disk. C: is:\n");
+    for (int i = 0; i < n_cands; i++)
+        kprintf("  %d. %s disk %d (%s), partition at LBA %u, %u MiB%s\n", i + 1, dev_kind(cands[i].d),
+                dev[cands[i].d].idx, dev[cands[i].d].name, cands[i].start, cands[i].size >> 11,
+                cands[i].q >= 8 ? " - vmdos started from here" : i == def ? " - the best guess" : "");
+    while (vkbd_take() >= 0) ;
+    for (int ms = secs * 1000; ms > 0; ms -= 20) {
+        if (ms % 1000 == 0 || ms == secs * 1000)
+            kprintf("\rPress 1-%d (Enter: %d), %d s ", n_cands, def + 1, (ms + 999) / 1000);
+        int k = poll_key();
+        if (k == 0) break;
+        if (k >= 1 && k <= n_cands) { def = k - 1; break; }
+        sleep_ms(20);
+    }
+    for (int ms = 0; ms < 200; ms += 2) {          /* the key's release and anything after it: not for the mouse setup */
+        if (inb(0x64) & 1) inb(0x60);
+        sleep_ms(2);
+    }
+    while (vkbd_take() >= 0) ;
+    kprintf("\ndisk: %d chosen\n", def + 1);
+    return def;
+}
+
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
 
 void disk_init(void)
@@ -376,6 +438,7 @@ void disk_init(void)
         for (int d = 0; d < n_dev; d++) {
             u32 s = 0, z = 0;
             int q = scan(d, &s, &z);
+            if (q) note(d, s, z, q);
             if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
         }
         for (;;) {
@@ -386,6 +449,7 @@ void disk_init(void)
                 int q = scan(d, &s, &z);
                 kprintf("disk: USB disk %d (%s, %u MiB): %s\n", i, dev[d].name, (u32)(dev[d].sectors >> 11),
                         q >= 8 ? "the boot partition" : q ? "has KERNEL.SYS" : "no FAT partition with KERNEL.SYS");
+                if (q) note(d, s, z, q);
                 if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
             }
             int good = hint ? bq >= (hint_sig_len ? 8 : 6) : bq > 0;
@@ -397,7 +461,12 @@ void disk_init(void)
             sleep_ms(20);
             waited += 20;
         }
-        if (bd >= 0) { use(bd, bs, bz); return; }
+        if (bd >= 0) {
+            int c = choose(bd, bs);
+            if (c >= 0) { bd = cands[c].d; bs = cands[c].start; bz = cands[c].size; }
+            use(bd, bs, bz);
+            return;
+        }
         if (n_dev) kprintf("disk: no FAT partition with KERNEL.SYS on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
     }
     if (disk_image && !fd_ram(0, disk_image, disk_size)) {

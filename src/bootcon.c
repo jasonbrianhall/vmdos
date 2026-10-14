@@ -102,6 +102,7 @@ void bootcon_putc(char c)
     if (!bootcon_on || busy) return;                  /* an interrupt's line while one is drawn: serial only */
     busy = 1;
     if (c == '\n') newline();
+    else if (c == '\r') col = 0;                      /* rewrite the line (a countdown) */
     else if (c >= 32 && c < 127) {
         if (col >= cols) newline();
         text[row][col] = c;

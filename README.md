@@ -97,7 +97,10 @@ EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
 (parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them) and USB
 sticks that hold KERNEL.SYS at their root, preferring the one vmdos.efi
-started from (it passes the partition's start and disk signature); other
+started from (it passes the partition's start and disk signature);
+when more than one disk has such a partition, the boot log lists them and
+waits 5 s for a number (Enter or the countdown: the preferred one;
+`cmenu=N` seconds, `cmenu=0` no menu); other
 partitions are only touched when you put one in a VMHD drive (below; DOS
 sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
 disk if built with `RAMDISK=1`. To use an
