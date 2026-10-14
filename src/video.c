@@ -1077,6 +1077,7 @@ static int et_mode(int mode, int clear)
         vbe_set(m, clear);
         video_mode = mode;
         wr8(BDA + 0x49, (u8)mode);
+        wr8(BDA + 0x87, (u8)((rd8(BDA + 0x87) & 0x7F) | (clear ? 0 : 0x80)));   /* vbe_set's inner mode set kept memory; AH=0Fh's bit 7 says what the caller asked */
         text_cols = vbe_w / 8; text_rows = vbe_h / 16;
         wr16(BDA + 0x4A, (u16)text_cols);
         wr8(BDA + 0x84, (u8)(text_rows - 1));
