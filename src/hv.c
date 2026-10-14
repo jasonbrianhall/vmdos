@@ -266,6 +266,23 @@ static void put_regs(struct regs *r)
 }
 
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
+/* For vgalog: hex of the VM's code around CS:EIP and the top of its stack
+   (what WIN386 does around a VGA access, for disassembling). */
+static u8 *glin(u32 lin);
+void hv_dump_here(const char *why)
+{
+    u32 a = (u32)V64(S_CS + 8) + V32(S_RIP) - 0x100;
+    kprintf("code %s: %04x:%08x, from %08x:\n", why, V16(S_CS), V32(S_RIP), V32(S_RIP) - 0x100);
+    for (u32 l = 0; l < 0x200; l += 32) {
+        char b[100]; int n = 0;
+        for (u32 i = 0; i < 32; i++) { u8 *p = glin(a + l + i); n += snprintf(b + n, sizeof b - n, "%02x", p ? *p : 0); }
+        kprintf("  %s\n", b);
+    }
+    u32 sp = (u32)V64(S_SS + 8) + (V16(S_SS + 2) & 0x400 ? V32(S_RSP) : (V32(S_RSP) & 0xFFFF));
+    char b[200]; int n = 0;
+    for (u32 i = 0; i < 24; i++) { u8 *q = glin(sp + i * 4); n += snprintf(b + n, sizeof b - n, " %08x", q ? *(u32 *)q : 0xDEADDEAD); }
+    kprintf("stack %04x:%08x:%s\n", V16(S_SS), V32(S_RSP), b);
+}
 /* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
 int hv_guest_pm(u16 *cs, u32 *eip)
 {

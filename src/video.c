@@ -1459,6 +1459,9 @@ void video_port_out(u16 port, u8 v)
         if (port == 0x3C0 && atc_flip) ix = atc_idx;            /* 3C0: index, then data */
         if (ix >= 0) kprintf("vga %04x:%08x out %03x[%02x] <- %02x\n", cs, eip, port, ix, v);
         else kprintf("vga %04x:%08x out %03x <- %02x\n", cs, eip, port, v);
+        static int dumped;
+        if (port == 0x3CF && (gc_idx & 15) == 6 && v == 0x0D && !(dumped & 1)) { dumped |= 1; hv_dump_here("GC6 <- 0D"); }
+        if (port == 0x3C0 && v == 0x20 && !atc_flip && !(dumped & 2) && (dumped & 1)) { dumped |= 2; hv_dump_here("ATC <- 20"); }
     }
     video_port_out_(port, v);
 }
