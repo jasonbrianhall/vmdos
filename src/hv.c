@@ -626,7 +626,15 @@ static void npf_exit(void)
 {
     u32 gpa = (u32)V64(C_INFO2);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
-    if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }
+    if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) {
+        static int holelog = -1, n;
+        if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;
+        if (holelog && n++ < 300)
+            kprintf("hole: write to physical %05x (dropped) from %04x:%08x %s\n", gpa, V16(S_CS), V32(S_RIP),
+                    real_or_v86() ? (V32(S_RFLAGS) & EFL_VM ? "v86" : "real") : "pm");
+        emulate_at(gpa, 0);
+        return;
+    }
     if (gpa >= 0xB0000 && gpa < 0xB8000 && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }   /* empty B000h (video_b000_map) */
     hv_stop("the guest touched memory it doesn't have: physical %x (%s)", gpa,
             (V32(C_INFO1) & 2) ? "write" : "read");
