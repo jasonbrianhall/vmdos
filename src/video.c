@@ -1401,6 +1401,16 @@ static u32 gfx_row_addr(int y)
     return 0xB8000 + (y & 1) * 0x2000 + (y >> 1) * 80;
 }
 
+/* Mode 13h with chain-4 off (planar_on): the window may be unmapped (every
+   guest access emulated), so BIOS drawing goes to the planes, pixel a of
+   the 320-wide screen at plane a & 3, offset a >> 2, as the CRTC shows it
+   (Windows 9x's IO.SYS prints over its unchained boot logo). */
+static u8 *m13_ptr(u32 lin)
+{
+    u32 a = lin - 0xA0000;
+    return planar_on ? planes + (a & 3) * 65536 + ((a >> 2) & 0xFFFF) : gptr(lin);
+}
+
 static void put_pixel(int x, int y, u8 c)
 {
     if (x < 0 || y < 0 || x >= gfx_w() || y >= gfx_h()) return;
@@ -1419,7 +1429,7 @@ static void put_pixel(int x, int y, u8 c)
     int bpp = gfx_bpp();
     if (!bpp) return;
     u32 a = gfx_row_addr(y);
-    if (bpp == 8) { wr8(a + x, (c & 0x80) ? rd8(a + x) ^ (c & 0x7F) : c); return; }
+    if (bpp == 8) { u8 *q = m13_ptr(a + x); *q = (c & 0x80) ? *q ^ (c & 0x7F) : c; return; }
     int per = 8 / bpp, sh = (per - 1 - x % per) * bpp;
     u8 m = (u8)(((1 << bpp) - 1) << sh), v = (u8)((c << sh) & m);
     a += x / per;
@@ -1439,7 +1449,7 @@ static u8 get_pixel(int x, int y)
     int bpp = gfx_bpp();
     if (!bpp) return 0;
     u32 a = gfx_row_addr(y);
-    if (bpp == 8) return rd8(a + x);
+    if (bpp == 8) return *m13_ptr(a + x);
     int per = 8 / bpp, sh = (per - 1 - x % per) * bpp;
     return (rd8(a + x / per) >> sh) & ((1 << bpp) - 1);
 }
@@ -1498,6 +1508,11 @@ static void scroll(int up, int lines, u8 attr, int r0, int c0, int r1, int c1, i
             int dy = up ? r0 * 8 + i : r1 * 8 + 7 - i;
             int sy = up ? dy + lines * 8 : dy - lines * 8;
             int in = up ? sy <= r1 * 8 + 7 : sy >= r0 * 8;
+            if (bpp == 8 && planar_on) {
+                u32 da = gfx_row_addr(dy) + c0 * 8, sa = gfx_row_addr(sy) + c0 * 8;
+                for (int k = 0; k < (c1 - c0 + 1) * 8; k++) *m13_ptr(da + k) = in ? *m13_ptr(sa + k) : fill;
+                continue;
+            }
             u8 *d = gptr(gfx_row_addr(dy) + c0 * bpp);
             if (in) memmove(d, gptr(gfx_row_addr(sy) + c0 * bpp), (c1 - c0 + 1) * bpp);
             else memset(d, fill, (c1 - c0 + 1) * bpp);
