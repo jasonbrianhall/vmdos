@@ -268,7 +268,7 @@ static void put_regs(struct regs *r)
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
 
 /* ---------------- stopping ---------------- */
-static void hv_stop(const char *fmt, ...)
+__attribute__((noreturn)) static void hv_stop(const char *fmt, ...)
 {
     char msg[600];
     va_list ap;
@@ -561,7 +561,7 @@ static int svm_check(void)
 {
     u32 a, b, c, d;
     cpuid(0, &a, &b, &c, &d);
-    if (b == 0x756E6547) return 5;                                 /* "Genu"ineIntel: VT-x, not yet */
+    if (b == 0x756E6547) return 5;                                 /* "Genu"ineIntel: VT-x (hvvmx.c) */
     cpuid(0x80000000, &a, &b, &c, &d);
     if (a < 0x8000000A) return 1;
     cpuid(0x80000001, &a, &b, &c, &d);
@@ -576,17 +576,32 @@ static int svm_check(void)
 }
 
 static const char *const hv_err[] = {
-    "", "this CPU has no AMD-V (SVM)", "AMD-V is turned off in the firmware setup",
+    "", "this CPU has no hardware virtualization (AMD-V or VT-x)", "AMD-V is turned off in the firmware setup",
     "this CPU's AMD-V has no nested paging", "not enough memory for the VM",
-    "Intel VT-x isn't supported yet (AMD-V only)", "vmdos runs without PAE paging (nopae)",
+    "", "vmdos runs without PAE paging (nopae)",
+    "VT-x is turned off in the firmware setup",
+    "this CPU's VT-x lacks EPT or unrestricted guest (Intel CPUs from 2010 on have them)",
+    "VT-x could not be started",
 };
+static int vmx;                       /* Intel VT-x (hvvmx.c) instead of AMD-V */
+int vmx_check(void);
+int vmx_setup(u8 *shadow);
+void vmx_guest_init(void);
+void vmx_run(u8 *shadow, u32 *g);
 
 static int hv_setup(void)
 {
     int e = svm_check();
+    if (e == 5) { e = vmx_check(); vmx = !e; }
     if (e) return e;
+    if (!hv_host_pae()) return 6;
     if (!ext) ext = phys_try_alloc(VM_TOP - EXT_START);
     if (!ext) return 4;
+    if (vmx) {                                                    /* the VMCB is VT-x's shadow of the VMCS */
+        vmcb = phys_alloc(4096);
+        npt_init();                                               /* (maps the VM's memory into the host) */
+        return vmx_setup(vmcb);
+    }
     vmcb = phys_alloc(4096); hsave = phys_alloc(4096); hvsave = phys_alloc(4096);
     iopm = phys_alloc(12288); msrpm = phys_alloc(8192);
     memset(iopm, 0xFF, 12288);                                    /* every port exits */
@@ -686,7 +701,7 @@ int hv_start(int key)
 {
     int e = hv_setup();
     if (e) { kprintf("VMHV: %s\n", hv_err[e]); return e; }
-    kprintf("VMHV: restarting DOS in an AMD-V virtual machine (640 KB + %u KB)\n", (VM_TOP >> 10) - 1024);
+    kprintf("VMHV: restarting DOS in a virtual machine (%s, 640 KB + %u KB)\n", vmx ? "Intel VT-x" : "AMD-V", (VM_TOP >> 10) - 1024);
     disk_flush();
     cdaudio_stop();
     sb_out_stop();
@@ -727,10 +742,25 @@ int hv_start(int key)
     memset(&r0, 0, sizeof r0);
     bios_boot(&r0);
     vmcb_init(&r0);
+    if (vmx) vmx_guest_init();
     hv_active = 1;
 
     for (;;) {
         if (hv_force) force_exit();
+        if (debug_level >= 3) {                                    /* debug=3: the text screen to the log, every 20 s */
+            static u32 last_dump;
+            if (ticks - last_dump >= 20000) {
+                last_dump = ticks;
+                kprintf("---- screen (mode %02x) ----\n", video_mode);
+                for (int y = 0; y < 25; y++) {
+                    char line[81];
+                    int n = 0;
+                    for (int x = 0; x < 80; x++) { u8 c = rd8(0xB8000 + (y * 80 + x) * 2); line[x] = c >= 32 && c < 127 ? (char)c : ' '; if (c > 32) n = x + 1; }
+                    line[n] = 0;
+                    kprintf("%s\n", line);
+                }
+            }
+        }
         if (wait_irq) {
             wait_irq = 0;
             wait_for_guest_irq();
@@ -739,7 +769,8 @@ int hv_start(int key)
         V8(C_TLB) = hv_tlb_dirty ? 1 : 0;
         hv_tlb_dirty = 0;
         V32(C_CLEAN) = 0;
-        svm_run((u32)(uintptr_t)vmcb, (u32)(uintptr_t)hvsave, g);
+        if (vmx) vmx_run(vmcb, g);
+        else svm_run((u32)(uintptr_t)vmcb, (u32)(uintptr_t)hvsave, g);
 
         u64 ei = V64(C_EXITINT);                                  /* an event cut short: send it again */
         V64(C_EVENT) = (ei & EV_VALID) ? ei : 0;
@@ -797,6 +828,11 @@ int hv_start(int key)
         case X_SHUT:
             kprintf("VMHV: the guest triple-faulted: restarting\n");
             reboot();
+        case 0xF00: break;                                        /* VT-x: done in hvvmx.c (CPUID, CR access) */
+        case 0xF01:                                               /* VT-x: entry failed, or an exit it can't do */
+            hv_stop("VT-x: %s %u (%x)", (V32(C_INFO1) >> 16) == 1 ? "VM entry failed, VMX instruction error" :
+                    (V32(C_INFO1) >> 16) == 2 ? "VM entry failed on the guest state, reason" : "unexpected VM exit, reason",
+                    V32(C_INFO1) & 0xFFFF, (u32)V64(C_INFO2));
         default:
             if (code >= 0x80 && code <= 0x86) {                   /* SVM instructions: not for the guest */
                 V64(C_EVENT) = 6 | EV_EXC | EV_VALID;

@@ -110,10 +110,13 @@ static void *pt_for(u32 lin)
     return (void *)(uintptr_t)(*pde & ~0xFFFu);
 }
 
+void (*hv_map_hook)(u32 lin);          /* hvvmx.c: VT-x's EPT mirrors the host's linear 0-10 MiB */
+
 static void map_page64(u32 lin, u64 phys, u32 flags)
 {
     if (pae) ((u64 *)pt_for(lin))[(lin >> 12) & 511] = (phys & ~0xFFFull) | flags;
     else ((u32 *)pt_for(lin))[(lin >> 12) & 1023] = ((u32)phys & ~0xFFFu) | flags;
+    if (hv_map_hook && lin < (10u << 20)) hv_map_hook(lin);
 }
 
 void map_page(u32 lin, u32 phys, u32 flags) { map_page64(lin, phys, flags); }
@@ -158,6 +161,7 @@ u64 hv_host_pde(u32 lin)                      /* the PDE (making its table if ne
     return pae_pd[lin >> 30][(lin >> 21) & 511];
 }
 u64 *hv_host_pt0(void) { return (u64 *)pt_for(0); }
+u64 hv_host_pte(u32 lin) { return ((u64 *)pt_for(lin))[(lin >> 12) & 511]; }   /* PAE only (VMHV needs it) */
 
 /* Swap the table for linear 0-2 MiB (pde != 0), or put the real one back
    (pde == 0). Only the host's view changes: the VM's tables point at the
