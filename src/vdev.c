@@ -538,9 +538,11 @@ static u8 in8(u16 port)
     case 0x71: {
         u32 kb = hv_ext_kb();                       /* VMHV: the VM's extended memory, not the PC's */
         u8 ix = cmos_index & 0x7F;
-        if (kb && (ix == 0x17 || ix == 0x30)) return (u8)kb;
-        if (kb && (ix == 0x18 || ix == 0x31)) return (u8)(kb >> 8);
-        if (kb && (ix == 0x34 || ix == 0x35)) return 0;
+        u32 k16 = kb > 0xFFFF ? 0xFFFF : kb, b64 = kb > 15360 ? (kb - 15360) / 64 : 0;   /* KB above 1 MB; 64 KB blocks above 16 MB */
+        if (kb && (ix == 0x17 || ix == 0x30)) return (u8)k16;
+        if (kb && (ix == 0x18 || ix == 0x31)) return (u8)(k16 >> 8);
+        if (kb && ix == 0x34) return (u8)b64;
+        if (kb && ix == 0x35) return (u8)(b64 >> 8);
         outb(0x70, ix); return inb(0x71); }
     case 0x92: return a20_on ? 2 : 0;
     case 0x201: return joy_port_in();                    /* game port (joy.c) */

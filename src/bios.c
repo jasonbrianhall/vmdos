@@ -298,10 +298,12 @@ static int int15(struct regs *r)
         if (joy_bios(r)) { set_cf(r, 0); return BIOS_DONEF; }
         set_cf(r, 1);
         return BIOS_DONEF;
-    case 0x88: AX(r) = (u16)hv_ext_kb(); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
+    case 0x88: AX(r) = (u16)(hv_ext_kb() > 0xFC00 ? 0xFC00 : hv_ext_kb()); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
     case 0xE8:
-        if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, none above */
-            AX(r) = CX(r) = (u16)hv_ext_kb(); BX(r) = DX(r) = 0;
+        if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, above in 64 KB blocks */
+            u32 kb = hv_ext_kb();
+            AX(r) = CX(r) = (u16)(kb > 15360 ? 15360 : kb);
+            BX(r) = DX(r) = (u16)(kb > 15360 ? (kb - 15360) / 64 : 0);
             set_cf(r, 0);
             return BIOS_DONEF;
         }

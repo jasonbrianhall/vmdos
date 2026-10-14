@@ -426,7 +426,8 @@ games that are their own memory manager. vmdos can't give them that in
 virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
 machine (AMD-V with nested paging, or Intel VT-x with EPT and unrestricted
 guest: Intel CPUs from 2010 on) where it can. The guest sees a 386
-with 640 KB and 8 MB of extended memory (1-9 MB) and nothing else at
+with 640 KB and 31 MB of extended memory (1-32 MB; `vmmem=N` on the
+command line for another size in MB, halved until it fits) and nothing else at
 C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
 EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
 vmdos's: the BIOS stubs and every I/O port exit to the same code as in

@@ -6,12 +6,13 @@
    kernels) can't have it. VMHV restarts the PC's DOS inside an AMD-V
    guest instead: the guest owns ring 0, its own descriptor tables, paging
    and memory manager, and sees a 386 with 640 KB of conventional memory
-   and 8 MB of extended memory (1-9 MB), nothing else. vmdos stays
+   and 31 MB of extended memory (1-32 MB; vmmem=N for N MB), nothing else. vmdos stays
    underneath as the hardware:
 
    - Memory: the nested page tables (NPT) give guest-physical 0-1 MB the
      usual guest RAM (BIOS segment, video memory and the VGA window
-     included) and 1-9 MB a block of its own. They share the host's page
+     included) and 1 MB up a block of its own (above 10 MB mapped
+     only in the VM's tables; the VESA framebuffer at E0000000h). They share the host's page
      tables for linear 0-10 MiB, where the host maps the same thing, so
      A20 and the VGA window's trapping work unchanged, and the guest's
      memory is at the same linear address for the host (Sound Blaster DMA
@@ -102,7 +103,9 @@
 #define EV_EXC    (3u << 8)
 #define EV_ERR    (1u << 11)
 
-#define VM_TOP    (9u << 20)          /* guest RAM: 0-640K, (UMB area), 1-9 MB */
+static u32 vm_top = 9u << 20;         /* guest RAM: 0-640K, (UMB area), 1 MB up to here (vmmem=, MB) */
+#define VM_TOP    vm_top
+#define HV_LFB    0xE0000000u           /* the VESA framebuffer, as the VM sees it */
 #define EXT_START 0x110000u           /* above the HMA, which is guest_ram's */
 
 static u8 *vmcb, *hsave, *hvsave, *iopm, *msrpm, *ext;
@@ -149,7 +152,8 @@ static u8 *gpa_ptr(u32 gpa)
     if (gpa < 0x100000) return (u8 *)(uintptr_t)guest_phys(gpa);
     if (gpa < EXT_START) return (u8 *)(uintptr_t)guest_phys(a20_on ? gpa : gpa - 0x100000);
     if (gpa < VM_TOP) return ext + (gpa - EXT_START);
-    if (video_vram_range(gpa, 1)) return (u8 *)(uintptr_t)gpa;
+    u32 vsize, vbase = video_vram_base(&vsize);
+    if (gpa >= HV_LFB && gpa - HV_LFB < vsize) return (u8 *)(uintptr_t)(vbase + (gpa - HV_LFB));
     return 0;
 }
 
@@ -174,9 +178,11 @@ static int npt_init(void)
     }
     for (u32 a = 0; a < 10u << 20; a += 2u << 20)              /* shared with the host */
         npt_pd[0][a >> 21] = hv_host_pde(a) | 7;
-    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at its address */
+    for (u32 a = 10u << 20; a < VM_TOP; a += 4096)             /* RAM above 10 MB: not shared with the host */
+        npt_pt(a)[(a >> 12) & 511] = ((u32)(uintptr_t)ext + (a - EXT_START)) | 7;
+    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at HV_LFB */
     for (u32 a = 0; a < vsize; a += 4096)
-        npt_pt(vbase + a)[((vbase + a) >> 12) & 511] = (vbase + a) | 7;
+        npt_pt(HV_LFB + a)[((HV_LFB + a) >> 12) & 511] = (vbase + a) | 7;
     gview_pt = phys_alloc(4096);
     return 0;
 }
@@ -517,6 +523,9 @@ static void msr_exit(void)
    memory through its own page tables (emu_ptr). */
 static u8 *hole_page, *vrom;
 u8 *hv_hole_page(void) { return hv_active ? hole_page : 0; }
+u32 hv_lfb(void) { return HV_LFB; }
+u32 hv_vm_top(void) { return VM_TOP; }
+u8 *hv_gpa_ptr(u32 gpa) { return gpa_ptr(gpa); }
 #define VROM_SIZE 0x8000u
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u
@@ -645,7 +654,19 @@ static int hv_setup(void)
     if (e == 5) { e = vmx_check(); vmx = !e; }
     if (e) return e;
     if (!hv_host_pae()) return 6;
-    if (!ext) ext = phys_try_alloc(VM_TOP - EXT_START);
+    if (!ext) {                                                   /* vmmem=N (MB, default 32): halved until it fits */
+        u32 mb = 32;
+        const char *m = strstr(cmdline, "vmmem=");
+        if (m) { mb = 0; for (m += 6; *m >= '0' && *m <= '9'; m++) mb = mb * 10 + (u32)(*m - '0'); }
+        if (mb < 9) mb = 9;
+        if (mb > 512) mb = 512;
+        for (;;) {
+            vm_top = mb << 20;
+            ext = phys_try_alloc(VM_TOP - EXT_START);
+            if (ext || mb <= 9) break;
+            mb = mb / 2 < 9 ? 9 : mb / 2;
+        }
+    }
     if (!ext) return 4;
     if (vmx) {                                                    /* the VMCB is VT-x's shadow of the VMCS */
         vmcb = phys_alloc(4096);
@@ -913,7 +934,7 @@ u32 hv_ext_kb(void) { return hv_active ? (VM_TOP >> 10) - 1024 : 0; }
 
 int hv_e820(struct regs *r)
 {
-    static const struct { u32 base, len, type; } map[] = {
+    const struct { u32 base, len, type; } map[] = {
         { 0, 0xA0000, 1 }, { 0xF0000, 0x10000, 2 }, { 0x100000, VM_TOP - 0x100000, 1 },
     };
     u32 i = r->ebx;

@@ -1000,7 +1000,7 @@ static void vbe_mode_info(int m, u32 a)
     wr8(a + 0x1E, 1);
     static const u8 masks[3][8] = { { 5, 10, 5, 5, 5, 0, 1, 15 }, { 5, 11, 6, 5, 5, 0, 0, 0 }, { 8, 16, 8, 8, 8, 0, 8, 24 } };
     if (bpp != 8) memcpy(gptr(a + 0x1F), masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2], 8);
-    wr32(a + 0x28, (u32)(uintptr_t)vram);       /* PhysBasePtr */
+    wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
     wr16(a + 0x32, (u16)pitch);                 /* VBE 3: linear bytes per line */
 }
 

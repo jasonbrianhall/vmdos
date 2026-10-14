@@ -270,7 +270,10 @@ void dpmi_espfix(struct regs *r);
 
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
-u8 *hv_hole_page(void);                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
+u8 *hv_hole_page(void);
+u32 hv_lfb(void);                             /* VMHV: the VESA framebuffer's guest-physical address */
+u32 hv_vm_top(void);                          /* VMHV: the top of the VM's RAM */
+u8 *hv_gpa_ptr(u32 gpa);                      /* VMHV: host pointer for guest-physical memory (0: none) */                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
 void video_b000_map(void);
 void video_vgalog_giveup(void);              /* vgalog: dump the VGA VxD's code now (Windows quitting) */                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
 int hv_guest_pm(u16 *cs, u32 *eip);

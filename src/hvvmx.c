@@ -159,8 +159,10 @@ static void ept_init(void)
         ept_pdpt[i] = (u32)(uintptr_t)ept_pd[i] | EPT_RWX;
     }
     for (u32 a = 0; a < 10u << 20; a += 4096) ept_sync(a);
-    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at its address */
-    for (u32 a = 0; a < vsize; a += 4096) ept_pt(vbase + a)[((vbase + a) >> 12) & 511] = (vbase + a) | EPT_RWX | EPT_WB;
+    for (u32 a = 10u << 20; a < hv_vm_top(); a += 4096)         /* RAM above 10 MB: straight to its block */
+        ept_pt(a)[(a >> 12) & 511] = (u32)(uintptr_t)hv_gpa_ptr(a) | EPT_RWX | EPT_WB;
+    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at hv_lfb() */
+    for (u32 a = 0; a < vsize; a += 4096) ept_pt(hv_lfb() + a)[((hv_lfb() + a) >> 12) & 511] = (vbase + a) | EPT_RWX | EPT_WB;
     eptp = (u32)(uintptr_t)ept_pml4 | 6 | 3 << 3;                /* write-back, 4-level walk */
     hv_map_hook = ept_sync;
 }
