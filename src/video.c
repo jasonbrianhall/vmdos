@@ -758,6 +758,7 @@ static u8 vga16_read_(u32 lin)
     return (u8)~r;
 }
 
+static void vga_write_planes(u8 v, u8 *base, u32 stride);
 void vga16_write(u32 lin, u8 v)
 {
     if (vgamem_log()) kprintf("vga mem wr %05x <- %02x (GC6 %02x GC5 %02x SEQ2 %02x)\n", lin, v, gc[6], gc[5], seq[2]);
@@ -765,15 +766,22 @@ void vga16_write(u32 lin, u8 v)
     int oo = vga16_off(lin);
     if (oo < 0) return;
     u32 o = (u32)oo;
+    ega_dirty = 1;
+    vga_write_planes(v, planes + o, 65536);
+}
+
+/* A write through the graphics controller: plane p's byte at base + p * stride. */
+static void vga_write_planes(u8 v, u8 *base, u32 stride)
+{
     int mode = gc[5] & 3, rot = gc[3] & 7, fn = (gc[3] >> 3) & 3;
     u8 mask = gc[8], mm = seq[2] & 15;
-    ega_dirty = 1;
     if (rot) v = (u8)((v >> rot) | (v << (8 - rot)));
     if (mode == 3) { mask &= v; }
     for (int p = 0; p < 4; p++) {
         if (!(mm & (1 << p))) continue;
         u8 d;
-        if (mode == 1) { planes[p * 65536 + o] = latch[p]; continue; }
+        u8 *q = base + p * stride;
+        if (mode == 1) { *q = latch[p]; continue; }
         if (mode == 0) d = (gc[1] & (1 << p)) ? ((gc[0] & (1 << p)) ? 0xFF : 0) : v;
         else if (mode == 2) d = (v & (1 << p)) ? 0xFF : 0;
         else d = (gc[0] & (1 << p)) ? 0xFF : 0;
@@ -782,7 +790,7 @@ void vga16_write(u32 lin, u8 v)
         case 2: d |= latch[p]; break;
         case 3: d ^= latch[p]; break;
         }
-        planes[p * 65536 + o] = (u8)((d & mask) | (latch[p] & ~mask));
+        *q = (u8)((d & mask) | (latch[p] & ~mask));
     }
 }
 
@@ -1064,6 +1072,11 @@ static void et_remap(void)
 {
     if (!vbe_on || !et_on) return;
     u32 wb = et_seg & 15, rb = et_seg >> 4;
+    if (!(seq[4] & 8)) {                     /* chain-4 off: planar, every access emulated */
+        if (et_split != 2) { for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0); tlb_flush(); }
+        et_split = 2;
+        return;
+    }
     if (wb == rb && (seq[2] & 15) == 15) { et_split = 0; vbe_map_bank(wb); return; }
     et_split = 1;
     vbe_bank = wb;
@@ -1087,9 +1100,27 @@ static void et_crtc(void)
     if (pitch != vbe_pitch || start != vbe_start) { vbe_pitch = pitch; vbe_start = start; full_redraw = 1; }
 }
 
-u8 video_et_read(u32 lin) { return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)]; }
+/* Chain-4 off (the Windows driver's screen-to-screen copies: write mode 1
+   moves four pixels a byte through the latches): the window is a 64 KB
+   piece of each plane, segment s (mod 4, 256 KB a plane) at plane offset
+   s * 64K; plane p's byte q is pixel 4q + p of the packed screen. */
+static u8 *et_planar(u32 lin, u32 seg) { return vram + ((seg & 3) * 65536 + ((lin - 0xA0000) & 0xFFFF)) * 4; }
+u8 video_et_read(u32 lin)
+{
+    if (et_split == 2) {
+        u8 *b = et_planar(lin, et_seg >> 4);
+        for (int p = 0; p < 4; p++) latch[p] = b[p];
+        if (!(gc[5] & 8)) return latch[gc[4] & 3];
+        u8 r = 0;                                  /* read mode 1: colour compare */
+        for (int p = 0; p < 4; p++)
+            if (gc[7] & (1 << p)) r |= latch[p] ^ ((gc[2] & (1 << p)) ? 0xFF : 0);
+        return (u8)~r;
+    }
+    return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)];
+}
 void video_et_write(u32 lin, u8 v)
 {
+    if (et_split == 2) { vga_write_planes(v, et_planar(lin, et_seg), 1); return; }
     u32 o = (lin - 0xA0000) & 0xFFFF;
     if (!((seq[2] >> (o & 3)) & 1)) return;                    /* that plane is masked off */
     vram[(u32)(et_seg & 15) * 65536 + o] = v;
@@ -1610,7 +1641,7 @@ static void video_port_out_(u16 port, u8 v)
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
         seq[seq_idx & 7] = v;
-        if ((seq_idx & 7) == 4) planar_check();
+        if ((seq_idx & 7) == 4) { planar_check(); et_remap(); }
         else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); et_remap(); }
         return;
     case 0x3C6: dac_mask = v; palette_dirty = 1; return;
