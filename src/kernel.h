@@ -286,6 +286,7 @@ void hv_hotkey(void);                         /* Ctrl+Alt+End */
 u32 hv_ext_kb(void);                          /* the VM's extended memory (0: no VM) */
 int hv_e820(struct regs *r);
 int v86_wrap_string(struct regs *r);           /* v86.c: 8086 segment wrap of a string instruction */
+int hv_emu_check(u32 lin, int write);          /* 0 unmapped, 1 memory, 2 the trapped VGA window */
 u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
 void hv_emu_wr8(u32 lin, u8 v);
 
@@ -330,6 +331,7 @@ struct emu_cpu {
     int code32;                               /* 32-bit code segment */
 };
 int mem_emulate(struct emu_cpu *e);
+int mem_emulate_more(struct emu_cpu *e);         /* go on emulating a window loop (VMHV) */
 int vga16_window(u32 lin);                    /* video.c: 16-color planar window */
 u8 vga16_read(u32 lin);
 void vga16_write(u32 lin, u8 v);

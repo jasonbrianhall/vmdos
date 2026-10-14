@@ -798,7 +798,7 @@ static void vga_write_planes(u8 v, u8 *base, u32 stride)
 int vga16_fault(struct emu_cpu *e, u32 cr2)
 {
     if (!vga16_window(cr2)) return 0;
-    if (mem_emulate(e)) return 1;
+    if (mem_emulate(e)) { mem_emulate_more(e); return 1; }
     u32 a = e->seg_base[1] + *e->eip;
     kprintf("vga16: can't emulate %02x %02x %02x %02x %02x at %x (address %x)\n",
             rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), a, cr2);

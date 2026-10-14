@@ -614,6 +614,13 @@ static u8 *emu_ptr(u32 lin, u32 *gpa, int write)
     }
     return gpa_ptr(*gpa);
 }
+int hv_emu_check(u32 lin, int write)
+{
+    u32 gpa = ~0u;
+    u8 *p = emu_ptr(lin, &gpa, write);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return 2;
+    return p ? 1 : 0;
+}
 u8 hv_emu_rd8(u32 lin)
 {
     u32 gpa;
