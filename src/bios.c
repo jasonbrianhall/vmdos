@@ -368,6 +368,7 @@ static int int15_ps2(struct regs *r)
     }
     AH(r) = (u8)err;
     set_cf(r, err != 0);
+    if (!err && AL(r) == 0x00 && BH(r) == 1) return BIOS_CONT;  /* the stub unmasks IRQ 12 with OUTs (bios.asm) */
     return BIOS_DONEF;
 }
 

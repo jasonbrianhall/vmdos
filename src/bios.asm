@@ -102,7 +102,35 @@ svc_16: TRAP 0x10
         iret
 
 %assign v 0x11
-%rep 7
+%rep 4
+svc_ %+ v:
+        TRAP v
+        iret
+  %assign v v+1
+%endrep
+
+; INT 15h: the monitor does the work. After C200h (PS/2 mouse on) it
+; returns here instead, and IRQ 12 (and the cascade, IRQ 2) is unmasked with
+; real port I/O, as a BIOS does it: Windows' VPICD traps the PIC's mask
+; registers and only lets IRQ 12 through to a VM that unmasked it.
+; Success: CF clear in the flags the IRET returns.
+svc_21: TRAP 0x15
+        push ax
+        in al, 0A1h
+        and al, 0EFh
+        out 0A1h, al
+        in al, 21h
+        and al, 0FBh
+        out 21h, al
+        pop ax
+        push bp
+        mov bp, sp
+        and byte [bp + 6], 0FEh         ; the caller's CF: success
+        pop bp
+        iret
+
+%assign v 0x16
+%rep 2
 svc_ %+ v:
         TRAP v
         iret
