@@ -84,10 +84,10 @@ static int bochs_vbe(void)
 /* ---------------- VGA state ---------------- */
 int video_mode = 3;
 u8 vga_dac[256][3];
-u8 crtc[32];
+u8 crtc[64];                                        /* 30h-3Fh: the ET4000's extended registers */
 int palette_dirty = 1;
 static u8 crtc_idx, seq_idx, gc_idx, atc_idx, atc_flip, misc_out = 0x67;
-static u8 seq[8], gc[16], atc[21];
+static u8 seq[8], gc[16], atc[32];                  /* ATC 16h-1Fh: ET4000 extensions (not drawn) */
 static u8 atc_pas = 0x20;            /* attribute index bit 5: palette address source (screen on) */
 static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 /* DAC width: 6 bits a primary as on a VGA, or 8 once a program asks for it
@@ -99,6 +99,9 @@ static u32 pal[256];
 
 /* VESA BIOS state (see the VBE section) */
 static int vbe_on;
+static u8 et_seg;                                    /* ET4000 segment select (3CDh) */
+static int et_split;                                 /* its read segment != its write segment: writes trapped */
+static int et_on;                                    /* an ET4000 mode: line pitch and display start come from the CRTC */
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int full_redraw = 1, last_layout_mode = -1;
 
@@ -170,6 +173,14 @@ static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x
 static void planar_check(void);
 static void ega_check(void);
 static void modex_check(void);
+int video_et_split(u32 lin);
+static void et_crtc(void);
+static void et_remap(void);
+u8 video_et_read(u32 lin);
+void video_et_write(u32 lin, u8 v);
+static int vga_logging(u16 *cs, u32 *eip);
+static int vgalog = -1;
+static u32 vdd_code_at;                   /* vgalog: where the VGA VxD's check ran, dumped when Windows gives up */
 
 /* Graphics mode size in pixels. */
 /* 256-colour (mode 13h based) screens as the CRTC describes them, so
@@ -285,28 +296,42 @@ void video_set_mode(int mode, int clear)
     wr8(BDA + 0x87, (rd8(BDA + 0x87) & 0x7F) | (clear ? 0 : 0x80) | 0x60);
     wr8(BDA + 0x88, 0x09);
     wr8(BDA + 0x89, 0x11);
+    /* The CRTC, the graphics controller's mode register and the misc output
+       as IBM's VGA BIOS programs them (its parameter tables): software reads
+       them back (Windows 3.1's display VxD takes the text screen's geometry
+       from them), and the renderer takes widths, heights and pitches from
+       them (ega_geom, m13_geom, ega_row). */
+    static const u8 crtc_tab[][25] = {
+        /* 0: text, 80 columns */ { 0x5F,0x4F,0x50,0x82,0x55,0x81,0xBF,0x1F,0x00,0x4F,0x0D,0x0E,0,0,0,0,0x9C,0x8E,0x8F,0x28,0x1F,0x96,0xB9,0xA3,0xFF },
+        /* 1: text, 40 columns */ { 0x2D,0x27,0x28,0x90,0x2B,0xA0,0xBF,0x1F,0x00,0x4F,0x0D,0x0E,0,0,0,0,0x9C,0x8E,0x8F,0x14,0x1F,0x96,0xB9,0xA3,0xFF },
+        /* 2: CGA 4, 5 */          { 0x2D,0x27,0x28,0x90,0x2B,0x80,0xBF,0x1F,0x00,0xC1,0x00,0x00,0,0,0,0,0x9C,0x8E,0x8F,0x14,0x00,0x96,0xB9,0xA2,0xFF },
+        /* 3: CGA 6 */             { 0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,0x00,0xC1,0x00,0x00,0,0,0,0,0x9C,0x8E,0x8F,0x28,0x00,0x96,0xB9,0xC2,0xFF },
+        /* 4: 0Dh */               { 0x2D,0x27,0x28,0x90,0x2B,0x80,0xBF,0x1F,0x00,0xC0,0x00,0x00,0,0,0,0,0x9C,0x8E,0x8F,0x14,0x00,0x96,0xB9,0xE3,0xFF },
+        /* 5: 0Eh */               { 0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,0x00,0xC0,0x00,0x00,0,0,0,0,0x9C,0x8E,0x8F,0x28,0x00,0x96,0xB9,0xE3,0xFF },
+        /* 6: 10h */               { 0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,0x00,0x40,0x00,0x00,0,0,0,0,0x83,0x85,0x5D,0x28,0x0F,0x63,0xBA,0xE3,0xFF },
+        /* 7: 12h */               { 0x5F,0x4F,0x50,0x82,0x54,0x80,0x0B,0x3E,0x00,0x40,0x00,0x00,0,0,0,0,0xEA,0x8C,0xDF,0x28,0x00,0xE7,0x04,0xE3,0xFF },
+        /* 8: 13h */               { 0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,0x00,0x41,0x00,0x00,0,0,0,0,0x9C,0x8E,0x8F,0x28,0x40,0x96,0xB9,0xA3,0xFF },
+    };
+    int t = is_text(mode) ? (text_cols == 40 ? 1 : 0) : mode == 4 || mode == 5 ? 2 : mode == 6 ? 3 :
+            mode == 0x0D ? 4 : mode == 0x0E ? 5 : mode == 0x10 ? 6 : mode == 0x12 ? 7 : mode == 0x13 ? 8 : 0;
     memset(crtc, 0, sizeof crtc);
+    memcpy(crtc, crtc_tab[t], 25);
+    if (mode == 7) crtc[0x14] = 0x0F;              /* mono: underline on scan line 15 */
+    crtc[0x37] = 0x0F;                             /* ET4000 video system configuration 2: 1 MB, 32-bit DRAM */
+    misc_out = mode == 7 ? 0x66 : is_text(mode) ? 0x67 : mode == 0x10 ? 0xA3 : mode == 0x12 ? 0xE3 : 0x63;
     memset(gc, 0, sizeof gc);
-    gc[6] = is_text(mode) || is_cga(mode) ? 0x0E : 0x05;   /* memory map: B800h / A000h 64K */
+    gc[5] = is_text(mode) ? 0x10 : mode == 4 || mode == 5 ? 0x30 : mode == 0x13 ? 0x40 : 0x00;   /* odd/even, CGA shift, 256-colour */
+    gc[6] = mode == 7 ? 0x0A : is_text(mode) || is_cga(mode) ? 0x0E : 0x05;   /* memory map: B000h / B800h / A000h 64K */
     gc[7] = 0x0F; gc[8] = 0xFF;                    /* color don't care, bit mask */
-    seq[2] = 0x0F;                                 /* all planes */
-    seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) ? 0x06 : 0x02;   /* chain-4 in mode 13h */
-    crtc[0x13] = text_cols == 40 && (is_text(mode) || mode == 0x0D) ? 0x14 : 0x28;
-    crtc[0x18] = 0xFF; crtc[0x07] = 0x10; crtc[0x09] = 0x40;    /* line compare off */
+    seq[0] = 0x03;                                 /* not in reset */
+    seq[2] = is_text(mode) || mode == 4 || mode == 5 ? 0x03 : mode == 6 ? 0x01 : 0x0F;   /* planes written */
+    seq[3] = 0x00;                                 /* character map select */
+    seq[4] = mode == 0x13 ? 0x0E : is_ega(mode) || mode == 6 ? 0x06 : 0x02;   /* chain-4 in mode 13h */
     seq[1] = mode == 0x0D || mode == 4 || mode == 5 || (is_text(mode) && text_cols == 40) ? 0x09 : 0x01;   /* dot clock halved: 320 wide */
     reg_mode = 0;
-    if (is_ega(mode)) {                            /* as the BIOS programs them: width, height, scan doubling */
-        crtc[0x01] = mode == 0x0D ? 0x27 : 0x4F;
-        crtc[0x12] = mode == 0x10 ? 0x5D : mode == 0x12 ? 0xDF : 0x8F;
-        crtc[0x07] = mode == 0x12 ? 0x3E : 0x1F;
-        crtc[0x09] = mode == 0x0D || mode == 0x0E ? 0xC0 : 0x40;
-    }
-    if (mode == 0x13) {                            /* as the BIOS programs it: 320 wide, 400 lines doubled */
-        crtc[0x01] = 0x4F; crtc[0x12] = 0x8F; crtc[0x07] = 0x1F; crtc[0x09] = 0x41;
-        crtc[0x14] = 0x40; crtc[0x17] = 0xA3;
-    }
     planar_check();
     ega_check();
+    if (hv_active) video_b000_map();                         /* mode 7 has its text there */
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
     if (clear) {
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
@@ -605,6 +630,59 @@ static void planar_check(void)
 static int ega_on, ega_dirty;
 static u8 latch[4];
 
+/* The graphics controller's memory map (GC 6 bits 2-3) says where the
+   planes appear: 0 A0000h-BFFFFh, 1 A0000h-AFFFFh (what the BIOS sets),
+   2 B0000h-B7FFFh, 3 B8000h-BFFFFh; outside it the VGA doesn't answer
+   (reads FFh, writes go nowhere). A0000h-AFFFFh is always trapped in these
+   modes; the B000h/B800h halves only while the map puts the planes there
+   (Windows 3.1's VGA driver checks this is a VGA by moving them to B800h). */
+static int b_trap;                        /* bit 0: B0000h-B7FFFh trapped, bit 1: B8000h-BFFFFh */
+static void ega_bmap(void)
+{
+    int map = (gc[6] >> 2) & 3;
+    int want = !ega_on ? 0 : map == 0 ? 3 : map == 2 ? 1 : map == 3 ? 2 : 0;
+    if (want == b_trap) return;
+    for (int h = 0; h < 2; h++) {
+        int on = (want >> h) & 1;
+        if (on == ((b_trap >> h) & 1)) continue;
+        for (u32 i = 0; i < 8; i++) {
+            u32 a = 0xB0000 + h * 0x8000 + i * 4096;
+            if (on) map_page(a, 0, 0); else map_page(a, guest_phys(a), 7);
+        }
+    }
+    tlb_flush();
+    b_trap = want;
+    if (!(want & 1)) video_b000_map();
+    if (vgalog > 0) kprintf("vga: memory map %d, B000h/B800h trapped %d\n", map, want);
+}
+
+/* B0000h-B7FFFh when the planes aren't there: the monochrome text buffer
+   in mode 7, else nothing answers on a colour VGA (reads FFh, writes go
+   nowhere) - Windows 3.1's VGA VxD writes and reads back B000h to see
+   whether a second, monochrome adapter is there, and gives up if it finds
+   memory. In VMHV only (the v86 monitor keeps it as RAM). */
+void video_vgalog_giveup(void)
+{
+    if (!vgalog || !vdd_code_at) return;
+    kprintf("VDD init code when Windows gave up (int 20h calls that ran are patched):\n");
+    hv_dump_lin((vdd_code_at & ~0xFFFu) - 0x1000, 0x2000);
+    kprintf("VDD locked code:\n");
+    hv_dump_lin(0x80015000, 0x2000);
+    vdd_code_at = 0;
+}
+
+void video_b000_map(void)
+{
+    if (b_trap & 1) return;                                   /* the planes are there */
+    u8 *hole = hv_hole_page();
+    int empty = hole && video_mode != 7;
+    for (u32 i = 0; i < 8; i++) {
+        u32 a = 0xB0000 + i * 4096;
+        map_page(a, empty ? (u32)(uintptr_t)hole : guest_phys(a), empty ? 5 : 7);
+    }
+    tlb_flush();
+}
+
 static void ega_check(void)
 {
     int want = is_ega(video_mode);
@@ -617,9 +695,26 @@ static void ega_check(void)
         map_window(guest_phys(0xA0000));
         ega_on = 0;
     }
+    ega_bmap();
 }
 
-int vga16_window(u32 lin) { return (ega_on || modex_trap || (planar_on && mapped_ro)) && lin >= 0xA0000 && lin < 0xB0000; }
+int vga16_window(u32 lin)
+{
+    if (video_et_split(lin)) return 1;                         /* ET4000 split segments: writes emulated */
+    if (lin >= 0xA0000 && lin < 0xB0000) return ega_on || modex_trap || (planar_on && mapped_ro);
+    if (lin >= 0xB0000 && lin < 0xC0000) return ega_on && ((b_trap >> ((lin - 0xB0000) >> 15)) & 1);
+    return 0;
+}
+
+/* Offset in the planes for lin through the memory map, -1: not decoded. */
+static int vga16_off(u32 lin)
+{
+    if (!ega_on) return (int)((lin - 0xA0000) & 0xFFFF);          /* unchained 256-colour: A000h */
+    static const u32 base[4] = { 0xA0000, 0xA0000, 0xB0000, 0xB8000 }, size[4] = { 0x20000, 0x10000, 0x8000, 0x8000 };
+    int map = (gc[6] >> 2) & 3;
+    if (lin < base[map] || lin - base[map] >= size[map]) return -1;
+    return (int)((lin - base[map]) & 0xFFFF);
+}
 
 /* Unchained 256-colour: emulate unless writes go plainly to one plane. */
 static void modex_check(void)
@@ -636,9 +731,25 @@ static void modex_check(void)
     } else if (!want && modex_trap) modex_trap = 0;   /* apply_map_mask maps the window */
 }
 
+static int vgamem_log(void)
+{
+    static int n;
+    u16 cs; u32 eip;
+    return vga_logging(&cs, &eip) && n++ < 400;
+}
+static u8 vga16_read_(u32 lin);
 u8 vga16_read(u32 lin)
 {
-    u32 o = (lin - 0xA0000) & 0xFFFF;
+    u8 v = vga16_read_(lin);
+    if (vgamem_log()) kprintf("vga mem rd %05x -> %02x (GC6 %02x GC5 %02x GC4 %02x)\n", lin, v, gc[6], gc[5], gc[4]);
+    return v;
+}
+static u8 vga16_read_(u32 lin)
+{
+    if (video_et_split(lin)) return video_et_read(lin);
+    int oo = vga16_off(lin);
+    if (oo < 0) return 0xFF;
+    u32 o = (u32)oo;
     for (int p = 0; p < 4; p++) latch[p] = planes[p * 65536 + o];
     if (!(gc[5] & 8)) return latch[gc[4] & 3];
     u8 r = 0;                                      /* read mode 1: colour compare */
@@ -647,18 +758,30 @@ u8 vga16_read(u32 lin)
     return (u8)~r;
 }
 
+static void vga_write_planes(u8 v, u8 *base, u32 stride);
 void vga16_write(u32 lin, u8 v)
 {
-    u32 o = (lin - 0xA0000) & 0xFFFF;
+    if (vgamem_log()) kprintf("vga mem wr %05x <- %02x (GC6 %02x GC5 %02x SEQ2 %02x)\n", lin, v, gc[6], gc[5], seq[2]);
+    if (video_et_split(lin)) { video_et_write(lin, v); return; }
+    int oo = vga16_off(lin);
+    if (oo < 0) return;
+    u32 o = (u32)oo;
+    ega_dirty = 1;
+    vga_write_planes(v, planes + o, 65536);
+}
+
+/* A write through the graphics controller: plane p's byte at base + p * stride. */
+static void vga_write_planes(u8 v, u8 *base, u32 stride)
+{
     int mode = gc[5] & 3, rot = gc[3] & 7, fn = (gc[3] >> 3) & 3;
     u8 mask = gc[8], mm = seq[2] & 15;
-    ega_dirty = 1;
     if (rot) v = (u8)((v >> rot) | (v << (8 - rot)));
     if (mode == 3) { mask &= v; }
     for (int p = 0; p < 4; p++) {
         if (!(mm & (1 << p))) continue;
         u8 d;
-        if (mode == 1) { planes[p * 65536 + o] = latch[p]; continue; }
+        u8 *q = base + p * stride;
+        if (mode == 1) { *q = latch[p]; continue; }
         if (mode == 0) d = (gc[1] & (1 << p)) ? ((gc[0] & (1 << p)) ? 0xFF : 0) : v;
         else if (mode == 2) d = (v & (1 << p)) ? 0xFF : 0;
         else d = (gc[0] & (1 << p)) ? 0xFF : 0;
@@ -667,7 +790,7 @@ void vga16_write(u32 lin, u8 v)
         case 2: d |= latch[p]; break;
         case 3: d ^= latch[p]; break;
         }
-        planes[p * 65536 + o] = (u8)((d & mask) | (latch[p] & ~mask));
+        *q = (u8)((d & mask) | (latch[p] & ~mask));
     }
 }
 
@@ -675,7 +798,7 @@ void vga16_write(u32 lin, u8 v)
 int vga16_fault(struct emu_cpu *e, u32 cr2)
 {
     if (!vga16_window(cr2)) return 0;
-    if (mem_emulate(e)) return 1;
+    if (mem_emulate(e)) { mem_emulate_more(e); return 1; }
     u32 a = e->seg_base[1] + *e->eip;
     kprintf("vga16: can't emulate %02x %02x %02x %02x %02x at %x (address %x)\n",
             rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), a, cr2);
@@ -850,6 +973,8 @@ static void vbe_off(void)
 {
     if (!vbe_on) return;
     vbe_on = 0;
+    et_split = 0;
+    et_on = 0;
     map_window(guest_phys(0xA0000));
 }
 
@@ -884,7 +1009,7 @@ static void vbe_mode_info(int m, u32 a)
     wr8(a + 0x1E, 1);
     static const u8 masks[3][8] = { { 5, 10, 5, 5, 5, 0, 1, 15 }, { 5, 11, 6, 5, 5, 0, 0, 0 }, { 8, 16, 8, 8, 8, 0, 8, 24 } };
     if (bpp != 8) memcpy(gptr(a + 0x1F), masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2], 8);
-    wr32(a + 0x28, (u32)(uintptr_t)vram);       /* PhysBasePtr */
+    wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
     wr16(a + 0x32, (u16)pitch);                 /* VBE 3: linear bytes per line */
 }
 
@@ -907,6 +1032,7 @@ static void vbe_set(int m, int clear)
     vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
     vbe_pitch = vbe_w * vbe_bytespp(vbe_bpp);
     vbe_start = 0;
+    et_on = 0;
     vbe_on = 1;
     if (clear) memset(vram, 0, VRAM_SIZE);
     vbe_map_bank(0);
@@ -923,6 +1049,111 @@ void video_vbe_window(struct regs *r)
     if ((u32)DX(r) * 65536 >= VRAM_SIZE) { AX(r) = 0x014F; return; }
     if (vbe_on) vbe_map_bank(DX(r)); else vbe_bank = DX(r);
     AX(r) = 0x004F;
+}
+
+/* ---------------- Tseng ET4000 ----------------
+   For drivers that know SVGA chips rather than VESA (Windows 3.1's
+   SVGA256/VDDSVGA, games' ET4000 support): the ET4000's BIOS modes 2Eh,
+   30h, 38h (640x480, 800x600, 1024x768 in 256 colours) are the VESA modes
+   of that size, with the CRTC as the ET4000 programs it (drivers check the
+   width and height a mode set leaves there), and its segment select
+   register at 3CDh banks the A000h window: bits 0-3 the 64 KB segment
+   written, bits 4-7 the one read. With the two different (screen-to-screen
+   copies) the window shows the read segment read-only and writes are
+   emulated into the write segment. 1 MB, as on most ET4000 cards. */
+int video_et_split(u32 lin) { return et_split && vbe_on && lin >= 0xA0000 && lin < 0xB0000; }
+
+/* The window as the segments and the map mask want it: straight onto the
+   segment when one segment does both and every plane is written, else the
+   read segment read-only, with writes emulated (another segment, or the
+   map mask: in chain-4 a byte at address a is in plane a & 3, written only
+   if that plane's bit is set; drivers mask the edges of 32-bit writes so). */
+static void et_remap(void)
+{
+    if (!vbe_on || !et_on) return;
+    u32 wb = et_seg & 15, rb = et_seg >> 4;
+    if (!(seq[4] & 8)) {                     /* chain-4 off: planar, every access emulated */
+        if (et_split != 2) { for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0); tlb_flush(); }
+        et_split = 2;
+        return;
+    }
+    if (wb == rb && (seq[2] & 15) == 15) { et_split = 0; vbe_map_bank(wb); return; }
+    et_split = 1;
+    vbe_bank = wb;
+    map_window_flags((u32)(uintptr_t)vram + rb * 65536, 5);  /* the read segment, read-only */
+}
+static void et_segment(u8 v)
+{
+    et_seg = v;
+    et_remap();
+}
+/* The ET4000's line pitch and display start, from the CRTC: offset (13h,
+   bit 8 in 3Fh bit 7) in 8-byte units, as its 256-colour modes count it;
+   start address (0Ch, 0Dh, bits 16-17 in 33h) in 4-byte units. Drivers set
+   their own pitch (Windows' SVGA256: 1024 bytes for a 640-wide screen). */
+static void et_crtc(void)
+{
+    if (!et_on || !vbe_on) return;
+    u32 pitch = ((u32)(crtc[0x3F] & 0x80) << 1 | crtc[0x13]) * 8;
+    u32 start = ((u32)(crtc[0x33] & 3) << 16 | (u32)crtc[0x0C] << 8 | crtc[0x0D]) * 4;
+    if (pitch < vbe_w || start + pitch * vbe_h > VRAM_SIZE) return;
+    if (pitch != vbe_pitch || start != vbe_start) { vbe_pitch = pitch; vbe_start = start; full_redraw = 1; }
+}
+
+/* Chain-4 off (the Windows driver's screen-to-screen copies: write mode 1
+   moves four pixels a byte through the latches): the window is a 64 KB
+   piece of each plane, segment s (mod 4, 256 KB a plane) at plane offset
+   s * 64K; plane p's byte q is pixel 4q + p of the packed screen. */
+static u8 *et_planar(u32 lin, u32 seg) { return vram + ((seg & 3) * 65536 + ((lin - 0xA0000) & 0xFFFF)) * 4; }
+u8 video_et_read(u32 lin)
+{
+    if (et_split == 2) {
+        u8 *b = et_planar(lin, et_seg >> 4);
+        for (int p = 0; p < 4; p++) latch[p] = b[p];
+        if (!(gc[5] & 8)) return latch[gc[4] & 3];
+        u8 r = 0;                                  /* read mode 1: colour compare */
+        for (int p = 0; p < 4; p++)
+            if (gc[7] & (1 << p)) r |= latch[p] ^ ((gc[2] & (1 << p)) ? 0xFF : 0);
+        return (u8)~r;
+    }
+    return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)];
+}
+void video_et_write(u32 lin, u8 v)
+{
+    if (et_split == 2) { vga_write_planes(v, et_planar(lin, et_seg), 1); return; }
+    u32 o = (lin - 0xA0000) & 0xFFFF;
+    if (!((seq[2] >> (o & 3)) & 1)) return;                    /* that plane is masked off */
+    vram[(u32)(et_seg & 15) * 65536 + o] = v;
+}
+
+static int et_mode(int mode, int clear)
+{
+    static const struct { u8 no; u16 vbe; u8 c1, c12, c7, c13; } t[] = {
+        { 0x2E, 0x101, 0x4F, 0xDF, 0x3E, 0x50 },        /* 640x480: vertical display end 1DFh */
+        { 0x30, 0x103, 0x63, 0x57, 0xF0, 0x64 },        /* 800x600: 257h */
+        { 0x38, 0x105, 0x7F, 0xFF, 0xFD, 0x80 },        /* 1024x768: 2FFh */
+    };
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        if (t[i].no != mode) continue;
+        int m = vbe_find(t[i].vbe);
+        if (m < 0) return 0;
+        vbe_set(m, clear);
+        video_mode = mode;
+        wr8(BDA + 0x49, (u8)mode);
+        wr8(BDA + 0x87, (u8)((rd8(BDA + 0x87) & 0x7F) | (clear ? 0 : 0x80)));   /* vbe_set's inner mode set kept memory; AH=0Fh's bit 7 says what the caller asked */
+        text_cols = vbe_w / 8; text_rows = vbe_h / 16;
+        wr16(BDA + 0x4A, (u16)text_cols);
+        wr8(BDA + 0x84, (u8)(text_rows - 1));
+        wr16(BDA + 0x85, 16);
+        crtc[0x01] = t[i].c1; crtc[0x12] = t[i].c12; crtc[0x07] = t[i].c7; crtc[0x13] = t[i].c13;
+        crtc[0x09] = 0x40;                             /* no double scan */
+        crtc[0x14] = 0x60; crtc[0x17] = 0xAB;
+        misc_out = mode == 0x2E ? 0xE3 : 0x2F;
+        et_seg = 0; et_split = 0;
+        et_on = 1;
+        return 1;
+    }
+    return 0;
 }
 
 /* The protected-mode interface's routines (4F0Ah): 47h set window,
@@ -1291,11 +1522,41 @@ void video_init(void)
 }
 
 /* ---------------- VGA ports ---------------- */
+/* vgalog (command line): every VGA port access the VMHV guest makes from
+   protected mode (Windows' display VxD, not DOS programs or the BIOS), with
+   the register index for the data ports, and every INT 10h call. */
+static int vga_logging(u16 *cs, u32 *eip)
+{
+    if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
+    return vgalog && hv_guest_pm(cs, eip);
+}
+static int vga_index(u16 port)
+{
+    switch (port) {
+    case 0x3C1: return atc_idx;
+    case 0x3C5: return seq_idx;
+    case 0x3CF: return gc_idx;
+    case 0x3B5: case 0x3D5: return crtc_idx;
+    }
+    return -1;
+}
+static u32 video_port_in_(u16 port);
 u32 video_port_in(u16 port)
+{
+    u32 v = video_port_in_(port);
+    u16 cs; u32 eip;
+    if (port != 0x3DA && port != 0x3BA && vga_logging(&cs, &eip)) {
+        int ix = vga_index(port);
+        if (ix >= 0) kprintf("vga %04x:%08x in  %03x[%02x] -> %02x\n", cs, eip, port, ix, v & 0xFF);
+        else kprintf("vga %04x:%08x in  %03x -> %02x\n", cs, eip, port, v & 0xFF);
+    }
+    return v;
+}
+static u32 video_port_in_(u16 port)
 {
     switch (port) {
     case 0x3C0: return atc_idx | atc_pas;
-    case 0x3C1: return atc[atc_idx % 21];
+    case 0x3C1: return atc[atc_idx & 31];
     case 0x3C2: return 0x10;
     case 0x3D9: return cga_sel;
     case 0x3C4: return seq_idx & 7;
@@ -1309,10 +1570,11 @@ u32 video_port_in(u16 port)
         return v; }
     case 0x3CA: return 0;
     case 0x3CC: return misc_out;
+    case 0x3CD: return et_seg;                     /* ET4000 segment select */
     case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
-    case 0x3B5: case 0x3D5: return crtc[crtc_idx & 31];
+    case 0x3B5: case 0x3D5: return crtc[crtc_idx & 63];
     case 0x3BA: case 0x3DA: {
         atc_flip = 0;
         u32 t = vpit_clock();
@@ -1347,21 +1609,40 @@ static void reg_mode_check(void)
     full_redraw = 1;
 }
 
+static void video_port_out_(u16 port, u8 v);
 void video_port_out(u16 port, u8 v)
+{
+    u16 cs; u32 eip;
+    if (vga_logging(&cs, &eip)) {
+        int ix = vga_index(port);
+        if (port == 0x3C0 && atc_flip) ix = atc_idx;            /* 3C0: index, then data */
+        if (ix >= 0) kprintf("vga %04x:%08x out %03x[%02x] <- %02x\n", cs, eip, port, ix, v);
+        else kprintf("vga %04x:%08x out %03x <- %02x\n", cs, eip, port, v);
+        static int dumped;
+        static u32 gc6_eip;
+        if (port == 0x3CF && (gc_idx & 15) == 6 && v == 0x0D && !(dumped & 1)) { dumped |= 1; gc6_eip = eip; hv_dump_here("GC6 <- 0D"); }
+        if (port == 0x3C0 && v == 0x20 && !atc_flip && !(dumped & 2) && (dumped & 1)) { dumped |= 2; hv_dump_here("ATC <- 20"); kprintf("VDD data:\n"); hv_dump_lin(0x80285000, 0x200);
+            kprintf("VDD code after (int 20h calls that ran are patched):\n"); hv_dump_lin(gc6_eip - 0x40, 0x180);
+            vdd_code_at = gc6_eip; }
+    }
+    video_port_out_(port, v);
+}
+static void video_port_out_(u16 port, u8 v)
 {
     switch (port) {
     case 0x3C0:
         if (!atc_flip) { atc_idx = v & 0x1F; atc_pas = v & 0x20; }
-        else if (atc_idx < 21) { atc[atc_idx] = v; palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
+        else { atc[atc_idx & 31] = v; if (atc_idx < 21) palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
+    case 0x3CD: et_segment(v); return;               /* ET4000 segment select */
     case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
         seq[seq_idx & 7] = v;
-        if ((seq_idx & 7) == 4) planar_check();
-        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); }
+        if ((seq_idx & 7) == 4) { planar_check(); et_remap(); }
+        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); et_remap(); }
         return;
     case 0x3C6: dac_mask = v; palette_dirty = 1; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
@@ -1376,11 +1657,12 @@ void video_port_out(u16 port, u8 v)
         gc[gc_idx & 15] = v;
         if ((gc_idx & 15) == 4) readmap_last = 1;
         apply_map_mask();
-        if ((gc_idx & 15) == 6) reg_mode_check();
+        if ((gc_idx & 15) == 6) { reg_mode_check(); ega_bmap(); }
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
-        crtc[crtc_idx & 31] = v;
+        crtc[crtc_idx & 63] = v;
+        et_crtc();
         if ((crtc_idx & 31) == 0x0C || (crtc_idx & 31) == 0x0D) full_redraw = 1;
         return;
     }
@@ -1633,11 +1915,45 @@ static void video_state(struct regs *r)
     AL(r) = 0x1C;
 }
 
-void video_int10(struct regs *r)
+/* After an INT 10h mode set in VMHV: the register writes it made, for the
+   INT 10h stub to do again as real OUTs from the guest (bios.asm), so that
+   Windows' display VxD, which traps the VGA ports, sees the mode programmed.
+   1: the stub is to continue (BIOS_CONT). */
+static int mode_replay(void)
 {
+    u32 base = 0xF0000u + rd16(0xF0000u + 0x230);
+    u32 t = base + 2, n = 0;
+#define W(port, val) do { if (n < 160) { wr16(t + n * 3, (u16)(port)); wr8(t + n * 3 + 2, (u8)(val)); n++; } } while (0)
+    u16 crt = video_mode == 7 ? 0x3B4 : 0x3D4;
+    W(0x3C4, 0); W(0x3C5, 0x01);                                  /* sequencer in reset */
+    for (int i = 1; i < 5; i++) { W(0x3C4, i); W(0x3C5, seq[i]); }
+    W(0x3C2, misc_out);
+    W(0x3C4, 0); W(0x3C5, 0x03);
+    W(crt, 0x11); W(crt + 1, crtc[0x11] & 0x7F);                   /* CRTC 0-7 writable */
+    for (int i = 0; i < 25; i++) { W(crt, i); W(crt + 1, crtc[i]); }
+    W(0x8000 | (crt + 6), 0);                                     /* read 3DAh: attribute index next */
+    for (int i = 0; i < 21; i++) { W(0x3C0, i); W(0x3C0, atc[i]); }
+    W(0x3C0, 0x20);                                               /* palette back to the display */
+    for (int i = 0; i < 9; i++) { W(0x3CE, i); W(0x3CF, gc[i]); }
+    W(0x3CE, 0x0F);
+#undef W
+    wr16(base, (u16)n);
+    return 1;
+}
+
+int video_int10(struct regs *r)
+{
+    int cont = 0;
+    if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
+    if (vgalog) kprintf("INT 10h AX=%04x BX=%04x CX=%04x DX=%04x\n", AX(r), BX(r), CX(r), DX(r));
+
     int page = BH(r) & 7;
     switch (AH(r)) {
-    case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20; break;
+    case 0x00:
+        if (!et_mode(AL(r) & 0x7F, !(AL(r) & 0x80))) video_set_mode(AL(r), !(AL(r) & 0x80));
+        if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20;
+        if (hv_active) cont = mode_replay();
+        break;
     case 0x01:
         wr16(BDA + 0x60, CX(r));
         crtc[0x0A] = CH(r) & 0x3F; crtc[0x0B] = CL(r) & 0x1F;
@@ -1756,6 +2072,7 @@ void video_int10(struct regs *r)
     default:
         dbg(1, "INT 10h AX=%04x unsupported\n", AX(r));
     }
+    return cont;
 }
 
 /* Text for the user from the monitor (e.g. why a DPMI client was stopped). */

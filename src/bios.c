@@ -62,10 +62,9 @@ static int kbuf_get(u16 *w, int remove)
     return 1;
 }
 
-static void keyboard_irq(void)
+static void keyboard_irq(u8 sc)
 {
     static int e0, skip;
-    u8 sc = (u8)vkbd_read_data();
     if (skip) { skip--; return; }
     if (sc == 0xE0) { e0 = 1; return; }
     if (sc == 0xE1) { skip = 5; return; }               /* Pause */
@@ -202,7 +201,66 @@ static int disk_rw(u32 lba, u32 count, u32 buf, int write)
     return write ? disk_write(lba, count, gptr(buf)) : disk_read(lba, count, gptr(buf));
 }
 
+static int disklog = -1;
+static void int13_log(struct regs *r, u8 fn, int st)
+{
+    if (disklog < 0) disklog = strstr(cmdline, "disklog") != 0;
+    if (!disklog) return;
+    static int n;
+    if (n++ >= 3000) return;
+    if (fn == 0x02 || fn == 0x03) {
+        u32 cyl = CH(r) | ((u32)(CL(r) & 0xC0) << 2), head = DH(r), sec = CL(r) & 63;
+        kprintf("disk: INT 13h %02x DL=%02x CHS %u/%u/%u n=%u buf %04x:%04x -> %02x\n", fn, DL(r), cyl, head, sec, AL(r),
+                r->v86_es, BX(r), st);
+    } else if (fn == 0x42 || fn == 0x43) {
+        u32 p = LIN(r->v86_ds, SI(r));
+        kprintf("disk: INT 13h %02x DL=%02x LBA %u n=%u buf %04x:%04x -> %02x\n", fn, DL(r), rd32(p + 8), rd16(p + 2),
+                rd16(p + 6), rd16(p + 4), st);
+    } else kprintf("disk: INT 13h %02x DL=%02x -> %02x\n", fn, DL(r), st);
+}
+
+static int int13_(struct regs *r);
+/* disklog in VMHV: after a read, the sectors read again into our own
+   buffer and compared with what the guest's page tables show at its
+   buffer; a mismatch means the data went somewhere else. */
+static void int13_verify(struct regs *in, u8 fn)
+{
+    static u8 tmp[128 * 512];
+    if (!hv_active || DL(in) != 0x80) return;
+    u32 lin, n, lba;
+    if (fn == 0x02) {
+        u32 cyl = CH(in) | ((u32)(CL(in) & 0xC0) << 2), sec = CL(in) & 63, head = DH(in);
+        lba = (cyl * DISK_HEADS + head) * DISK_SPT + sec - 1; n = AL(in); lin = LIN(in->v86_es, BX(in));
+    } else return;
+    if (!n || n > 128 || disk_read(lba, n, tmp)) return;
+    static int reported;
+    for (u32 i = 0; i < n * 512; i++) {
+        u32 gpa = 0;
+        int b = hv_guest_byte(lin + i, &gpa);
+        if (b != tmp[i]) {
+            if (reported++ < 30)
+                kprintf("disk: VERIFY MISMATCH read %u sectors at LBA %u into %04x:%04x: byte %u (linear %x -> physical %x) is %x, disk has %02x\n",
+                        n, lba, in->v86_es, BX(in), i, lin + i, gpa, b, tmp[i]);
+            return;
+        }
+    }
+}
+
 static int int13(struct regs *r)
+{
+    u8 fn = AH(r);
+    struct regs in = *r;
+    int res = int13_(r);
+    int13_log(&in, fn, AH(r));
+    if (disklog > 0 && AH(r) == 0) int13_verify(&in, fn);
+    return res;
+}
+void bios_disklog_fault(u32 lin, int write)
+{
+    if (disklog < 0) disklog = strstr(cmdline, "disklog") != 0;
+    if (disklog) kprintf("disk: buffer page %x not the guest's yet (%s): #PF to the guest\n", lin, write ? "read into it" : "write from it");
+}
+static int int13_(struct regs *r)
 {
     int st = 0;
     u8 fn = AH(r);
@@ -299,10 +357,28 @@ static int int15(struct regs *r)
         if (joy_bios(r)) { set_cf(r, 0); return BIOS_DONEF; }
         set_cf(r, 1);
         return BIOS_DONEF;
-    case 0x88: AX(r) = (u16)hv_ext_kb(); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
+    case 0x87:                                          /* VMHV: block move, CX words, GDT at ES:SI */
+        if (hv_ext_kb()) {
+            u32 g = LIN(r->v86_es, SI(r));
+            u32 src = rd16(g + 0x12) | (u32)rd8(g + 0x14) << 16 | (u32)rd8(g + 0x17) << 24;
+            u32 dst = rd16(g + 0x1A) | (u32)rd8(g + 0x1C) << 16 | (u32)rd8(g + 0x1F) << 24;
+            u32 n = (u32)CX(r) * 2;
+            int bad = CX(r) > 0x8000;
+            for (u32 i = 0; i < n && !bad; i++) {           /* guest-physical, A20 on as the BIOS turns it on */
+                u8 *s8 = hv_gpa_ptr(src + i), *d8 = hv_gpa_ptr(dst + i);
+                if (d8) *d8 = s8 ? *s8 : 0xFF;
+            }
+            AH(r) = bad ? 1 : 0;
+            set_cf(r, bad);
+            return BIOS_DONEF;
+        }
+        break;
+    case 0x88: AX(r) = (u16)(hv_ext_kb() > 0xFC00 ? 0xFC00 : hv_ext_kb()); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
     case 0xE8:
-        if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, none above */
-            AX(r) = CX(r) = (u16)hv_ext_kb(); BX(r) = DX(r) = 0;
+        if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, above in 64 KB blocks */
+            u32 kb = hv_ext_kb();
+            AX(r) = CX(r) = (u16)(kb > 15360 ? 15360 : kb);
+            BX(r) = DX(r) = (u16)(kb > 15360 ? (kb - 15360) / 64 : 0);
             set_cf(r, 0);
             return BIOS_DONEF;
         }
@@ -368,6 +444,7 @@ static int int15_ps2(struct regs *r)
     }
     AH(r) = (u8)err;
     set_cf(r, err != 0);
+    if (!err && AL(r) == 0x00 && BH(r) == 1) return BIOS_CONT;  /* the stub unmasks IRQ 12 with OUTs (bios.asm) */
     return BIOS_DONEF;
 }
 
@@ -376,12 +453,18 @@ static int int15_ps2(struct regs *r)
 static void ps2_irq(struct regs *r)
 {
     DX(r) = 0;
-    int b = vaux_bios_byte();
+    int b = (AH(r) & 1) ? AL(r) : -1;                     /* read by the stub from port 60h (bios.asm) */
+    if (mouse_log()) { static int n; if (n++ < 40) kprintf("mouse: BIOS IRQ 12 handler, byte %s%02x\n", b < 0 ? "none " : "", b & 0xFF); }
     if (b < 0) return;
     if (ps2_n == 0 && !(b & 0x08)) return;              /* resync on byte 0 (bit 3 set) */
     ps2_pkt[ps2_n++] = (u8)b;
     if (ps2_n < 3) return;
     ps2_n = 0;
+    if (mouse_log()) {
+        static int n;
+        if (n++ < 40) kprintf("mouse: IRQ 12 packet %02x %02x %02x -> %s %04x:%04x\n", ps2_pkt[0], ps2_pkt[1], ps2_pkt[2],
+                              ps2_on && rd32(PS2_HANDLER) ? "handler" : "dropped (off)", rd16(PS2_HANDLER + 2), rd16(PS2_HANDLER));
+    }
     if (!ps2_on || !rd32(PS2_HANDLER)) return;
     AX(r) = ps2_pkt[0]; BX(r) = ps2_pkt[1]; CX(r) = ps2_pkt[2]; DX(r) = 1;
 }
@@ -418,6 +501,19 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x06: {
         u16 ip = rd16(LIN(r->ss, SP(r))), cs = rd16(LIN(r->ss, SP(r) + 2));
         u32 a = LIN(cs, ip);
+        /* ARPL (63h) is Windows 386 enhanced mode's V86 callback opcode: one
+           left in a vector after WIN386 quit lands here, in plain real mode,
+           often while Windows is printing why it quit. A PC's BIOS IRETs and
+           the PC hangs with that message on the screen; do the same, and log. */
+        if (rd8(a) == 0x63) {
+            static u32 told = (u32)-1;
+            if (told != a) {
+                told = a;
+                kprintf("invalid opcode ARPL at %04x:%04x (a Windows 386 callback outside Windows?): "
+                        "the guest hangs here, as on a PC; Ctrl+Shift+F10 shows this log\n", cs, ip);
+            }
+            return BIOS_DONE;
+        }
         panic("invalid opcode at %04x:%04x (%02x %02x %02x %02x) and no handler for INT 6",
               cs, ip, rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3)); }
     case 0x08: {
@@ -425,11 +521,10 @@ int bios_service(struct regs *r, int id, int via_stub)
         if (t >= 0x1800B0) { t = 0; wr8(BDA + 0x70, 1); }
         wr32(BDA + 0x6C, t);
         return BIOS_CONT; }
-    case 0x09:
-        keyboard_irq();
-        vpic_eoi_irq(1);
-        return BIOS_DONE;
-    case 0x10: video_int10(r); return BIOS_DONEF;
+    case 0x09:                                            /* the stub read port 60h and EOIs (bios.asm) */
+        keyboard_irq(AL(r));
+        return BIOS_CONT;
+    case 0x10: return video_int10(r) ? BIOS_CONT : BIOS_DONEF;
     case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
     case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
     case 0x13: return int13(r);
@@ -442,7 +537,8 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x1A: return int1a(r);
     case 0x2F:
         dbg(3, "BIOS INT 2Fh AX=%04x via %s\n", AX(r), via_stub ? "chain" : "direct");
-        if (xms_hidden) ;                                       /* noxms: none here */
+        if (AX(r) == 0x564C) log_api(r);                        /* DMESG (in VMHV the chain ends here) */
+        else if (xms_hidden) ;                                  /* noxms: none here */
         else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
         return BIOS_DONE;

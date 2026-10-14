@@ -375,6 +375,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   sees it isn't in real mode and takes the DPMI host instead of starting
   its own kernel (test: `tests/iopltest.asm`). Its debugger SD/32A, which
   needs DOS/32A's own kernel, refuses as it does under Windows.
+- Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
+  3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
+  segment select register (3CDh, separate read and write segments), 1 MB.
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
@@ -423,7 +426,8 @@ games that are their own memory manager. vmdos can't give them that in
 virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
 machine (AMD-V with nested paging, or Intel VT-x with EPT and unrestricted
 guest: Intel CPUs from 2010 on) where it can. The guest sees a 386
-with 640 KB and 8 MB of extended memory (1-9 MB) and nothing else at
+with 640 KB and 31 MB of extended memory (1-32 MB; `vmmem=N` on the
+command line for another size in MB, halved until it fits) and nothing else at
 C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
 EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
 vmdos's: the BIOS stubs and every I/O port exit to the same code as in

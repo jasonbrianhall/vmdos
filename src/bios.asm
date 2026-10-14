@@ -66,12 +66,71 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vbe_pmi_end - vbe_pmi         ; 022A  its length
         dw ps2_handler                   ; 022C  INT 15h C207h handler (far pointer)
         dw int67                         ; 022E  EMS (VMEMS.SYS points INT 67h here)
+        dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
 
 ; ---- stubs ----
 dummy:  iret
 
-%assign v 0x10
-%rep 8
+; INT 10h: the monitor does the work; after a mode set in VMHV it returns
+; here (instead of IRETing for us) with a list of the register writes the
+; mode set made, and they are done again as real OUTs from the guest, as a
+; VGA BIOS does them: Windows' display VxD traps the VGA ports while the BIOS
+; runs and keeps its copy of the registers from what it sees.
+svc_16: TRAP 0x10
+        push ax
+        push cx
+        push dx
+        push si
+        mov si, vga_regtab
+        mov cx, [cs:vga_regtab_n]
+        jcxz .done
+.next:  mov dx, [cs:si]
+        mov al, [cs:si + 2]
+        add si, 3
+        test dh, 80h                    ; bit 15: a read (3DAh: the attribute flip-flop)
+        jnz .in
+        out dx, al
+        loop .next
+        jmp short .done
+.in:    and dh, 7Fh
+        in al, dx
+        loop .next
+.done:  pop si
+        pop dx
+        pop cx
+        pop ax
+        iret
+
+%assign v 0x11
+%rep 4
+svc_ %+ v:
+        TRAP v
+        iret
+  %assign v v+1
+%endrep
+
+; INT 15h: the monitor does the work. After C200h (PS/2 mouse on) it
+; returns here instead, and IRQ 12 (and the cascade, IRQ 2) is unmasked with
+; real port I/O, as a BIOS does it: Windows' VPICD traps the PIC's mask
+; registers and only lets IRQ 12 through to a VM that unmasked it.
+; Success: CF clear in the flags the IRET returns.
+svc_21: TRAP 0x15
+        push ax
+        in al, 0A1h
+        and al, 0EFh
+        out 0A1h, al
+        in al, 21h
+        and al, 0FBh
+        out 21h, al
+        pop ax
+        push bp
+        mov bp, sp
+        and byte [bp + 6], 0FEh         ; the caller's CF: success
+        pop bp
+        iret
+
+%assign v 0x16
+%rep 2
 svc_ %+ v:
         TRAP v
         iret
@@ -184,7 +243,16 @@ int08:  TRAP 0x08               ; tick count, then the user hook, then EOI
         pop ax
         iret
 
-int09:  TRAP 0x09               ; keyboard: the monitor reads port 60h, fills the buffer, EOIs
+; Keyboard: the scan code read and the EOI sent with real port I/O, as a
+; BIOS does: in a DOS window under Windows the keyboard VxD hands the VM its
+; keys through a virtual port 60h, and VPICD sends the next IRQ 1 only after
+; the VM's own EOI.
+int09:  push ax
+        in al, 0x60
+        TRAP 0x09               ; AL: the scan code; the monitor fills the buffer
+        mov al, 0x20
+        out 0x20, al
+        pop ax
         iret
 
 int18:  TRAP 0x18
@@ -196,7 +264,10 @@ int74:                           ; IRQ 12: PS/2 mouse byte -> INT 15h C207h hand
         pusha
         push ds
         push es
-        TRAP 0x74                ; DX=1: packet done, AX status, BX X, CX Y
+        in al, 0x64              ; the byte from the 8042 with real port reads, as a BIOS
+        mov ah, al               ; does it: under Windows the keyboard VxD has taken it
+        in al, 0x60              ; already and hands it to the VM through port 60h
+        TRAP 0x74                ; AH status (bit 0: AL is a byte); DX=1: packet done, AX status, BX X, CX Y
         test dx, dx
         jz .eoi
         push ax
@@ -239,6 +310,8 @@ config_table:                    ; INT 15h AH=C0h
 diskette_table:                  ; INT 1Eh (1.44 MB values; there are no floppies)
         db 0xAF, 0x02, 0x25, 0x02, 0x12, 0x1B, 0xFF, 0x6C, 0xF6, 0x0F, 0x08
 
+vga_regtab_n: dw 0
+vga_regtab:   times 3 * 160 db 0
 stubs_end:
 
         times 0xFFF0 - ($ - $$) db 0

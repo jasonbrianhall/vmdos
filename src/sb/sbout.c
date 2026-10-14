@@ -151,7 +151,7 @@ static int map_dma_buffer(void)
 {
     uint32_t bytes = s.dma_len << (s.ch >= 4);
     if (s.dma_phys + bytes > GUEST_TOP) return 0;
-    s.mem = (const volatile uint8_t *)gptr(s.dma_phys);
+    s.mem = (const volatile uint8_t *)(hv_active && s.dma_phys >= (10u << 20) ? hv_gpa_ptr(s.dma_phys) : gptr(s.dma_phys));   /* VMHV RAM above 10 MB isn't at its own address */
     return 1;
 }
 

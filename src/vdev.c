@@ -4,6 +4,9 @@
 
 /* ---------------- 8259 ---------------- */
 struct pic { u8 irr, isr, imr, base, init, icw4, read_isr; };
+int mouse_log(void);
+static int mlog_n;                                   /* mouselog: the interrupt path, the first 200 events */
+#define MLOG(...) do { if (mouse_log() && mlog_n < 200) { mlog_n++; kprintf(__VA_ARGS__); } } while (0)
 static struct pic pm = { 0, 0, 0xF8, 0x08, 0, 0, 0 };
 static struct pic ps = { 0, 0, 0xFF, 0x70, 0, 0, 0 };
 static int chosen_irq = -1;
@@ -84,6 +87,7 @@ static void pic_out(struct pic *p, int a0, u8 v)
     case 2: p->init = p->icw4 ? 3 : 0; return;
     case 3: p->init = 0; return;
     }
+    if (mouse_log() && (p->base == 0x70 || p == &ps)) MLOG("mouse: guest writes slave PIC mask %02x (IRQ 12 %s)\n", v, v & 0x10 ? "masked" : "open");
     p->imr = v;
 }
 
@@ -140,6 +144,7 @@ static void pit_write(int n, u8 v)
         if (n == 0) {
             next_irq0 = c->start + reload_of(c);
             dbg(1, "guest PIT ch0: reload %u (%u Hz)\n", reload_of(c), PIT_HZ / reload_of(c));
+            if (reload_of(c) == 65536) video_vgalog_giveup();          /* vgalog: Windows putting the timer back as it quits */
         }
     }
 }
@@ -455,6 +460,7 @@ void vkbd_refill(void)
         mq_head = (mq_head + 1) % sizeof mq;
         kbd_full = 1; kbd_aux = 1;
         aux_since = ticks;
+        MLOG("mouse: byte %02x to the 8042, %s (ccb %02x, slave mask %02x)\n", kbd_obuf, ccb & 2 ? "IRQ 12" : "no IRQ (ccb bit 1 off)", ccb, ps.imr);
         if (ccb & 2) vpic_raise(12);
         return;
     }
@@ -481,7 +487,7 @@ static void kbd_command(u8 v)
     case 0xDD: set_a20(0); break;
     case 0xDF: set_a20(1); break;
     case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; break;
-    case 0xA7: ccb |= 0x20; break;                  /* mouse port off */
+    case 0xA7: ccb |= 0x20; MLOG("mouse: 8042 A7h: mouse port off\n"); break;   /* mouse port off */
     case 0xA8: ccb &= ~0x20; break;                 /* mouse port on */
     case 0xA9: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;   /* mouse port test: OK */
     case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; kbd_aux = 0; break;
@@ -494,7 +500,7 @@ static void kbd_command(u8 v)
 static void kbd_data(u8 v)
 {
     if (kbd_cmd == 0xD1) { set_a20((v & 2) != 0); kbd_cmd = 0; return; }
-    if (kbd_cmd == 0x60) { ccb = v; kbd_cmd = 0; return; }
+    if (kbd_cmd == 0x60) { if (v != ccb) MLOG("mouse: 8042 command byte %02x -> %02x\n", ccb, v); ccb = v; kbd_cmd = 0; return; }
     if (kbd_cmd == 0xD4) { kbd_cmd = 0; aux_data(v); return; }     /* to the mouse */
     if (kbd_cmd == 0xD3) { kbd_cmd = 0; mq_put(v); return; }       /* as if from the mouse */
     if (v == 0xEE) kq_put(0xEE);
@@ -513,7 +519,15 @@ static u8 in8(u16 port)
     case 0xA0: case 0xA1: return pic_in(&ps, port & 1);
     case 0x40: case 0x41: case 0x42: return pit_read(port - 0x40);
     case 0x43: return 0xFF;
-    case 0x60: return (u8)vkbd_read_data();
+    case 0x60: {
+        int aux = kbd_full && kbd_aux;
+        u8 b = (u8)vkbd_read_data();
+        if (aux) {
+            u16 cs = 0; u32 eip = 0;
+            int pm = hv_guest_pm(&cs, &eip);
+            MLOG("mouse: guest reads the mouse byte %02x from port 60h (%s %04x:%08x)\n", b, pm ? "protected mode" : "real/v86", cs, eip);
+        }
+        return b; }
     case 0x61: {
         u8 v = port61 & 0x0F;
         if ((pit_clock() / 18) & 1) v |= 0x10;
@@ -524,9 +538,11 @@ static u8 in8(u16 port)
     case 0x71: {
         u32 kb = hv_ext_kb();                       /* VMHV: the VM's extended memory, not the PC's */
         u8 ix = cmos_index & 0x7F;
-        if (kb && (ix == 0x17 || ix == 0x30)) return (u8)kb;
-        if (kb && (ix == 0x18 || ix == 0x31)) return (u8)(kb >> 8);
-        if (kb && (ix == 0x34 || ix == 0x35)) return 0;
+        u32 k16 = kb > 0xFFFF ? 0xFFFF : kb, b64 = kb > 15360 ? (kb - 15360) / 64 : 0;   /* KB above 1 MB; 64 KB blocks above 16 MB */
+        if (kb && (ix == 0x17 || ix == 0x30)) return (u8)k16;
+        if (kb && (ix == 0x18 || ix == 0x31)) return (u8)(k16 >> 8);
+        if (kb && ix == 0x34) return (u8)b64;
+        if (kb && ix == 0x35) return (u8)(b64 >> 8);
         outb(0x70, ix); return inb(0x71); }
     case 0x92: return a20_on ? 2 : 0;
     case 0x201: return joy_port_in();                    /* game port (joy.c) */

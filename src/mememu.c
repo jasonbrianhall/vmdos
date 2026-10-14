@@ -12,6 +12,7 @@ static struct emu_cpu *E;
 static int osz, asz;                 /* operand size (2/4; 1 for byte ops), address size (2/4) */
 static int seg_ovr;                  /* -1 or 0..5 (ES CS SS DS FS GS) */
 static u32 ip;                       /* offset of the next code byte */
+static int probe, probe_bad, probe_win;  /* dry run: accesses checked, not done */
 
 enum { ES, CS, SS, DS, FS, GS };
 
@@ -19,6 +20,7 @@ static u8 fetch8(void)
 {
     u32 a = E->seg_base[CS] + (E->code32 ? ip : (ip & 0xFFFF));
     ip++;
+    if (probe && hv_emu_check(a, 0) != 1) { probe_bad = 1; return 0x90; }
     return hv_active ? hv_emu_rd8(a) : rd8(a);
 }
 static u16 fetch16(void) { u16 v = fetch8(); return v | (u16)(fetch8() << 8); }
@@ -27,9 +29,21 @@ static u32 fetch32(void) { u32 v = fetch16(); return v | (u32)fetch16() << 16; }
 /* ---------------- memory ---------------- */
 /* In VMHV the addresses are the guest's linear ones: hv.c walks its page
    tables and finds the window by guest-physical address. */
-static u8 mrd8(u32 a) { return hv_active ? hv_emu_rd8(a) : vga16_window(a) ? vga16_read(a) : rd8(a); }
+static u8 mrd8(u32 a)
+{
+    if (probe) {
+        int c = hv_emu_check(a, 0);
+        if (c == 2) { probe_win = 1; return 0; }
+        if (!c) { probe_bad = 1; return 0; }
+    }
+    return hv_active ? hv_emu_rd8(a) : vga16_window(a) ? vga16_read(a) : rd8(a);
+}
 static void mwr8(u32 a, u8 v)
 {
+    if (probe) {                                   /* only window writes: no guest page faults to miss */
+        if (hv_emu_check(a, 1) == 2) probe_win = 1; else probe_bad = 1;
+        return;
+    }
     if (hv_active) hv_emu_wr8(a, v);
     else if (vga16_window(a)) vga16_write(a, v);
     else wr8(a, v);
@@ -59,7 +73,7 @@ static void rset(int r, u32 v, int sz)
 
 /* ---------------- ModRM ---------------- */
 static int mod_, reg_, rm_;
-static u32 ea;                         /* linear address when mod != 3 */
+static u32 ea, ea_off;                 /* linear address, offset when mod != 3 */
 
 static u32 segbase(int def) { return E->seg_base[seg_ovr >= 0 ? seg_ovr : def]; }
 
@@ -92,6 +106,7 @@ static void modrm(void)
         if (mod_ == 1) off += (u32)(int)(signed char)fetch8();
         else if (mod_ == 2) off += fetch32();
     }
+    ea_off = off;
     ea = segbase(def) + off;
 }
 
@@ -211,6 +226,23 @@ static int string_op(u8 op, int rep)
     return 1;
 }
 
+static int cond(int cc)
+{
+    u32 f = *E->eflags;
+    int cf = !!(f & EFL_CF), zf = !!(f & EFL_ZF), sf = !!(f & EFL_SF), of = !!(f & EFL_OF), pf = !!(f & EFL_PF), r;
+    switch (cc >> 1) {
+    case 0: r = of; break;
+    case 1: r = cf; break;
+    case 2: r = zf; break;
+    case 3: r = cf | zf; break;
+    case 4: r = sf; break;
+    case 5: r = pf; break;
+    case 6: r = sf != of; break;
+    default: r = zf | (sf != of); break;
+    }
+    return (cc & 1) ? !r : r;
+}
+
 /* ---------------- one instruction ---------------- */
 int mem_emulate(struct emu_cpu *e)
 {
@@ -240,7 +272,10 @@ int mem_emulate(struct emu_cpu *e)
     asz = adsz32 ? 4 : 2;
     int sz = (op & 1) ? osz : 1;
 
-    if (op < 0x40 && (op & 7) < 4) {              /* ALU r/m,r  r,r/m */
+    if (op < 0x40 && ((op & 7) == 4 || (op & 7) == 5)) {   /* ALU AL/eAX,imm */
+        u32 r = alu(op >> 3, rget(0, sz), sz == 1 ? fetch8() : osz == 4 ? fetch32() : fetch16(), sz);
+        if ((op >> 3) != 7) rset(0, r, sz);
+    } else if (op < 0x40 && (op & 7) < 4) {              /* ALU r/m,r  r,r/m */
         int aop = op >> 3;
         modrm();
         if (op & 2) {
@@ -271,6 +306,39 @@ int mem_emulate(struct emu_cpu *e)
         u32 a = segbase(DS) + off;
         if (op < 0xA2) rset(0, mrd(a, sz), sz); else mwr(a, rget(0, sz), sz);
         break; }
+    /* plain register and control-flow instructions: the rest of a copy loop (mem_emulate_more) */
+    case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+    case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+        rset(op & 7, incdec(rget(op & 7, osz), op >= 0x48, osz), osz);
+        break;
+    case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
+    case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F: {
+        u32 rel = (u32)(int)(signed char)fetch8();
+        if (cond(op & 15)) ip += rel;
+        break; }
+    case 0xEB: { u32 rel = (u32)(int)(signed char)fetch8(); ip += rel; break; }
+    case 0xE9: { u32 rel = osz == 4 ? fetch32() : (u32)(int)(short)fetch16(); ip += rel; break; }
+    case 0xE0: case 0xE1: case 0xE2: case 0xE3: {
+        u32 rel = (u32)(int)(signed char)fetch8();
+        int take;
+        if (op == 0xE3) take = idx_get(1) == 0;
+        else {
+            rset(1, idx_get(1) - 1, asz);
+            take = idx_get(1) != 0;
+            if (op == 0xE0) take = take && !(*E->eflags & EFL_ZF);
+            if (op == 0xE1) take = take && (*E->eflags & EFL_ZF);
+        }
+        if (take) ip += rel;
+        break; }
+    case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+        rset(op & 7, fetch8(), 1);
+        break;
+    case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+        rset(op & 7, osz == 4 ? fetch32() : fetch16(), osz);
+        break;
+    case 0xA8: case 0xA9: alu(4, rget(0, sz), sz == 1 ? fetch8() : osz == 4 ? fetch32() : fetch16(), sz); break;
+    case 0x8D: modrm(); if (mod_ == 3) return 0; rset(reg_, ea_off, osz); break;
+    case 0x90: break;
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
         if (!string_op(op, rep)) return 0;
         break;
@@ -318,4 +386,32 @@ int mem_emulate(struct emu_cpu *e)
     }
     *e->eip = e->code32 ? ip : (ip & 0xFFFF);
     return 1;
+}
+
+/* After an emulated access to the trapped window: the instructions after it
+   are most likely the rest of a copy or fill loop (the Windows driver's
+   byte-at-a-time planar copies), each of which would fault again. Go on
+   emulating them while each one, tried first as a dry run, touches only
+   the window (or reads mapped memory) and is something the emulator does;
+   stop at anything else, or after 16 instructions without a window access,
+   and let the guest run on from there. VMHV only (the guest's page tables
+   are walked for every access). */
+int mem_emulate_more(struct emu_cpu *e)
+{
+    if (!hv_active || (*e->eflags & EFL_TF)) return 0;
+    int n = 0, idle = 0;
+    while (n < 4096 && idle < 16) {
+        u32 r[8], rip = *e->eip, fl = *e->eflags;
+        struct emu_cpu d = *e;
+        for (int i = 0; i < 8; i++) { r[i] = *e->gpr[i]; d.gpr[i] = &r[i]; }
+        d.eip = &rip; d.eflags = &fl;
+        probe = 1; probe_bad = 0; probe_win = 0;
+        int ok = mem_emulate(&d);
+        probe = 0;
+        if (!ok || probe_bad) break;
+        if (!mem_emulate(e)) break;
+        n++;
+        idle = probe_win ? 0 : idle + 1;
+    }
+    return n;
 }

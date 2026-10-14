@@ -6,12 +6,13 @@
    kernels) can't have it. VMHV restarts the PC's DOS inside an AMD-V
    guest instead: the guest owns ring 0, its own descriptor tables, paging
    and memory manager, and sees a 386 with 640 KB of conventional memory
-   and 8 MB of extended memory (1-9 MB), nothing else. vmdos stays
+   and 31 MB of extended memory (1-32 MB; vmmem=N for N MB), nothing else. vmdos stays
    underneath as the hardware:
 
    - Memory: the nested page tables (NPT) give guest-physical 0-1 MB the
      usual guest RAM (BIOS segment, video memory and the VGA window
-     included) and 1-9 MB a block of its own. They share the host's page
+     included) and 1 MB up a block of its own (above 10 MB mapped
+     only in the VM's tables; the VESA framebuffer at E0000000h). They share the host's page
      tables for linear 0-10 MiB, where the host maps the same thing, so
      A20 and the VGA window's trapping work unchanged, and the guest's
      memory is at the same linear address for the host (Sound Blaster DMA
@@ -68,6 +69,7 @@
 #define S_CPL     0x4CB
 #define S_EFER    0x4D0
 #define S_CR4     0x548
+#define S_CR2     0x640
 #define S_CR3     0x550
 #define S_CR0     0x558
 #define S_DR7     0x560
@@ -101,7 +103,9 @@
 #define EV_EXC    (3u << 8)
 #define EV_ERR    (1u << 11)
 
-#define VM_TOP    (9u << 20)          /* guest RAM: 0-640K, (UMB area), 1-9 MB */
+static u32 vm_top = 9u << 20;         /* guest RAM: 0-640K, (UMB area), 1 MB up to here (vmmem=, MB) */
+#define VM_TOP    vm_top
+#define HV_LFB    0xE0000000u           /* the VESA framebuffer, as the VM sees it */
 #define EXT_START 0x110000u           /* above the HMA, which is guest_ram's */
 
 static u8 *vmcb, *hsave, *hvsave, *iopm, *msrpm, *ext;
@@ -148,7 +152,8 @@ static u8 *gpa_ptr(u32 gpa)
     if (gpa < 0x100000) return (u8 *)(uintptr_t)guest_phys(gpa);
     if (gpa < EXT_START) return (u8 *)(uintptr_t)guest_phys(a20_on ? gpa : gpa - 0x100000);
     if (gpa < VM_TOP) return ext + (gpa - EXT_START);
-    if (video_vram_range(gpa, 1)) return (u8 *)(uintptr_t)gpa;
+    u32 vsize, vbase = video_vram_base(&vsize);
+    if (gpa >= HV_LFB && gpa - HV_LFB < vsize) return (u8 *)(uintptr_t)(vbase + (gpa - HV_LFB));
     return 0;
 }
 
@@ -173,9 +178,11 @@ static int npt_init(void)
     }
     for (u32 a = 0; a < 10u << 20; a += 2u << 20)              /* shared with the host */
         npt_pd[0][a >> 21] = hv_host_pde(a) | 7;
-    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at its address */
+    for (u32 a = 10u << 20; a < VM_TOP; a += 4096)             /* RAM above 10 MB: not shared with the host */
+        npt_pt(a)[(a >> 12) & 511] = ((u32)(uintptr_t)ext + (a - EXT_START)) | 7;
+    u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at HV_LFB */
     for (u32 a = 0; a < vsize; a += 4096)
-        npt_pt(vbase + a)[((vbase + a) >> 12) & 511] = (vbase + a) | 7;
+        npt_pt(HV_LFB + a)[((HV_LFB + a) >> 12) & 511] = (vbase + a) | 7;
     gview_pt = phys_alloc(4096);
     return 0;
 }
@@ -266,6 +273,53 @@ static void put_regs(struct regs *r)
 }
 
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
+/* For vgalog: hex of the VM's code around CS:EIP and the top of its stack
+   (what WIN386 does around a VGA access, for disassembling). */
+static u8 *glin(u32 lin);
+void hv_dump_here(const char *why)
+{
+    u32 a = (u32)V64(S_CS + 8) + V32(S_RIP) - 0x100;
+    kprintf("code %s: %04x:%08x, from %08x:\n", why, V16(S_CS), V32(S_RIP), V32(S_RIP) - 0x100);
+    for (u32 l = 0; l < 0x200; l += 32) {
+        char b[100]; int n = 0;
+        for (u32 i = 0; i < 32; i++) { u8 *p = glin(a + l + i); n += snprintf(b + n, sizeof b - n, "%02x", p ? *p : 0); }
+        kprintf("  %s\n", b);
+    }
+    u32 sp = (u32)V64(S_SS + 8) + (V16(S_SS + 2) & 0x400 ? V32(S_RSP) : (V32(S_RSP) & 0xFFFF));
+    char b[200]; int n = 0;
+    for (u32 i = 0; i < 24; i++) { u8 *q = glin(sp + i * 4); n += snprintf(b + n, sizeof b - n, " %08x", q ? *(u32 *)q : 0xDEADDEAD); }
+    kprintf("stack %04x:%08x:%s\n", V16(S_SS), V32(S_RSP), b);
+}
+/* For vgalog: bytes of the VM's linear memory, as hex and text. */
+void hv_dump_lin(u32 a, u32 len)
+{
+    for (u32 l = 0; l < len; l += 32) {
+        char h[70], t[40]; int n = 0;
+        for (u32 i = 0; i < 32; i++) {
+            u8 *p = glin(a + l + i), c = p ? *p : 0;
+            n += snprintf(h + n, sizeof h - n, "%02x", c);
+            t[i] = c >= 32 && c < 127 ? (char)c : '.';
+        }
+        t[32] = 0;
+        kprintf("  %08x %s %s\n", a + l, h, t);
+    }
+}
+/* vgalog: a fault the guest's ring 0 (WIN386) takes, the first 400. */
+static int guest_fault_log(const char *what, u32 err, u32 cr2)
+{
+    static int n;
+    if (n++ >= 400) return 0;
+    kprintf("guest ring-0 %s err %x cr2 %x at %04x:%08x\n", what, err, cr2, V16(S_CS), V32(S_RIP));
+    if (n <= 3) hv_dump_here(what);
+    return 1;
+}
+/* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
+int hv_guest_pm(u16 *cs, u32 *eip)
+{
+    if (!hv_active || real_or_v86()) return 0;
+    *cs = V16(S_CS); *eip = V32(S_RIP);
+    return 1;
+}
 
 /* ---------------- stopping ---------------- */
 __attribute__((noreturn)) static void hv_stop(const char *fmt, ...)
@@ -330,6 +384,51 @@ static void iret16(struct regs *r, u32 keep)
 
 static int wait_irq;                  /* the guest waits (HLT, a BIOS call that needs input) */
 
+/* The guest's page for lin: present, user (v86 code reaches it) and, for
+   a write, writable? With paging off, always. */
+static int gpage_ok(u32 lin, int write)
+{
+    u32 cr0 = V32(S_CR0), cr4 = V32(S_CR4);
+    if (!(cr0 & 0x80000000u)) return 1;
+    u8 *pd = gpa_ptr(V32(S_CR3) & ~0xFFFu);
+    if (!pd) return 0;
+    u32 pde = ((u32 *)pd)[lin >> 22], need = 5 | (write ? 2 : 0);
+    if ((pde & need) != need) return 0;
+    if ((pde & 0x80) && (cr4 & 0x10)) return 1;
+    u8 *pt = gpa_ptr(pde & ~0xFFFu);
+    if (!pt) return 0;
+    u32 pte = ((u32 *)pt)[(lin >> 12) & 1023];
+    return (pte & need) == need;
+}
+
+/* A disk transfer's buffer (INT 13h AH=02h/03h, 42h/43h): if a page of it
+   isn't the guest's yet (Windows maps a DOS session's pages on first
+   touch), a #PF at the stub, as the BIOS's own REP MOVS would take: the
+   guest maps the page and runs the INT 13h stub again. 1 if delivered. */
+static int buffer_fault(struct regs *r, int id)
+{
+    if (id != 0x13 || !(V32(S_CR0) & 0x80000000u)) return 0;
+    u32 lin, len;
+    int write;                                                    /* the BIOS writes the buffer (a read) */
+    switch (AH(r)) {
+    case 0x02: case 0x03: lin = LIN(r->v86_es, BX(r)); len = AL(r) * 512u; write = AH(r) == 0x02; break;
+    case 0x42: case 0x43: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        lin = LIN(rd16(p + 6), rd16(p + 4)); len = rd16(p + 2) * 512u; write = AH(r) == 0x42; break; }
+    default: return 0;
+    }
+    if (!len || len > 0x20000) return 0;
+    for (u32 a = lin & ~0xFFFu; a < lin + len; a += 4096) {
+        u32 at = a < lin ? lin : a;
+        if (gpage_ok(at, write)) continue;
+        bios_disklog_fault(at, write);
+        V64(S_CR2) = at;
+        V64(C_EVENT) = 14 | EV_EXC | EV_ERR | EV_VALID | (u64)(4u | (write ? 2u : 0u) | (gpage_ok(at, 0) ? 1u : 0u)) << 32;
+        return 1;
+    }
+    return 0;
+}
+
 /* "HLT; db id" at F000:xxxx? Then run the service. 1 if it was one. */
 static int bios_stub(void)
 {
@@ -352,6 +451,15 @@ static int bios_stub(void)
             menu_key = 0;
         }
     }
+    {
+        static int holelog = -1, n;
+        if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;
+        int es_u = r.v86_es >= 0xC800 && r.v86_es < 0xF000, ds_u = r.v86_ds >= 0xC800 && r.v86_ds < 0xF000;
+        if (holelog && (es_u || ds_u) && n++ < 300)
+            kprintf("hole: BIOS %02x AX=%04x BX=%04x CX=%04x DX=%04x ES=%04x DS=%04x SI=%04x DI=%04x\n", id, AX(&r), BX(&r),
+                    CX(&r), DX(&r), r.v86_es, r.v86_ds, SI(&r), DI(&r));
+    }
+    if (buffer_fault(&r, id)) return 1;                           /* the guest maps the page, then INT 13h again */
     int res = bios_service(&r, id, 1);
     switch (res) {
     case BIOS_DONE: iret16(&r, 0); break;
@@ -468,6 +576,26 @@ static void msr_exit(void)
    writes. Both emulate the instruction (mememu.c), reading the guest's
    memory through its own page tables (emu_ptr). */
 static u8 *hole_page, *vrom;
+u8 *hv_hole_page(void) { return hv_active ? hole_page : 0; }
+u32 hv_lfb(void) { return HV_LFB; }
+u32 hv_vm_top(void) { return VM_TOP; }
+u8 *hv_gpa_ptr(u32 gpa) { return gpa_ptr(gpa); }
+static int gwalk(u32 lin, u32 *gpa);
+/* disklog: the guest's byte at linear lin, through its own page tables
+   (independent of gview); -1 if not mapped. */
+int hv_guest_byte(u32 lin, u32 *gpa_out)
+{
+    u32 gpa;
+    if (!hv_active || gwalk(lin, &gpa)) return -1;
+    if (gpa_out) *gpa_out = gpa;
+    u8 *p = gpa_ptr(gpa);
+    if (gpa < 0x200000) {                                         /* as the VM sees it: the host's low table */
+        u64 e = hv_host_pt0()[gpa >> 12];
+        if (!(e & 1)) return -1;
+        p = (u8 *)(uintptr_t)((u32)(e & ~0xFFFull) + (gpa & 0xFFF));
+    }
+    return p ? *p : -1;
+}
 #define VROM_SIZE 0x8000u
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u
@@ -486,18 +614,25 @@ static u8 *emu_ptr(u32 lin, u32 *gpa, int write)
     }
     return gpa_ptr(*gpa);
 }
+int hv_emu_check(u32 lin, int write)
+{
+    u32 gpa = ~0u;
+    u8 *p = emu_ptr(lin, &gpa, write);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return 2;
+    return p ? 1 : 0;
+}
 u8 hv_emu_rd8(u32 lin)
 {
     u32 gpa;
     u8 *p = emu_ptr(lin, &gpa, 0);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) return vga16_read(gpa);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return vga16_read(gpa);
     return p ? *p : 0xFF;
 }
 void hv_emu_wr8(u32 lin, u8 v)
 {
     u32 gpa;
     u8 *p = emu_ptr(lin, &gpa, 1);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) vga16_write(gpa, v);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) vga16_write(gpa, v);
     else if (p) *p = v;                                           /* else dropped (empty space) */
 }
 
@@ -521,8 +656,17 @@ static void emulate_at(u32 gpa, int vga)
 static void npf_exit(void)
 {
     u32 gpa = (u32)V64(C_INFO2);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
-    if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
+    if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) {
+        static int holelog = -1, n;
+        if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;
+        if (holelog && n++ < 300)
+            kprintf("hole: write to physical %05x (dropped) from %04x:%08x %s\n", gpa, V16(S_CS), V32(S_RIP),
+                    real_or_v86() ? (V32(S_RFLAGS) & EFL_VM ? "v86" : "real") : "pm");
+        emulate_at(gpa, 0);
+        return;
+    }
+    if (gpa >= 0xB0000 && gpa < 0xB8000 && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }   /* empty B000h (video_b000_map) */
     hv_stop("the guest touched memory it doesn't have: physical %x (%s)", gpa,
             (V32(C_INFO1) & 2) ? "write" : "read");
 }
@@ -595,7 +739,19 @@ static int hv_setup(void)
     if (e == 5) { e = vmx_check(); vmx = !e; }
     if (e) return e;
     if (!hv_host_pae()) return 6;
-    if (!ext) ext = phys_try_alloc(VM_TOP - EXT_START);
+    if (!ext) {                                                   /* vmmem=N (MB, default 32): halved until it fits */
+        u32 mb = 32;
+        const char *m = strstr(cmdline, "vmmem=");
+        if (m) { mb = 0; for (m += 6; *m >= '0' && *m <= '9'; m++) mb = mb * 10 + (u32)(*m - '0'); }
+        if (mb < 9) mb = 9;
+        if (mb > 512) mb = 512;
+        for (;;) {
+            vm_top = mb << 20;
+            ext = phys_try_alloc(VM_TOP - EXT_START);
+            if (ext || mb <= 9) break;
+            mb = mb / 2 < 9 ? 9 : mb / 2;
+        }
+    }
     if (!ext) return 4;
     if (vmx) {                                                    /* the VMCB is VT-x's shadow of the VMCS */
         vmcb = phys_alloc(4096);
@@ -618,6 +774,7 @@ static void vmcb_init(struct regs *r)
 {
     memset(vmcb, 0, 4096);
     V32(C_EXC) = 1u << 13;                                        /* #GP: HLT in v86 mode (BIOS stubs) */
+    if (strstr(cmdline, "vgalog")) V32(C_EXC) |= 1u << 0 | 1u << 6 | 1u << 14;   /* vgalog: the guest's ring-0 faults, logged */
     V32(C_MISC1) = I1_INTR | I1_HLT | I1_IOIO | I1_MSR | I1_SHUTDOWN;
     V32(C_MISC2) = I2_SVM;
     V64(C_IOPM) = (u32)(uintptr_t)iopm;
@@ -744,6 +901,7 @@ int hv_start(int key)
     vmcb_init(&r0);
     if (vmx) vmx_guest_init();
     hv_active = 1;
+    video_b000_map();                                             /* B000h: empty bus, as on a colour VGA */
 
     for (;;) {
         if (hv_force) force_exit();
@@ -804,6 +962,7 @@ int hv_start(int key)
         case X_EXC(13):
             if ((V32(S_RFLAGS) & EFL_VM) ? bios_stub() : vbe_pm_stub()) break;
             if (real_or_v86() && wrap_string()) break;
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log("#GP", (u32)V64(C_INFO1), 0);
             if (debug_level >= 2) {
                 static int shown;
                 if (shown++ < 8) {
@@ -825,6 +984,15 @@ int hv_start(int key)
             V64(C_EVENT) = 13 | EV_EXC | EV_ERR | EV_VALID | (u64)(u32)V64(C_INFO1) << 32;
             break;
         case X_NPF: npf_exit(); break;
+        case X_EXC(0): case X_EXC(6):                             /* vgalog: logged, then the guest's own */
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log(code == X_EXC(0) ? "#DE" : "#UD", 0, 0);
+            V64(C_EVENT) = (u32)(code - X_EXC(0)) | EV_EXC | EV_VALID;
+            break;
+        case X_EXC(14):
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log("#PF", (u32)V64(C_INFO1), (u32)V64(C_INFO2));
+            V64(S_CR2) = V64(C_INFO2);                            /* the intercept doesn't set it */
+            V64(C_EVENT) = 14 | EV_EXC | EV_ERR | EV_VALID | (u64)(u32)V64(C_INFO1) << 32;
+            break;
         case X_SHUT:
             kprintf("VMHV: the guest triple-faulted: restarting\n");
             reboot();
@@ -851,7 +1019,7 @@ u32 hv_ext_kb(void) { return hv_active ? (VM_TOP >> 10) - 1024 : 0; }
 
 int hv_e820(struct regs *r)
 {
-    static const struct { u32 base, len, type; } map[] = {
+    const struct { u32 base, len, type; } map[] = {
         { 0, 0xA0000, 1 }, { 0xF0000, 0x10000, 2 }, { 0x100000, VM_TOP - 0x100000, 1 },
     };
     u32 i = r->ebx;

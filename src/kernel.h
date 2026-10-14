@@ -72,6 +72,9 @@ static inline void wr32(u32 a, u32 v) { *(volatile u32 *)gptr(a) = v; }
 #define BDA 0x400u
 
 /* ---- lib.c ---- */
+struct regs;
+void log_api(struct regs *r);                 /* INT 2Fh AX=564Ch: DMESG.COM reads the log */
+const char *log_save(void);                   /* the log into C:\VMDOS\VMDOS.LOG (0: done) */
 void *memcpy(void *d, const void *s, size_t n);
 void *memmove(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);
@@ -267,11 +270,23 @@ void dpmi_espfix(struct regs *r);
 
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
+u8 *hv_hole_page(void);
+void bios_disklog_fault(u32 lin, int write);  /* disklog: a disk buffer page faulted to the guest */
+u32 hv_lfb(void);                             /* VMHV: the VESA framebuffer's guest-physical address */
+u32 hv_vm_top(void);                          /* VMHV: the top of the VM's RAM */
+u8 *hv_gpa_ptr(u32 gpa);
+int hv_guest_byte(u32 lin, u32 *gpa);          /* disklog: guest byte via its page tables, -1 unmapped */                      /* VMHV: host pointer for guest-physical memory (0: none) */                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
+void video_b000_map(void);
+void video_vgalog_giveup(void);              /* vgalog: dump the VGA VxD's code now (Windows quitting) */                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
+int hv_guest_pm(u16 *cs, u32 *eip);
+void hv_dump_here(const char *why);
+void hv_dump_lin(u32 a, u32 len);           /* VMHV: code and stack at the guest's CS:EIP, for vgalog */           /* VMHV: the guest is in protected mode, at CS:EIP */
 int hv_start(int key);                        /* only returns on failure: an error code */
 void hv_hotkey(void);                         /* Ctrl+Alt+End */
 u32 hv_ext_kb(void);                          /* the VM's extended memory (0: no VM) */
 int hv_e820(struct regs *r);
 int v86_wrap_string(struct regs *r);           /* v86.c: 8086 segment wrap of a string instruction */
+int hv_emu_check(u32 lin, int write);          /* 0 unmapped, 1 memory, 2 the trapped VGA window */
 u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
 void hv_emu_wr8(u32 lin, u8 v);
 
@@ -302,12 +317,12 @@ void log_view(void);                           /* Ctrl+Shift+F10: the log, until
 extern volatile int log_view_req;
 extern int video_mode;
 extern u8 vga_dac[256][3];
-extern u8 crtc[32];
+extern u8 crtc[64];
 extern int palette_dirty;
 void video_framebuffer(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp,
                        u8 rpos, u8 rsz, u8 gpos, u8 gsz, u8 bpos, u8 bsz);
 void video_text_fallback(void);
-void video_int10(struct regs *r);
+int video_int10(struct regs *r);              /* 1: continue the INT 10h stub (register writes to replay) */
 /* mememu.c: emulate the instruction that touched trapped video memory */
 struct emu_cpu {
     u32 *gpr[8];                              /* eax ecx edx ebx esp ebp esi edi */
@@ -316,6 +331,7 @@ struct emu_cpu {
     int code32;                               /* 32-bit code segment */
 };
 int mem_emulate(struct emu_cpu *e);
+int mem_emulate_more(struct emu_cpu *e);         /* go on emulating a window loop (VMHV) */
 int vga16_window(u32 lin);                    /* video.c: 16-color planar window */
 u8 vga16_read(u32 lin);
 void vga16_write(u32 lin, u8 v);
