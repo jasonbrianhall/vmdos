@@ -68,6 +68,7 @@
 #define S_CPL     0x4CB
 #define S_EFER    0x4D0
 #define S_CR4     0x548
+#define S_CR2     0x640
 #define S_CR3     0x550
 #define S_CR0     0x558
 #define S_DR7     0x560
@@ -296,6 +297,15 @@ void hv_dump_lin(u32 a, u32 len)
         t[32] = 0;
         kprintf("  %08x %s %s\n", a + l, h, t);
     }
+}
+/* vgalog: a fault the guest's ring 0 (WIN386) takes, the first 400. */
+static int guest_fault_log(const char *what, u32 err, u32 cr2)
+{
+    static int n;
+    if (n++ >= 400) return 0;
+    kprintf("guest ring-0 %s err %x cr2 %x at %04x:%08x\n", what, err, cr2, V16(S_CS), V32(S_RIP));
+    if (n <= 3) hv_dump_here(what);
+    return 1;
 }
 /* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
 int hv_guest_pm(u16 *cs, u32 *eip)
@@ -658,6 +668,7 @@ static void vmcb_init(struct regs *r)
 {
     memset(vmcb, 0, 4096);
     V32(C_EXC) = 1u << 13;                                        /* #GP: HLT in v86 mode (BIOS stubs) */
+    if (strstr(cmdline, "vgalog")) V32(C_EXC) |= 1u << 0 | 1u << 6 | 1u << 14;   /* vgalog: the guest's ring-0 faults, logged */
     V32(C_MISC1) = I1_INTR | I1_HLT | I1_IOIO | I1_MSR | I1_SHUTDOWN;
     V32(C_MISC2) = I2_SVM;
     V64(C_IOPM) = (u32)(uintptr_t)iopm;
@@ -845,6 +856,7 @@ int hv_start(int key)
         case X_EXC(13):
             if ((V32(S_RFLAGS) & EFL_VM) ? bios_stub() : vbe_pm_stub()) break;
             if (real_or_v86() && wrap_string()) break;
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log("#GP", (u32)V64(C_INFO1), 0);
             if (debug_level >= 2) {
                 static int shown;
                 if (shown++ < 8) {
@@ -866,6 +878,15 @@ int hv_start(int key)
             V64(C_EVENT) = 13 | EV_EXC | EV_ERR | EV_VALID | (u64)(u32)V64(C_INFO1) << 32;
             break;
         case X_NPF: npf_exit(); break;
+        case X_EXC(0): case X_EXC(6):                             /* vgalog: logged, then the guest's own */
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log(code == X_EXC(0) ? "#DE" : "#UD", 0, 0);
+            V64(C_EVENT) = (u32)(code - X_EXC(0)) | EV_EXC | EV_VALID;
+            break;
+        case X_EXC(14):
+            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log("#PF", (u32)V64(C_INFO1), (u32)V64(C_INFO2));
+            V64(S_CR2) = V64(C_INFO2);                            /* the intercept doesn't set it */
+            V64(C_EVENT) = 14 | EV_EXC | EV_ERR | EV_VALID | (u64)(u32)V64(C_INFO1) << 32;
+            break;
         case X_SHUT:
             kprintf("VMHV: the guest triple-faulted: restarting\n");
             reboot();
