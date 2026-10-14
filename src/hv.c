@@ -384,6 +384,50 @@ static void iret16(struct regs *r, u32 keep)
 
 static int wait_irq;                  /* the guest waits (HLT, a BIOS call that needs input) */
 
+/* The guest's page for lin: present, user (v86 code reaches it) and, for
+   a write, writable? With paging off, always. */
+static int gpage_ok(u32 lin, int write)
+{
+    u32 cr0 = V32(S_CR0), cr4 = V32(S_CR4);
+    if (!(cr0 & 0x80000000u)) return 1;
+    u8 *pd = gpa_ptr(V32(S_CR3) & ~0xFFFu);
+    if (!pd) return 0;
+    u32 pde = ((u32 *)pd)[lin >> 22], need = 5 | (write ? 2 : 0);
+    if ((pde & need) != need) return 0;
+    if ((pde & 0x80) && (cr4 & 0x10)) return 1;
+    u8 *pt = gpa_ptr(pde & ~0xFFFu);
+    if (!pt) return 0;
+    u32 pte = ((u32 *)pt)[(lin >> 12) & 1023];
+    return (pte & need) == need;
+}
+
+/* A disk transfer's buffer (INT 13h AH=02h/03h, 42h/43h): if a page of it
+   isn't the guest's yet (Windows maps a DOS session's pages on first
+   touch), a #PF at the stub, as the BIOS's own REP MOVS would take: the
+   guest maps the page and runs the INT 13h stub again. 1 if delivered. */
+static int buffer_fault(struct regs *r, int id)
+{
+    if (id != 0x13 || !(V32(S_CR0) & 0x80000000u)) return 0;
+    u32 lin, len;
+    int write;                                                    /* the BIOS writes the buffer (a read) */
+    switch (AH(r)) {
+    case 0x02: case 0x03: lin = LIN(r->v86_es, BX(r)); len = AL(r) * 512u; write = AH(r) == 0x02; break;
+    case 0x42: case 0x43: {
+        u32 p = LIN(r->v86_ds, SI(r));
+        lin = LIN(rd16(p + 6), rd16(p + 4)); len = rd16(p + 2) * 512u; write = AH(r) == 0x42; break; }
+    default: return 0;
+    }
+    if (!len || len > 0x20000) return 0;
+    for (u32 a = lin & ~0xFFFu; a < lin + len; a += 4096) {
+        u32 at = a < lin ? lin : a;
+        if (gpage_ok(at, write)) continue;
+        V64(S_CR2) = at;
+        V64(C_EVENT) = 14 | EV_EXC | EV_ERR | EV_VALID | (u64)(4u | (write ? 2u : 0u) | (gpage_ok(at, 0) ? 1u : 0u)) << 32;
+        return 1;
+    }
+    return 0;
+}
+
 /* "HLT; db id" at F000:xxxx? Then run the service. 1 if it was one. */
 static int bios_stub(void)
 {
@@ -406,6 +450,7 @@ static int bios_stub(void)
             menu_key = 0;
         }
     }
+    if (buffer_fault(&r, id)) return 1;                           /* the guest maps the page, then INT 13h again */
     int res = bios_service(&r, id, 1);
     switch (res) {
     case BIOS_DONE: iret16(&r, 0); break;
