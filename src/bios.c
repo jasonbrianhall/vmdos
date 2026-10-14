@@ -418,6 +418,19 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x06: {
         u16 ip = rd16(LIN(r->ss, SP(r))), cs = rd16(LIN(r->ss, SP(r) + 2));
         u32 a = LIN(cs, ip);
+        /* ARPL (63h) is Windows 386 enhanced mode's V86 callback opcode: one
+           left in a vector after WIN386 quit lands here, in plain real mode,
+           often while Windows is printing why it quit. A PC's BIOS IRETs and
+           the PC hangs with that message on the screen; do the same, and log. */
+        if (rd8(a) == 0x63) {
+            static u32 told = (u32)-1;
+            if (told != a) {
+                told = a;
+                kprintf("invalid opcode ARPL at %04x:%04x (a Windows 386 callback outside Windows?): "
+                        "the guest hangs here, as on a PC; Ctrl+Shift+F10 shows this log\n", cs, ip);
+            }
+            return BIOS_DONE;
+        }
         panic("invalid opcode at %04x:%04x (%02x %02x %02x %02x) and no handler for INT 6",
               cs, ip, rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3)); }
     case 0x08: {
