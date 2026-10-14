@@ -375,6 +375,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   sees it isn't in real mode and takes the DPMI host instead of starting
   its own kernel (test: `tests/iopltest.asm`). Its debugger SD/32A, which
   needs DOS/32A's own kernel, refuses as it does under Windows.
+- Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
+  3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
+  segment select register (3CDh, separate read and write segments), 1 MB.
 - VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC

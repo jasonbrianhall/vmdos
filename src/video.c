@@ -84,10 +84,10 @@ static int bochs_vbe(void)
 /* ---------------- VGA state ---------------- */
 int video_mode = 3;
 u8 vga_dac[256][3];
-u8 crtc[32];
+u8 crtc[64];                                        /* 30h-3Fh: the ET4000's extended registers */
 int palette_dirty = 1;
 static u8 crtc_idx, seq_idx, gc_idx, atc_idx, atc_flip, misc_out = 0x67;
-static u8 seq[8], gc[16], atc[21];
+static u8 seq[8], gc[16], atc[32];                  /* ATC 16h-1Fh: ET4000 extensions (not drawn) */
 static u8 atc_pas = 0x20;            /* attribute index bit 5: palette address source (screen on) */
 static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 /* DAC width: 6 bits a primary as on a VGA, or 8 once a program asks for it
@@ -99,6 +99,8 @@ static u32 pal[256];
 
 /* VESA BIOS state (see the VBE section) */
 static int vbe_on;
+static u8 et_seg;                                    /* ET4000 segment select (3CDh) */
+static int et_split;                                 /* its read segment != its write segment: writes trapped */
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int full_redraw = 1, last_layout_mode = -1;
 
@@ -170,6 +172,9 @@ static int is_ega(int m) { return m == 0x0D || m == 0x0E || m == 0x10 || m == 0x
 static void planar_check(void);
 static void ega_check(void);
 static void modex_check(void);
+int video_et_split(u32 lin);
+u8 video_et_read(u32 lin);
+void video_et_write(u32 lin, u8 v);
 static int vga_logging(u16 *cs, u32 *eip);
 static int vgalog = -1;
 static u32 vdd_code_at;                   /* vgalog: where the VGA VxD's check ran, dumped when Windows gives up */
@@ -309,6 +314,7 @@ void video_set_mode(int mode, int clear)
     memset(crtc, 0, sizeof crtc);
     memcpy(crtc, crtc_tab[t], 25);
     if (mode == 7) crtc[0x14] = 0x0F;              /* mono: underline on scan line 15 */
+    crtc[0x37] = 0x0F;                             /* ET4000 video system configuration 2: 1 MB, 32-bit DRAM */
     misc_out = mode == 7 ? 0x66 : is_text(mode) ? 0x67 : mode == 0x10 ? 0xA3 : mode == 0x12 ? 0xE3 : 0x63;
     memset(gc, 0, sizeof gc);
     gc[5] = is_text(mode) ? 0x10 : mode == 4 || mode == 5 ? 0x30 : mode == 0x13 ? 0x40 : 0x00;   /* odd/even, CGA shift, 256-colour */
@@ -691,6 +697,7 @@ static void ega_check(void)
 
 int vga16_window(u32 lin)
 {
+    if (video_et_split(lin)) return 1;                         /* ET4000 split segments: writes emulated */
     if (lin >= 0xA0000 && lin < 0xB0000) return ega_on || modex_trap || (planar_on && mapped_ro);
     if (lin >= 0xB0000 && lin < 0xC0000) return ega_on && ((b_trap >> ((lin - 0xB0000) >> 15)) & 1);
     return 0;
@@ -736,6 +743,7 @@ u8 vga16_read(u32 lin)
 }
 static u8 vga16_read_(u32 lin)
 {
+    if (video_et_split(lin)) return video_et_read(lin);
     int oo = vga16_off(lin);
     if (oo < 0) return 0xFF;
     u32 o = (u32)oo;
@@ -750,6 +758,7 @@ static u8 vga16_read_(u32 lin)
 void vga16_write(u32 lin, u8 v)
 {
     if (vgamem_log()) kprintf("vga mem wr %05x <- %02x (GC6 %02x GC5 %02x SEQ2 %02x)\n", lin, v, gc[6], gc[5], seq[2]);
+    if (video_et_split(lin)) { video_et_write(lin, v); return; }
     int oo = vga16_off(lin);
     if (oo < 0) return;
     u32 o = (u32)oo;
@@ -953,6 +962,7 @@ static void vbe_off(void)
 {
     if (!vbe_on) return;
     vbe_on = 0;
+    et_split = 0;
     map_window(guest_phys(0xA0000));
 }
 
@@ -1026,6 +1036,59 @@ void video_vbe_window(struct regs *r)
     if ((u32)DX(r) * 65536 >= VRAM_SIZE) { AX(r) = 0x014F; return; }
     if (vbe_on) vbe_map_bank(DX(r)); else vbe_bank = DX(r);
     AX(r) = 0x004F;
+}
+
+/* ---------------- Tseng ET4000 ----------------
+   For drivers that know SVGA chips rather than VESA (Windows 3.1's
+   SVGA256/VDDSVGA, games' ET4000 support): the ET4000's BIOS modes 2Eh,
+   30h, 38h (640x480, 800x600, 1024x768 in 256 colours) are the VESA modes
+   of that size, with the CRTC as the ET4000 programs it (drivers check the
+   width and height a mode set leaves there), and its segment select
+   register at 3CDh banks the A000h window: bits 0-3 the 64 KB segment
+   written, bits 4-7 the one read. With the two different (screen-to-screen
+   copies) the window shows the read segment read-only and writes are
+   emulated into the write segment. 1 MB, as on most ET4000 cards. */
+int video_et_split(u32 lin) { return et_split && vbe_on && lin >= 0xA0000 && lin < 0xB0000; }
+
+static void et_segment(u8 v)
+{
+    et_seg = v;
+    if (!vbe_on) return;
+    u32 wb = v & 15, rb = v >> 4;
+    if (wb == rb) { et_split = 0; vbe_map_bank(wb); return; }
+    et_split = 1;
+    vbe_bank = wb;
+    map_window_flags((u32)(uintptr_t)vram + rb * 65536, 5);  /* the read segment, read-only */
+}
+u8 video_et_read(u32 lin) { return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)]; }
+void video_et_write(u32 lin, u8 v) { vram[(u32)(et_seg & 15) * 65536 + ((lin - 0xA0000) & 0xFFFF)] = v; }
+
+static int et_mode(int mode, int clear)
+{
+    static const struct { u8 no; u16 vbe; u8 c1, c12, c7, c13; } t[] = {
+        { 0x2E, 0x101, 0x4F, 0xDF, 0x3E, 0x50 },        /* 640x480: vertical display end 1DFh */
+        { 0x30, 0x103, 0x63, 0x57, 0xF0, 0x64 },        /* 800x600: 257h */
+        { 0x38, 0x105, 0x7F, 0xFF, 0xFD, 0x80 },        /* 1024x768: 2FFh */
+    };
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        if (t[i].no != mode) continue;
+        int m = vbe_find(t[i].vbe);
+        if (m < 0) return 0;
+        vbe_set(m, clear);
+        video_mode = mode;
+        wr8(BDA + 0x49, (u8)mode);
+        text_cols = vbe_w / 8; text_rows = vbe_h / 16;
+        wr16(BDA + 0x4A, (u16)text_cols);
+        wr8(BDA + 0x84, (u8)(text_rows - 1));
+        wr16(BDA + 0x85, 16);
+        crtc[0x01] = t[i].c1; crtc[0x12] = t[i].c12; crtc[0x07] = t[i].c7; crtc[0x13] = t[i].c13;
+        crtc[0x09] = 0x40;                             /* no double scan */
+        crtc[0x14] = 0x60; crtc[0x17] = 0xAB;
+        misc_out = mode == 0x2E ? 0xE3 : 0x2F;
+        et_seg = 0; et_split = 0;
+        return 1;
+    }
+    return 0;
 }
 
 /* The protected-mode interface's routines (4F0Ah): 47h set window,
@@ -1428,7 +1491,7 @@ static u32 video_port_in_(u16 port)
 {
     switch (port) {
     case 0x3C0: return atc_idx | atc_pas;
-    case 0x3C1: return atc[atc_idx % 21];
+    case 0x3C1: return atc[atc_idx & 31];
     case 0x3C2: return 0x10;
     case 0x3D9: return cga_sel;
     case 0x3C4: return seq_idx & 7;
@@ -1442,10 +1505,11 @@ static u32 video_port_in_(u16 port)
         return v; }
     case 0x3CA: return 0;
     case 0x3CC: return misc_out;
+    case 0x3CD: return et_seg;                     /* ET4000 segment select */
     case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
-    case 0x3B5: case 0x3D5: return crtc[crtc_idx & 31];
+    case 0x3B5: case 0x3D5: return crtc[crtc_idx & 63];
     case 0x3BA: case 0x3DA: {
         atc_flip = 0;
         u32 t = vpit_clock();
@@ -1503,10 +1567,11 @@ static void video_port_out_(u16 port, u8 v)
     switch (port) {
     case 0x3C0:
         if (!atc_flip) { atc_idx = v & 0x1F; atc_pas = v & 0x20; }
-        else if (atc_idx < 21) { atc[atc_idx] = v; palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
+        else { atc[atc_idx & 31] = v; if (atc_idx < 21) palette_dirty = 1; if (atc_idx == 0x10) reg_mode_check(); }
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
+    case 0x3CD: et_segment(v); return;               /* ET4000 segment select */
     case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
@@ -1531,7 +1596,7 @@ static void video_port_out_(u16 port, u8 v)
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
-        crtc[crtc_idx & 31] = v;
+        crtc[crtc_idx & 63] = v;
         if ((crtc_idx & 31) == 0x0C || (crtc_idx & 31) == 0x0D) full_redraw = 1;
         return;
     }
@@ -1818,7 +1883,9 @@ int video_int10(struct regs *r)
 
     int page = BH(r) & 7;
     switch (AH(r)) {
-    case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20;
+    case 0x00:
+        if (!et_mode(AL(r) & 0x7F, !(AL(r) & 0x80))) video_set_mode(AL(r), !(AL(r) & 0x80));
+        if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20;
         if (hv_active) cont = mode_replay();
         break;
     case 0x01:

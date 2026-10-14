@@ -311,7 +311,7 @@ void log_view(void);                           /* Ctrl+Shift+F10: the log, until
 extern volatile int log_view_req;
 extern int video_mode;
 extern u8 vga_dac[256][3];
-extern u8 crtc[32];
+extern u8 crtc[64];
 extern int palette_dirty;
 void video_framebuffer(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp,
                        u8 rpos, u8 rsz, u8 gpos, u8 gsz, u8 bpos, u8 bsz);
