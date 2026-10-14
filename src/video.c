@@ -172,6 +172,7 @@ static void ega_check(void);
 static void modex_check(void);
 static int vga_logging(u16 *cs, u32 *eip);
 static int vgalog = -1;
+static u32 vdd_code_at;                   /* vgalog: where the VGA VxD's check ran, dumped when Windows gives up */
 
 /* Graphics mode size in pixels. */
 /* 256-colour (mode 13h based) screens as the CRTC describes them, so
@@ -1483,7 +1484,7 @@ void video_port_out(u16 port, u8 v)
         if (port == 0x3CF && (gc_idx & 15) == 6 && v == 0x0D && !(dumped & 1)) { dumped |= 1; gc6_eip = eip; hv_dump_here("GC6 <- 0D"); }
         if (port == 0x3C0 && v == 0x20 && !atc_flip && !(dumped & 2) && (dumped & 1)) { dumped |= 2; hv_dump_here("ATC <- 20"); kprintf("VDD data:\n"); hv_dump_lin(0x80285000, 0x200);
             kprintf("VDD code after (int 20h calls that ran are patched):\n"); hv_dump_lin(gc6_eip - 0x40, 0x180);
-            kprintf("VDD init code (whole):\n"); hv_dump_lin((gc6_eip & ~0xFFFu) - 0x1000, 0x2000); }
+            vdd_code_at = gc6_eip; }
     }
     video_port_out_(port, v);
 }
@@ -1777,6 +1778,11 @@ void video_int10(struct regs *r)
 {
     if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
     if (vgalog) kprintf("INT 10h AX=%04x BX=%04x CX=%04x DX=%04x\n", AX(r), BX(r), CX(r), DX(r));
+    if (vgalog && vdd_code_at && AH(r) == 0) {                   /* Windows giving up: its VxD's code as it is now */
+        kprintf("VDD init code when Windows gave up (int 20h calls that ran are patched):\n");
+        hv_dump_lin((vdd_code_at & ~0xFFFu) - 0x1000, 0x2000);
+        vdd_code_at = 0;
+    }
     int page = BH(r) & 7;
     switch (AH(r)) {
     case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20; break;
