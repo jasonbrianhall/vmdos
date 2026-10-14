@@ -357,6 +357,22 @@ static int int15(struct regs *r)
         if (joy_bios(r)) { set_cf(r, 0); return BIOS_DONEF; }
         set_cf(r, 1);
         return BIOS_DONEF;
+    case 0x87:                                          /* VMHV: block move, CX words, GDT at ES:SI */
+        if (hv_ext_kb()) {
+            u32 g = LIN(r->v86_es, SI(r));
+            u32 src = rd16(g + 0x12) | (u32)rd8(g + 0x14) << 16 | (u32)rd8(g + 0x17) << 24;
+            u32 dst = rd16(g + 0x1A) | (u32)rd8(g + 0x1C) << 16 | (u32)rd8(g + 0x1F) << 24;
+            u32 n = (u32)CX(r) * 2;
+            int bad = CX(r) > 0x8000;
+            for (u32 i = 0; i < n && !bad; i++) {           /* guest-physical, A20 on as the BIOS turns it on */
+                u8 *s8 = hv_gpa_ptr(src + i), *d8 = hv_gpa_ptr(dst + i);
+                if (d8) *d8 = s8 ? *s8 : 0xFF;
+            }
+            AH(r) = bad ? 1 : 0;
+            set_cf(r, bad);
+            return BIOS_DONEF;
+        }
+        break;
     case 0x88: AX(r) = (u16)(hv_ext_kb() > 0xFC00 ? 0xFC00 : hv_ext_kb()); set_cf(r, 0); return BIOS_DONEF;   /* none, but in VMHV */
     case 0xE8:
         if (hv_ext_kb() && (AL(r) == 0x01 || AL(r) == 0x81)) {   /* VMHV: 1-16 MB in KB, above in 64 KB blocks */
