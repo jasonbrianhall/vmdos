@@ -487,7 +487,15 @@ struct regs *isr_dispatch(struct regs *r)
         if (irq == 0 && usb_ready && (ticks & 7) == 0) {
             if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
         }
-        if (irq == 0 && log_view_req && !in_usb && usb_quiet()) log_view();   /* Ctrl+Shift+F10 */
+        if (irq == 0 && log_view_req && !in_usb && usb_quiet()) {             /* Ctrl+Shift+F10 */
+            extern int vif;
+            if (from_v86) {                       /* where a hung DOS is stuck */
+                u32 a = r->cs * 16 + (r->eip & 0xFFFF);
+                kprintf("log: guest at %04x:%04x (V86, IF %u), code %02x %02x %02x %02x %02x %02x\n", r->cs, r->eip, vif,
+                        *(u8 *)a, *(u8 *)(a + 1), *(u8 *)(a + 2), *(u8 *)(a + 3), *(u8 *)(a + 4), *(u8 *)(a + 5));
+            } else kprintf("log: guest at %x:%x (%s)\n", r->cs, r->eip, from_pm ? "protected mode" : "kernel");
+            log_view();
+        }
         if (irq == 0 && debug_level >= 2 && ticks % 5000 == 0) {
             extern int vif;
             void vpic_debug(char *buf, int n);
