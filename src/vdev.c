@@ -519,7 +519,15 @@ static u8 in8(u16 port)
     case 0xA0: case 0xA1: return pic_in(&ps, port & 1);
     case 0x40: case 0x41: case 0x42: return pit_read(port - 0x40);
     case 0x43: return 0xFF;
-    case 0x60: return (u8)vkbd_read_data();
+    case 0x60: {
+        int aux = kbd_full && kbd_aux;
+        u8 b = (u8)vkbd_read_data();
+        if (aux) {
+            u16 cs = 0; u32 eip = 0;
+            int pm = hv_guest_pm(&cs, &eip);
+            MLOG("mouse: guest reads the mouse byte %02x from port 60h (%s %04x:%08x)\n", b, pm ? "protected mode" : "real/v86", cs, eip);
+        }
+        return b; }
     case 0x61: {
         u8 v = port61 & 0x0F;
         if ((pit_clock() / 18) & 1) v |= 0x10;

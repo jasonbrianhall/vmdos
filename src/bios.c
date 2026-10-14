@@ -378,6 +378,7 @@ static void ps2_irq(struct regs *r)
 {
     DX(r) = 0;
     int b = vaux_bios_byte();
+    if (mouse_log()) { static int n; if (n++ < 40) kprintf("mouse: BIOS IRQ 12 handler, byte %s%02x\n", b < 0 ? "none " : "", b & 0xFF); }
     if (b < 0) return;
     if (ps2_n == 0 && !(b & 0x08)) return;              /* resync on byte 0 (bit 3 set) */
     ps2_pkt[ps2_n++] = (u8)b;
