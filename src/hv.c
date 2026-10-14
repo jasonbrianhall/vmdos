@@ -580,6 +580,22 @@ u8 *hv_hole_page(void) { return hv_active ? hole_page : 0; }
 u32 hv_lfb(void) { return HV_LFB; }
 u32 hv_vm_top(void) { return VM_TOP; }
 u8 *hv_gpa_ptr(u32 gpa) { return gpa_ptr(gpa); }
+static int gwalk(u32 lin, u32 *gpa);
+/* disklog: the guest's byte at linear lin, through its own page tables
+   (independent of gview); -1 if not mapped. */
+int hv_guest_byte(u32 lin, u32 *gpa_out)
+{
+    u32 gpa;
+    if (!hv_active || gwalk(lin, &gpa)) return -1;
+    if (gpa_out) *gpa_out = gpa;
+    u8 *p = gpa_ptr(gpa);
+    if (gpa < 0x200000) {                                         /* as the VM sees it: the host's low table */
+        u64 e = hv_host_pt0()[gpa >> 12];
+        if (!(e & 1)) return -1;
+        p = (u8 *)(uintptr_t)((u32)(e & ~0xFFFull) + (gpa & 0xFFF));
+    }
+    return p ? *p : -1;
+}
 #define VROM_SIZE 0x8000u
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u

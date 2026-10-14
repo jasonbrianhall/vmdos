@@ -220,12 +220,39 @@ static void int13_log(struct regs *r, u8 fn, int st)
 }
 
 static int int13_(struct regs *r);
+/* disklog in VMHV: after a read, the sectors read again into our own
+   buffer and compared with what the guest's page tables show at its
+   buffer; a mismatch means the data went somewhere else. */
+static void int13_verify(struct regs *in, u8 fn)
+{
+    static u8 tmp[128 * 512];
+    if (!hv_active || DL(in) != 0x80) return;
+    u32 lin, n, lba;
+    if (fn == 0x02) {
+        u32 cyl = CH(in) | ((u32)(CL(in) & 0xC0) << 2), sec = CL(in) & 63, head = DH(in);
+        lba = (cyl * DISK_HEADS + head) * DISK_SPT + sec - 1; n = AL(in); lin = LIN(in->v86_es, BX(in));
+    } else return;
+    if (!n || n > 128 || disk_read(lba, n, tmp)) return;
+    static int reported;
+    for (u32 i = 0; i < n * 512; i++) {
+        u32 gpa = 0;
+        int b = hv_guest_byte(lin + i, &gpa);
+        if (b != tmp[i]) {
+            if (reported++ < 30)
+                kprintf("disk: VERIFY MISMATCH read %u sectors at LBA %u into %04x:%04x: byte %u (linear %x -> physical %x) is %x, disk has %02x\n",
+                        n, lba, in->v86_es, BX(in), i, lin + i, gpa, b, tmp[i]);
+            return;
+        }
+    }
+}
+
 static int int13(struct regs *r)
 {
     u8 fn = AH(r);
     struct regs in = *r;
     int res = int13_(r);
     int13_log(&in, fn, AH(r));
+    if (disklog > 0 && AH(r) == 0) int13_verify(&in, fn);
     return res;
 }
 void bios_disklog_fault(u32 lin, int write)

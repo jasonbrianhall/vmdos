@@ -274,7 +274,8 @@ u8 *hv_hole_page(void);
 void bios_disklog_fault(u32 lin, int write);  /* disklog: a disk buffer page faulted to the guest */
 u32 hv_lfb(void);                             /* VMHV: the VESA framebuffer's guest-physical address */
 u32 hv_vm_top(void);                          /* VMHV: the top of the VM's RAM */
-u8 *hv_gpa_ptr(u32 gpa);                      /* VMHV: host pointer for guest-physical memory (0: none) */                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
+u8 *hv_gpa_ptr(u32 gpa);
+int hv_guest_byte(u32 lin, u32 *gpa);          /* disklog: guest byte via its page tables, -1 unmapped */                      /* VMHV: host pointer for guest-physical memory (0: none) */                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
 void video_b000_map(void);
 void video_vgalog_giveup(void);              /* vgalog: dump the VGA VxD's code now (Windows quitting) */                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
 int hv_guest_pm(u16 *cs, u32 *eip);
