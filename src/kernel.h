@@ -271,7 +271,8 @@ void dpmi_espfix(struct regs *r);
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
 u8 *hv_hole_page(void);                       /* VMHV: the read-only FFh page of the empty bus (0: not in VMHV) */
-void video_b000_map(void);                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
+void video_b000_map(void);
+void video_vgalog_giveup(void);              /* vgalog: dump the VGA VxD's code now (Windows quitting) */                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
 int hv_guest_pm(u16 *cs, u32 *eip);
 void hv_dump_here(const char *why);
 void hv_dump_lin(u32 a, u32 len);           /* VMHV: code and stack at the guest's CS:EIP, for vgalog */           /* VMHV: the guest is in protected mode, at CS:EIP */

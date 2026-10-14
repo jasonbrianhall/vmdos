@@ -652,6 +652,14 @@ static void ega_bmap(void)
    nowhere) - Windows 3.1's VGA VxD writes and reads back B000h to see
    whether a second, monochrome adapter is there, and gives up if it finds
    memory. In VMHV only (the v86 monitor keeps it as RAM). */
+void video_vgalog_giveup(void)
+{
+    if (!vgalog || !vdd_code_at) return;
+    kprintf("VDD init code when Windows gave up (int 20h calls that ran are patched):\n");
+    hv_dump_lin((vdd_code_at & ~0xFFFu) - 0x1000, 0x2000);
+    vdd_code_at = 0;
+}
+
 void video_b000_map(void)
 {
     if (b_trap & 1) return;                                   /* the planes are there */
@@ -1778,11 +1786,7 @@ void video_int10(struct regs *r)
 {
     if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
     if (vgalog) kprintf("INT 10h AX=%04x BX=%04x CX=%04x DX=%04x\n", AX(r), BX(r), CX(r), DX(r));
-    if (vgalog && vdd_code_at && AH(r) == 0) {                   /* Windows giving up: its VxD's code as it is now */
-        kprintf("VDD init code when Windows gave up (int 20h calls that ran are patched):\n");
-        hv_dump_lin((vdd_code_at & ~0xFFFu) - 0x1000, 0x2000);
-        vdd_code_at = 0;
-    }
+
     int page = BH(r) & 7;
     switch (AH(r)) {
     case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20; break;
