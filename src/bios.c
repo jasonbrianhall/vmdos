@@ -383,6 +383,11 @@ static void ps2_irq(struct regs *r)
     ps2_pkt[ps2_n++] = (u8)b;
     if (ps2_n < 3) return;
     ps2_n = 0;
+    if (mouse_log()) {
+        static int n;
+        if (n++ < 40) kprintf("mouse: IRQ 12 packet %02x %02x %02x -> %s %04x:%04x\n", ps2_pkt[0], ps2_pkt[1], ps2_pkt[2],
+                              ps2_on && rd32(PS2_HANDLER) ? "handler" : "dropped (off)", rd16(PS2_HANDLER + 2), rd16(PS2_HANDLER));
+    }
     if (!ps2_on || !rd32(PS2_HANDLER)) return;
     AX(r) = ps2_pkt[0]; BX(r) = ps2_pkt[1]; CX(r) = ps2_pkt[2]; DX(r) = 1;
 }

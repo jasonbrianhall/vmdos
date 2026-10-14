@@ -4,6 +4,9 @@
 
 /* ---------------- 8259 ---------------- */
 struct pic { u8 irr, isr, imr, base, init, icw4, read_isr; };
+int mouse_log(void);
+static int mlog_n;                                   /* mouselog: the interrupt path, the first 200 events */
+#define MLOG(...) do { if (mouse_log() && mlog_n < 200) { mlog_n++; kprintf(__VA_ARGS__); } } while (0)
 static struct pic pm = { 0, 0, 0xF8, 0x08, 0, 0, 0 };
 static struct pic ps = { 0, 0, 0xFF, 0x70, 0, 0, 0 };
 static int chosen_irq = -1;
@@ -84,6 +87,7 @@ static void pic_out(struct pic *p, int a0, u8 v)
     case 2: p->init = p->icw4 ? 3 : 0; return;
     case 3: p->init = 0; return;
     }
+    if (mouse_log() && (p->base == 0x70 || p == &ps)) MLOG("mouse: guest writes slave PIC mask %02x (IRQ 12 %s)\n", v, v & 0x10 ? "masked" : "open");
     p->imr = v;
 }
 
@@ -456,6 +460,7 @@ void vkbd_refill(void)
         mq_head = (mq_head + 1) % sizeof mq;
         kbd_full = 1; kbd_aux = 1;
         aux_since = ticks;
+        MLOG("mouse: byte %02x to the 8042, %s (ccb %02x, slave mask %02x)\n", kbd_obuf, ccb & 2 ? "IRQ 12" : "no IRQ (ccb bit 1 off)", ccb, ps.imr);
         if (ccb & 2) vpic_raise(12);
         return;
     }
@@ -482,7 +487,7 @@ static void kbd_command(u8 v)
     case 0xDD: set_a20(0); break;
     case 0xDF: set_a20(1); break;
     case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; break;
-    case 0xA7: ccb |= 0x20; break;                  /* mouse port off */
+    case 0xA7: ccb |= 0x20; MLOG("mouse: 8042 A7h: mouse port off\n"); break;   /* mouse port off */
     case 0xA8: ccb &= ~0x20; break;                 /* mouse port on */
     case 0xA9: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;   /* mouse port test: OK */
     case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; kbd_aux = 0; break;
@@ -495,7 +500,7 @@ static void kbd_command(u8 v)
 static void kbd_data(u8 v)
 {
     if (kbd_cmd == 0xD1) { set_a20((v & 2) != 0); kbd_cmd = 0; return; }
-    if (kbd_cmd == 0x60) { ccb = v; kbd_cmd = 0; return; }
+    if (kbd_cmd == 0x60) { if (v != ccb) MLOG("mouse: 8042 command byte %02x -> %02x\n", ccb, v); ccb = v; kbd_cmd = 0; return; }
     if (kbd_cmd == 0xD4) { kbd_cmd = 0; aux_data(v); return; }     /* to the mouse */
     if (kbd_cmd == 0xD3) { kbd_cmd = 0; mq_put(v); return; }       /* as if from the mouse */
     if (v == 0xEE) kq_put(0xEE);
