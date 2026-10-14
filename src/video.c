@@ -657,6 +657,8 @@ void video_vgalog_giveup(void)
     if (!vgalog || !vdd_code_at) return;
     kprintf("VDD init code when Windows gave up (int 20h calls that ran are patched):\n");
     hv_dump_lin((vdd_code_at & ~0xFFFu) - 0x1000, 0x2000);
+    kprintf("VDD locked code:\n");
+    hv_dump_lin(0x80015000, 0x2000);
     vdd_code_at = 0;
 }
 
