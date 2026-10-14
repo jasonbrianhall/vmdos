@@ -492,6 +492,7 @@ static void msr_exit(void)
    writes. Both emulate the instruction (mememu.c), reading the guest's
    memory through its own page tables (emu_ptr). */
 static u8 *hole_page, *vrom;
+u8 *hv_hole_page(void) { return hv_active ? hole_page : 0; }
 #define VROM_SIZE 0x8000u
 #define HOLE_LO 0xC0000u
 #define HOLE_HI 0xF0000u
@@ -547,6 +548,7 @@ static void npf_exit(void)
     u32 gpa = (u32)V64(C_INFO2);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
     if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }
+    if (gpa >= 0xB0000 && gpa < 0xB8000 && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }   /* empty B000h (video_b000_map) */
     hv_stop("the guest touched memory it doesn't have: physical %x (%s)", gpa,
             (V32(C_INFO1) & 2) ? "write" : "read");
 }
@@ -768,6 +770,7 @@ int hv_start(int key)
     vmcb_init(&r0);
     if (vmx) vmx_guest_init();
     hv_active = 1;
+    video_b000_map();                                             /* B000h: empty bus, as on a colour VGA */
 
     for (;;) {
         if (hv_force) force_exit();

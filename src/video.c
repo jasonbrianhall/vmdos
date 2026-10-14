@@ -321,6 +321,7 @@ void video_set_mode(int mode, int clear)
     reg_mode = 0;
     planar_check();
     ega_check();
+    if (hv_active) video_b000_map();                         /* mode 7 has its text there */
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
     if (clear) {
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
@@ -641,7 +642,25 @@ static void ega_bmap(void)
     }
     tlb_flush();
     b_trap = want;
+    if (!(want & 1)) video_b000_map();
     if (vgalog > 0) kprintf("vga: memory map %d, B000h/B800h trapped %d\n", map, want);
+}
+
+/* B0000h-B7FFFh when the planes aren't there: the monochrome text buffer
+   in mode 7, else nothing answers on a colour VGA (reads FFh, writes go
+   nowhere) - Windows 3.1's VGA VxD writes and reads back B000h to see
+   whether a second, monochrome adapter is there, and gives up if it finds
+   memory. In VMHV only (the v86 monitor keeps it as RAM). */
+void video_b000_map(void)
+{
+    if (b_trap & 1) return;                                   /* the planes are there */
+    u8 *hole = hv_hole_page();
+    int empty = hole && video_mode != 7;
+    for (u32 i = 0; i < 8; i++) {
+        u32 a = 0xB0000 + i * 4096;
+        map_page(a, empty ? (u32)(uintptr_t)hole : guest_phys(a), empty ? 5 : 7);
+    }
+    tlb_flush();
 }
 
 static void ega_check(void)
