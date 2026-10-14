@@ -1303,7 +1303,38 @@ void video_init(void)
 }
 
 /* ---------------- VGA ports ---------------- */
+/* vgalog (command line): every VGA port access the VMHV guest makes from
+   protected mode (Windows' display VxD, not DOS programs or the BIOS), with
+   the register index for the data ports, and every INT 10h call. */
+static int vgalog = -1;
+static int vga_logging(u16 *cs, u32 *eip)
+{
+    if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
+    return vgalog && hv_guest_pm(cs, eip);
+}
+static int vga_index(u16 port)
+{
+    switch (port) {
+    case 0x3C1: return atc_idx;
+    case 0x3C5: return seq_idx;
+    case 0x3CF: return gc_idx;
+    case 0x3B5: case 0x3D5: return crtc_idx;
+    }
+    return -1;
+}
+static u32 video_port_in_(u16 port);
 u32 video_port_in(u16 port)
+{
+    u32 v = video_port_in_(port);
+    u16 cs; u32 eip;
+    if (port != 0x3DA && port != 0x3BA && vga_logging(&cs, &eip)) {
+        int ix = vga_index(port);
+        if (ix >= 0) kprintf("vga %04x:%08x in  %03x[%02x] -> %02x\n", cs, eip, port, ix, v & 0xFF);
+        else kprintf("vga %04x:%08x in  %03x -> %02x\n", cs, eip, port, v & 0xFF);
+    }
+    return v;
+}
+static u32 video_port_in_(u16 port)
 {
     switch (port) {
     case 0x3C0: return atc_idx | atc_pas;
@@ -1359,7 +1390,19 @@ static void reg_mode_check(void)
     full_redraw = 1;
 }
 
+static void video_port_out_(u16 port, u8 v);
 void video_port_out(u16 port, u8 v)
+{
+    u16 cs; u32 eip;
+    if (vga_logging(&cs, &eip)) {
+        int ix = vga_index(port);
+        if (port == 0x3C0 && atc_flip) ix = atc_idx;            /* 3C0: index, then data */
+        if (ix >= 0) kprintf("vga %04x:%08x out %03x[%02x] <- %02x\n", cs, eip, port, ix, v);
+        else kprintf("vga %04x:%08x out %03x <- %02x\n", cs, eip, port, v);
+    }
+    video_port_out_(port, v);
+}
+static void video_port_out_(u16 port, u8 v)
 {
     switch (port) {
     case 0x3C0:
@@ -1647,6 +1690,8 @@ static void video_state(struct regs *r)
 
 void video_int10(struct regs *r)
 {
+    if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
+    if (vgalog) kprintf("INT 10h AX=%04x BX=%04x CX=%04x DX=%04x\n", AX(r), BX(r), CX(r), DX(r));
     int page = BH(r) & 7;
     switch (AH(r)) {
     case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20; break;

@@ -270,6 +270,7 @@ void dpmi_espfix(struct regs *r);
 
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
+int hv_guest_pm(u16 *cs, u32 *eip);           /* VMHV: the guest is in protected mode, at CS:EIP */
 int hv_start(int key);                        /* only returns on failure: an error code */
 void hv_hotkey(void);                         /* Ctrl+Alt+End */
 u32 hv_ext_kb(void);                          /* the VM's extended memory (0: no VM) */

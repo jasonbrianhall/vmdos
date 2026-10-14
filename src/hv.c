@@ -266,6 +266,13 @@ static void put_regs(struct regs *r)
 }
 
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
+/* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
+int hv_guest_pm(u16 *cs, u32 *eip)
+{
+    if (!hv_active || real_or_v86()) return 0;
+    *cs = V16(S_CS); *eip = V32(S_RIP);
+    return 1;
+}
 
 /* ---------------- stopping ---------------- */
 __attribute__((noreturn)) static void hv_stop(const char *fmt, ...)
