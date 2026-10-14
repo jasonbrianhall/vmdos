@@ -283,6 +283,20 @@ void hv_dump_here(const char *why)
     for (u32 i = 0; i < 24; i++) { u8 *q = glin(sp + i * 4); n += snprintf(b + n, sizeof b - n, " %08x", q ? *(u32 *)q : 0xDEADDEAD); }
     kprintf("stack %04x:%08x:%s\n", V16(S_SS), V32(S_RSP), b);
 }
+/* For vgalog: bytes of the VM's linear memory, as hex and text. */
+void hv_dump_lin(u32 a, u32 len)
+{
+    for (u32 l = 0; l < len; l += 32) {
+        char h[70], t[40]; int n = 0;
+        for (u32 i = 0; i < 32; i++) {
+            u8 *p = glin(a + l + i), c = p ? *p : 0;
+            n += snprintf(h + n, sizeof h - n, "%02x", c);
+            t[i] = c >= 32 && c < 127 ? (char)c : '.';
+        }
+        t[32] = 0;
+        kprintf("  %08x %s %s\n", a + l, h, t);
+    }
+}
 /* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
 int hv_guest_pm(u16 *cs, u32 *eip)
 {
