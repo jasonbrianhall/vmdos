@@ -497,14 +497,14 @@ u8 hv_emu_rd8(u32 lin)
 {
     u32 gpa;
     u8 *p = emu_ptr(lin, &gpa, 0);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) return vga16_read(gpa);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return vga16_read(gpa);
     return p ? *p : 0xFF;
 }
 void hv_emu_wr8(u32 lin, u8 v)
 {
     u32 gpa;
     u8 *p = emu_ptr(lin, &gpa, 1);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) vga16_write(gpa, v);
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) vga16_write(gpa, v);
     else if (p) *p = v;                                           /* else dropped (empty space) */
 }
 
@@ -528,7 +528,7 @@ static void emulate_at(u32 gpa, int vga)
 static void npf_exit(void)
 {
     u32 gpa = (u32)V64(C_INFO2);
-    if (gpa >= 0xA0000 && gpa < 0xB0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
+    if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
     if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) { emulate_at(gpa, 0); return; }
     hv_stop("the guest touched memory it doesn't have: physical %x (%s)", gpa,
             (V32(C_INFO1) & 2) ? "write" : "read");

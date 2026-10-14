@@ -617,6 +617,30 @@ static void planar_check(void)
 static int ega_on, ega_dirty;
 static u8 latch[4];
 
+/* The graphics controller's memory map (GC 6 bits 2-3) says where the
+   planes appear: 0 A0000h-BFFFFh, 1 A0000h-AFFFFh (what the BIOS sets),
+   2 B0000h-B7FFFh, 3 B8000h-BFFFFh; outside it the VGA doesn't answer
+   (reads FFh, writes go nowhere). A0000h-AFFFFh is always trapped in these
+   modes; the B000h/B800h halves only while the map puts the planes there
+   (Windows 3.1's VGA driver checks this is a VGA by moving them to B800h). */
+static int b_trap;                        /* bit 0: B0000h-B7FFFh trapped, bit 1: B8000h-BFFFFh */
+static void ega_bmap(void)
+{
+    int map = (gc[6] >> 2) & 3;
+    int want = !ega_on ? 0 : map == 0 ? 3 : map == 2 ? 1 : map == 3 ? 2 : 0;
+    if (want == b_trap) return;
+    for (int h = 0; h < 2; h++) {
+        int on = (want >> h) & 1;
+        if (on == ((b_trap >> h) & 1)) continue;
+        for (u32 i = 0; i < 8; i++) {
+            u32 a = 0xB0000 + h * 0x8000 + i * 4096;
+            if (on) map_page(a, 0, 0); else map_page(a, guest_phys(a), 7);
+        }
+    }
+    tlb_flush();
+    b_trap = want;
+}
+
 static void ega_check(void)
 {
     int want = is_ega(video_mode);
@@ -629,9 +653,25 @@ static void ega_check(void)
         map_window(guest_phys(0xA0000));
         ega_on = 0;
     }
+    ega_bmap();
 }
 
-int vga16_window(u32 lin) { return (ega_on || modex_trap || (planar_on && mapped_ro)) && lin >= 0xA0000 && lin < 0xB0000; }
+int vga16_window(u32 lin)
+{
+    if (lin >= 0xA0000 && lin < 0xB0000) return ega_on || modex_trap || (planar_on && mapped_ro);
+    if (lin >= 0xB0000 && lin < 0xC0000) return ega_on && ((b_trap >> ((lin - 0xB0000) >> 15)) & 1);
+    return 0;
+}
+
+/* Offset in the planes for lin through the memory map, -1: not decoded. */
+static int vga16_off(u32 lin)
+{
+    if (!ega_on) return (int)((lin - 0xA0000) & 0xFFFF);          /* unchained 256-colour: A000h */
+    static const u32 base[4] = { 0xA0000, 0xA0000, 0xB0000, 0xB8000 }, size[4] = { 0x20000, 0x10000, 0x8000, 0x8000 };
+    int map = (gc[6] >> 2) & 3;
+    if (lin < base[map] || lin - base[map] >= size[map]) return -1;
+    return (int)((lin - base[map]) & 0xFFFF);
+}
 
 /* Unchained 256-colour: emulate unless writes go plainly to one plane. */
 static void modex_check(void)
@@ -650,7 +690,9 @@ static void modex_check(void)
 
 u8 vga16_read(u32 lin)
 {
-    u32 o = (lin - 0xA0000) & 0xFFFF;
+    int oo = vga16_off(lin);
+    if (oo < 0) return 0xFF;
+    u32 o = (u32)oo;
     for (int p = 0; p < 4; p++) latch[p] = planes[p * 65536 + o];
     if (!(gc[5] & 8)) return latch[gc[4] & 3];
     u8 r = 0;                                      /* read mode 1: colour compare */
@@ -661,7 +703,9 @@ u8 vga16_read(u32 lin)
 
 void vga16_write(u32 lin, u8 v)
 {
-    u32 o = (lin - 0xA0000) & 0xFFFF;
+    int oo = vga16_off(lin);
+    if (oo < 0) return;
+    u32 o = (u32)oo;
     int mode = gc[5] & 3, rot = gc[3] & 7, fn = (gc[3] >> 3) & 3;
     u8 mask = gc[8], mm = seq[2] & 15;
     ega_dirty = 1;
@@ -1431,7 +1475,7 @@ static void video_port_out_(u16 port, u8 v)
         gc[gc_idx & 15] = v;
         if ((gc_idx & 15) == 4) readmap_last = 1;
         apply_map_mask();
-        if ((gc_idx & 15) == 6) reg_mode_check();
+        if ((gc_idx & 15) == 6) { reg_mode_check(); ega_bmap(); }
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
