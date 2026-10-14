@@ -101,6 +101,7 @@ static u32 pal[256];
 static int vbe_on;
 static u8 et_seg;                                    /* ET4000 segment select (3CDh) */
 static int et_split;                                 /* its read segment != its write segment: writes trapped */
+static int et_on;                                    /* an ET4000 mode: line pitch and display start come from the CRTC */
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int full_redraw = 1, last_layout_mode = -1;
 
@@ -173,6 +174,7 @@ static void planar_check(void);
 static void ega_check(void);
 static void modex_check(void);
 int video_et_split(u32 lin);
+static void et_crtc(void);
 u8 video_et_read(u32 lin);
 void video_et_write(u32 lin, u8 v);
 static int vga_logging(u16 *cs, u32 *eip);
@@ -963,6 +965,7 @@ static void vbe_off(void)
     if (!vbe_on) return;
     vbe_on = 0;
     et_split = 0;
+    et_on = 0;
     map_window(guest_phys(0xA0000));
 }
 
@@ -1020,6 +1023,7 @@ static void vbe_set(int m, int clear)
     vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
     vbe_pitch = vbe_w * vbe_bytespp(vbe_bpp);
     vbe_start = 0;
+    et_on = 0;
     vbe_on = 1;
     if (clear) memset(vram, 0, VRAM_SIZE);
     vbe_map_bank(0);
@@ -1060,6 +1064,19 @@ static void et_segment(u8 v)
     vbe_bank = wb;
     map_window_flags((u32)(uintptr_t)vram + rb * 65536, 5);  /* the read segment, read-only */
 }
+/* The ET4000's line pitch and display start, from the CRTC: offset (13h,
+   bit 8 in 3Fh bit 7) in 8-byte units, as its 256-colour modes count it;
+   start address (0Ch, 0Dh, bits 16-17 in 33h) in 4-byte units. Drivers set
+   their own pitch (Windows' SVGA256: 1024 bytes for a 640-wide screen). */
+static void et_crtc(void)
+{
+    if (!et_on || !vbe_on) return;
+    u32 pitch = ((u32)(crtc[0x3F] & 0x80) << 1 | crtc[0x13]) * 8;
+    u32 start = ((u32)(crtc[0x33] & 3) << 16 | (u32)crtc[0x0C] << 8 | crtc[0x0D]) * 4;
+    if (pitch < vbe_w || start + pitch * vbe_h > VRAM_SIZE) return;
+    if (pitch != vbe_pitch || start != vbe_start) { vbe_pitch = pitch; vbe_start = start; full_redraw = 1; }
+}
+
 u8 video_et_read(u32 lin) { return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)]; }
 void video_et_write(u32 lin, u8 v) { vram[(u32)(et_seg & 15) * 65536 + ((lin - 0xA0000) & 0xFFFF)] = v; }
 
@@ -1087,6 +1104,7 @@ static int et_mode(int mode, int clear)
         crtc[0x14] = 0x60; crtc[0x17] = 0xAB;
         misc_out = mode == 0x2E ? 0xE3 : 0x2F;
         et_seg = 0; et_split = 0;
+        et_on = 1;
         return 1;
     }
     return 0;
@@ -1598,6 +1616,7 @@ static void video_port_out_(u16 port, u8 v)
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
         crtc[crtc_idx & 63] = v;
+        et_crtc();
         if ((crtc_idx & 31) == 0x0C || (crtc_idx & 31) == 0x0D) full_redraw = 1;
         return;
     }
