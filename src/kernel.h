@@ -72,6 +72,9 @@ static inline void wr32(u32 a, u32 v) { *(volatile u32 *)gptr(a) = v; }
 #define BDA 0x400u
 
 /* ---- lib.c ---- */
+struct regs;
+void log_api(struct regs *r);                 /* INT 2Fh AX=564Ch: DMESG.COM reads the log */
+const char *log_save(void);                   /* the log into C:\VMDOS\VMDOS.LOG (0: done) */
 void *memcpy(void *d, const void *s, size_t n);
 void *memmove(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);

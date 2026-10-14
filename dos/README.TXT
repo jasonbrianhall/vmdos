@@ -22,6 +22,10 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
                           (default VMSHOT.BMP)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 100)
+  DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
+  DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
+                          when it stops, or on S in the Ctrl+Shift+F10 log
+                          (for a crash or hang: read it after restarting)
   VMCD                  List CD drives and images
   VMCD F: C:\ISOS\X.ISO Put an ISO (or CUE sheet) in a CD drive (has to be on C:)
   VMFD A: DISK1.IMG     Put a floppy image in A: or B: (/E takes it out,

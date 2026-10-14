@@ -165,6 +165,83 @@ static void log_lines(void)
     if (n_lines > 1 && !loglin[line_at[n_lines - 1]]) n_lines--;    /* the empty line after the last newline */
 }
 
+/* ---- the log for DOS: DMESG.COM ----
+   INT 2Fh AX=564Ch: EDX = log position to start at (0: the oldest kept),
+   CX = buffer size at ES:DI (at least 2). Copies the log from there, '\n'
+   as CR LF; returns CX = bytes copied (0: the end), EDX = position to ask
+   for next, AX = 0, BX = 'VM'. */
+void log_api(struct regs *r)
+{
+    u32 start = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0, p = r->edx;
+    if (p < start) p = start;
+    u32 a = LIN(r->v86_es, DI(r)), n = 0, max = CX(r);
+    while (p < logpos && n + 2 <= max) {
+        char c = logbuf[p++ % sizeof logbuf];
+        if (c == '\n') wr8(a + n++, '\r');
+        wr8(a + n++, (u8)c);
+    }
+    CX(r) = (u16)n;
+    r->edx = p;
+    r->eax = (r->eax & 0xFFFF0000u);
+    BX(r) = 0x564D;
+}
+
+/* The log into C:\VMDOS\VMDOS.LOG, a file DMESG /K made: its own sectors,
+   overwritten in place (newest lines kept), so no FAT or directory sector
+   changes and DOS's file system is never touched. The file must start with
+   "vmdos log" (so a file of the user's is never overwritten). Pads with
+   Ctrl+Z and spaces. 0 done, else what's wrong. */
+const char *log_save(void)
+{
+    static int busy;
+    static struct fatvol v;
+    static struct extent ext[64];
+    static u8 sec[512];
+    u32 c, size;
+    if (busy) return "busy";
+    busy = 1;
+    const char *err = 0;
+    if (disk_volume(&v)) err = "C: has no FAT partition";
+    else if (fat_lookup(&v, "\\VMDOS\\VMDOS.LOG", &c, &size)) err = "no C:\\VMDOS\\VMDOS.LOG (DMESG /K makes it)";
+    else if (size < 4096) err = "C:\\VMDOS\\VMDOS.LOG is too small (DMESG /K makes it again)";
+    int n = 0;
+    if (!err) {
+        if (size > 1024 * 1024) size = 1024 * 1024;
+        size &= ~511u;
+        n = fat_extents(&v, c, size, ext, 64);
+        if (n <= 0) err = "C:\\VMDOS\\VMDOS.LOG is too fragmented";
+        else if (disk_read(ext[0].lba, 1, sec) || memcmp(sec, "vmdos log", 9)) err = "C:\\VMDOS\\VMDOS.LOG isn't one DMESG /K made";
+    }
+    if (!err) {
+        /* header, then the newest part of the log that fits (CR LF lines) */
+        static const char hdr[] = "vmdos log, saved by vmdos itself\r\n\r\n";
+        u32 start = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0, len = 0;
+        for (u32 p = start; p < logpos; p++) len += logbuf[p % sizeof logbuf] == '\n' ? 2 : 1;
+        u32 room = size - (sizeof hdr - 1) - 1;
+        while (len > room) len -= logbuf[start++ % sizeof logbuf] == '\n' ? 2 : 1;
+        u32 p = start, h = 0;
+        int cr = 0, eof = 0;
+        for (int e = 0; e < n && !err; e++)
+            for (u32 s = 0; s < ext[e].count && !err; s++) {
+                for (int b = 0; b < 512; b++) {
+                    u8 ch;
+                    if (h < sizeof hdr - 1) ch = (u8)hdr[h++];
+                    else if (cr) { ch = '\n'; cr = 0; }
+                    else if (p < logpos) {
+                        ch = (u8)logbuf[p++ % sizeof logbuf];
+                        if (ch == '\n') { ch = '\r'; cr = 1; }
+                    } else if (!eof) { ch = 0x1A; eof = 1; }        /* Ctrl+Z: TYPE stops here */
+                    else ch = ' ';
+                    sec[b] = ch;
+                }
+                if (disk_write(ext[e].lba + s, 1, sec)) err = "a disk write failed";
+            }
+        disk_flush();
+    }
+    busy = 0;
+    return err;
+}
+
 void usb_tick(void);
 static int stop_key(void)
 {
@@ -187,10 +264,12 @@ static void log_screen(const char *msg, int closable)
     int rows = 24 - 3 - msg_rows - 3;
     if (rows < 3) rows = 3;
     int top = n_lines > rows ? n_lines - rows : 0, last = -1;
+    const char *saved = 0;
     for (;;) {
         if (top != last) {
-            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End%s):\n",
-                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines, closable ? ", Esc: back" : "");
+            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End, S: save%s):%s%s\n",
+                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines, closable ? ", Esc: back" : "",
+                             saved ? " " : "", saved ? saved : "");
             for (int i = top; i < top + rows && i < n_lines && n < (int)sizeof screen - 80; i++)
                 n += snprintf(screen + n, sizeof screen - n, "%s\n", loglin + line_at[i]);
             if (closable) video_console_attr("vmdos log", screen, 0x1F);
@@ -208,6 +287,11 @@ static void log_screen(const char *msg, int closable)
         case 0x47: top = 0; break;                                   /* home */
         case 0x4F: top = max; break;                                 /* end */
         case 0x01: case 0x44: if (closable) return; break;          /* Esc, F10 */
+        case 0x1F: {                                                 /* S: into C:\VMDOS\VMDOS.LOG */
+            const char *e = log_save();
+            saved = e ? e : "saved to C:\\VMDOS\\VMDOS.LOG";
+            last = -1;
+            break; }
         }
         if (top > max) top = max;
         if (top < 0) top = 0;
@@ -239,6 +323,8 @@ void panic(const char *fmt, ...)
     va_end(ap);
     disk_flush();                                 /* don't lose gathered writes (no-op while flushing) */
     kprintf("\n*** vmdos stopped: %s\n", buf);
+    const char *se = log_save();                  /* into C:\VMDOS\VMDOS.LOG, if DMESG /K made it */
+    kprintf(se ? "log not saved: %s\n" : "log saved to C:\\VMDOS\\VMDOS.LOG\n", se);
     if (bootcon_on && !video_fb_ready()) for (;;) __asm__ volatile("cli; hlt");   /* the boot console shows it */
     bootcon_stop();
     log_screen(buf, 0);
