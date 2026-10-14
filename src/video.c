@@ -175,6 +175,7 @@ static void ega_check(void);
 static void modex_check(void);
 int video_et_split(u32 lin);
 static void et_crtc(void);
+static void et_remap(void);
 u8 video_et_read(u32 lin);
 void video_et_write(u32 lin, u8 v);
 static int vga_logging(u16 *cs, u32 *eip);
@@ -1054,15 +1055,24 @@ void video_vbe_window(struct regs *r)
    emulated into the write segment. 1 MB, as on most ET4000 cards. */
 int video_et_split(u32 lin) { return et_split && vbe_on && lin >= 0xA0000 && lin < 0xB0000; }
 
-static void et_segment(u8 v)
+/* The window as the segments and the map mask want it: straight onto the
+   segment when one segment does both and every plane is written, else the
+   read segment read-only, with writes emulated (another segment, or the
+   map mask: in chain-4 a byte at address a is in plane a & 3, written only
+   if that plane's bit is set; drivers mask the edges of 32-bit writes so). */
+static void et_remap(void)
 {
-    et_seg = v;
-    if (!vbe_on) return;
-    u32 wb = v & 15, rb = v >> 4;
-    if (wb == rb) { et_split = 0; vbe_map_bank(wb); return; }
+    if (!vbe_on || !et_on) return;
+    u32 wb = et_seg & 15, rb = et_seg >> 4;
+    if (wb == rb && (seq[2] & 15) == 15) { et_split = 0; vbe_map_bank(wb); return; }
     et_split = 1;
     vbe_bank = wb;
     map_window_flags((u32)(uintptr_t)vram + rb * 65536, 5);  /* the read segment, read-only */
+}
+static void et_segment(u8 v)
+{
+    et_seg = v;
+    et_remap();
 }
 /* The ET4000's line pitch and display start, from the CRTC: offset (13h,
    bit 8 in 3Fh bit 7) in 8-byte units, as its 256-colour modes count it;
@@ -1078,7 +1088,12 @@ static void et_crtc(void)
 }
 
 u8 video_et_read(u32 lin) { return vram[(u32)(et_seg >> 4) * 65536 + ((lin - 0xA0000) & 0xFFFF)]; }
-void video_et_write(u32 lin, u8 v) { vram[(u32)(et_seg & 15) * 65536 + ((lin - 0xA0000) & 0xFFFF)] = v; }
+void video_et_write(u32 lin, u8 v)
+{
+    u32 o = (lin - 0xA0000) & 0xFFFF;
+    if (!((seq[2] >> (o & 3)) & 1)) return;                    /* that plane is masked off */
+    vram[(u32)(et_seg & 15) * 65536 + o] = v;
+}
 
 static int et_mode(int mode, int clear)
 {
@@ -1596,7 +1611,7 @@ static void video_port_out_(u16 port, u8 v)
     case 0x3C5:
         seq[seq_idx & 7] = v;
         if ((seq_idx & 7) == 4) planar_check();
-        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); }
+        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); et_remap(); }
         return;
     case 0x3C6: dac_mask = v; palette_dirty = 1; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
