@@ -442,7 +442,7 @@ int bios_service(struct regs *r, int id, int via_stub)
         keyboard_irq();
         vpic_eoi_irq(1);
         return BIOS_DONE;
-    case 0x10: video_int10(r); return BIOS_DONEF;
+    case 0x10: return video_int10(r) ? BIOS_CONT : BIOS_DONEF;
     case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
     case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
     case 0x13: return int13(r);

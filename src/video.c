@@ -1784,14 +1784,43 @@ static void video_state(struct regs *r)
     AL(r) = 0x1C;
 }
 
-void video_int10(struct regs *r)
+/* After an INT 10h mode set in VMHV: the register writes it made, for the
+   INT 10h stub to do again as real OUTs from the guest (bios.asm), so that
+   Windows' display VxD, which traps the VGA ports, sees the mode programmed.
+   1: the stub is to continue (BIOS_CONT). */
+static int mode_replay(void)
 {
+    u32 base = 0xF0000u + rd16(0xF0000u + 0x230);
+    u32 t = base + 2, n = 0;
+#define W(port, val) do { if (n < 160) { wr16(t + n * 3, (u16)(port)); wr8(t + n * 3 + 2, (u8)(val)); n++; } } while (0)
+    u16 crt = video_mode == 7 ? 0x3B4 : 0x3D4;
+    W(0x3C4, 0); W(0x3C5, 0x01);                                  /* sequencer in reset */
+    for (int i = 1; i < 5; i++) { W(0x3C4, i); W(0x3C5, seq[i]); }
+    W(0x3C2, misc_out);
+    W(0x3C4, 0); W(0x3C5, 0x03);
+    W(crt, 0x11); W(crt + 1, crtc[0x11] & 0x7F);                   /* CRTC 0-7 writable */
+    for (int i = 0; i < 25; i++) { W(crt, i); W(crt + 1, crtc[i]); }
+    W(0x8000 | (crt + 6), 0);                                     /* read 3DAh: attribute index next */
+    for (int i = 0; i < 21; i++) { W(0x3C0, i); W(0x3C0, atc[i]); }
+    W(0x3C0, 0x20);                                               /* palette back to the display */
+    for (int i = 0; i < 9; i++) { W(0x3CE, i); W(0x3CF, gc[i]); }
+    W(0x3CE, 0x0F);
+#undef W
+    wr16(base, (u16)n);
+    return 1;
+}
+
+int video_int10(struct regs *r)
+{
+    int cont = 0;
     if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
     if (vgalog) kprintf("INT 10h AX=%04x BX=%04x CX=%04x DX=%04x\n", AX(r), BX(r), CX(r), DX(r));
 
     int page = BH(r) & 7;
     switch (AH(r)) {
-    case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20; break;
+    case 0x00: video_set_mode(AL(r), !(AL(r) & 0x80)); if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20;
+        if (hv_active) cont = mode_replay();
+        break;
     case 0x01:
         wr16(BDA + 0x60, CX(r));
         crtc[0x0A] = CH(r) & 0x3F; crtc[0x0B] = CL(r) & 0x1F;
@@ -1910,6 +1939,7 @@ void video_int10(struct regs *r)
     default:
         dbg(1, "INT 10h AX=%04x unsupported\n", AX(r));
     }
+    return cont;
 }
 
 /* Text for the user from the monitor (e.g. why a DPMI client was stopped). */

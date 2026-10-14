@@ -66,12 +66,43 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vbe_pmi_end - vbe_pmi         ; 022A  its length
         dw ps2_handler                   ; 022C  INT 15h C207h handler (far pointer)
         dw int67                         ; 022E  EMS (VMEMS.SYS points INT 67h here)
+        dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
 
 ; ---- stubs ----
 dummy:  iret
 
-%assign v 0x10
-%rep 8
+; INT 10h: the monitor does the work; after a mode set in VMHV it returns
+; here (instead of IRETing for us) with a list of the register writes the
+; mode set made, and they are done again as real OUTs from the guest, as a
+; VGA BIOS does them: Windows' display VxD traps the VGA ports while the BIOS
+; runs and keeps its copy of the registers from what it sees.
+svc_16: TRAP 0x10
+        push ax
+        push cx
+        push dx
+        push si
+        mov si, vga_regtab
+        mov cx, [cs:vga_regtab_n]
+        jcxz .done
+.next:  mov dx, [cs:si]
+        mov al, [cs:si + 2]
+        add si, 3
+        test dh, 80h                    ; bit 15: a read (3DAh: the attribute flip-flop)
+        jnz .in
+        out dx, al
+        loop .next
+        jmp short .done
+.in:    and dh, 7Fh
+        in al, dx
+        loop .next
+.done:  pop si
+        pop dx
+        pop cx
+        pop ax
+        iret
+
+%assign v 0x11
+%rep 7
 svc_ %+ v:
         TRAP v
         iret
@@ -239,6 +270,8 @@ config_table:                    ; INT 15h AH=C0h
 diskette_table:                  ; INT 1Eh (1.44 MB values; there are no floppies)
         db 0xAF, 0x02, 0x25, 0x02, 0x12, 0x1B, 0xFF, 0x6C, 0xF6, 0x0F, 0x08
 
+vga_regtab_n: dw 0
+vga_regtab:   times 3 * 160 db 0
 stubs_end:
 
         times 0xFFF0 - ($ - $$) db 0

@@ -316,7 +316,7 @@ extern int palette_dirty;
 void video_framebuffer(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp,
                        u8 rpos, u8 rsz, u8 gpos, u8 gsz, u8 bpos, u8 bsz);
 void video_text_fallback(void);
-void video_int10(struct regs *r);
+int video_int10(struct regs *r);              /* 1: continue the INT 10h stub (register writes to replay) */
 /* mememu.c: emulate the instruction that touched trapped video memory */
 struct emu_cpu {
     u32 *gpr[8];                              /* eax ecx edx ebx esp ebp esi edi */
