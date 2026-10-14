@@ -243,7 +243,16 @@ int08:  TRAP 0x08               ; tick count, then the user hook, then EOI
         pop ax
         iret
 
-int09:  TRAP 0x09               ; keyboard: the monitor reads port 60h, fills the buffer, EOIs
+; Keyboard: the scan code read and the EOI sent with real port I/O, as a
+; BIOS does: in a DOS window under Windows the keyboard VxD hands the VM its
+; keys through a virtual port 60h, and VPICD sends the next IRQ 1 only after
+; the VM's own EOI.
+int09:  push ax
+        in al, 0x60
+        TRAP 0x09               ; AL: the scan code; the monitor fills the buffer
+        mov al, 0x20
+        out 0x20, al
+        pop ax
         iret
 
 int18:  TRAP 0x18

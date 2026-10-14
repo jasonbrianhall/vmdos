@@ -62,10 +62,9 @@ static int kbuf_get(u16 *w, int remove)
     return 1;
 }
 
-static void keyboard_irq(void)
+static void keyboard_irq(u8 sc)
 {
     static int e0, skip;
-    u8 sc = (u8)vkbd_read_data();
     if (skip) { skip--; return; }
     if (sc == 0xE0) { e0 = 1; return; }
     if (sc == 0xE1) { skip = 5; return; }               /* Pause */
@@ -445,10 +444,9 @@ int bios_service(struct regs *r, int id, int via_stub)
         if (t >= 0x1800B0) { t = 0; wr8(BDA + 0x70, 1); }
         wr32(BDA + 0x6C, t);
         return BIOS_CONT; }
-    case 0x09:
-        keyboard_irq();
-        vpic_eoi_irq(1);
-        return BIOS_DONE;
+    case 0x09:                                            /* the stub read port 60h and EOIs (bios.asm) */
+        keyboard_irq(AL(r));
+        return BIOS_CONT;
     case 0x10: return video_int10(r) ? BIOS_CONT : BIOS_DONEF;
     case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
     case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
