@@ -1039,7 +1039,7 @@ AudioDriver audio_init(const char* cmdline) {
     latency_ms = 50;
 #endif
     // Boot option latency=N (milliseconds, 5..200) overrides it: lower if
-    // sound feels late, higher if it crackles (the debug heartbeat counts underruns).
+    // sound feels late, higher if it crackles (gaps are logged: "sound: N gaps").
     for (const char* p = cmdline; p && *p; p++)
         if (!strncmp(p, "latency=", 8)) {
             int v = 0;
@@ -1130,9 +1130,29 @@ uint32_t audio_play_pos() {
 // real stall forces a jump.
 static uint32_t underruns;
 uint32_t audio_underruns() { return underruns; }
+extern "C" volatile uint32_t ticks;                    // milliseconds (cpu.c)
+extern "C" uint32_t usb_audio_underruns(void);
+
+// Gaps you can hear, in the log: at most a line every 5 s while they
+// happen (the card ran dry, or USB audio's packets did), so "choppy" can
+// be told apart from a bad mix or bad hardware without hearing it.
+static void log_gaps() {
+    static uint32_t seen, t0;
+    static bool counting;
+    uint32_t n = underruns + usb_audio_underruns();
+    if (n == seen) return;
+    if (!counting) { counting = true; t0 = ticks; return; }
+    if (ticks - t0 < 5000) return;
+    printf("sound: %u gap%s in %u s (%s, latency=%d ms)\n", n - seen, n - seen == 1 ? "" : "s", (ticks - t0) / 1000,
+           cur_out >= 0 ? outs[cur_out].name : "no output", latency_ms);
+    seen = n;
+    counting = false;
+}
+
 int audio_frames_wanted(int nominal) {
     usb_sync();
     if (driver == AUDIO_USB) usb_audio_pump();
+    log_gaps();
     if (driver == AUDIO_NONE || nominal <= 0) return nominal;
     if (driver == AUDIO_SB) return sb_frames_wanted(nominal, &underruns);
     uint32_t play = audio_play_pos();
