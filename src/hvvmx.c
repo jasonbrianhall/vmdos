@@ -375,6 +375,118 @@ static void do_cpuid(u32 *r)
     V64(S_RIP) = V32(S_RIP) + exit_len;
 }
 
+/* ---------------- task switches ----------------
+   VT-x always exits on one (AMD-V lets them run): a far CALL or JMP to a
+   TSS or task gate, an IRET with NT set, an interrupt or exception through
+   a task gate. CWSDPMI (DJGPP programs: Quake ...) switches between itself
+   and the program this way. Done here as the CPU does it, for 32-bit TSSes,
+   without its checks (a bad TSS stops the VM as before). */
+static u32 lin_rd32(u32 a) { return hv_emu_rd8(a) | hv_emu_rd8(a + 1) << 8 | hv_emu_rd8(a + 2) << 16 | (u32)hv_emu_rd8(a + 3) << 24; }
+static void lin_wr32(u32 a, u32 v) { for (int i = 0; i < 4; i++) hv_emu_wr8(a + i, (u8)(v >> (8 * i))); }
+
+/* The descriptor for selector sel (GDT, or the LDT now loaded): 0 if
+   past the table's limit. *at: its linear address. */
+static int desc_read(u32 sel, u32 *d0, u32 *d1, u32 *at)
+{
+    u32 base, lim;
+    if (sel & 4) { base = (u32)V64(S_LDTR + 8); lim = V32(S_LDTR + 4); if (!(V16(S_LDTR + 2) & 0x80)) return 0; }
+    else { base = (u32)V64(S_GDTR + 8); lim = V32(S_GDTR + 4); }
+    if ((sel | 7) > lim) return 0;
+    *at = base + (sel & ~7u);
+    *d0 = lin_rd32(*at); *d1 = lin_rd32(*at + 4);
+    return 1;
+}
+
+/* Shadow segment o from descriptor d0:d1 (attr in AMD-V's packed form). */
+static void seg_from_desc(u32 o, u16 sel, u32 d0, u32 d1)
+{
+    u32 lim = (d0 & 0xFFFF) | (d1 & 0xF0000);
+    if (d1 & (1u << 23)) lim = lim << 12 | 0xFFF;
+    V16(o) = sel;
+    V16(o + 2) = (u16)(((d1 >> 8) & 0xFF) | ((d1 >> 12) & 0xF00));
+    V32(o + 4) = lim;
+    V64(o + 8) = (d0 >> 16) | ((d1 & 0xFF) << 16) | (d1 & 0xFF000000u);
+}
+
+/* Segment register o loaded with sel, as a task switch does. */
+static void seg_load(u32 o, u16 sel, int v86)
+{
+    if (v86) { V16(o) = sel; V16(o + 2) = 0xF3; V32(o + 4) = 0xFFFF; V64(o + 8) = (u32)sel << 4; return; }
+    u32 d0, d1, at;
+    if (!(sel & ~3u) || !desc_read(sel, &d0, &d1, &at)) { V16(o) = sel; V16(o + 2) = 0; V32(o + 4) = 0; V64(o + 8) = 0; return; }
+    if ((d1 & (1u << 12)) && !(d1 & (1u << 8))) { d1 |= 1u << 8; lin_wr32(at + 4, d1); }   /* accessed */
+    seg_from_desc(o, sel, d0, d1);
+}
+
+/* r: eax ebx ecx edx esi edi ebp. 0 done, -1 can't (left to stop the VM). */
+static int task_switch(u32 *r)
+{
+    u32 q = vmread(EXIT_QUAL), src = (q >> 30) & 3;             /* 0 CALL, 1 IRET, 2 JMP, 3 IDT task gate */
+    u16 nsel = (u16)q;
+    u32 nd0, nd1, nat, od0, od1, oat;
+    if (!desc_read(nsel, &nd0, &nd1, &nat)) return -1;
+    u32 ntype = (nd1 >> 8) & 0xF;
+    if (ntype != 9 && ntype != 0xB) return -1;                  /* a 32-bit TSS */
+    u32 ob = (u32)V64(S_TR + 8);
+    u16 osel = V16(S_TR);
+    seg_from_desc(S_TR, nsel, nd0, nd1);                        /* the new TSS's base and limit, for now */
+    u32 nb = (u32)V64(S_TR + 8);
+    if (V32(S_TR + 4) < 0x67) return -1;
+
+    /* The event through a task gate, and where the old task goes on. */
+    u32 iv = (u32)V64(C_EXITINT), ev_type = (iv >> 8) & 7;
+    int has_err = src == 3 && (iv & (1u << 31)) && (iv & (1u << 11));
+    u32 err = (u32)(V64(C_EXITINT) >> 32);
+    u32 eip = V32(S_RIP);
+    if (src != 3 || ev_type == 4 || ev_type == 5 || ev_type == 6) eip += exit_len;   /* past the instruction */
+    if (src == 3) V64(C_EXITINT) = 0;                           /* delivered by the switch: not again */
+
+    /* Save the old task. */
+    u32 fl = V32(S_RFLAGS);
+    if (src == 1) fl &= ~(1u << 14);                            /* IRET: NT clear in the saved copy */
+    lin_wr32(ob + 0x20, eip);
+    lin_wr32(ob + 0x24, fl);
+    lin_wr32(ob + 0x28, r[0]); lin_wr32(ob + 0x2C, r[2]); lin_wr32(ob + 0x30, r[3]); lin_wr32(ob + 0x34, r[1]);
+    lin_wr32(ob + 0x38, V32(S_RSP)); lin_wr32(ob + 0x3C, r[6]); lin_wr32(ob + 0x40, r[4]); lin_wr32(ob + 0x44, r[5]);
+    static const u32 segs[6] = { S_ES, S_CS, S_SS, S_DS, S_FS, S_GS };
+    for (int i = 0; i < 6; i++) lin_wr32(ob + 0x48 + 4 * i, V16(segs[i]));
+
+    /* Busy bits and the back link. */
+    if ((src == 1 || src == 2) && desc_read(osel, &od0, &od1, &oat)) lin_wr32(oat + 4, od1 & ~(1u << 9));
+    if (src != 1) { nd1 |= 1u << 9; lin_wr32(nat + 4, nd1); }
+    if (src == 0 || src == 3) lin_wr32(nb, osel);
+    seg_from_desc(S_TR, nsel, nd0, nd1 | (1u << 9));
+
+    /* Load the new one. */
+    /* All of it read through the old page tables, then the new CR3. */
+    u32 ncr3 = lin_rd32(nb + 0x1C), neip = lin_rd32(nb + 0x20), nfl = lin_rd32(nb + 0x24);
+    r[0] = lin_rd32(nb + 0x28); r[2] = lin_rd32(nb + 0x2C); r[3] = lin_rd32(nb + 0x30); r[1] = lin_rd32(nb + 0x34);
+    V64(S_RSP) = lin_rd32(nb + 0x38); r[6] = lin_rd32(nb + 0x3C); r[4] = lin_rd32(nb + 0x40); r[5] = lin_rd32(nb + 0x44);
+    u16 sel[6];
+    for (int i = 0; i < 6; i++) sel[i] = (u16)lin_rd32(nb + 0x48 + 4 * i);
+    u16 ldt = (u16)lin_rd32(nb + 0x60);
+    if (V32(S_CR0) & 0x80000000u) V64(S_CR3) = ncr3;
+    if (src == 0 || src == 3) nfl |= 1u << 14;                  /* NT: nested */
+    nfl = (nfl & 0x003F7FD7u) | 2;
+    V64(S_RFLAGS) = nfl;
+    V64(S_RIP) = neip;
+    int v86 = (nfl >> 17) & 1;
+    u32 ld0, ld1, lat;
+    if ((ldt & ~3u) && !(ldt & 4) && desc_read(ldt & ~3u, &ld0, &ld1, &lat)) seg_from_desc(S_LDTR, ldt, ld0, ld1);
+    else { V16(S_LDTR) = ldt; V16(S_LDTR + 2) = 0; V32(S_LDTR + 4) = 0; V64(S_LDTR + 8) = 0; }
+    for (int i = 0; i < 6; i++) seg_load(segs[i], sel[i], v86);
+    *(volatile u8 *)(sh + S_CPL) = v86 ? 3 : (u8)(sel[1] & 3);
+    V64(S_CR0) = V32(S_CR0) | 8;                                /* TS */
+
+    if (has_err) {                                              /* the exception's error code, on the new stack */
+        u32 esp = V32(S_RSP) - 4;
+        if (!(V16(S_SS + 2) & 0x400)) esp &= 0xFFFF;            /* 16-bit stack */
+        lin_wr32((u32)V64(S_SS + 8) + esp, err);
+        V64(S_RSP) = (V32(S_RSP) & (V16(S_SS + 2) & 0x400 ? 0 : 0xFFFF0000u)) | esp;
+    }
+    return 0;
+}
+
 /* ---------------- one run ---------------- */
 void vmx_run(u8 *shadow, u32 *g)
 {
@@ -384,6 +496,10 @@ void vmx_run(u8 *shadow, u32 *g)
     u64 ev = V64(C_EVENT);
     if ((u32)ev & (1u << 31)) {
         u32 info = (u32)ev, type = (info >> 8) & 7;
+        /* Real mode (unrestricted guest, PE clear): exceptions push no
+           error code, and VM entry refuses one (instruction error 7).
+           hv.c reflects #GP and #PF with theirs, as protected mode wants. */
+        if (!(V32(S_CR0) & 1)) info &= ~(1u << 11);
         vmwrite(ENTRY_INTR, info);
         if (info & (1u << 11)) vmwrite(ENTRY_EXC_ERR, (u32)(ev >> 32));
         if (type == 4 || type == 5 || type == 6) vmwrite(ENTRY_LEN, exit_len);
@@ -423,6 +539,9 @@ void vmx_run(u8 *shadow, u32 *g)
     case 1: code = X_INTR; break;
     case 2: code = X_SHUT; break;
     case 7: code = X_VINTR; break;
+    case 9:                                                     /* task switch */
+        if (task_switch(r)) { code = X_FAIL; V64(C_INFO1) = 0x30000 | 9; V64(C_INFO2) = vmread(EXIT_QUAL); }
+        break;
     case 10: do_cpuid(r); break;
     case 12: code = X_HLT; break;
     case 13: case 14: case 55: V64(S_RIP) = V32(S_RIP) + exit_len; break;   /* INVD, INVLPG, XSETBV */
