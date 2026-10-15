@@ -1006,6 +1006,7 @@ static struct {
     uint32_t seq_start, facc;
     uint32_t src_pos;                                  // ring frame of the next TD
     uint32_t underruns;
+    uint32_t ev_dry, ev_missed, ev_err, last_cc;       // xHCI's events for the stream: ring underrun, missed service, other errors
     char name[64];
     // EHCI / UHCI (usb2.inc): one isochronous descriptor per frame, in a
     // ring of UA2_SLOTS linked into the periodic schedule once.
@@ -1242,7 +1243,9 @@ static bool ua_dispatch(int slot, int ep, const Trb& e) {
     int cc = e.d2 >> 24;
     uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
     int idx = (int)((trb - phys(ua.trb)) / sizeof(Trb));
-    if (cc == 14 || cc == 15) { ua.seq_done = ua.seq_enq; return true; }   // ring under/overrun: all of it went
+    if (cc == 14 || cc == 15) { ua.ev_dry++; ua.seq_done = ua.seq_enq; return true; }   // ring under/overrun: all of it went
+    if (cc == 23) ua.ev_missed++;                       // missed service: the controller was late for it
+    else if (cc != 1 && cc != 13) { ua.ev_err++; ua.last_cc = (uint32_t)cc; }
     if (idx >= 0 && idx < UA_TRBS - 1 && (int32_t)(ua.seq_of[idx] + 1 - ua.seq_done) > 0) ua.seq_done = ua.seq_of[idx] + 1;
     return true;
 }
@@ -1264,16 +1267,24 @@ extern "C" int usb_audio_start(const int16_t* ring, uint32_t frames) {
     return 1;
 }
 extern "C" void usb_audio_stop(void) { ua.running = false; }
-// Ring frames played since usb_audio_start, modulo the ring (a power of
-// two, so the product wrapping round doesn't matter).
+// Where audio.cpp must stay ahead of: how far the pump has taken samples
+// from its ring (into packets the device plays over the next few tens of
+// ms), not how far the device has played. Reported as the device's play
+// position, the queue (and how late the transfer events are read) went
+// unaccounted: audio.cpp kept its 50 ms lead on a position that was up to
+// 40 ms behind the pump, which then caught up with what it hadn't written
+// yet, or set off a resync, many times a second on real hardware.
 extern "C" uint32_t usb_audio_pos(void) {
-    if (ua_is() && kbds[ua.dev].hc->type != HC_XHCI && ua.running) ua2_done();
-    int32_t n = (int32_t)(ua.seq_done - ua.seq_start);
-    if (n < 0) n = 0;
-    uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
-    return (uint32_t)n * per % ua.src_frames;
+    if (!ua.running) return 0;
+    return ua.src_pos;
 }
 extern "C" uint32_t usb_audio_underruns(void) { return ua.underruns; }
+// For the gap log: TDs played (seq_done), the pump finding the queue empty,
+// the controller's ring underruns, missed services, other errors (last code).
+extern "C" void usb_audio_stats(uint32_t* s) {
+    s[0] = ua.seq_done; s[1] = ua.underruns; s[2] = ua.ev_dry; s[3] = ua.ev_missed; s[4] = ua.ev_err; s[5] = ua.last_cc;
+    s[6] = ua.td_us;
+}
 
 // n device frames into p from `per` of audio.cpp's ring frames starting at
 // src (resampled, to the device's channels and sample size). Bytes written.
