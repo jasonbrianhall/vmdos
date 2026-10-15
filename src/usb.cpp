@@ -223,6 +223,8 @@ struct Keyboard {
     // hubs
     int nports, ttt;
     uint32_t dirty;                        // ports with a change waiting (bit n = port n)
+    uint32_t given_up;                     // ports whose device failed setup too often (bit n = port n)
+    uint8_t port_fails[32];                // failed setups in a row, by port
     uint32_t power_good_ms;
     char where[24];                        // "port 3" / "port 3.2" for messages
     // mass storage
@@ -1648,7 +1650,27 @@ static void hub_port_change(int h, int port) {
         if (kbds[j].active && kbds[j].parent == h && kbds[j].hub_port == port) existing = j;
     bool connected = status & 1;
     if (existing >= 0 && (!connected || (change & 1))) { forget(existing); existing = -1; }
-    if (!connected || existing >= 0) return;
+    uint32_t bit = port < 32 ? 1u << port : 0;
+    if (!connected && port < 32) { hb.given_up &= ~bit; hb.port_fails[port] = 0; }   // unplugged: a fresh start
+    if (!connected || existing >= 0 || (hb.given_up & bit)) return;
+    // A device that fails its setup again and again (an internal one that
+    // never answers, and keeps changing its port's state) would be reset and
+    // enumerated on every change, each time holding up the poll (and with it
+    // sound) for a fraction of a second: three tries, then it's left alone
+    // until it's unplugged.
+    struct Tally {
+        Keyboard& hb; int h, port; uint32_t bit;
+        ~Tally() {
+            if (port >= 32 || !hb.active) return;
+            bool there = false;
+            for (int j = 0; j < MAX_KBD; j++) there |= kbds[j].active && kbds[j].parent == h && kbds[j].hub_port == port;
+            if (there) { hb.port_fails[port] = 0; return; }
+            if (++hb.port_fails[port] >= 3) {
+                hb.given_up |= bit;
+                printf("USB: %s.%d: failed 3 times, left alone until it's unplugged\n", hb.where, port);
+            }
+        }
+    } tally{hb, h, port, bit};
 
     // Reset the port, wait for it to finish, and see how fast the device is.
     // SuperSpeed ports too (see reset_port); a link stuck in SS.Inactive or

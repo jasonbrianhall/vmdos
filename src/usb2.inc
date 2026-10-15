@@ -110,6 +110,7 @@ static bool u_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, ui
     int data_to = n - 1, status_td = n;
     u_fill(n++, true, st | U_IOC, u_token(len && in ? PID_OUT : PID_IN, k.addr, 0, 1, 0), 0);
     int rc = u_run(n, status_td, data_from, data_to, 500, nullptr, nullptr);
+    ctl_cc = rc;
     return rc == 1 || rc == 13;
 }
 
@@ -312,6 +313,7 @@ static bool e_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, ui
     e_fill(status, -1, -1, len && in ? 0 : 1, 1, 0, 0, true);   // STATUS, the other way
     int rc = e_run(e_chars(k, 0, k.mps0 ? k.mps0 : 64, true, true), e_caps(k, false), status + 1,
                    1, len ? 1 : 0, 0, 500, nullptr, nullptr);
+    ctl_cc = rc;                                        // for messages: 1 done, 13 short, 6 stall, -1 error / timeout
     return rc == 1 || rc == 13;
 }
 
@@ -545,6 +547,7 @@ static bool o_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, ui
     n++;
     uint8_t carry = 0;
     int rc = o_run(H->qh_ctl, true, o_ed0(k, 0, k.mps0 ? k.mps0 : 8), n, data_from, data_to, lens, &carry, 500, nullptr);
+    ctl_cc = rc;
     return rc == 1 || rc == 13;
 }
 
