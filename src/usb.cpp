@@ -139,12 +139,14 @@ static uint64_t ring_push(Ring& r, uint32_t d0, uint32_t d1, uint32_t d2, uint32
 // cards, or separate USB 2/USB 3 controllers on some boards); each gets its
 // own registers, command and event rings and device slots. H is the one
 // being worked on: set it before touching a controller or its devices.
-enum { HC_XHCI = 0, HC_EHCI = 1, HC_UHCI = 2 };       // EHCI / UHCI: usb2.inc
+enum { HC_XHCI = 0, HC_EHCI = 1, HC_UHCI = 2, HC_OHCI = 3 };   // EHCI / UHCI / OHCI: usb2.inc
 struct Hc {
     int type;
     // EHCI / UHCI
     uint16_t io;                           // UHCI I/O ports
     volatile uint8_t* eop;                 // EHCI operational registers
+    volatile uint8_t* oreg;                // OHCI registers (frames: its HCCA; qh_int: periodic head ED,
+                                           // qh_ctl / xqh: control / bulk EDs; tds: general TDs)
     volatile uint32_t *frames, *qh_int, *qh_ctl, *aqh, *xqh, *tds;
     volatile uint8_t* sbuf;                // setup packets
     uint8_t addr_used[128];
@@ -258,6 +260,8 @@ static void hc2_clear_halt(Keyboard& k, bool in);
 static bool hc2_address(Keyboard& k);
 static void hc2_release(Keyboard& k);
 static void hc2_poll();
+static void hc2_root_poll(bool first);
+static const char* hc2_name();
 static uint8_t alloc_addr();
 
 static inline volatile uint32_t* ctx(volatile uint8_t* base, int idx) {
@@ -1001,9 +1005,26 @@ static struct {
     uint32_t src_pos;                                  // ring frame of the next TD
     uint32_t underruns;
     char name[64];
+    // EHCI / UHCI (usb2.inc): one isochronous descriptor per frame, in a
+    // ring of UA2_SLOTS linked into the periodic schedule once.
+    Hc* iso_hc;                                        // the controller they're linked into, null: none
+    volatile uint32_t* iso;                            // UA2_SLOTS descriptors, 128 bytes each
+    int iso_kind;                                      // UA2_UHCI / UA2_SITD / UA2_ITD
+    int addr, ep, hub, hub_port, hs_iv;                // hs_iv: microframes between packets (iTD)
+    uint32_t hw_last, hw_ext;                          // the controller's frame counter, extended to 32 bits
+    uint32_t f_base;                                   // TD seq is played in frame f_base + seq
+    int o_tail;                                        // OHCI: the ring slot of the ED's dummy tail TD
+    volatile int o_flush; uint32_t o_flush_at;         // OHCI: emptying its queue (1: to start, 2: skipping since o_flush_at)
 } ua;
 
 static bool ua_is(void) { return ua.dev >= 0 && kbds[ua.dev].active && kbds[ua.dev].kind == AUDIO; }
+// EHCI / UHCI streams (usb2.inc).
+struct UaAlt;
+static bool ua2_link(Keyboard& k, const UaAlt& a);
+static void ua2_unlink(void);
+static void ua2_start(void);
+static void ua2_done(void);
+static void ua2_pump(void);
 
 // A class request on endpoint 0 that the device may stall: on xHCI a STALL
 // halts the default endpoint too, so it's reset and moved on.
@@ -1105,8 +1126,14 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
         printf("USB: audio device %04x:%04x on %s: no output it can play here (only a microphone?)\n", vid, pid, k.where);
         return false;
     }
-    if (H->type != HC_XHCI) {
-        printf("USB: audio device %04x:%04x on %s: USB audio needs a USB 3 (xHCI) controller\n", vid, pid, k.where);
+    if (H->type != HC_XHCI && best.interval != 1 && k.speed != 3) {
+        printf("USB: audio device %04x:%04x on %s: a packet every %d frames isn't supported\n", vid, pid, k.where,
+               1 << (best.interval - 1));
+        return false;
+    }
+    if (H->type != HC_XHCI && k.speed == 3 && best.interval > 4) {
+        printf("USB: audio device %04x:%04x on %s: a packet every %d microframes isn't supported\n", vid, pid, k.where,
+               1 << (best.interval - 1));
         return false;
     }
     if (k.speed >= 4) { printf("USB: audio device on %s: SuperSpeed audio isn't supported\n", k.where); return false; }
@@ -1160,24 +1187,30 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
     if (interval < 0) interval = 0;
     if (interval > 15) interval = 15;
     int dci = (best.ep & 0xF) * 2;
-    memset((void*)k.in_ctx, 0, 33 * H->csz);
-    ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
-    fill_slot(k, dci);
-    volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
-    ep[0] = (uint32_t)interval << 16;
-    ep[1] = 1u << 3 | (uint32_t)best.mps << 16;              // isochronous OUT, CErr 0
-    for (int i = 0; i < UA_TRBS; i++) ua.trb[i].d0 = ua.trb[i].d1 = ua.trb[i].d2 = ua.trb[i].d3 = 0;
-    volatile Trb& link = ua.trb[UA_TRBS - 1];
-    link.d0 = (uint32_t)phys(ua.trb); link.d1 = (uint32_t)(phys(ua.trb) >> 32);
-    link.d3 = TRB_LINK << 10 | (1 << 1);
-    uint64_t ri = phys(ua.trb) | 1;
-    ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
-    ep[4] = (uint32_t)best.mps | (uint32_t)best.mps << 16;   // average TRB length, max ESIT payload
-    uint64_t ic = phys(k.in_ctx);
-    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
-    if (cc != 1) { printf("USB: %s: audio: configure endpoint failed (%d)\n", k.where, cc); return false; }
-
     ua.running = false;
+    if (H->type != HC_XHCI) {                          // EHCI / UHCI: a descriptor a frame
+        if (!ua2_link(k, best)) return false;
+        interval = 3;                                  // 1 ms
+        dci = best.ep & 0xF;
+    } else {
+        memset((void*)k.in_ctx, 0, 33 * H->csz);
+        ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
+        fill_slot(k, dci);
+        volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+        ep[0] = (uint32_t)interval << 16;
+        ep[1] = 1u << 3 | (uint32_t)best.mps << 16;              // isochronous OUT, CErr 0
+        for (int i = 0; i < UA_TRBS; i++) ua.trb[i].d0 = ua.trb[i].d1 = ua.trb[i].d2 = ua.trb[i].d3 = 0;
+        volatile Trb& link = ua.trb[UA_TRBS - 1];
+        link.d0 = (uint32_t)phys(ua.trb); link.d1 = (uint32_t)(phys(ua.trb) >> 32);
+        link.d3 = TRB_LINK << 10 | (1 << 1);
+        uint64_t ri = phys(ua.trb) | 1;
+        ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+        ep[4] = (uint32_t)best.mps | (uint32_t)best.mps << 16;   // average TRB length, max ESIT payload
+        uint64_t ic = phys(k.in_ctx);
+        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+        if (cc != 1) { printf("USB: %s: audio: configure endpoint failed (%d)\n", k.where, cc); return false; }
+    }
+
     ua.enq = 0; ua.cycle = 1;
     ua.dci = dci;
     ua.td_us = 125u << interval;
@@ -1220,6 +1253,7 @@ extern "C" int usb_audio_start(const int16_t* ring, uint32_t frames) {
     ua.src = ring; ua.src_frames = frames;
     ua.seq_start = ua.seq_enq;
     ua.src_pos = 0;
+    if (kbds[ua.dev].hc->type != HC_XHCI) ua2_start();
     ua.running = true;
     printf("USB: audio: playing through %s\n", ua.name);
     return 1;
@@ -1228,6 +1262,7 @@ extern "C" void usb_audio_stop(void) { ua.running = false; }
 // Ring frames played since usb_audio_start, modulo the ring (a power of
 // two, so the product wrapping round doesn't matter).
 extern "C" uint32_t usb_audio_pos(void) {
+    if (ua_is() && kbds[ua.dev].hc->type != HC_XHCI && ua.running) ua2_done();
     int32_t n = (int32_t)(ua.seq_done - ua.seq_start);
     if (n < 0) n = 0;
     uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
@@ -1235,10 +1270,31 @@ extern "C" uint32_t usb_audio_pos(void) {
 }
 extern "C" uint32_t usb_audio_underruns(void) { return ua.underruns; }
 
+// n device frames into p from `per` of audio.cpp's ring frames starting at
+// src (resampled, to the device's channels and sample size). Bytes written.
+static int ua_render(volatile uint8_t* p, uint32_t src, uint32_t per, uint32_t n) {
+    int o = 0;
+    for (uint32_t j = 0; j < n; j++) {
+        // per ring frames stretched to n: linear, in 1/256ths.
+        uint32_t pos = j * per * 256 / n;
+        uint32_t i0 = (src + (pos >> 8)) % ua.src_frames, i1 = (i0 + 1) % ua.src_frames, f = pos & 255;
+        int l = (ua.src[i0 * 2] * (int)(256 - f) + ua.src[i1 * 2] * (int)f) >> 8;
+        int r = (ua.src[i0 * 2 + 1] * (int)(256 - f) + ua.src[i1 * 2 + 1] * (int)f) >> 8;
+        for (int c = 0; c < ua.ch; c++) {
+            int v = ua.ch == 1 ? (l + r) / 2 : c == 0 ? l : c == 1 ? r : 0;
+            if (ua.bytes == 2) { p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+            else if (ua.bytes == 3) { p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+            else { p[o++] = 0; p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
+        }
+    }
+    return o;
+}
+
 // Keep about 10 ms of packets queued.
 extern "C" void usb_audio_pump(void) {
     if (!ua.running || !ua_is() || !ua.src) return;
     Keyboard& k = kbds[ua.dev];
+    if (k.hc->type != HC_XHCI) { ua2_pump(); return; }
     uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
     uint32_t q = 10000 / ua.td_us; if (q < 2) q = 2; if (q > UA_TRBS - 8) q = UA_TRBS - 8;
     uint32_t ioc_every = 2000 / ua.td_us; if (ioc_every < 1) ioc_every = 1;
@@ -1255,20 +1311,7 @@ extern "C" void usb_audio_pump(void) {
         int fb = ua.ch * ua.bytes;
         if ((int)n * fb > ua.pkt_max) n = (uint32_t)(ua.pkt_max / fb);
         volatile uint8_t* p = ua.pkt + ua.enq * 1024;
-        int o = 0;
-        for (uint32_t j = 0; j < n; j++) {
-            // per ring frames stretched to n: linear, in 1/256ths.
-            uint32_t pos = n ? j * per * 256 / n : 0;
-            uint32_t i0 = (src + (pos >> 8)) % ua.src_frames, i1 = (i0 + 1) % ua.src_frames, f = pos & 255;
-            int l = (ua.src[i0 * 2] * (int)(256 - f) + ua.src[i1 * 2] * (int)f) >> 8;
-            int r = (ua.src[i0 * 2 + 1] * (int)(256 - f) + ua.src[i1 * 2 + 1] * (int)f) >> 8;
-            for (int c = 0; c < ua.ch; c++) {
-                int v = ua.ch == 1 ? (l + r) / 2 : c == 0 ? l : c == 1 ? r : 0;
-                if (ua.bytes == 2) { p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
-                else if (ua.bytes == 3) { p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
-                else { p[o++] = 0; p[o++] = 0; p[o++] = (uint8_t)v; p[o++] = (uint8_t)(v >> 8); }
-            }
-        }
+        int o = ua_render(p, src, per, n);
         volatile Trb& t = ua.trb[ua.enq];
         uint64_t a = phys(p);
         t.d0 = (uint32_t)a; t.d1 = (uint32_t)(a >> 32); t.d2 = (uint32_t)o;
@@ -1557,7 +1600,10 @@ static void forget(int i) {
         if (kbds[j].active && kbds[j].parent == i) forget(j);
     if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
     for (int j = 0; j < n_msd; j++) if (msd_dev[j] == i) msd_dev[j] = -1;     // its slot waits for it to come back
-    if (k.kind == AUDIO && ua.dev == i) { ua.running = false; ua.dev = -1; ua.gen++; }
+    if (k.kind == AUDIO && ua.dev == i) {
+        ua.running = false; ua.dev = -1; ua.gen++;
+        if (H->type != HC_XHCI) ua2_unlink();
+    }
     k.active = false;
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
@@ -1884,13 +1930,14 @@ bool usb_init(const char* cmdline) {
         printf("USB: xHCI %d with %d ports, %d keyboard/mouse device%s, %d disk%s\n", num_hc - 1, H->num_ports, n, n == 1 ? "" : "s",
                nd, nd == 1 ? "" : "s");
     }
-    // EHCI (USB 2), then its UHCI companions, which get the low- and
-    // full-speed devices EHCI hands over. (OHCI companions: not yet.)
+    // EHCI (USB 2), then its UHCI or OHCI companions, which get the low- and
+    // full-speed devices EHCI hands over (or, with no EHCI, everything).
     // ehci=off: leave them to the firmware, as before vmdos drove them (its
     // legacy USB support may then still type for keyboards on them).
     bool older_off = cmdline && strstr(cmdline, "ehci=off");
-    if (older_off) printf("USB: EHCI and UHCI left to the firmware (ehci=off)\n");
-    static const struct { int progif, type; const char* name; } older[] = { { 0x20, HC_EHCI, "EHCI" }, { 0x00, HC_UHCI, "UHCI" } };
+    if (older_off) printf("USB: EHCI, UHCI and OHCI left to the firmware (ehci=off)\n");
+    static const struct { int progif, type; const char* name; } older[] = {
+        { 0x20, HC_EHCI, "EHCI" }, { 0x00, HC_UHCI, "UHCI" }, { 0x10, HC_OHCI, "OHCI" } };
     for (auto& o : older)
         if (!older_off)
         for (int i = 0; num_hc < MAX_HC && pci_find_class(0x0C, 0x03, o.progif, &d, i); i++) {
@@ -1899,20 +1946,20 @@ bool usb_init(const char* cmdline) {
             H->type = o.type;
             uint32_t vd = pci_read(d, 0);
             printf("USB: %s %d at PCI %02x:%02x.%x (%04x:%04x)\n", o.name, num_hc, d.bus, d.dev, d.fn, vd & 0xFFFF, vd >> 16);
-            if (!(o.type == HC_EHCI ? e_init(d) : u_init(d))) continue;
+            if (!(o.type == HC_EHCI ? e_init(d) : o.type == HC_UHCI ? u_init(d) : o_init(d))) continue;
             num_hc++;
         }
     for (int c = 0; c < num_hc; c++) {                  // their devices: EHCI's first (it hands some over)
         H = &hcs[c];
         if (H->type == HC_XHCI) continue;
-        if (H->type == HC_EHCI) e_root_poll(true); else u_root_poll(true);
+        hc2_root_poll(true);
     }
     for (int c = 0; c < num_hc; c++) {
         H = &hcs[c];
         if (H->type == HC_XHCI) continue;
         int n = 0, nd = 0;
         for (auto& k : kbds) { n += k.active && k.hc == H && (k.kind == KBD || k.kind == MOUSE || k.kind == JOY); nd += k.active && k.hc == H && k.kind == MSD; }
-        printf("USB: %s %d with %d ports, %d keyboard/mouse/gamepad device%s, %d disk%s\n", H->type == HC_EHCI ? "EHCI" : "UHCI",
+        printf("USB: %s %d with %d ports, %d keyboard/mouse/gamepad device%s, %d disk%s\n", hc2_name(),
                c, H->num_ports, n, n == 1 ? "" : "s", nd, nd == 1 ? "" : "s");
     }
     if (!num_hc) { printf("USB: no USB controller\n"); return false; }
