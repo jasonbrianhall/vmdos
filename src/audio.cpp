@@ -340,6 +340,38 @@ static bool hdmi_config_pin(int cad, int n, uint8_t stream_tag, uint16_t fmt) {
     return true;
 }
 
+static const char* boot_cmdline;                      // sb= when the Sound Blaster restarts, hda_gpio=
+
+// Laptop amplifiers on the codec's GPIO pins. IDT / SigmaTel codecs (Dell
+// Latitudes, HPs) switch the speaker and headphone amp with GPIO0, and
+// stay silent with it low, whatever the pins and EAPD say: Linux sets it
+// high for them ("GPIO0 = EAPD"). hda_gpio=N (hex: the GPIOs to drive
+// high) does it on any codec, hda_gpio=0 on none.
+static void hda_gpio(int cad, int fg) {
+    uint32_t id = param(cad, 0, 0x00), n = param(cad, fg, 0x11) & 0xFF;
+    int want = -1;
+    for (const char* p = boot_cmdline; p && *p; p++) {
+        if (strncmp(p, "hda_gpio=", 9) != 0 || (p != boot_cmdline && p[-1] != ' ')) continue;
+        want = 0;
+        for (const char* q = p + 9; *q && *q != ' '; q++) {
+            char c = (char)(*q | 32);
+            int x = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (x < 0) break;
+            want = want * 16 + x;
+        }
+        break;
+    }
+    uint16_t vendor = (uint16_t)(id >> 16);
+    if (want < 0) want = vendor == 0x111D || vendor == 0x8384 ? 1 : 0;   // IDT, SigmaTel
+    uint32_t bits = n ? (uint32_t)want & ((1u << (n > 8 ? 8 : n)) - 1) : 0;
+    printf("HDA: codec %d: %04x:%04x, %u GPIO%s%s", cad, vendor, id & 0xFFFF, n, n == 1 ? "" : "s", bits ? "" : "\n");
+    if (!bits) return;
+    verb(cad, fg, 0x716, (verb(cad, fg, 0xF16, 0) & 0xFF) | bits);     // enable
+    verb(cad, fg, 0x717, (verb(cad, fg, 0xF17, 0) & 0xFF) | bits);     // output
+    verb(cad, fg, 0x715, (verb(cad, fg, 0xF15, 0) & 0xFF) | bits);     // high
+    printf(", %02x driven high (amplifier on)\n", bits);
+}
+
 static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
     uint32_t sub = param(cad, 0, 0x04);
     int fg_start = (sub >> 16) & 0xFF, fg_count = sub & 0xFF;
@@ -348,6 +380,7 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
         if ((param(cad, fg, 0x05) & 0xFF) != 0x01) continue;  // audio function group only
         verb(cad, fg, 0x705, 0);                               // power up the group
         io_delay(10000);
+        if (hda_mode == HDA_ANALOG) hda_gpio(cad, fg);
         uint32_t ws = param(cad, fg, 0x04);
         int start = (ws >> 16) & 0xFF, count = ws & 0xFF;
 
@@ -878,7 +911,6 @@ struct AudioOut { OutKind kind; PciDevice d; uint8_t cad, pin; bool monitor; cha
 static AudioOut outs[MAX_OUTS];
 static int nouts, cur_out = -1;
 static int latency_ms;
-static const char* boot_cmdline;                      // for sb= when the Sound Blaster restarts
 
 static const char* hda_vendor(const PciDevice& d) {
     switch (pci_read(d, 0x00) & 0xFFFF) {
