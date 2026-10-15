@@ -496,6 +496,10 @@ void vmx_run(u8 *shadow, u32 *g)
     u64 ev = V64(C_EVENT);
     if ((u32)ev & (1u << 31)) {
         u32 info = (u32)ev, type = (info >> 8) & 7;
+        /* Real mode (unrestricted guest, PE clear): exceptions push no
+           error code, and VM entry refuses one (instruction error 7).
+           hv.c reflects #GP and #PF with theirs, as protected mode wants. */
+        if (!(V32(S_CR0) & 1)) info &= ~(1u << 11);
         vmwrite(ENTRY_INTR, info);
         if (info & (1u << 11)) vmwrite(ENTRY_EXC_ERR, (u32)(ev >> 32));
         if (type == 4 || type == 5 || type == 6) vmwrite(ENTRY_LEN, exit_len);
