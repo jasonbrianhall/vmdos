@@ -1295,13 +1295,20 @@ static int ua_render(volatile uint8_t* p, uint32_t src, uint32_t per, uint32_t n
     return o;
 }
 
-// Keep about 10 ms of packets queued.
+// Keep about 30 ms of packets queued. What has played is known only from
+// the transfer events, and those are read every 8 ms (usb_tick), while
+// this runs every 4 ms, often just before them: it can be working from
+// a count 12 ms old. With only 10 ms queued it believed the ring full
+// while the device was about to run dry, and real hardware (unlike QEMU's
+// device, which buffers on its own) went silent for a moment every few
+// milliseconds: sound that kept cutting out.
+#define UA_QUEUE_US 30000
 extern "C" void usb_audio_pump(void) {
     if (!ua.running || !ua_is() || !ua.src) return;
     Keyboard& k = kbds[ua.dev];
     if (k.hc->type != HC_XHCI) { ua2_pump(); return; }
     uint32_t per = 48 * ua.td_us / 1000;               // ring frames a TD
-    uint32_t q = 10000 / ua.td_us; if (q < 2) q = 2; if (q > UA_TRBS - 8) q = UA_TRBS - 8;
+    uint32_t q = UA_QUEUE_US / ua.td_us; if (q < 2) q = 2; if (q > UA_TRBS - 8) q = UA_TRBS - 8;
     uint32_t ioc_every = 2000 / ua.td_us; if (ioc_every < 1) ioc_every = 1;
     if ((int32_t)(ua.seq_enq - ua.seq_done) <= 0 && ua.seq_enq != ua.seq_start) ua.underruns++;   // ran dry
     bool any = false;
