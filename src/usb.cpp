@@ -1145,7 +1145,10 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
     }
     if (best.mps > 1024) best.mps = 1024;
 
-    if (!control(k, 0x00, 9, config, 0, 0, nullptr)) return false;              // SET_CONFIGURATION
+    if (!control(k, 0x00, 9, config, 0, 0, nullptr)) {                          // SET_CONFIGURATION
+        printf("USB: %s: audio: SET_CONFIGURATION %d failed (cc=%d)\n", k.where, config, ctl_cc);
+        return false;
+    }
     if (!control(k, 0x01, 11, best.alt, best.iface, 0, nullptr)) {               // SET_INTERFACE
         printf("USB: %s: audio: SET_INTERFACE %d alt %d failed\n", k.where, best.iface, best.alt);
         return false;
@@ -1444,7 +1447,9 @@ static bool setup_slot(Keyboard& k, int ki) {
         delay_ms(10);
     }
 
-    static volatile uint8_t desc[256] __attribute__((aligned(64)));
+    // Room for a headset's configuration (a microphone and several formats
+    // run past 256 bytes, and what didn't fit was never seen).
+    static volatile uint8_t desc[1024] __attribute__((aligned(64)));
     if (!control(k, 0x80, 6, 0x0100, 0, 8, desc)) { printf("USB: %s: no descriptor\n", k.where); return false; }
     int mps = desc[7];
     bool hub = desc[4] == 9;                            // device class: hub
@@ -1452,14 +1457,24 @@ static bool setup_slot(Keyboard& k, int ki) {
         memset((void*)ctx(k.in_ctx, 0), 0, H->csz);
         ctx(k.in_ctx, 0)[1] = 0x2;
         ep0[1] = (ep0[1] & 0xFFFF) | (uint32_t)mps << 16;
-        command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_EVALUATE_CTX << 10 | (uint32_t)k.slot << 24, nullptr);
+        int ecc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_EVALUATE_CTX << 10 | (uint32_t)k.slot << 24, nullptr);
+        if (ecc != 1) printf("USB: %s: Evaluate Context (EP0 packets of %d) failed (cc=%d)\n", k.where, mps, ecc);
     }
     uint16_t vid = 0, pid = 0;
     if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) { vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; }
-    if (!control(k, 0x80, 6, 0x0200, 0, 9, desc)) return false;
+    if (!control(k, 0x80, 6, 0x0200, 0, 9, desc)) {
+        printf("USB: %s: %04x:%04x: no configuration descriptor (cc=%d)\n", k.where, vid, pid, ctl_cc);
+        return false;
+    }
     int total = desc[2] | desc[3] << 8;
-    if (total > (int)sizeof(desc)) total = sizeof(desc);
-    if (!control(k, 0x80, 6, 0x0200, 0, total, desc)) return false;
+    if (total > (int)sizeof(desc)) {
+        printf("USB: %s: %04x:%04x: configuration of %d bytes, only the first %d read\n", k.where, vid, pid, total, (int)sizeof(desc));
+        total = sizeof(desc);
+    }
+    if (!control(k, 0x80, 6, 0x0200, 0, total, desc)) {
+        printf("USB: %s: %04x:%04x: configuration (%d bytes) not read (cc=%d)\n", k.where, vid, pid, total, ctl_cc);
+        return false;
+    }
     int config = desc[5];
 
     // A boot keyboard or mouse interface, or a hub's, and its interrupt IN endpoint.
