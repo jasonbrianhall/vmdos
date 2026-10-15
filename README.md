@@ -37,7 +37,7 @@ sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); eve
 ```
 
 Plug it in, pick the stick in the PC's boot menu (UEFI or legacy BIOS). The stick is then
-C: (vmdos reads it through its own USB driver: xHCI, EHCI or UHCI, bulk-only mass
+C: (vmdos reads it through its own USB driver: xHCI, EHCI, UHCI or OHCI, bulk-only mass
 storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
 Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
 Afterwards the stick can be mounted on Linux to add games (it's FAT).
@@ -315,12 +315,12 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   or `vmdos.efi` straight from the UEFI firmware.
 - BIOS: INT 10h (text modes, mode 13h, DAC/palette), 11h, 12h, 13h (CHS and
   LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
-- USB controllers: xHCI (USB 3), EHCI (USB 2) and UHCI (USB 1.1, the
+- USB controllers: xHCI (USB 3), EHCI (USB 2), UHCI (USB 1.1, the
   companions EHCI hands low/full-speed devices to on Intel boards and in
-  QEMU/libvirt); OHCI (AMD/NVIDIA companions) not yet. Everything below
-  works on any of them.
+  QEMU/libvirt) and OHCI (USB 1.1, the same on AMD, ATI, NVIDIA, VIA and SiS
+  chipsets, or on their own on older PCs). Everything below works on any of them.
 - Keyboards: PS/2, and USB (boot protocol, hubs, hot-plug; polled).
-  `usb=off` on the command line skips USB; `ehci=off` skips only the EHCI and UHCI controllers, leaving them (and any legacy keyboard/mouse emulation) to the firmware.
+  `usb=off` on the command line skips USB; `ehci=off` skips only the EHCI, UHCI and OHCI controllers, leaving them (and any legacy keyboard/mouse emulation) to the firmware.
 - Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
   first is joystick A, a second joystick B (with one, its buttons 3 and 4
   are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES
@@ -401,11 +401,15 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through USB
   audio, HD Audio, AC'97 or a real Sound Blaster (`audio=usb|hda|hdmi|ac97|sb|off`,
   `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
-  USB audio (headphones, headsets, DACs; USB Audio Class 1 or 2, on an xHCI
-  controller): plugged in, it's used first; plugged in later, sound switches
+  USB audio (headphones, headsets, DACs; USB Audio Class 1 or 2, on xHCI,
+  EHCI or UHCI controllers): plugged in, it's used first; plugged in later, sound switches
   to it, and back when it's unplugged. 48 kHz 16-bit stereo when the device
-  takes it, else converted (44.1 kHz, 24/32-bit, mono). Test in QEMU:
-  `-device qemu-xhci -device usb-audio,audiodev=a0 -audiodev wav,id=a0,path=out.wav`.
+  takes it, else converted (44.1 kHz, 24/32-bit, mono). On USB 2 boards a
+  full-speed device plays through the UHCI or OHCI companion, or through split
+  transactions when it's behind a hub (including the one built into later
+  Intel chipsets); a high-speed one through EHCI directly. Test in QEMU:
+  `-device qemu-xhci -device usb-audio,audiodev=a0 -audiodev wav,id=a0,path=out.wav`
+  (or `-device piix3-usb-uhci` or `-device pci-ohci` in place of `qemu-xhci`).
   A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
   Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from the PC's mic jack (else
   internal mic, else line in) when playing through HD Audio analog;
@@ -499,7 +503,7 @@ untested.
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
 | `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
-| `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI and UHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |
+| `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI, UHCI and OHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
