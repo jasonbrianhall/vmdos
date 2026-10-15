@@ -33,8 +33,9 @@
    reboot screen), twice within 3 s offers a forced restart.
 
    This is a draft: AMD-V only (no Intel VT-x yet), a 32-bit (non-PAE)
-   guest paging walk, planar VGA only from code below 1 MiB, no CD-ROM
-   in the VM (VMCD's interface is the v86 monitor's). */
+   guest paging walk, planar VGA only from code below 1 MiB. VMCD and
+   DMESG reach vmdos through its BIOS's INT 2Fh stub (dos/vmapi.inc): DOS
+   ends the INT 2Fh chain before it gets there. */
 #include "kernel.h"
 
 /* ---- the VMCB ---- */

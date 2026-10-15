@@ -39,7 +39,7 @@ dump:   xor edx, edx
         mov cx, BUFSZ
         xor bx, bx
         mov ax, 564Ch
-        int 2Fh
+        call vmapi
         cmp byte [first], 0
         je .got
         cmp bx, 564Dh                   ; 'VM'
@@ -68,7 +68,7 @@ keep:   mov ax, 564Ch                   ; under vmdos at all?
         push cs
         pop es
         mov di, buf
-        int 2Fh
+        call vmapi
         cmp bx, 564Dh
         jne notvm
         mov di, buf                     ; first block: the signature, Ctrl+Z, spaces
@@ -132,5 +132,6 @@ msg_notvm db 'DMESG: not running under vmdos', 13, 10, '$'
 msg_usage db 'DMESG       vmdos', 39, 's log (DMESG > LOG.TXT, DMESG | MORE)', 13, 10
         db 'DMESG /K    make C:\VMDOS\VMDOS.LOG, where vmdos saves its log when it', 13, 10
         db '            stops or on S in its Ctrl+Shift+F10 log (after a crash or hang)', 13, 10, '$'
+%include "vmapi.inc"
 first   db 0
 buf:
