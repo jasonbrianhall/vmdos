@@ -116,8 +116,8 @@ FORCE:
 $(BUILD)/VMSPEED.COM: dos/vmspeed.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-$(BUILD)/DMESG.COM: dos/dmesg.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/DMESG.COM: dos/dmesg.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
 $(BUILD)/VMSHOT.COM: dos/vmshot.asm | $(BUILD)
 	nasm -f bin $< -o $@
@@ -131,11 +131,11 @@ $(BUILD)/VMHV.COM: dos/vmhv.asm | $(BUILD)
 $(BUILD)/hvasm.o: src/hvasm.S | $(BUILD)
 	$(CC) -m32 -c $< -o $@
 
-$(BUILD)/VMCD.SYS: dos/vmcd.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/VMCD.SYS: dos/vmcd.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
-$(BUILD)/VMCD.COM: dos/vmcdtool.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/VMCD.COM: dos/vmcdtool.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
 $(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
 	nasm -f bin $< -o $@

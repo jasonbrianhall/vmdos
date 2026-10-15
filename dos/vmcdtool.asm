@@ -25,7 +25,7 @@
         xor ch, ch
         mov ax, 5644h
         mov bx, 2
-        int 2Fh
+        call vmapi
         cmp ax, 5644h
         je novm
         or ax, ax
@@ -41,7 +41,7 @@ list:   mov ax, 150Dh                   ; the CD drives' letters (SHSUCDX/MSCDEX
         mov dx, 4C45h                   ; 'LE': DS:SI = letters
         mov si, letters
         mov di, buf
-        int 2Fh
+        call vmapi
         cmp ax, 5644h
         je novm
         mov dx, buf
@@ -77,7 +77,7 @@ path:   mov di, pbuf                    ; token -> ASCIIZ
         xor ch, ch
         mov ax, 5644h
         mov bx, 3
-        int 2Fh
+        call vmapi
         cmp ax, 5644h
         je novm
         or ax, ax
@@ -196,6 +196,7 @@ msg_e5   db 'VMCD: no such CD-ROM drive (more with cdrives=N on the kernel comma
 msg_e6   db 'VMCD: out of memory for the image', 13, 10, '$'
 msg_e7   db 'VMCD: disk error reading C:', 13, 10, '$'
 msg_e8   db 'VMCD: unusable CUE sheet (BIN missing or unsupported track mode; see the log)', 13, 10, '$'
+%include "vmapi.inc"
 letters: times 26 db 0FFh
 pbuf:    times 128 db 0
 tbuf:    times 128 db 0

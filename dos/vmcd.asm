@@ -1,6 +1,6 @@
 ; VMCD.SYS: CD-ROM device driver for vmdos's CD drives (ISO files on C:,
 ; chosen with VMCD.COM, or loaded as boot modules). Every request goes to
-; the monitor (INT 2Fh AX=5644h);
+; the monitor (INT 2Fh AX=5644h, made at vmdos's BIOS stub: vmapi.inc);
 ; SHSUCDX or MSCDEX then gives each drive a letter:
 ;   DEVICE=C:\VMDOS\VMCD.SYS    (in FDCONFIG.SYS)
 ;   SHSUCDX /D:?VMCD0001        (in AUTOEXEC.BAT)
@@ -33,13 +33,14 @@ interrupt:
         mov ax, 5644h
         mov bx, 1
         mov dx, cs
-        int 2Fh                         ; the monitor does the request
+        call vmapi                      ; the monitor does the request
 done:   pop es
         pop di
         pop dx
         pop bx
         pop ax
         retf
+%include "vmapi.inc"
 resident_end:
 
 init:   push cx
@@ -48,7 +49,7 @@ init:   push cx
         pop ds
         mov ax, 5644h
         xor bx, bx
-        int 2Fh
+        call vmapi
         cmp ax, 5644h                   ; unchanged: not vmdos
         je .none
         or ax, ax
