@@ -121,6 +121,13 @@ static void map_page64(u32 lin, u64 phys, u32 flags)
 
 void map_page(u32 lin, u32 phys, u32 flags) { map_page64(lin, phys, flags); }
 
+/* The physical page behind lin, 0 if it isn't mapped. */
+u32 page_phys(u32 lin)
+{
+    u64 e = pae ? ((u64 *)pt_for(lin))[(lin >> 12) & 511] : ((u32 *)pt_for(lin))[(lin >> 12) & 1023];
+    return (e & 1) ? (u32)(e & ~0xFFFull) : 0;
+}
+
 static void map_range(u32 lin, u64 phys, u32 len, u32 flags)
 {
     u32 off = lin & 0xFFF;

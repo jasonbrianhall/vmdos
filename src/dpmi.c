@@ -360,11 +360,12 @@ void dpmi_detect(struct regs *r)
     dbg(1, "DPMI: detection\n");
 }
 
+static void release_free(void);
 static void reset_client(void)
 {
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
-    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1) blk[i].used = 0;  /* memory stays for reuse */
-    merge_free();
+    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1) blk[i].used = 0;
+    release_free();
     memset(ldt_used, 0, sizeof ldt_used);
     memset(seg_cache, 0, sizeof seg_cache);
     xdepth = 0;
@@ -462,7 +463,8 @@ static int desc_rights_ok(u8 acc) { return (acc & 0x60) == 0x60 && (acc & 0x10);
    pages from anywhere: DOS/4GW's DOS/16M core keeps 24-bit addresses.
    Blocks that don't fit there (Quake's DJGPP heap grows past 14 MiB) are
    kernel heap pages above 16 MiB, at their own (identity-mapped) address,
-   opened to ring 3. Blocks keep their place when freed, for reuse. The
+   opened to ring 3. Blocks keep their place when freed, for reuse, until
+   the client exits (release_free). The
    free-memory report offers up to dpmi=MB (default 1024) in all, but its
    "largest block" stays what the window has, so DOS/4GW stays inside it. */
 #define WIN_LO 0x00200000u
@@ -532,6 +534,32 @@ static void merge_free(void)
             }
         }
     }
+}
+
+/* The client is gone: what it had goes back to the kernel, and the window
+   is whole again. Kept while it ran (freed blocks are reused), its memory
+   left in place after it ended had the window in pieces: a freed block
+   doesn't join the untouched window space next to it (that space has no
+   pages behind it), so after a small program (or a game's setup) the next
+   one could find no window piece big enough ("out of memory", where the
+   same game had just run). */
+static void release_free(void)
+{
+    for (int i = 0; i < MAX_BLOCKS; i++) {
+        if (!blk[i].size || blk[i].used) continue;
+        if (in_window(i)) {
+            for (u32 a = blk[i].lin; a < blk[i].lin + blk[i].size; a += 4096) {
+                u32 p = page_phys(a);
+                if (p) phys_release((void *)(uintptr_t)p, 4096);
+                map_page(a, guest_phys(0), 0);
+            }
+        } else if (blk[i].lin >= WIN_HI) {          /* above 16 MiB, where it is */
+            set_user(blk[i].lin, blk[i].size, 0);
+            phys_release((void *)(uintptr_t)blk[i].lin, blk[i].size);
+        } else continue;
+        blk[i].size = 0;
+    }
+    tlb_flush();
 }
 
 static u32 win_largest(void)
