@@ -113,6 +113,7 @@ u32 guest_phys(u32 lin);                      /* physical page behind guest line
 void tlb_flush(void);
 int page_dirty(u32 lin, int clear);           /* PTE dirty bit (cleared if clear) */
 void map_page(u32 lin, u32 phys, u32 flags);
+u32 page_phys(u32 lin);                       /* physical page behind lin, 0: not mapped */
 void set_a20(int on);
 extern int a20_on;
 extern int usb_ready;
