@@ -438,6 +438,11 @@ fixes the choice. A card changed to takes over the address DOS already has,
 so VMPKT and the programs on it carry on. The RTL8168/8125 driver relies on
 the firmware having set up the PHY (`debug=1` logs what vmdos found).
 
+vmdos also shows DOS an ISA NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
+`ne2k=off` removes it) on the same card and address, for drivers that want
+hardware: Windows 95/98/ME's "NE2000 Compatible" (under VMHV), NE2000 packet
+drivers, ODI/NDIS drivers for Windows 3.x. Use it or VMPKT, not both.
+
 IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
 PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
 `make run NET=lan` (any number of times, `NIC=rtl8139` for another card)

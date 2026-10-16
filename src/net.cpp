@@ -74,6 +74,10 @@ void enqueue(const uint8_t* f, unsigned len)
                         f[6], f[7], f[8], f[9], f[10], f[11]);
 }
 
+// Room for another frame? While the queue is full, frames stay in the
+// card's own ring (more buffering; under QEMU the sender waits too).
+bool room() { return q_count < QLEN || rx_mode == 1; }
+
 struct Card {
     int kind;
     PciDevice pci;
@@ -235,7 +239,7 @@ void poll(Card& c)
     volatile RxD* rx = (volatile RxD*)c.rxd;
     for (int n = 0; n < NRX; n++) {
         volatile RxD& d = rx[c.rx_cur];
-        if (!(d.status & 1)) break;             // DD
+        if (!(d.status & 1) || !room()) break;  // DD
         BARRIER();
         if ((d.status & 2) && !d.errors) enqueue(c.rxb + c.rx_cur * 2048, d.len);
         else st.rx_err++;
@@ -332,7 +336,7 @@ bool link(Card& c) { return !(inb(c.io + MSR) & 4); }   // LINKB: 1 = link down
 
 void poll(Card& c)
 {
-    for (int n = 0; n < 64 && !(inb(c.io + CR) & 1); n++) {   // BUFE clear: a frame is there
+    for (int n = 0; n < 64 && room() && !(inb(c.io + CR) & 1); n++) {   // BUFE clear: a frame is there
         uint16_t status = *(volatile uint16_t*)(c.rxb + c.rx_off);
         uint16_t len = *(volatile uint16_t*)(c.rxb + c.rx_off + 2);
         if (status == 0 && len == 0xFFF0) break;          // early receive, not there yet
@@ -583,7 +587,7 @@ void poll(Card& c)
     for (int n = 0; n < NRX; n++) {
         volatile Desc& d = rx[c.rx_cur];
         uint32_t s = d.opts1;
-        if (s & OWN) break;
+        if ((s & OWN) || !room()) break;
         BARRIER();
         if ((s & RES) || (s & (FS | LS)) != (FS | LS)) st.rx_err++;
         else {
@@ -723,8 +727,50 @@ void auto_check()
 
 extern "C" int net_ready;
 int net_ready;
+extern "C" int ne2k_running(void);
+extern "C" void ne2k_tick(void);
+extern "C" void ne2k_init(void);
 
+// For the emulated NE2000 (ne2k.c).
+extern "C" int net_peek_len(void) { if (!q_count) poll_card(); return q_count ? qlen_of[q_head] : 0; }
+extern "C" int net_take(uint8_t* buf, int max)
+{
+    if (!q_count) return 0;
+    int len = qlen_of[q_head];
+    memcpy(buf, qbuf + q_head * FRAME_MAX, len < max ? len : max);
+    q_head = (q_head + 1) % QLEN;
+    q_count--;
+    return len;
+}
+extern "C" int net_send(const uint8_t* f, unsigned len)
+{
+    bool ok = len >= 14 && len <= 1514 && send_frame(f, len);
+    if (ok) { st.tx++; st.tx_bytes += len; } else st.tx_err++;
+    if (log_on) kprintf("net: NE2000 out %u bytes, type %02x%02x%s\n", len, f[12], f[13], ok ? "" : " FAILED");
+    return ok;
+}
+extern "C" int net_dos_mac(uint8_t* mac, int fix)          // the address DOS sees (fix: from now on)
+{
+    if (active < 0) return 0;
+    if (fix && !mac_fixed) { memcpy(dos_mac, cards[active].mac, 6); mac_fixed = true; }
+    memcpy(mac, cur_mac(), 6);
+    return 1;
+}
+extern "C" void net_rx_mode(int m)
+{
+    if (m == rx_mode) return;
+    rx_mode = m;
+    if (active >= 0) card_mode(cards[active], m);
+}
+
+static void net_init_cards(void);
 extern "C" void net_init(void)
+{
+    net_init_cards();
+    ne2k_init();
+}
+
+static void net_init_cards(void)
 {
     if (strstr(cmdline, "net=off")) return;
     log_on = strstr(cmdline, "netlog") != 0;
@@ -763,6 +809,7 @@ extern "C" void net_tick(void)
 {
     poll_card();
     auto_check();
+    if (ne2k_running()) ne2k_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 
