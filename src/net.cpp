@@ -534,6 +534,12 @@ bool init(Card& c)
         phy_write(c, 0, (uint16_t)((bmcr & ~0x0800) | 0x1200));   // power up, autonegotiate
         kprintf("net: %s PHY was powered down: woken, negotiating\n", c.name);
     }
+    bool fe = chip->ver == 29 || chip->ver == 30 || chip->ver == 37 || chip->ver == 39;   // the 8105e/8402/8106e
+    if (fe) {
+        phy_write(c, 0x1F, 0);                  // PHY page 0
+        phy_write(c, 0x18, 0x0310);             // ALDPS (link-down power saving) off, as Linux does
+        udelay(100000);
+    }
 
     // rings
     c.rxd = (uint8_t*)phys_alloc(NRX * sizeof(Desc));
@@ -567,6 +573,14 @@ bool init(Card& c)
     } else {
         w8(c, MaxTxPacketSize, c.evl_up ? 0x27 : 0x3F);
         w16(c, IntrMitigate, 0);
+        if (fe) {
+            w32(c, MISC, r32(c, MISC) | 0x002800);   // FuncEvent: leave ASPM while Rx/Tx are busy
+            w8(c, 0xD3, r8(c, 0xD3) | 0x0C);         // MCU: EN_NDP, EN_OOB_RESET
+        }
+        if (chip->ver == 39) {
+            w32(c, MISC, (r32(c, MISC) | (1u << 23)) & ~(1u << 16));   // DISABLE_LAN_EN, no early tally
+            w8(c, 0xD0, r8(c, 0xD0) & ~0x40);        // DLLPR: PFM off
+        }
     }
     if (chip->ver >= 40) w32(c, MISC, r32(c, MISC) & ~(1u << 19));   // RXDV gate off
     w16(c, RxMaxSize, BUF);
@@ -586,6 +600,8 @@ bool init(Card& c)
     w32(c, RxConfig, rxc);                      // accepting nothing yet
     w32(c, TxConfig, (7u << 8) | (3u << 24) | (c.evl_up ? (1u << 7) : 0));
     irq_off(c);
+    phy_write(c, 0x1F, 0);
+    phy_write(c, 0, 0x9200);                    // PHY soft reset, autonegotiate afresh (genphy_soft_reset)
     return true;
 }
 
@@ -721,6 +737,21 @@ int use_card(int i, const char* why)
 }
 
 // Auto: while the card in use has had no link for 3 s, change to one that has.
+// Every link change in the log.
+void link_watch()
+{
+    static uint32_t last;
+    static uint8_t was[MAXCARDS];
+    if (ticks - last < 250) return;
+    last = ticks;
+    for (int i = 0; i < ncards; i++) {
+        if (!cards[i].running) continue;
+        uint8_t now = card_link(cards[i]) ? 2 : 1;
+        if (was[i] && now != was[i]) kprintf("net: card %d (%s): link %s\n", i + 1, cards[i].name, now == 2 ? "up" : "down");
+        was[i] = now;
+    }
+}
+
 void auto_check()
 {
     static uint32_t down_since, last;
@@ -818,6 +849,7 @@ static void net_init_cards(void)
 extern "C" void net_tick(void)
 {
     poll_card();
+    link_watch();
     auto_check();
     if (ne2k_running()) ne2k_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);

@@ -140,6 +140,12 @@ $(BUILD)/VMCD.COM: dos/vmcdtool.asm dos/vmapi.inc | $(BUILD)
 $(BUILD)/VMPKT.COM: dos/vmpkt.asm dos/vmapi.inc | $(BUILD)
 	nasm -f bin -i dos/ $< -o $@
 
+$(BUILD)/PKTTEST.COM: tests/pkttest.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
+$(BUILD)/IPXTEST.COM: tests/ipxtest.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMNIC.COM: dos/vmnic.asm dos/vmapi.inc | $(BUILD)
 	nasm -f bin -i dos/ $< -o $@
 
@@ -166,7 +172,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT \
