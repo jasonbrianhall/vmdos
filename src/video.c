@@ -1568,7 +1568,7 @@ static u32 video_port_in_(u16 port)
     case 0x3C2: return 0x10;
     case 0x3D9: return cga_sel;
     case 0x3C4: return seq_idx & 7;
-    case 0x3C5: return seq[seq_idx & 7];
+    case 0x3C5: return seq_idx < 8 ? seq[seq_idx] : 0;   /* past the VGA's (and ET4000's): none */
     case 0x3C6: return dac_mask;
     case 0x3C7: return 3;
     case 0x3C8: return dac_widx;
@@ -1582,7 +1582,8 @@ static u32 video_port_in_(u16 port)
     case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
-    case 0x3B5: case 0x3D5: return crtc[crtc_idx & 63];
+    case 0x3B5: case 0x3D5: return crtc_idx < 64 ? crtc[crtc_idx] : 0;   /* past the ET4000's: none
+                                                    (wrapped, 50h read as 10h: an ARK chip ID to svgalib) */
     case 0x3BA: case 0x3DA: {
         atc_flip = 0;
         u32 t = vpit_clock();
@@ -1648,9 +1649,10 @@ static void video_port_out_(u16 port, u8 v)
     case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
-        seq[seq_idx & 7] = v;
-        if ((seq_idx & 7) == 4) { planar_check(); et_remap(); }
-        else if ((seq_idx & 7) == 2) { readmap_last = 0; apply_map_mask(); et_remap(); }
+        if (seq_idx >= 8) return;                   /* another chip's register (a chipset probe): none here */
+        seq[seq_idx] = v;
+        if (seq_idx == 4) { planar_check(); et_remap(); }
+        else if (seq_idx == 2) { readmap_last = 0; apply_map_mask(); et_remap(); }
         return;
     case 0x3C6: dac_mask = v; palette_dirty = 1; return;
     case 0x3C7: dac_ridx = v; dac_rc = 0; return;
@@ -1669,7 +1671,8 @@ static void video_port_out_(u16 port, u8 v)
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
-        crtc[crtc_idx & 63] = v;
+        if (crtc_idx >= 64) return;
+        crtc[crtc_idx] = v;
         et_crtc();
         if ((crtc_idx & 31) == 0x0C || (crtc_idx & 31) == 0x0D) full_redraw = 1;
         return;

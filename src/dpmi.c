@@ -1,5 +1,7 @@
 /* DPMI 0.9 host, for DOS extenders (DOS/4GW, DOS/32A, PMODE/W, CWSDPMI
-   clients...). One client at a time.
+   clients...). One client runs at a time; one that starts another DOS
+   program which is a client too (a front end such as AdvanceMENU running
+   AdvanceMAME) has its state put aside until that one exits (nest_push).
 
    The client runs in 16- or 32-bit protected mode at ring 3 with IOPL 0,
    using LDT descriptors. Every port access, CLI/STI, HLT and software INT
@@ -168,6 +170,7 @@ static void ldt_install(void)
 }
 
 /* ---------------- client state ---------------- */
+#define NEST_MAX 4                              /* clients that started clients, waiting */
 static int client, client32;
 static u16 psp_seg, env_seg, rm_stack_seg;
 static u32 locked_stack;                       /* linear */
@@ -205,7 +208,9 @@ static u32 lin(u32 sel, u32 off) { return sel_base(sel) + off; }
 
 /* Is [a, a+n) something the client may hand us? (DOS memory or one of its blocks) */
 #define MAX_BLOCKS 512
-static struct { u32 lin, size; u8 used; } blk[MAX_BLOCKS];
+static struct { u32 lin, size; u8 used, lvl; } blk[MAX_BLOCKS];   /* lvl: the nesting level of its client */
+static int nest;                                /* clients put aside, waiting for the one running (nest_push) */
+static u32 nest_stack[NEST_MAX + 1];            /* each level's own locked stack */
 int xms_range_ok(u32 a, u32 n);
 static int alloc_block(u32 size);
 static void merge_free(void);
@@ -361,10 +366,12 @@ void dpmi_detect(struct regs *r)
 }
 
 static void release_free(void);
+static void nest_push(void);
+static void nest_pop(void);
 static void reset_client(void)
 {
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
-    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1) blk[i].used = 0;
+    for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1 && blk[i].lvl == nest) blk[i].used = 0;   /* its own, not a waiting parent's */
     release_free();
     memset(ldt_used, 0, sizeof ldt_used);
     memset(seg_cache, 0, sizeof seg_cache);
@@ -397,6 +404,7 @@ static struct regs *enter_pm(struct regs *r)
         if (b < 0) panic("DPMI: out of memory for the host stack");
         blk[b].used = 2;                       /* the host's: never freed */
         locked_stack = blk[b].lin;
+        if (!nest) nest_stack[0] = locked_stack;
     }
     ldt[HOST_SS_I] = make_desc(locked_stack, LOCKED_SIZE - 1, 0xF2, 4);
     ldt[HOST_DS_I] = make_desc(0, 0xFFFF, 0xF2, 0);
@@ -430,11 +438,12 @@ static struct regs *terminate(struct ctx *c, u8 code, const char *why)
         video_puts(why);
         video_puts("\r\n");
     }
-    u16 psp = psp_seg;
+    u16 psp = psp_seg, rss = rm_stack_seg;
     reset_client();
+    if (nest) nest_pop();                      /* the client that started this one: back as it was */
     struct ctx rm;
     memset(&rm, 0, sizeof rm);
-    rm.ss = rm_stack_seg; rm.esp = 0x2000;
+    rm.ss = rss; rm.esp = 0x2000;
     rm.ds = rm.es = psp;
     rm.eax = 0x4C00 | code;
     rm.eflags = 2;
@@ -594,7 +603,7 @@ static int reuse(u32 size, int window)
     for (int i = 0; i < MAX_BLOCKS; i++)
         if (blk[i].size && !blk[i].used && in_window(i) == window && blk[i].size >= size &&
             (fit < 0 || blk[i].size < blk[fit].size)) fit = i;
-    if (fit >= 0) { blk[fit].used = 1; memset(gptr(blk[fit].lin), 0, blk[fit].size); }
+    if (fit >= 0) { blk[fit].used = 1; blk[fit].lvl = (u8)nest; memset(gptr(blk[fit].lin), 0, blk[fit].size); }
     return fit;
 }
 
@@ -636,7 +645,7 @@ static int alloc_block(u32 size)
         if (!p) return -1;
         lin = (u32)(uintptr_t)p; set_user(lin, size, 1);
     }
-    blk[i].lin = lin; blk[i].size = size; blk[i].used = 1;
+    blk[i].lin = lin; blk[i].size = size; blk[i].used = 1; blk[i].lvl = (u8)nest;
     memset(gptr(lin), 0, size);
     return i;
 }
@@ -692,6 +701,65 @@ static struct regs *dos_call(struct ctx *c, int kind, u16 ax, u16 bx, u16 es)
 
 #define MAX_CB 16
 static struct { u16 sel; u32 off; u16 ssel; u32 soff; u8 used; } cbs[MAX_CB];
+
+/* A client's whole state, put aside while a client it started runs. */
+static struct parked {
+    u64 ldt[LDT_N];
+    u8 ldt_used[LDT_N];
+    u8 pm_vec[sizeof pm_vec], exc_vec[sizeof exc_vec], seg_cache[sizeof seg_cache], cbs[sizeof cbs];
+    struct xent xs[XDEPTH];
+    int xdepth, client32, stepping;
+    u32 step_cs, step_eip, step_ss, step_esp, locked_stack;
+    u16 psp_seg, env_seg, rm_stack_seg;
+} *parked[NEST_MAX];
+
+static void nest_push(void)
+{
+    if (!parked[nest]) parked[nest] = phys_alloc(sizeof(struct parked));
+    struct parked *p = parked[nest];
+    memcpy(p->ldt, ldt, sizeof p->ldt);
+    memcpy(p->ldt_used, ldt_used, sizeof ldt_used);
+    memcpy(p->pm_vec, pm_vec, sizeof pm_vec); memcpy(p->exc_vec, exc_vec, sizeof exc_vec);
+    memcpy(p->seg_cache, seg_cache, sizeof seg_cache); memcpy(p->cbs, cbs, sizeof cbs);
+    memcpy(p->xs, xs, sizeof xs);
+    p->xdepth = xdepth; p->client32 = client32; p->stepping = stepping;
+    p->step_cs = step_cs; p->step_eip = step_eip; p->step_ss = step_ss; p->step_esp = step_esp;
+    p->locked_stack = locked_stack;
+    p->psp_seg = psp_seg; p->env_seg = env_seg; p->rm_stack_seg = rm_stack_seg;
+    kprintf("DPMI: client (PSP %04x) starts another; its state put aside (level %d)\n", psp_seg, nest + 1);
+    nest++;
+    /* the new one: nothing of the old, its own locked stack (the old one's
+       frames stay where they are) */
+    memset(cbs, 0, sizeof cbs);
+    xdepth = 0; stepping = 0;
+    if (!nest_stack[nest]) {
+        int b = alloc_block(LOCKED_SIZE);
+        if (b < 0) panic("DPMI: out of memory for a nested client's host stack");
+        blk[b].used = 2;
+        nest_stack[nest] = blk[b].lin;
+    }
+    locked_stack = nest_stack[nest];
+    client = 0;
+}
+
+static void nest_pop(void)
+{
+    nest--;
+    struct parked *p = parked[nest];
+    memcpy(ldt, p->ldt, sizeof p->ldt);
+    memcpy(ldt_used, p->ldt_used, sizeof ldt_used);
+    memcpy(pm_vec, p->pm_vec, sizeof pm_vec); memcpy(exc_vec, p->exc_vec, sizeof exc_vec);
+    memcpy(seg_cache, p->seg_cache, sizeof seg_cache); memcpy(cbs, p->cbs, sizeof cbs);
+    memcpy(xs, p->xs, sizeof xs);
+    xdepth = p->xdepth; client32 = p->client32; stepping = p->stepping;
+    step_cs = p->step_cs; step_eip = p->step_eip; step_ss = p->step_ss; step_esp = p->step_esp;
+    locked_stack = p->locked_stack;
+    psp_seg = p->psp_seg; env_seg = p->env_seg; rm_stack_seg = p->rm_stack_seg;
+    ldt[HOST_CS_I] = make_desc(0xF0000, 0xFFFF, 0xFA, client32 ? 4 : 0);
+    ldt[HOST_SS_I] = make_desc(locked_stack, LOCKED_SIZE - 1, 0xF2, 4);
+    client = 1;
+    kprintf("DPMI: back to the client that started it (PSP %04x, level %d)\n", psp_seg, nest);
+}
 
 static struct regs *int31(struct ctx *c)
 {
@@ -1192,7 +1260,13 @@ int dpmi_rm_trap(struct regs *r, int id)
     struct ctx c;
     get_ctx(r, &c);
     if (id == 0x54) {                          /* switch entry: remember the caller */
-        if (client) reset_client();            /* an earlier client that didn't exit through us */
+        /* A client already: one waiting in a DOS call it made from protected
+           mode (EXEC, reflected or through 0300h: this is the program it started) is put aside until
+           this one exits; else it's one that went without exiting through
+           us, forgotten. */
+        if (client && xdepth && (xs[xdepth - 1].kind == X_REFLECT || xs[xdepth - 1].kind == X_SIM) && nest < NEST_MAX)
+            nest_push();                       /* (DJGPP's spawn runs INT 21h 4B00h through 0300h) */
+        else if (client) reset_client();
         entry_ctx = c;
         entry_ctx.eip = pop(&entry_ctx, 0);    /* the far call's return address */
         entry_ctx.cs = pop(&entry_ctx, 0);
