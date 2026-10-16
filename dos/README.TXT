@@ -34,6 +34,7 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMHD D: 3             Put partition 3 in D: (/R read-only, /E out)
   VMPKT                 Packet driver for the network card (INT 60h)
   VMIPX                 IPX for network games (load VMPKT first)
+  VMNIC [n | AUTO]      List the network cards, or pick the one to use
   VMSB 16 | PRO         Sound Blaster 16 or Pro (VMSB alone shows which)
   VMSB MIC              Mic level meter (written for parrot but the parrot game doesn't
                           work because of the way it handles audio)
