@@ -110,6 +110,28 @@ void w32(Card& c, int r, uint32_t v) { *(volatile uint32_t*)(c.mm + r) = v; }
 void w16(Card& c, int r, uint16_t v) { *(volatile uint16_t*)(c.mm + r) = v; }
 void w8(Card& c, int r, uint8_t v) { c.mm[r] = v; }
 
+// PCI power state D0 (full power), as pci_enable_device does: the firmware
+// may have left the card in D3. Returns the state it was in.
+int pci_d0(const PciDevice& d)
+{
+    if (!(pci_read(d, 0x04) & (1u << 20))) return -1;   // no capability list
+    int cap = pci_read(d, 0x34) & 0xFC;
+    for (int n = 0; cap && n < 48; n++) {
+        uint32_t h = pci_read(d, cap);
+        if ((h & 0xFF) == 0x01) {               // power management
+            uint32_t pmcsr = pci_read(d, cap + 4);
+            int st = pmcsr & 3;
+            if (st) {
+                pci_write(d, cap + 4, (pmcsr & ~3u) | 0x8000);   // D0 (and clear PME status)
+                udelay(10000);
+            }
+            return st;
+        }
+        cap = (h >> 8) & 0xFC;
+    }
+    return -1;
+}
+
 // The card's first memory BAR, mapped (0: none).
 volatile uint8_t* map_bar(const PciDevice& d, uint32_t len)
 {
@@ -495,8 +517,17 @@ void irq_off(Card& c)
 
 void dump_phy(Card& c, const char* why);
 
+void eri_write(Card& c, int addr, uint32_t mask, uint32_t v)   // ERI (ExGMAC) register write
+{
+    w32(c, 0x70, v);                            // ERIDR
+    w32(c, 0x74, 0x80000000u | mask << 12 | (uint32_t)addr);   // ERIAR: write, EXGMAC
+    for (int i = 0; i < 100 && (r32(c, 0x74) & 0x80000000u); i++) udelay(10);
+}
+
 bool init(Card& c)
 {
+    int was = pci_d0(c.pci);
+    if (was > 0) kprintf("net: %02x:%02x.%u was in PCI power state D%d: now D0\n", c.pci.bus, c.pci.dev, c.pci.fn, was);
     pci_write(c.pci, 0x04, (pci_read(c.pci, 0x04) | 0x06) & ~0x400u);   // memory, bus master
     c.mm = map_bar(c.pci, 0x10000);
     if (!c.mm) return false;
@@ -582,8 +613,13 @@ bool init(Card& c)
         if (chip->ver == 39) {
             w32(c, MISC, (r32(c, MISC) | (1u << 23)) & ~(1u << 16));   // DISABLE_LAN_EN, no early tally
             w8(c, 0xD0, r8(c, 0xD0) & ~0x40);        // DLLPR: PFM off
+            eri_write(c, 0x1D0, 3, 0);
+            eri_write(c, 0x1B0, 3, 0);               // EEE off
         }
     }
+    // the PLL stays up (Linux: rtl_set_d3_pll_down; older ones powered it up here for the 8106e)
+    if (!c.is8125 && chip->ver >= 25 && chip->ver != 28 && chip->ver != 31 && chip->ver != 38)
+        w8(c, 0x6F, r8(c, 0x6F) | 0xC0);           // PMCH: D3hot / D3cold no PLL down
     if (chip->ver >= 40) w32(c, MISC, r32(c, MISC) & ~(1u << 19));   // RXDV gate off
     w16(c, RxMaxSize, BUF);
     w32(c, TxDescHi, 0); w32(c, TxDescLo, (uint32_t)(uintptr_t)c.txd);
@@ -627,6 +663,9 @@ void dump_phy(Card& c, const char* why)
     kprintf("net: %s %s: PHY id %04x:%04x BMCR %04x BMSR %04x/%04x ADV %04x LPA %04x, PHYstatus %02x, ChipCmd %02x\n",
             c.name, why, id1 & 0xFFFF, id2 & 0xFFFF, bmcr & 0xFFFF, bmsr1 & 0xFFFF, bmsr & 0xFFFF, adv & 0xFFFF, lpa & 0xFFFF,
             r8(c, PHYstatus), r8(c, ChipCmd));
+    kprintf("net: %s %s: Config0-5 %02x %02x %02x %02x %02x %02x PMCH %02x MISC %08x MCU %02x DLLPR %02x PHY 18h %04x\n",
+            c.name, why, r8(c, 0x51), r8(c, 0x52), r8(c, 0x53), r8(c, 0x54), r8(c, 0x55), r8(c, 0x56), r8(c, 0x6F),
+            r32(c, MISC), r8(c, 0xD3), r8(c, 0xD0), phy_read(c, 0x18) & 0xFFFF);
 }
 
 void poll(Card& c)
