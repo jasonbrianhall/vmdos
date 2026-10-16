@@ -15,8 +15,8 @@
 // later is given it, so VMPKT, VMIPX and their clients carry on unchanged.
 //
 // Cards: Intel 8254x/8257x/I21x "e1000" (QEMU's default, -nic model=e1000
-// or e1000e), Realtek RTL8139 (-nic model=rtl8139), Realtek RTL8111/8168
-// and RTL8125 (2.5G) on real PCs. Kernel options: net=off (none), nic=N,
+// or e1000e), Realtek RTL8139 (-nic model=rtl8139), Realtek RTL8111/8168,
+// RTL8125 (2.5G) and RTL810x (10/100) on real PCs. Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log).
 //
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
@@ -401,17 +401,25 @@ const Chip chips[] = {
     { 0x281, "RTL8168d", 25 }, { 0x28A, "RTL8168dp", 28 }, { 0x28B, "RTL8168dp", 31 },
     { 0x3C9, "RTL8168cp", 23 }, { 0x3C8, "RTL8168cp", 18 }, { 0x3C2, "RTL8168c", 20 }, { 0x3C0, "RTL8168c", 19 },
     { 0x384, "RTL8168b", 17 }, { 0x380, "RTL8168b", 17 }, { 0x300, "RTL8168b", 11 },
+    { 0x3C3, "RTL8168c", 21 },
+    // the 8101 family: Fast Ethernet (10EC:8136)
+    { 0x409, "RTL8105e", 29 }, { 0x349, "RTL8102e", 8 }, { 0x249, "RTL8102e", 8 },
+    { 0x348, "RTL8102e", 7 }, { 0x248, "RTL8102e", 7 }, { 0x240, "RTL8401", 14 },
 };
 const Chip masked[] = {                         // matched on XID & 0x7C8
     { 0x488, "RTL8411", 38 }, { 0x2C8, "RTL8168evl", 34 }, { 0x2C0, "RTL8168e", 33 },
     { 0x280, "RTL8168d", 26 }, { 0x3C8, "RTL8168cp", 24 }, { 0x3C0, "RTL8168c", 22 },
+    { 0x380, "RTL8168b", 17 },
+    { 0x448, "RTL8106e", 39 }, { 0x440, "RTL8402", 37 }, { 0x408, "RTL8105e", 30 },
+    { 0x348, "RTL8103e", 9 }, { 0x248, "RTL8103e", 9 }, { 0x340, "RTL8101e", 10 },
 };
 
 bool match(uint32_t id)
 {
     if ((id & 0xFFFF) != 0x10EC) return false;
     uint16_t d = id >> 16;
-    return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8125 || d == 0x3000 || d == 0x5000;
+    return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8125 || d == 0x3000 || d == 0x5000 ||
+           d == 0x8136;                           // RTL810x Fast Ethernet
 }
 
 void unlock(Card& c) { w8(c, Cfg9346, 0xC0); }
@@ -504,7 +512,7 @@ bool init(Card& c)
     c.is8125 = chip->ver >= 61;
     c.ocp_phy = chip->ver >= 40;
     c.gen_g = chip->ver >= 40 && chip->ver <= 52;
-    c.evl_up = chip->ver >= 34 && chip->ver <= 52;
+    c.evl_up = chip->ver >= 34 && chip->ver != 39 && chip->ver <= 52;
     dbg(1, "net: %s (XID %03x, r8169 version %u)\n", chip->name, c.xid, chip->ver);
 
     irq_off(c);
@@ -571,8 +579,10 @@ bool init(Card& c)
     uint32_t rxc;
     if (c.is8125) rxc = (8u << 27) | (7u << 8) | (chip->ver >= 63 ? (1u << 11) : 0);
     else if (c.gen_g) rxc = (1u << 15) | (1u << 14) | (7u << 8) | (1u << 11);
-    else if (chip->ver >= 18) rxc = (1u << 15) | (1u << 14) | (7u << 8);
-    else rxc = (7u << 13) | (7u << 8);
+    else if ((chip->ver >= 18 && chip->ver <= 24) || (chip->ver >= 34 && chip->ver <= 36) || chip->ver == 38)
+        rxc = (1u << 15) | (1u << 14) | (7u << 8);   // RX128_INT_EN, RX_MULTI_EN
+    else if (chip->ver <= 17 && (chip->ver < 7 || chip->ver > 9)) rxc = (7u << 13) | (7u << 8);   // FIFO threshold, DMA burst
+    else rxc = (1u << 15) | (7u << 8);
     w32(c, RxConfig, rxc);                      // accepting nothing yet
     w32(c, TxConfig, (7u << 8) | (3u << 24) | (c.evl_up ? (1u << 7) : 0));
     irq_off(c);
