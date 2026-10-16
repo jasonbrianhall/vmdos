@@ -39,6 +39,7 @@
 //   7  use card CL (0-based; FFh: auto): AX = 0, 1 no such card, 2 it didn't start
 #include "pci.hpp"
 #include "hw.hpp"
+#include "../third_party/rtl_nic/rtl8106e-1.h"
 
 namespace {
 
@@ -572,6 +573,13 @@ bool init(Card& c)
         phy_write(c, 0x1F, 0);                  // PHY page 0
         phy_write(c, 0x18, 0x0310);             // ALDPS (link-down power saving) off, as Linux does
         udelay(100000);
+    }
+    if (chip->ver == 39) {                      // rtl8106e_hw_phy_config: the PHY patch, then its settings
+        for (const auto& w : rtl8106e_1_fw) phy_write(c, w[0], w[1]);
+        static const uint16_t after[][2] = { { 0x1F, 4 }, { 0x10, 0xC07F }, { 0x19, 0x7030 }, { 0x1F, 0 } };
+        for (const auto& w : after) phy_write(c, w[0], w[1]);
+        for (int i = 0; i < 60 && (phy_read(c, 0) & 0x8000); i++) udelay(10000);
+        dbg(1, "net: %s: PHY patch (%u writes) applied\n", c.name, (unsigned)(sizeof rtl8106e_1_fw / sizeof rtl8106e_1_fw[0]));
     }
 
     // rings
