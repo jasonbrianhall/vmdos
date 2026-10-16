@@ -103,6 +103,8 @@ static u8 et_seg;                                    /* ET4000 segment select (3
 static int et_split;                                 /* its read segment != its write segment: writes trapped */
 static int et_on;                                    /* an ET4000 mode: line pitch and display start come from the CRTC */
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
+static int vbe_crtc_follow;                 /* a VBE 3 mode set with CRTC timings: the display-end registers set the size */
+static u32 vbe_mode_w, vbe_mode_h;          /* the VESA mode's own size */
 static int full_redraw = 1, last_layout_mode = -1;
 
 static const u8 ega_atc[16] = { 0, 1, 2, 3, 4, 5, 0x14, 7, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F };
@@ -175,6 +177,7 @@ static void ega_check(void);
 static void modex_check(void);
 int video_et_split(u32 lin);
 static void et_crtc(void);
+static void vbe_crtc_size(void);
 static void et_remap(void);
 u8 video_et_read(u32 lin);
 void video_et_write(u32 lin, u8 v);
@@ -1002,7 +1005,7 @@ static void vbe_mode_info(int m, u32 a)
 {
     memset(gptr(a), 0, 256);
     u32 bpp = vmodes[m].bpp, B = vbe_bytespp(bpp), pitch = vmodes[m].w * B;
-    wr16(a + 0x00, 0x9F);                       /* supported, TTY, colour, graphics, LFB */
+    wr16(a + 0x00, 0x19F);                      /* supported, TTY, colour, graphics, LFB; doublescan (VBE 3) */
     wr8(a + 0x02, 7);                           /* window A: exists, readable, writable */
     wr16(a + 0x04, 64); wr16(a + 0x06, 64);     /* granularity, size (KB) */
     wr16(a + 0x08, 0xA000);
@@ -1019,6 +1022,7 @@ static void vbe_mode_info(int m, u32 a)
     if (bpp != 8) memcpy(gptr(a + 0x1F), masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2], 8);
     wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
     wr16(a + 0x32, (u16)pitch);                 /* VBE 3: linear bytes per line */
+    wr32(a + 0x3E, 400000000u);                 /* VBE 3: maximum pixel clock (timings are only followed for the size) */
 }
 
 static void vbe_set(int m, int clear)
@@ -1041,6 +1045,18 @@ static void vbe_set(int m, int clear)
     vbe_pitch = vbe_w * vbe_bytespp(vbe_bpp);
     vbe_start = 0;
     et_on = 0;
+    vbe_mode_w = vbe_w; vbe_mode_h = vbe_h;
+    vbe_crtc_follow = 0;
+    /* the CRTC as an SVGA has it in this mode: display end in 8-pixel
+       character clocks and in lines, no doublescan (AdvanceMAME's VBE 3
+       driver reads them back, then retunes them for the size it wants) */
+    {
+        u32 de = vbe_h - 1;
+        crtc[0x01] = (u8)(vbe_w / 8 - 1);
+        crtc[0x12] = (u8)de;
+        crtc[0x07] = (u8)((crtc[0x07] & ~0x42) | ((de >> 7) & 0x02) | ((de >> 3) & 0x40));
+        crtc[0x09] &= 0x60;
+    }
     vbe_on = 1;
     if (clear) memset(vram, 0, VRAM_SIZE);
     vbe_map_bank(0);
@@ -1185,6 +1201,23 @@ void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
     }
 }
 
+/* After a VBE 3 mode set with CRTC timings: the size the display-end
+   registers give (AdvanceMAME's vbeline/vbe3 tunes them to the game's own
+   size, 224x288 and so on), within what the pitch and memory hold. */
+static void vbe_crtc_size(void)
+{
+    u32 B = vbe_bytespp(vbe_bpp);
+    u32 w = ((u32)crtc[0x01] + 1) * 8;
+    u32 de = (crtc[0x12] | (crtc[0x07] & 0x02) << 7 | (crtc[0x07] & 0x40) << 3) + 1u;
+    u32 h = (crtc[0x09] & 0x80) || (crtc[0x09] & 0x1F) ? de / (((crtc[0x09] & 0x1F) + 1) * ((crtc[0x09] & 0x80) ? 2 : 1)) : de;
+    if (w < 64 || h < 64 || w * B > vbe_pitch || h * vbe_pitch > VRAM_SIZE) return;   /* mid-change */
+    if (w == vbe_w && h == vbe_h) return;
+    vbe_w = w; vbe_h = h;
+    full_redraw = 1;
+    last_layout_mode = -1;
+    kprintf("video: VESA mode %x shown as %ux%u (CRTC)\n", vbe_cur, vbe_w, vbe_h);
+}
+
 static void vbe_call(struct regs *r)
 {
     u32 es_di = LIN(r->v86_es, DI(r));
@@ -1196,7 +1229,7 @@ static void vbe_call(struct regs *r)
         int v2 = rd32(es_di) == 0x32454256u;     /* "VBE2" */
         memset(gptr(es_di + 4), 0, v2 ? 508 : 252);
         wr32(es_di, 0x41534556u);                /* "VESA" */
-        wr16(es_di + 4, 0x0200);
+        wr16(es_di + 4, 0x0300);                 /* VBE 3.0: CRTC timings on mode set (AdvanceMAME's vbeline) */
         wr32(es_di + 6, 0xF0000000u | (VBE_DATA & 0xFFFF));
         wr32(es_di + 0x0A, 1);                   /* capabilities: DAC switchable to 8 bits */
         wr32(es_di + 0x0E, 0xF0000000u | ((VBE_DATA + 0x80) & 0xFFFF));
@@ -1217,6 +1250,10 @@ static void vbe_call(struct regs *r)
         int m = vbe_find(bx);
         if (m < 0) { AX(r) = 0x014F; return; }
         vbe_set(m, !(bx & 0x8000));
+        if (bx & 0x0800) {                      /* VBE 3: with a CRTCInfoBlock; its timings are a monitor's business */
+            vbe_crtc_follow = 1;
+            dbg(1, "video: VESA mode %x with CRTC timings (%u Hz pixel clock)\n", vbe_cur, rd32(es_di + 0x0D));
+        }
         AX(r) = 0x004F; return; }
     case 0x03: BX(r) = vbe_on ? vbe_cur : (u16)video_mode; AX(r) = 0x004F; return;
     case 0x05: video_vbe_window(r); return;
@@ -1225,7 +1262,7 @@ static void vbe_call(struct regs *r)
         u32 B = vbe_bytespp(vbe_bpp);
         if (BL(r) == 0 || BL(r) == 2) {
             u32 p = BL(r) == 0 ? CX(r) * B : (CX(r) + B - 1) / B * B;
-            if (p < vbe_w * B || p * vbe_h > VRAM_SIZE) { AX(r) = 0x024F; return; }
+            if (p < 8 * B || p * vbe_mode_h > VRAM_SIZE) { AX(r) = 0x024F; return; }   /* narrower than the mode: a VBE 3 retune follows */
             vbe_pitch = p;
             full_redraw = 1;
         }
@@ -1260,6 +1297,9 @@ static void vbe_call(struct regs *r)
         }
         if (BL(r) <= 1) { BH(r) = dac8 ? 8 : 6; AX(r) = 0x004F; } else AX(r) = 0x014F;
         return;
+    case 0x0B:                                   /* VBE 3: the closest pixel clock (BL=0): any */
+        if (BL(r) != 0) { AX(r) = 0x014F; return; }
+        AX(r) = 0x004F; return;                  /* ECX stays: the clock asked for */
     case 0x0A:                                   /* protected-mode interface (bios.asm vbe_pmi) */
         if (BL(r) != 0) { AX(r) = 0x014F; return; }
         r->v86_es = 0xF000; DI(r) = rd16(0xF0228); CX(r) = rd16(0xF022A);
@@ -1674,6 +1714,8 @@ static void video_port_out_(u16 port, u8 v)
         if (crtc_idx >= 64) return;
         crtc[crtc_idx] = v;
         et_crtc();
+        if (vbe_on && vbe_crtc_follow && (crtc_idx == 0x01 || crtc_idx == 0x07 || crtc_idx == 0x09 || crtc_idx == 0x12))
+            vbe_crtc_size();
         if ((crtc_idx & 31) == 0x0C || (crtc_idx & 31) == 0x0D) full_redraw = 1;
         return;
     }
