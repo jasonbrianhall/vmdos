@@ -561,6 +561,16 @@ bool init(Card& c)
     for (int i = 0; i < 4; i++) c.mac[i] = (uint8_t)(m0 >> (8 * i));
     c.mac[4] = (uint8_t)m4; c.mac[5] = (uint8_t)(m4 >> 8);
 
+    // Which PHY steps (rtlphy= on the command line, letters): a ALDPS off,
+    // p the PHY patch, r a PHY soft reset at the end. Default: all of them,
+    // except the reset on the 10/100 chips (an RTL8106e lost the link the
+    // firmware had brought up and never negotiated again after it).
+    bool fe = chip->ver == 29 || chip->ver == 30 || chip->ver == 37 || chip->ver == 39;   // the 8105e/8402/8106e
+    const char* steps = fe ? "ap" : "apr";
+    if (const char* o = strstr(cmdline, "rtlphy=")) steps = o + 7;
+    auto step = [&](char k) { for (const char* q = steps; *q && *q != ' '; q++) if (*q == k) return true; return false; };
+    if (debug_level >= 1) dump_phy(c, "found");
+
     // the PHY: wake it if the firmware left it powered down
     int bmcr = phy_read(c, 0);
     dbg(1, "net: %s PHY BMCR %04x, PHYstatus %02x\n", c.name, bmcr & 0xFFFF, r8(c, PHYstatus));
@@ -568,13 +578,12 @@ bool init(Card& c)
         phy_write(c, 0, (uint16_t)((bmcr & ~0x0800) | 0x1200));   // power up, autonegotiate
         kprintf("net: %s PHY was powered down: woken, negotiating\n", c.name);
     }
-    bool fe = chip->ver == 29 || chip->ver == 30 || chip->ver == 37 || chip->ver == 39;   // the 8105e/8402/8106e
-    if (fe) {
+    if (fe && step('a')) {
         phy_write(c, 0x1F, 0);                  // PHY page 0
         phy_write(c, 0x18, 0x0310);             // ALDPS (link-down power saving) off, as Linux does
         udelay(100000);
     }
-    if (chip->ver == 39) {                      // rtl8106e_hw_phy_config: the PHY patch, then its settings
+    if (chip->ver == 39 && step('p')) {         // rtl8106e_hw_phy_config: the PHY patch, then its settings
         for (const auto& w : rtl8106e_1_fw) phy_write(c, w[0], w[1]);
         static const uint16_t after[][2] = { { 0x1F, 4 }, { 0x10, 0xC07F }, { 0x19, 0x7030 }, { 0x1F, 0 } };
         for (const auto& w : after) phy_write(c, w[0], w[1]);
@@ -647,7 +656,15 @@ bool init(Card& c)
     w32(c, TxConfig, (7u << 8) | (3u << 24) | (c.evl_up ? (1u << 7) : 0));
     irq_off(c);
     phy_write(c, 0x1F, 0);
-    phy_write(c, 0, 0x9200);                    // PHY soft reset, autonegotiate afresh (genphy_soft_reset)
+    if (step('r')) {                            // PHY soft reset, negotiate afresh (genphy_soft_reset)
+        int b = phy_read(c, 0);
+        phy_write(c, 0, (uint16_t)((b & ~0x0800) | 0x8000 | ((b & 0x1000) ? 0x0200 : 0)));
+    }
+    if (debug_level >= 1) {
+        char sv[8] = { 0 };
+        for (int i = 0; i < 7 && steps[i] && steps[i] != ' '; i++) sv[i] = steps[i];
+        kprintf("net: %s PHY steps \"%s\"\n", c.name, sv);
+    }
     if (debug_level >= 1) dump_phy(c, "started");
     return true;
 }
