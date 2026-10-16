@@ -422,6 +422,27 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
   above 4 GiB too, via PAE), or Bochs VBE under QEMU `-kernel`.
 
+## Network: packet driver and IPX
+
+vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
+Realtek RTL8111/8168, RTL8125 and RTL8139; `net=off` skips them, `netlog`
+logs frames) and DOS reaches them through TSRs in C:\VMDOS:
+
+    VMPKT [0x60 [10]]    packet driver (FTP spec 1.11) on INT 60h, IRQ 10
+    VMIPX                IPX (INT 2Fh 7A00h / INT 7Ah) on that packet driver
+    VMNIC [n | AUTO]     list the cards, or pick the one to use
+
+With several cards, vmdos uses one with a link, and changes to another if
+that one loses it for 3 s; `nic=2` on the kernel command line or `VMNIC 2`
+fixes the choice. A card changed to takes over the address DOS already has,
+so VMPKT and the programs on it carry on. The RTL8168/8125 driver relies on
+the firmware having set up the PHY (`debug=1` logs what vmdos found).
+
+IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
+PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
+`make run NET=lan` (any number of times, `NIC=rtl8139` for another card)
+puts QEMU machines on one virtual LAN for trying it out.
+
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
 Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS

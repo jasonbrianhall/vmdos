@@ -291,6 +291,12 @@ int hv_emu_check(u32 lin, int write);          /* 0 unmapped, 1 memory, 2 the tr
 u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
 void hv_emu_wr8(u32 lin, u8 v);
 
+/* ---- net.cpp: the PC's Ethernet card for VMPKT.COM (INT 2Fh AX=564Eh) ---- */
+extern int net_ready;
+void net_init(void);
+void net_tick(void);                          /* every timer tick: poll the card */
+void net_api(struct regs *r);
+
 /* ---- sound.c ---- */
 void sound_init(void);
 void sound_tick(void);                        /* every timer tick */
