@@ -195,6 +195,26 @@ int page_dirty(u32 lin, int clear)
     return d;
 }
 
+/* SSE for DOS programs: the CPU runs SSE instructions only once the OS
+   says it saves their state (CR4.OSFXSR) and takes their exceptions
+   (CR4.OSXMMEXCPT); without, every one is an invalid opcode (AdvanceMAME's
+   SSE2 blitters died with SIGILL). vmdos has one guest context and never
+   switches FPU state, so that's all there is to it. */
+static void sse_on(void)
+{
+    u32 a, b;
+    __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                     : "=&r"(a), "=&r"(b));
+    if (!((a ^ b) & 0x200000)) return;            /* no CPUID */
+    u32 eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (!(edx & (1u << 24)) || !(edx & (1u << 25))) return;   /* FXSR and SSE */
+    u32 cr4;
+    __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+    __asm__ volatile("mov %0,%%cr4" ::"r"(cr4 | (1u << 9) | (1u << 10)));
+    kprintf("SSE on (%s)\n", ecx & 1 ? "SSE3" : edx & (1u << 26) ? "SSE2" : "SSE");
+}
+
 static int cpu_has_pae(void)
 {
     u32 a, b;
@@ -270,6 +290,7 @@ static void paging_init(void)
         if (fb_len) map_range(fb_lin, fb_phys, fb_len, 3 | pat_wc);
     }
     u32 cr0;
+    sse_on();
     if (pae) {
         u32 cr4;
         __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
