@@ -195,8 +195,10 @@ f_target:
         mov byte [bp + F_AX], 0
         ret
 
-; BX=3 send: ES:SI = ECB
-f_send: mov di, [bp + F_SI]
+; BX=3 send: ES:SI = ECB -> AL 0 (the result is in the ECB; Novell's IPX
+; clears AL and Doom's IPXSETUP fails on anything else)
+f_send: mov byte [bp + F_AX], 0
+        mov di, [bp + F_SI]
         mov es, [bp + F_ES]
         mov byte [es:di + E_INUSE], 0FFh
         ; Ethernet header
