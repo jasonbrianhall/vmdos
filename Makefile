@@ -46,7 +46,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin 
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o floppy.o hv.o hvvmx.o hvasm.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o floppy.o hv.o hvvmx.o hvasm.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -137,6 +137,12 @@ $(BUILD)/VMCD.SYS: dos/vmcd.asm dos/vmapi.inc | $(BUILD)
 $(BUILD)/VMCD.COM: dos/vmcdtool.asm dos/vmapi.inc | $(BUILD)
 	nasm -f bin -i dos/ $< -o $@
 
+$(BUILD)/VMPKT.COM: dos/vmpkt.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
+
+$(BUILD)/VMIPX.COM: dos/vmipx.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -157,7 +163,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT $(VMDOS_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT \
@@ -343,9 +349,16 @@ QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device us
 # controller. QEMU needs access to /dev/bus/usb (root, or a udev rule).
 comma    := ,
 QUSBHOST := $(if $(USBHOST),-device qemu-xhci$(comma)id=hostxhci $(foreach d,$(USBHOST),-device usb-host$(comma)bus=hostxhci.0$(comma)vendorid=0x$(word 1,$(subst :, ,$(d)))$(comma)productid=0x$(word 2,$(subst :, ,$(d)))))
+# NET=lan: the network card (NIC=e1000, e1000e or rtl8139) on a LAN shared
+# by every QEMU started with NET=lan on this PC (UDP multicast), each with
+# its own MAC: two of them play IPX games (VMPKT, VMIPX). Default: QEMU's
+# own card and user-mode network.
+NIC      ?= e1000
+QNET_lan := -nic socket,mcast=230.0.0.1:1234,model=$(NIC),mac=52:54:00$(shell od -An -N3 -tx1 /dev/urandom | tr ' ' ':' | tr -d '\n')
+QNET     := $(if $(NET),$(QNET_$(NET)),-nic user,model=$(NIC))
 # KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
 ACCEL ?= -accel kvm -accel tcg
-QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)
+QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QNET) $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)
 # C=disk: esp.img on an AHCI controller (C:), after the CD in the boot order.
 BOOTDISK ?= 1
 QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \

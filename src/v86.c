@@ -188,6 +188,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x564C) { log_api(r); return; }         /* DMESG */
+    if (n == 0x2F && AX(r) == 0x564E) { net_api(r); return; }         /* VMPKT */
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;
@@ -465,6 +466,7 @@ struct regs *isr_dispatch(struct regs *r)
             vdev_tick();
             if (usb_ready) sound_tick();
             if (usb_ready) disk_tick();
+            if (net_ready) net_tick();
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
