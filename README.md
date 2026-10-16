@@ -425,8 +425,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 ## Network: packet driver and IPX
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
-Realtek RTL8111/8168, RTL8125, RTL810x and RTL8139; `net=off` skips them, `netlog`
-logs frames) and DOS reaches them through TSRs in C:\VMDOS:
+Realtek RTL8111/8168, RTL8125, RTL810x and RTL8139, and USB Ethernet adapters
+that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
+them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
 
     VMPKT [0x60 [10]]    packet driver (FTP spec 1.11) on INT 60h, IRQ 10
     VMIPX                IPX (INT 2Fh 7A00h / INT 7Ah) on that packet driver
@@ -445,8 +446,9 @@ drivers, ODI/NDIS drivers for Windows 3.x. Use it or VMPKT, not both.
 
 IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
 PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
-`make run NET=lan` (any number of times, `NIC=rtl8139` for another card)
-puts QEMU machines on one virtual LAN for trying it out.
+`make run NET=lan` (any number of times, `NIC=rtl8139` for another card,
+`NIC=usb` for a USB adapter) puts QEMU machines on one virtual LAN for trying
+it out.
 
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 

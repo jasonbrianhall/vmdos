@@ -358,13 +358,16 @@ QUSB     := $(if $(filter 1,$(USB)),-device qemu-xhci -device usb-kbd -device us
 # controller. QEMU needs access to /dev/bus/usb (root, or a udev rule).
 comma    := ,
 QUSBHOST := $(if $(USBHOST),-device qemu-xhci$(comma)id=hostxhci $(foreach d,$(USBHOST),-device usb-host$(comma)bus=hostxhci.0$(comma)vendorid=0x$(word 1,$(subst :, ,$(d)))$(comma)productid=0x$(word 2,$(subst :, ,$(d)))))
-# NET=lan: the network card (NIC=e1000, e1000e or rtl8139) on a LAN shared
-# by every QEMU started with NET=lan on this PC (UDP multicast), each with
-# its own MAC: two of them play IPX games (VMPKT, VMIPX). Default: QEMU's
-# own card and user-mode network.
+# NET=lan: the network card on a LAN shared by every QEMU started with
+# NET=lan on this PC (UDP multicast), each with its own MAC: two of them play
+# IPX games (VMPKT, VMIPX). Default: QEMU's user-mode network. NIC=e1000
+# (default), e1000e, rtl8139, or usb (a USB Ethernet adapter, CDC-ECM, on
+# an xHCI controller).
 NIC      ?= e1000
-QNET_lan := -nic socket,mcast=230.0.0.1:1234,model=$(NIC),mac=52:54:00$(shell od -An -N3 -tx1 /dev/urandom | tr ' ' ':' | tr -d '\n')
-QNET     := $(if $(NET),$(QNET_$(NET)),-nic user,model=$(NIC))
+QNETDEV_lan  := -netdev socket,id=vmnet,mcast=230.0.0.1:1234
+QNETDEV_user := -netdev user,id=vmnet
+QNETMAC  := $(if $(filter lan,$(NET)),$(comma)mac=52:54:00$(shell od -An -N3 -tx1 /dev/urandom | tr ' ' ':' | tr -d '\n'))
+QNET     := -nic none $(QNETDEV_$(or $(NET),user)) $(if $(filter usb,$(NIC)),-device qemu-xhci$(comma)id=netxhci -device usb-net$(comma)netdev=vmnet$(comma)bus=netxhci.0,-device $(NIC)$(comma)netdev=vmnet)$(QNETMAC)
 # KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
 ACCEL ?= -accel kvm -accel tcg
 QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QNET) $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)

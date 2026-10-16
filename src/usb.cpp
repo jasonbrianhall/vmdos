@@ -188,7 +188,7 @@ static bool next_event(Trb* out) {
 // string down through the hubs (4 bits a tier), and, for a low/full-speed
 // device behind a high-speed hub, that hub's slot and port (its transaction
 // translator).
-enum Kind { KBD, MOUSE, HUB, MSD, JOY, AUDIO };
+enum Kind { KBD, MOUSE, HUB, MSD, JOY, AUDIO, NET };
 
 // Where a gamepad's report has its X, Y, hat switch and buttons, from its
 // HID report descriptor. bit < 0: not there.
@@ -509,6 +509,7 @@ static void release_all(Keyboard& k) {
 }
 
 static bool ua_dispatch(int slot, int ep, const Trb& e);   // the audio stream's (below)
+static bool un_dispatch(int slot, int ep, const Trb& e);   // USB Ethernet's receive ring (below)
 // Events that arrive while we're waiting for something else.
 static void dispatch(const Trb& e) {
     int type = (e.d3 >> 10) & 0x3F;
@@ -520,8 +521,9 @@ static void dispatch(const Trb& e) {
     if (type != TRB_TRANSFER_EVENT) return;
     int slot = e.d3 >> 24, ep = (e.d3 >> 16) & 0x1F, cc = e.d2 >> 24;
     if (ua_dispatch(slot, ep, e)) return;
+    if (un_dispatch(slot, ep, e)) return;
     for (auto& k : kbds) {
-        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD || k.kind == AUDIO) continue;
+        if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD || k.kind == AUDIO || k.kind == NET) continue;
         uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
         int idx = (int)((trb - phys(k.intr.trb)) / sizeof(Trb));
         if (idx >= 0 && idx < RING_TRBS && (cc == 1 || cc == 13)) {
@@ -1357,6 +1359,163 @@ extern "C" void usb_audio_pump(void) {
 
 // The rest of setting up a device that has slot k.slot: its memory, an
 // address, and a keyboard, mouse or hub on top. False: not driven.
+// ---------------------------------------------------------------- USB Ethernet (CDC-ECM)
+// The standard USB Ethernet class: a communications interface (class 02h,
+// subclass 06h) whose Ethernet descriptor names the MAC address string, and
+// a data interface (0Ah) whose alternate setting 1 has a bulk IN and a bulk
+// OUT endpoint; one frame per transfer. Adapters with a vendor protocol of
+// their own (RTL8153...) often offer ECM as another configuration, and
+// QEMU's usb-net has RNDIS first: every configuration is looked through.
+// Received frames go to net.cpp (net_usb_rx) as their transfers complete;
+// UNET_RX transfers wait on the bulk IN endpoint all the time. xHCI only.
+extern "C" void net_usb_rx(const uint8_t* f, unsigned len);
+#define UNET_RX 16
+#define UNET_BUF 2048
+static struct {
+    int dev = -1;
+    int ctl_iface, data_iface;
+    uint8_t mac[6];
+    char name[24];
+    volatile uint8_t *rxb, *txb;
+    int buf_of[RING_TRBS];
+    uint32_t gen, errors;
+} un;
+
+static bool un_is() { return un.dev >= 0 && kbds[un.dev].active && kbds[un.dev].kind == NET; }
+
+static void un_queue(Keyboard& k, int b)
+{
+    un.buf_of[k.intr.enq] = b;
+    uint64_t p = phys(un.rxb + b * UNET_BUF);
+    ring_push(k.intr, (uint32_t)p, (uint32_t)(p >> 32), UNET_BUF, TRB_NORMAL << 10 | (1 << 5) | (1 << 2));   // IOC, ISP
+}
+
+static bool un_dispatch(int slot, int ep, const Trb& e)
+{
+    if (!un_is()) return false;
+    Keyboard& k = kbds[un.dev];
+    if (k.hc != H || k.slot != slot || k.dci != ep) return false;
+    int cc = e.d2 >> 24;
+    uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
+    int idx = (int)((trb - phys(k.intr.trb)) / sizeof(Trb));
+    if (idx < 0 || idx >= RING_TRBS - 1) return true;
+    int b = un.buf_of[idx];
+    if (cc == 1 || cc == 13) {
+        uint32_t len = UNET_BUF - (e.d2 & 0xFFFFFF);
+        if (len >= 14) net_usb_rx((const uint8_t*)(un.rxb + b * UNET_BUF), len);
+        un_queue(k, b);
+        H->db[k.slot] = k.dci;
+        return true;
+    }
+    if (++un.errors <= 10) printf("USB: Ethernet on %s: receive error (code %d)\n", k.where, cc);
+    if (cc == 6) {                                      // stalled: clear it, start again
+        clear_halt(k, true);
+        for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
+    } else un_queue(k, b);
+    H->db[k.slot] = k.dci;
+    return true;
+}
+
+// Look through the device's configurations for CDC-ECM; set it up if found.
+static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int nconf, uint16_t vid, uint16_t pid)
+{
+    if (nconf < 1) nconf = 1;
+    for (int ci = 0; ci < nconf && ci < 4; ci++) {
+        if (ci > 0) {                                   // the next configuration
+            if (!control(k, 0x80, 6, (uint16_t)(0x0200 | ci), 0, 9, desc)) break;
+            total = desc[2] | desc[3] << 8;
+            if (total > 1024) total = 1024;
+            if (!control(k, 0x80, 6, (uint16_t)(0x0200 | ci), 0, (uint16_t)total, desc)) break;
+        }
+        int config = desc[5];
+        int ctl = -1, data = -1, alt = 0, mac_idx = 0, ep_in = 0, ep_out = 0, mps = 512;
+        int cur = -1, cur_alt = 0, cur_class = -1, cur_sub = -1, in_ep = 0, out_ep = 0, cur_mps = 512;
+        for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
+            uint8_t t = desc[i + 1];
+            if (t == 4) {
+                if (cur_class == 0x0A && in_ep && out_ep && data < 0) { data = cur; alt = cur_alt; ep_in = in_ep; ep_out = out_ep; mps = cur_mps; }
+                cur = desc[i + 2]; cur_alt = desc[i + 3]; cur_class = desc[i + 5]; cur_sub = desc[i + 6];
+                in_ep = out_ep = 0;
+                if (cur_class == 2 && cur_sub == 6 && ctl < 0) ctl = cur;
+            } else if (t == 0x24 && cur == ctl && cur_class == 2 && i + 3 < total && desc[i + 2] == 0x0F) {
+                mac_idx = desc[i + 3];                  // Ethernet networking functional descriptor
+            } else if (t == 5 && cur_class == 0x0A && (desc[i + 3] & 3) == 2) {
+                if (desc[i + 2] & 0x80) in_ep = desc[i + 2]; else out_ep = desc[i + 2];
+                cur_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+            }
+        }
+        if (cur_class == 0x0A && in_ep && out_ep && data < 0) { data = cur; alt = cur_alt; ep_in = in_ep; ep_out = out_ep; mps = cur_mps; }
+        if (ctl < 0 || data < 0 || !mac_idx) continue;
+
+        if (H->type != HC_XHCI) { printf("USB: %s: Ethernet adapter %04x:%04x: only on xHCI so far\n", k.where, vid, pid); return false; }
+        if (!control(k, 0x00, 9, (uint16_t)config, 0, 0, nullptr)) { printf("USB: %s: SET_CONFIGURATION %d failed\n", k.where, config); return false; }
+        static volatile uint8_t str[64] __attribute__((aligned(64)));
+        if (!control(k, 0x80, 6, (uint16_t)(0x0300 | mac_idx), 0x0409, sizeof str, str) || str[0] < 26) {
+            printf("USB: %s: Ethernet adapter %04x:%04x: no MAC address string\n", k.where, vid, pid);
+            return false;
+        }
+        for (int j = 0; j < 6; j++) {                   // 12 hex digits, UTF-16
+            int v = 0;
+            for (int n = 0; n < 2; n++) {
+                int ch = str[2 + 2 * (2 * j + n)] | 0x20;
+                v = v * 16 + (ch >= 'a' ? ch - 'a' + 10 : ch - '0');
+            }
+            un.mac[j] = (uint8_t)v;
+        }
+        if (!un.rxb) {
+            un.rxb = (volatile uint8_t*)dma_alloc(UNET_RX * UNET_BUF, 4096);
+            un.txb = (volatile uint8_t*)dma_alloc(UNET_BUF, 4096);
+            if (!un.rxb || !un.txb) { printf("USB: out of memory for the Ethernet adapter\n"); un.rxb = nullptr; return false; }
+        }
+        if (alt) control(k, 0x01, 11, (uint16_t)alt, (uint16_t)data, 0, nullptr);   // SET_INTERFACE: the data alternate
+        k.iface = data; k.ep_in = ep_in; k.ep_out = ep_out; k.mps = mps;
+        if (!configure_bulk(k)) return false;
+        un.ctl_iface = ctl; un.data_iface = data;
+        control(k, 0x21, 0x43, 0x0C, (uint16_t)ctl, 0, nullptr);   // SET_ETHERNET_PACKET_FILTER: directed, broadcast
+        k.kind = NET;
+        k.active = true;
+        un.dev = ki;
+        un.gen++;
+        un.errors = 0;
+        snprintf(un.name, sizeof un.name, "USB %04x:%04x", vid, pid);
+        for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
+        H->db[k.slot] = k.dci;
+        printf("USB: Ethernet adapter %04x:%04x on %s (CDC-ECM, configuration %d, %s speed), MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+               vid, pid, k.where, config, speed_name(k.speed), un.mac[0], un.mac[1], un.mac[2], un.mac[3], un.mac[4], un.mac[5]);
+        return true;
+    }
+    return false;
+}
+
+// net.cpp's side (from the kernel, interrupts off: never inside usb_poll).
+extern "C" int usb_net_present(void) { return un_is(); }
+extern "C" uint32_t usb_net_gen(void) { return un.gen; }
+extern "C" const char* usb_net_name(void) { return un.name; }
+extern "C" void usb_net_mac(uint8_t* m) { memcpy(m, un.mac, 6); }
+extern "C" int usb_net_send(const uint8_t* f, unsigned len)
+{
+    if (!un_is() || usb_busy || in_poll || len > UNET_BUF - 1) return 0;
+    Keyboard& k = kbds[un.dev];
+    H = k.hc;
+    memcpy((void*)un.txb, f, len);
+    if (len % (unsigned)k.mps == 0) un.txb[len++] = 0;  // no zero-length packet needed: a byte of padding
+    in_poll = 1;                                        // usb_tick stays out while we wait
+    uint32_t got = 0;
+    int cc = bulk(k, false, un.txb, len, &got);
+    in_poll = 0;
+    if (cc == 6) clear_halt(k, false);
+    return cc == 1;
+}
+extern "C" void usb_net_filter(int bits)                // SET_ETHERNET_PACKET_FILTER
+{
+    if (!un_is() || usb_busy || in_poll) return;
+    Keyboard& k = kbds[un.dev];
+    H = k.hc;
+    in_poll = 1;
+    control(k, 0x21, 0x43, (uint16_t)bits, (uint16_t)un.ctl_iface, 0, nullptr);
+    in_poll = 0;
+}
+
 static bool setup_slot(Keyboard& k, int ki) {
     auto& m = devmem[ki];
     if (!m.out_ctx) {                                   // sized for 64-byte contexts, whichever controller
@@ -1481,7 +1640,8 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (ecc != 1) printf("USB: %s: Evaluate Context (EP0 packets of %d) failed (cc=%d)\n", k.where, mps, ecc);
     }
     uint16_t vid = 0, pid = 0;
-    if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) { vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; }
+    int nconf = 1;
+    if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) { vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; nconf = desc[17]; }
     if (!control(k, 0x80, 6, 0x0200, 0, 9, desc)) {
         printf("USB: %s: %04x:%04x: no configuration descriptor (cc=%d)\n", k.where, vid, pid, ctl_cc);
         return false;
@@ -1579,6 +1739,7 @@ static bool setup_slot(Keyboard& k, int ki) {
                k.lay.dragonrise ? "SNES layout" : k.lay.hat.bit >= 0 && k.lay.x.bit < 0 ? "hat" : "X/Y", k.slot, speed_name(k.speed));
         return true;
     }
+    if ((iface < 0 || !ep_addr) && !hub && un_probe(k, ki, desc, total, nconf, vid, pid)) return true;   // USB Ethernet?
     if (iface < 0 || !ep_addr) {
         int c0 = -1, c1 = 0, c2 = 0;                    // the first interface's class / subclass / protocol
         for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i])
@@ -1635,6 +1796,7 @@ static void forget(int i) {
         if (kbds[j].active && kbds[j].parent == i) forget(j);
     if (k.kind == KBD || k.kind == MOUSE || k.kind == JOY) release_all(k);
     for (int j = 0; j < n_msd; j++) if (msd_dev[j] == i) msd_dev[j] = -1;     // its slot waits for it to come back
+    if (k.kind == NET && un.dev == i) { un.dev = -1; un.gen++; }
     if (k.kind == AUDIO && ua.dev == i) {
         ua.running = false; ua.dev = -1; ua.gen++;
         if (H->type != HC_XHCI) ua2_unlink();
@@ -1642,7 +1804,7 @@ static void forget(int i) {
     k.active = false;
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
-    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == AUDIO ? "audio device" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
+    printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == NET ? "Ethernet adapter" : k.kind == AUDIO ? "audio device" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
            k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
