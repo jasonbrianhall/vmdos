@@ -493,6 +493,8 @@ void irq_off(Card& c)
     else { w16(c, IntrMask, 0); w16(c, IntrStatus, 0xFFFF); }
 }
 
+void dump_phy(Card& c, const char* why);
+
 bool init(Card& c)
 {
     pci_write(c.pci, 0x04, (pci_read(c.pci, 0x04) | 0x06) & ~0x400u);   // memory, bus master
@@ -602,10 +604,30 @@ bool init(Card& c)
     irq_off(c);
     phy_write(c, 0x1F, 0);
     phy_write(c, 0, 0x9200);                    // PHY soft reset, autonegotiate afresh (genphy_soft_reset)
+    if (debug_level >= 1) dump_phy(c, "started");
     return true;
 }
 
-bool link(Card& c) { return r8(c, PHYstatus) & 2; }
+// The PHY's own word on it (BMSR bit 2, latched: read twice), as Linux's
+// phylib; the MAC's PHYstatus copy too.
+bool link(Card& c)
+{
+    if (r8(c, PHYstatus) & 2) return true;
+    phy_write(c, 0x1F, 0);
+    phy_read(c, 1);
+    int bmsr = phy_read(c, 1);
+    return bmsr >= 0 && bmsr != 0xFFFF && (bmsr & 4);
+}
+
+void dump_phy(Card& c, const char* why)
+{
+    phy_write(c, 0x1F, 0);
+    int bmcr = phy_read(c, 0), bmsr1 = phy_read(c, 1), bmsr = phy_read(c, 1);
+    int id1 = phy_read(c, 2), id2 = phy_read(c, 3), adv = phy_read(c, 4), lpa = phy_read(c, 5);
+    kprintf("net: %s %s: PHY id %04x:%04x BMCR %04x BMSR %04x/%04x ADV %04x LPA %04x, PHYstatus %02x, ChipCmd %02x\n",
+            c.name, why, id1 & 0xFFFF, id2 & 0xFFFF, bmcr & 0xFFFF, bmsr1 & 0xFFFF, bmsr & 0xFFFF, adv & 0xFFFF, lpa & 0xFFFF,
+            r8(c, PHYstatus), r8(c, ChipCmd));
+}
 
 void poll(Card& c)
 {
@@ -749,6 +771,12 @@ void link_watch()
         uint8_t now = card_link(cards[i]) ? 2 : 1;
         if (was[i] && now != was[i]) kprintf("net: card %d (%s): link %s\n", i + 1, cards[i].name, now == 2 ? "up" : "down");
         was[i] = now;
+        // debug=1: what a Realtek PHY says while there's no link, every 2 s for the first 30 s
+        static int dumps[MAXCARDS];
+        if (debug_level >= 1 && now == 1 && cards[i].kind == KIND_R8169 && dumps[i] < 15 && (ticks / 250) % 8 == 0) {
+            dumps[i]++;
+            r8169::dump_phy(cards[i], "no link");
+        }
     }
 }
 
