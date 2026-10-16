@@ -87,7 +87,12 @@ list:   mov ax, 564Eh
         call putc
         mov dx, msg_sp2
         call puts
-        mov al, [si + 3]                ; bus:dev.fn
+        cmp byte [si], 4                ; a USB adapter: no PCI address
+        jne .pci
+        mov dx, msg_usb
+        call puts
+        jmp .addrd
+.pci:   mov al, [si + 3]                ; bus:dev.fn
         call puthex2
         mov dl, ':'
         call putc
@@ -98,7 +103,7 @@ list:   mov ax, 564Eh
         mov dl, [si + 5]
         add dl, '0'
         call putc
-        mov dl, ' '
+.addrd: mov dl, ' '
         call putc
         ; name, padded to 10
         push si
@@ -221,6 +226,7 @@ msg_head:   db 'Network cards (* in use)$'
 msg_auto:   db ', picked automatically (VMNIC n to choose)$'
 msg_crlf:   db 13, 10, '$'
 msg_sp2:    db '  $'
+msg_usb:    db 'USB    $'
 msg_up:     db '  link up', 13, 10, '$'
 msg_down:   db '  no link', 13, 10, '$'
 msg_off:    db '  not running', 13, 10, '$'

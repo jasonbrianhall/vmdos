@@ -43,7 +43,7 @@
 
 namespace {
 
-enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169 };
+enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB };
 const int QLEN = 64, FRAME_MAX = 1536, MAXCARDS = 8;
 
 bool log_on;
@@ -96,6 +96,9 @@ struct Card {
     uint16_t xid;
     bool is8125, ocp_phy, gen_g;                // 8125 family; PHY over OCP (8168g+); 8168g..8117
     bool evl_up;
+    // USB (CDC-ECM): its address can't be changed, so while DOS's differs
+    // the adapter takes everything and vmdos filters (spoof)
+    bool spoof;
 };
 Card cards[MAXCARDS];
 int ncards;
@@ -733,6 +736,45 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 }
 } // namespace r8169
 
+// ---------------- USB Ethernet adapters (usb.cpp: CDC-ECM) ----------------
+} // namespace
+extern "C" {
+int usb_net_present(void);
+uint32_t usb_net_gen(void);
+const char* usb_net_name(void);
+void usb_net_mac(uint8_t* m);
+int usb_net_send(const uint8_t* f, unsigned len);
+void usb_net_filter(int bits);
+}
+namespace {
+namespace usbnet {
+bool init(Card& c)
+{
+    if (!usb_net_present()) return false;
+    usb_net_mac(c.mac);
+    snprintf(c.name, sizeof c.name, "%s", usb_net_name());
+    c.pci.bus = c.pci.dev = c.pci.fn = 0xFF;
+    c.spoof = false;
+    return true;
+}
+bool link(Card&) { return usb_net_present(); }
+void set_mode(Card& c, int m)
+{
+    int bits = 0;                               // SET_ETHERNET_PACKET_FILTER
+    if (m >= 2) bits |= 0x04;                   // directed
+    if (m >= 3) bits |= 0x08;                   // broadcast
+    if (m >= 4) bits |= 0x02;                   // all multicast
+    if (m >= 6 || (c.spoof && m >= 2)) bits |= 0x01;   // promiscuous
+    usb_net_filter(bits);
+}
+void set_mac(Card& c, const uint8_t* a)
+{
+    c.spoof = memcmp(a, c.mac, 6) != 0;
+    set_mode(c, rx_mode);
+}
+bool send(Card&, const uint8_t* f, unsigned len) { return usb_net_send(f, len); }
+} // namespace usbnet
+
 // ---------------- the cards ----------------
 bool card_link(Card& c)
 {
@@ -741,6 +783,7 @@ bool card_link(Card& c)
     case KIND_E1000: return e1k::link(c);
     case KIND_RTL8139: return rtl::link(c);
     case KIND_R8169: return r8169::link(c);
+    case KIND_USB: return usbnet::link(c);
     }
     return false;
 }
@@ -751,6 +794,7 @@ void card_mode(Card& c, int m)                  // 1: receiving nothing
     case KIND_E1000: e1k::set_mode(c, m); break;
     case KIND_RTL8139: rtl::set_mode(c, m); break;
     case KIND_R8169: r8169::set_mode(c, m); break;
+    case KIND_USB: usbnet::set_mode(c, m); break;
     }
 }
 
@@ -760,6 +804,7 @@ void card_mac(Card& c, const uint8_t* a)
     case KIND_E1000: e1k::set_mac(c, a); break;
     case KIND_RTL8139: rtl::set_mac(c, a); break;
     case KIND_R8169: r8169::set_mac(c, a); break;
+    case KIND_USB: usbnet::set_mac(c, a); break;
     }
 }
 
@@ -769,6 +814,7 @@ bool card_start(Card& c)
     case KIND_E1000: c.running = e1k::init(c); break;
     case KIND_RTL8139: c.running = rtl::init(c); break;
     case KIND_R8169: c.running = r8169::init(c); break;
+    case KIND_USB: c.running = usbnet::init(c); break;
     }
     return c.running;
 }
@@ -792,6 +838,7 @@ bool send_frame(const uint8_t* f, unsigned len)
     case KIND_E1000: return e1k::send(c, f, len);
     case KIND_RTL8139: return rtl::send(c, f, len);
     case KIND_R8169: return r8169::send(c, f, len);
+    case KIND_USB: return usbnet::send(c, f, len);
     }
     return false;
 }
@@ -814,8 +861,9 @@ int use_card(int i, const char* why)
     q_head = q_count = 0;
     card_mac(c, cur_mac());                     // its own, or the one DOS has
     card_mode(c, rx_mode);
-    kprintf("net: using card %d, %s at %02x:%02x.%u (%s), link %s", i + 1, c.name, c.pci.bus, c.pci.dev, c.pci.fn,
-            why, card_link(c) ? "up" : "down");
+    if (c.kind == KIND_USB) kprintf("net: using card %d, %s (%s), link %s", i + 1, c.name, why, card_link(c) ? "up" : "down");
+    else kprintf("net: using card %d, %s at %02x:%02x.%u (%s), link %s", i + 1, c.name, c.pci.bus, c.pci.dev, c.pci.fn,
+                 why, card_link(c) ? "up" : "down");
     log_mac(", address ", cur_mac());
     kprintf("\n");
     return 0;
@@ -896,6 +944,7 @@ extern "C" void net_rx_mode(int m)
 }
 
 static void net_init_cards(void);
+static void usb_check(bool pick);
 extern "C" void net_init(void)
 {
     net_init_cards();
@@ -921,9 +970,10 @@ static void net_init_cards(void)
             kprintf(", link %s\n", card_link(c) ? "up" : "down");
         } else kprintf("net: card %d (%04x:%04x) didn't start\n", ncards, c.vendor, c.device);
     }
-    if (!ncards) { kprintf("net: no Ethernet card vmdos can drive\n"); return; }
     qbuf = (uint8_t*)phys_alloc(QLEN * FRAME_MAX);
-    net_ready = 1;
+    net_ready = 1;                              // a USB adapter may come later
+    usb_check(false);
+    if (!ncards) { kprintf("net: no Ethernet card vmdos can drive (a USB one is taken when plugged in)\n"); return; }
 
     int want = -1;
     if (const char* p = strstr(cmdline, "nic=")) { want = p[4] - '1'; auto_pick = false; }
@@ -937,8 +987,52 @@ static void net_init_cards(void)
 }
 
 // Every timer tick.
+// A card for the USB adapter when one is plugged in (the same entry when it
+// comes back); auto: used if nothing has a link.
+static void usb_check(bool pick)
+{
+    static uint32_t gen;
+    uint32_t g = usb_net_gen();
+    if (g == gen) return;
+    gen = g;
+    int u = -1;
+    for (int i = 0; i < ncards; i++) if (cards[i].kind == KIND_USB) u = i;
+    if (usb_net_present()) {
+        if (u < 0) {
+            if (ncards == MAXCARDS) return;
+            u = ncards++;
+            cards[u].kind = KIND_USB;
+        }
+        Card& c = cards[u];
+        if (!card_start(c)) return;
+        kprintf("net: card %d: %s", u + 1, c.name);
+        log_mac(", MAC ", c.mac);
+        kprintf("\n");
+        if (!pick) card_mode(c, 1);             // at boot: chosen with the others
+        else if (active == u) use_card(u, "plugged in again");
+        else if (active < 0 || (auto_pick && !card_link(cards[active]))) use_card(u, "auto: plugged in");
+        else card_mode(c, 1);
+    } else if (u >= 0 && cards[u].running) {
+        cards[u].running = false;
+        kprintf("net: card %d (%s) unplugged\n", u + 1, cards[u].name);
+        if (active == u && auto_pick)
+            for (int i = 0; i < ncards; i++)
+                if (i != u && card_link(cards[i])) { use_card(i, "auto: the USB adapter went"); break; }
+    }
+}
+
+// usb.cpp: a frame from the USB adapter (from usb_poll, the timer tick).
+extern "C" void net_usb_rx(const uint8_t* f, unsigned len)
+{
+    if (active < 0 || cards[active].kind != KIND_USB || !qbuf) return;
+    if (cards[active].spoof && rx_mode < 6 && !(f[0] & 1) && memcmp(f, cur_mac(), 6)) return;   // not ours
+    if (!room()) { st.dropped++; return; }
+    enqueue(f, len);
+}
+
 extern "C" void net_tick(void)
 {
+    usb_check(true);
     poll_card();
     link_watch();
     auto_check();
