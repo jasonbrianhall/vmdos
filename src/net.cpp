@@ -563,10 +563,9 @@ bool init(Card& c)
 
     // Which PHY steps (rtlphy= on the command line, letters): a ALDPS off,
     // p the PHY patch, r a PHY soft reset at the end. Default: all of them,
-    // except the reset on the 10/100 chips (an RTL8106e lost the link the
-    // firmware had brought up and never negotiated again after it).
+    // as Linux does.
     bool fe = chip->ver == 29 || chip->ver == 30 || chip->ver == 37 || chip->ver == 39;   // the 8105e/8402/8106e
-    const char* steps = fe ? "ap" : "apr";
+    const char* steps = "apr";
     if (const char* o = strstr(cmdline, "rtlphy=")) steps = o + 7;
     auto step = [&](char k) { for (const char* q = steps; *q && *q != ' '; q++) if (*q == k) return true; return false; };
     if (debug_level >= 1) dump_phy(c, "found");
