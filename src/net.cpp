@@ -15,8 +15,8 @@
 // later is given it, so VMPKT, VMIPX and their clients carry on unchanged.
 //
 // Cards: Intel 8254x/8257x/I21x "e1000" (QEMU's default, -nic model=e1000
-// or e1000e), Realtek RTL8139 (-nic model=rtl8139), Realtek RTL8111/8168
-// and RTL8125 (2.5G) on real PCs. Kernel options: net=off (none), nic=N,
+// or e1000e), Realtek RTL8139 (-nic model=rtl8139), Realtek RTL8111/8168,
+// RTL8125 (2.5G) and RTL810x (10/100) on real PCs. Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log).
 //
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
@@ -39,6 +39,7 @@
 //   7  use card CL (0-based; FFh: auto): AX = 0, 1 no such card, 2 it didn't start
 #include "pci.hpp"
 #include "hw.hpp"
+#include "../third_party/rtl_nic/rtl8106e-1.h"
 
 namespace {
 
@@ -74,6 +75,10 @@ void enqueue(const uint8_t* f, unsigned len)
                         f[6], f[7], f[8], f[9], f[10], f[11]);
 }
 
+// Room for another frame? While the queue is full, frames stay in the
+// card's own ring (more buffering; under QEMU the sender waits too).
+bool room() { return q_count < QLEN || rx_mode == 1; }
+
 struct Card {
     int kind;
     PciDevice pci;
@@ -105,6 +110,28 @@ uint8_t r8(Card& c, int r) { return c.mm[r]; }
 void w32(Card& c, int r, uint32_t v) { *(volatile uint32_t*)(c.mm + r) = v; }
 void w16(Card& c, int r, uint16_t v) { *(volatile uint16_t*)(c.mm + r) = v; }
 void w8(Card& c, int r, uint8_t v) { c.mm[r] = v; }
+
+// PCI power state D0 (full power), as pci_enable_device does: the firmware
+// may have left the card in D3. Returns the state it was in.
+int pci_d0(const PciDevice& d)
+{
+    if (!(pci_read(d, 0x04) & (1u << 20))) return -1;   // no capability list
+    int cap = pci_read(d, 0x34) & 0xFC;
+    for (int n = 0; cap && n < 48; n++) {
+        uint32_t h = pci_read(d, cap);
+        if ((h & 0xFF) == 0x01) {               // power management
+            uint32_t pmcsr = pci_read(d, cap + 4);
+            int st = pmcsr & 3;
+            if (st) {
+                pci_write(d, cap + 4, (pmcsr & ~3u) | 0x8000);   // D0 (and clear PME status)
+                udelay(10000);
+            }
+            return st;
+        }
+        cap = (h >> 8) & 0xFC;
+    }
+    return -1;
+}
 
 // The card's first memory BAR, mapped (0: none).
 volatile uint8_t* map_bar(const PciDevice& d, uint32_t len)
@@ -235,7 +262,7 @@ void poll(Card& c)
     volatile RxD* rx = (volatile RxD*)c.rxd;
     for (int n = 0; n < NRX; n++) {
         volatile RxD& d = rx[c.rx_cur];
-        if (!(d.status & 1)) break;             // DD
+        if (!(d.status & 1) || !room()) break;  // DD
         BARRIER();
         if ((d.status & 2) && !d.errors) enqueue(c.rxb + c.rx_cur * 2048, d.len);
         else st.rx_err++;
@@ -332,7 +359,7 @@ bool link(Card& c) { return !(inb(c.io + MSR) & 4); }   // LINKB: 1 = link down
 
 void poll(Card& c)
 {
-    for (int n = 0; n < 64 && !(inb(c.io + CR) & 1); n++) {   // BUFE clear: a frame is there
+    for (int n = 0; n < 64 && room() && !(inb(c.io + CR) & 1); n++) {   // BUFE clear: a frame is there
         uint16_t status = *(volatile uint16_t*)(c.rxb + c.rx_off);
         uint16_t len = *(volatile uint16_t*)(c.rxb + c.rx_off + 2);
         if (status == 0 && len == 0xFFF0) break;          // early receive, not there yet
@@ -397,17 +424,25 @@ const Chip chips[] = {
     { 0x281, "RTL8168d", 25 }, { 0x28A, "RTL8168dp", 28 }, { 0x28B, "RTL8168dp", 31 },
     { 0x3C9, "RTL8168cp", 23 }, { 0x3C8, "RTL8168cp", 18 }, { 0x3C2, "RTL8168c", 20 }, { 0x3C0, "RTL8168c", 19 },
     { 0x384, "RTL8168b", 17 }, { 0x380, "RTL8168b", 17 }, { 0x300, "RTL8168b", 11 },
+    { 0x3C3, "RTL8168c", 21 },
+    // the 8101 family: Fast Ethernet (10EC:8136)
+    { 0x409, "RTL8105e", 29 }, { 0x349, "RTL8102e", 8 }, { 0x249, "RTL8102e", 8 },
+    { 0x348, "RTL8102e", 7 }, { 0x248, "RTL8102e", 7 }, { 0x240, "RTL8401", 14 },
 };
 const Chip masked[] = {                         // matched on XID & 0x7C8
     { 0x488, "RTL8411", 38 }, { 0x2C8, "RTL8168evl", 34 }, { 0x2C0, "RTL8168e", 33 },
     { 0x280, "RTL8168d", 26 }, { 0x3C8, "RTL8168cp", 24 }, { 0x3C0, "RTL8168c", 22 },
+    { 0x380, "RTL8168b", 17 },
+    { 0x448, "RTL8106e", 39 }, { 0x440, "RTL8402", 37 }, { 0x408, "RTL8105e", 30 },
+    { 0x348, "RTL8103e", 9 }, { 0x248, "RTL8103e", 9 }, { 0x340, "RTL8101e", 10 },
 };
 
 bool match(uint32_t id)
 {
     if ((id & 0xFFFF) != 0x10EC) return false;
     uint16_t d = id >> 16;
-    return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8125 || d == 0x3000 || d == 0x5000;
+    return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8125 || d == 0x3000 || d == 0x5000 ||
+           d == 0x8136;                           // RTL810x Fast Ethernet
 }
 
 void unlock(Card& c) { w8(c, Cfg9346, 0xC0); }
@@ -481,8 +516,19 @@ void irq_off(Card& c)
     else { w16(c, IntrMask, 0); w16(c, IntrStatus, 0xFFFF); }
 }
 
+void dump_phy(Card& c, const char* why);
+
+void eri_write(Card& c, int addr, uint32_t mask, uint32_t v)   // ERI (ExGMAC) register write
+{
+    w32(c, 0x70, v);                            // ERIDR
+    w32(c, 0x74, 0x80000000u | mask << 12 | (uint32_t)addr);   // ERIAR: write, EXGMAC
+    for (int i = 0; i < 100 && (r32(c, 0x74) & 0x80000000u); i++) udelay(10);
+}
+
 bool init(Card& c)
 {
+    int was = pci_d0(c.pci);
+    if (was > 0) kprintf("net: %02x:%02x.%u was in PCI power state D%d: now D0\n", c.pci.bus, c.pci.dev, c.pci.fn, was);
     pci_write(c.pci, 0x04, (pci_read(c.pci, 0x04) | 0x06) & ~0x400u);   // memory, bus master
     c.mm = map_bar(c.pci, 0x10000);
     if (!c.mm) return false;
@@ -500,7 +546,7 @@ bool init(Card& c)
     c.is8125 = chip->ver >= 61;
     c.ocp_phy = chip->ver >= 40;
     c.gen_g = chip->ver >= 40 && chip->ver <= 52;
-    c.evl_up = chip->ver >= 34 && chip->ver <= 52;
+    c.evl_up = chip->ver >= 34 && chip->ver != 39 && chip->ver <= 52;
     dbg(1, "net: %s (XID %03x, r8169 version %u)\n", chip->name, c.xid, chip->ver);
 
     irq_off(c);
@@ -515,12 +561,33 @@ bool init(Card& c)
     for (int i = 0; i < 4; i++) c.mac[i] = (uint8_t)(m0 >> (8 * i));
     c.mac[4] = (uint8_t)m4; c.mac[5] = (uint8_t)(m4 >> 8);
 
+    // Which PHY steps (rtlphy= on the command line, letters): a ALDPS off,
+    // p the PHY patch, r a PHY soft reset at the end. Default: all of them,
+    // as Linux does.
+    bool fe = chip->ver == 29 || chip->ver == 30 || chip->ver == 37 || chip->ver == 39;   // the 8105e/8402/8106e
+    const char* steps = "apr";
+    if (const char* o = strstr(cmdline, "rtlphy=")) steps = o + 7;
+    auto step = [&](char k) { for (const char* q = steps; *q && *q != ' '; q++) if (*q == k) return true; return false; };
+    if (debug_level >= 1) dump_phy(c, "found");
+
     // the PHY: wake it if the firmware left it powered down
     int bmcr = phy_read(c, 0);
     dbg(1, "net: %s PHY BMCR %04x, PHYstatus %02x\n", c.name, bmcr & 0xFFFF, r8(c, PHYstatus));
     if (bmcr >= 0 && (bmcr & 0x0800)) {
         phy_write(c, 0, (uint16_t)((bmcr & ~0x0800) | 0x1200));   // power up, autonegotiate
         kprintf("net: %s PHY was powered down: woken, negotiating\n", c.name);
+    }
+    if (fe && step('a')) {
+        phy_write(c, 0x1F, 0);                  // PHY page 0
+        phy_write(c, 0x18, 0x0310);             // ALDPS (link-down power saving) off, as Linux does
+        udelay(100000);
+    }
+    if (chip->ver == 39 && step('p')) {         // rtl8106e_hw_phy_config: the PHY patch, then its settings
+        for (const auto& w : rtl8106e_1_fw) phy_write(c, w[0], w[1]);
+        static const uint16_t after[][2] = { { 0x1F, 4 }, { 0x10, 0xC07F }, { 0x19, 0x7030 }, { 0x1F, 0 } };
+        for (const auto& w : after) phy_write(c, w[0], w[1]);
+        for (int i = 0; i < 60 && (phy_read(c, 0) & 0x8000); i++) udelay(10000);
+        dbg(1, "net: %s: PHY patch (%u writes) applied\n", c.name, (unsigned)(sizeof rtl8106e_1_fw / sizeof rtl8106e_1_fw[0]));
     }
 
     // rings
@@ -555,7 +622,20 @@ bool init(Card& c)
     } else {
         w8(c, MaxTxPacketSize, c.evl_up ? 0x27 : 0x3F);
         w16(c, IntrMitigate, 0);
+        if (fe) {
+            w32(c, MISC, r32(c, MISC) | 0x002800);   // FuncEvent: leave ASPM while Rx/Tx are busy
+            w8(c, 0xD3, r8(c, 0xD3) | 0x0C);         // MCU: EN_NDP, EN_OOB_RESET
+        }
+        if (chip->ver == 39) {
+            w32(c, MISC, (r32(c, MISC) | (1u << 23)) & ~(1u << 16));   // DISABLE_LAN_EN, no early tally
+            w8(c, 0xD0, r8(c, 0xD0) & ~0x40);        // DLLPR: PFM off
+            eri_write(c, 0x1D0, 3, 0);
+            eri_write(c, 0x1B0, 3, 0);               // EEE off
+        }
     }
+    // the PLL stays up (Linux: rtl_set_d3_pll_down; older ones powered it up here for the 8106e)
+    if (!c.is8125 && chip->ver >= 25 && chip->ver != 28 && chip->ver != 31 && chip->ver != 38)
+        w8(c, 0x6F, r8(c, 0x6F) | 0xC0);           // PMCH: D3hot / D3cold no PLL down
     if (chip->ver >= 40) w32(c, MISC, r32(c, MISC) & ~(1u << 19));   // RXDV gate off
     w16(c, RxMaxSize, BUF);
     w32(c, TxDescHi, 0); w32(c, TxDescLo, (uint32_t)(uintptr_t)c.txd);
@@ -567,15 +647,50 @@ bool init(Card& c)
     uint32_t rxc;
     if (c.is8125) rxc = (8u << 27) | (7u << 8) | (chip->ver >= 63 ? (1u << 11) : 0);
     else if (c.gen_g) rxc = (1u << 15) | (1u << 14) | (7u << 8) | (1u << 11);
-    else if (chip->ver >= 18) rxc = (1u << 15) | (1u << 14) | (7u << 8);
-    else rxc = (7u << 13) | (7u << 8);
+    else if ((chip->ver >= 18 && chip->ver <= 24) || (chip->ver >= 34 && chip->ver <= 36) || chip->ver == 38)
+        rxc = (1u << 15) | (1u << 14) | (7u << 8);   // RX128_INT_EN, RX_MULTI_EN
+    else if (chip->ver <= 17 && (chip->ver < 7 || chip->ver > 9)) rxc = (7u << 13) | (7u << 8);   // FIFO threshold, DMA burst
+    else rxc = (1u << 15) | (7u << 8);
     w32(c, RxConfig, rxc);                      // accepting nothing yet
     w32(c, TxConfig, (7u << 8) | (3u << 24) | (c.evl_up ? (1u << 7) : 0));
     irq_off(c);
+    phy_write(c, 0x1F, 0);
+    if (step('r')) {                            // PHY soft reset, negotiate afresh (genphy_soft_reset)
+        int b = phy_read(c, 0);
+        phy_write(c, 0, (uint16_t)((b & ~0x0800) | 0x8000 | ((b & 0x1000) ? 0x0200 : 0)));
+    }
+    if (debug_level >= 1) {
+        char sv[8] = { 0 };
+        for (int i = 0; i < 7 && steps[i] && steps[i] != ' '; i++) sv[i] = steps[i];
+        kprintf("net: %s PHY steps \"%s\"\n", c.name, sv);
+    }
+    if (debug_level >= 1) dump_phy(c, "started");
     return true;
 }
 
-bool link(Card& c) { return r8(c, PHYstatus) & 2; }
+// The PHY's own word on it (BMSR bit 2, latched: read twice), as Linux's
+// phylib; the MAC's PHYstatus copy too.
+bool link(Card& c)
+{
+    if (r8(c, PHYstatus) & 2) return true;
+    phy_write(c, 0x1F, 0);
+    phy_read(c, 1);
+    int bmsr = phy_read(c, 1);
+    return bmsr >= 0 && bmsr != 0xFFFF && (bmsr & 4);
+}
+
+void dump_phy(Card& c, const char* why)
+{
+    phy_write(c, 0x1F, 0);
+    int bmcr = phy_read(c, 0), bmsr1 = phy_read(c, 1), bmsr = phy_read(c, 1);
+    int id1 = phy_read(c, 2), id2 = phy_read(c, 3), adv = phy_read(c, 4), lpa = phy_read(c, 5);
+    kprintf("net: %s %s: PHY id %04x:%04x BMCR %04x BMSR %04x/%04x ADV %04x LPA %04x, PHYstatus %02x, ChipCmd %02x\n",
+            c.name, why, id1 & 0xFFFF, id2 & 0xFFFF, bmcr & 0xFFFF, bmsr1 & 0xFFFF, bmsr & 0xFFFF, adv & 0xFFFF, lpa & 0xFFFF,
+            r8(c, PHYstatus), r8(c, ChipCmd));
+    kprintf("net: %s %s: Config0-5 %02x %02x %02x %02x %02x %02x PMCH %02x MISC %08x MCU %02x DLLPR %02x PHY 18h %04x\n",
+            c.name, why, r8(c, 0x51), r8(c, 0x52), r8(c, 0x53), r8(c, 0x54), r8(c, 0x55), r8(c, 0x56), r8(c, 0x6F),
+            r32(c, MISC), r8(c, 0xD3), r8(c, 0xD0), phy_read(c, 0x18) & 0xFFFF);
+}
 
 void poll(Card& c)
 {
@@ -583,7 +698,7 @@ void poll(Card& c)
     for (int n = 0; n < NRX; n++) {
         volatile Desc& d = rx[c.rx_cur];
         uint32_t s = d.opts1;
-        if (s & OWN) break;
+        if ((s & OWN) || !room()) break;
         BARRIER();
         if ((s & RES) || (s & (FS | LS)) != (FS | LS)) st.rx_err++;
         else {
@@ -707,6 +822,27 @@ int use_card(int i, const char* why)
 }
 
 // Auto: while the card in use has had no link for 3 s, change to one that has.
+// Every link change in the log.
+void link_watch()
+{
+    static uint32_t last;
+    static uint8_t was[MAXCARDS];
+    if (ticks - last < 250) return;
+    last = ticks;
+    for (int i = 0; i < ncards; i++) {
+        if (!cards[i].running) continue;
+        uint8_t now = card_link(cards[i]) ? 2 : 1;
+        if (was[i] && now != was[i]) kprintf("net: card %d (%s): link %s\n", i + 1, cards[i].name, now == 2 ? "up" : "down");
+        was[i] = now;
+        // debug=1: what a Realtek PHY says while there's no link, every 2 s for the first 30 s
+        static int dumps[MAXCARDS];
+        if (debug_level >= 1 && now == 1 && cards[i].kind == KIND_R8169 && dumps[i] < 15 && (ticks / 250) % 8 == 0) {
+            dumps[i]++;
+            r8169::dump_phy(cards[i], "no link");
+        }
+    }
+}
+
 void auto_check()
 {
     static uint32_t down_since, last;
@@ -723,8 +859,50 @@ void auto_check()
 
 extern "C" int net_ready;
 int net_ready;
+extern "C" int ne2k_running(void);
+extern "C" void ne2k_tick(void);
+extern "C" void ne2k_init(void);
 
+// For the emulated NE2000 (ne2k.c).
+extern "C" int net_peek_len(void) { if (!q_count) poll_card(); return q_count ? qlen_of[q_head] : 0; }
+extern "C" int net_take(uint8_t* buf, int max)
+{
+    if (!q_count) return 0;
+    int len = qlen_of[q_head];
+    memcpy(buf, qbuf + q_head * FRAME_MAX, len < max ? len : max);
+    q_head = (q_head + 1) % QLEN;
+    q_count--;
+    return len;
+}
+extern "C" int net_send(const uint8_t* f, unsigned len)
+{
+    bool ok = len >= 14 && len <= 1514 && send_frame(f, len);
+    if (ok) { st.tx++; st.tx_bytes += len; } else st.tx_err++;
+    if (log_on) kprintf("net: NE2000 out %u bytes, type %02x%02x%s\n", len, f[12], f[13], ok ? "" : " FAILED");
+    return ok;
+}
+extern "C" int net_dos_mac(uint8_t* mac, int fix)          // the address DOS sees (fix: from now on)
+{
+    if (active < 0) return 0;
+    if (fix && !mac_fixed) { memcpy(dos_mac, cards[active].mac, 6); mac_fixed = true; }
+    memcpy(mac, cur_mac(), 6);
+    return 1;
+}
+extern "C" void net_rx_mode(int m)
+{
+    if (m == rx_mode) return;
+    rx_mode = m;
+    if (active >= 0) card_mode(cards[active], m);
+}
+
+static void net_init_cards(void);
 extern "C" void net_init(void)
+{
+    net_init_cards();
+    ne2k_init();
+}
+
+static void net_init_cards(void)
 {
     if (strstr(cmdline, "net=off")) return;
     log_on = strstr(cmdline, "netlog") != 0;
@@ -762,7 +940,9 @@ extern "C" void net_init(void)
 extern "C" void net_tick(void)
 {
     poll_card();
+    link_watch();
     auto_check();
+    if (ne2k_running()) ne2k_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 

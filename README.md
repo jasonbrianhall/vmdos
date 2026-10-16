@@ -425,7 +425,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 ## Network: packet driver and IPX
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
-Realtek RTL8111/8168, RTL8125 and RTL8139; `net=off` skips them, `netlog`
+Realtek RTL8111/8168, RTL8125, RTL810x and RTL8139; `net=off` skips them, `netlog`
 logs frames) and DOS reaches them through TSRs in C:\VMDOS:
 
     VMPKT [0x60 [10]]    packet driver (FTP spec 1.11) on INT 60h, IRQ 10
@@ -437,6 +437,11 @@ that one loses it for 3 s; `nic=2` on the kernel command line or `VMNIC 2`
 fixes the choice. A card changed to takes over the address DOS already has,
 so VMPKT and the programs on it carry on. The RTL8168/8125 driver relies on
 the firmware having set up the PHY (`debug=1` logs what vmdos found).
+
+vmdos also shows DOS an ISA NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
+`ne2k=off` removes it) on the same card and address, for drivers that want
+hardware: Windows 95/98/ME's "NE2000 Compatible" (under VMHV), NE2000 packet
+drivers, ODI/NDIS drivers for Windows 3.x. Use it or VMPKT, not both.
 
 IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
 PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
