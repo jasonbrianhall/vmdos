@@ -1,11 +1,13 @@
 ; VMIPX.COM: an IPX driver (the Novell IPX API: INT 2Fh AX=7A00h entry
 ; point and INT 7Ah) on top of a packet driver -- VMPKT.COM under vmdos,
-; or any other on a real PC. IPX packets go out as Ethernet II frames of
-; type 8137h, on network 00000000h, with the card's MAC as the node, so
-; DOS games find each other on the LAN (and real IPX machines using
-; Ethernet II framing).
+; or any other on a real PC. Network 00000000h, the card's MAC as the
+; node, so DOS games find each other on the LAN. It takes IPX in all four
+; Ethernet framings (Ethernet II 8137h, Novell raw 802.3, 802.2, SNAP) and
+; sends Ethernet II until it hears IPX only in another framing (as from
+; NetWare ODI drivers, raw 802.3 by default), then sends in that.
 ;   VMIPX          load (finds the packet driver on 60h-80h)
 ;   VMIPX 0x61     use the packet driver on that vector
+;   VMIPX 802.3    always send in that framing (also 802.2, SNAP, II)
 ; IPX only (no SPX); one network, no routers: a packet's immediate
 ; address is its destination node. Sockets, listen ECBs with
 ; scatter/gather fragments, ESRs (at interrupt time, as Novell's), IPX
@@ -201,29 +203,7 @@ f_send: mov byte [bp + F_AX], 0
         mov di, [bp + F_SI]
         mov es, [bp + F_ES]
         mov byte [es:di + E_INUSE], 0FFh
-        ; Ethernet header
-        push di
-        mov si, di
-        add si, E_IMM
-        push ds
-        push es
-        pop ds
-        push cs
-        pop es
-        mov di, txbuf
-        movsw                           ; destination: the immediate address
-        movsw
-        movsw
-        pop ds
-        mov si, mac
-        movsw
-        movsw
-        movsw
-        mov ax, 3781h                   ; 8137h
-        stosw
-        pop di
-        ; the fragments
-        mov es, [bp + F_ES]
+        ; the fragments, to tx_ipx
         mov cx, [es:di + E_FRAGN]
         lea bx, [di + E_FRAG]
         mov dx, 0                       ; bytes so far
@@ -233,7 +213,7 @@ f_send: mov byte [bp + F_AX], 0
         mov ax, dx
         add ax, cx
         jc .big
-        cmp ax, 1500
+        cmp ax, 1492
         ja .big
         push ds
         push es
@@ -241,7 +221,7 @@ f_send: mov byte [bp + F_AX], 0
         lds si, [es:bx]
         push cs
         pop es
-        mov di, txbuf + 14
+        mov di, tx_ipx
         add di, dx
         rep movsb
         pop di
@@ -258,42 +238,84 @@ f_send: mov byte [bp + F_AX], 0
 .built: cmp dx, 30
         jb .bad
         ; the IPX header: checksum, length, transport control, the source address
-        mov word [txbuf + 14 + 0], 0FFFFh
+        mov word [tx_ipx + 0], 0FFFFh
         mov ax, dx
         xchg al, ah
-        mov [txbuf + 14 + 2], ax
-        mov byte [txbuf + 14 + 4], 0
+        mov [tx_ipx + 2], ax
+        mov byte [tx_ipx + 4], 0
         mov ax, [net]
-        mov [txbuf + 14 + 18], ax
+        mov [tx_ipx + 18], ax
         mov ax, [net + 2]
-        mov [txbuf + 14 + 20], ax
+        mov [tx_ipx + 20], ax
         mov ax, [mac]
-        mov [txbuf + 14 + 22], ax
+        mov [tx_ipx + 22], ax
         mov ax, [mac + 2]
-        mov [txbuf + 14 + 24], ax
+        mov [tx_ipx + 24], ax
         mov ax, [mac + 4]
-        mov [txbuf + 14 + 26], ax
+        mov [tx_ipx + 26], ax
         mov ax, [es:di + E_SOCK]
-        mov [txbuf + 14 + 28], ax
-        mov cx, dx
-        add cx, 14
+        mov [tx_ipx + 28], ax
+        ; the link header in front of it -> SI
+        mov si, tx_ipx
+        mov al, [tx_fmt]
+        cmp al, 2
+        je .llc
+        cmp al, 3
+        je .snap
+        sub si, 2
+        mov ax, 3781h                   ; Ethernet II: 8137h
+        cmp byte [tx_fmt], 0
+        je .tl
+        mov ax, dx                      ; raw 802.3: the length
+        xchg al, ah
+.tl:    mov [si], ax
+        jmp .macs
+.llc:   sub si, 3                       ; 802.2: DSAP, SSAP E0h, UI
+        mov word [si], 0E0E0h
+        mov byte [si + 2], 3
+        jmp .len
+.snap:  sub si, 8                       ; SNAP: AA AA 03, 00 00 00, 8137h
+        mov word [si], 0AAAAh
+        mov word [si + 2], 0003h
+        mov word [si + 4], 0
+        mov word [si + 6], 3781h
+.len:   mov ax, tx_ipx
+        sub ax, si
+        add ax, dx
+        xchg al, ah
+        sub si, 2
+        mov [si], ax
+.macs:  sub si, 12
+        push si
+        push ds
+        mov ax, cs
+        mov es, ax
+        mov di, si
+        mov si, [bp + F_SI]
+        mov ds, [bp + F_ES]
+        add si, E_IMM
+        movsw                           ; destination: the immediate address
+        movsw
+        movsw
+        pop ds
+        mov si, mac
+        movsw                           ; source
+        movsw
+        movsw
+        pop si
+        mov cx, tx_ipx                  ; the frame's length
+        add cx, dx
+        sub cx, si
         cmp cx, 60
         jae .send
-        push di
-        push es
-        push cs
-        pop es
-        mov di, txbuf
+        mov di, si
         add di, cx
         neg cx
         add cx, 60
         xor al, al
         rep stosb
-        pop es
-        pop di
         mov cx, 60
-.send:  mov si, txbuf
-        mov ah, 4
+.send:  mov ah, 4
         int 60h                         ; patched to the packet driver's vector
 pkt_int1 equ $ - 1
         mov al, 0
@@ -482,9 +504,44 @@ receiver:
 ; the frame in rxbuf: to the first ECB listening on its socket
 got_frame:
         mov cx, [rx_len]
-        sub cx, 14
-        jbe .x
-        mov ax, [rxbuf + 14 + 2]        ; the IPX length
+        cmp cx, 14 + 30
+        jb .x
+        mov si, rxbuf + 14
+        mov ax, [rxbuf + 12]
+        xchg al, ah
+        mov bl, 0
+        cmp ax, 8137h                   ; Ethernet II
+        je .ipx
+        cmp ax, 1500
+        ja .x
+        add ax, 14                      ; 802.3: the frame without padding
+        cmp ax, cx
+        ja .x
+        mov cx, ax
+        mov bl, 1
+        cmp word [si], 0FFFFh           ; raw 802.3: IPX's checksum right away
+        je .ipx
+        mov bl, 2
+        cmp word [si], 0E0E0h           ; 802.2
+        jne .snap
+        cmp byte [si + 2], 3
+        jne .x
+        add si, 3
+        jmp .ipx
+.snap:  mov bl, 3
+        cmp word [si], 0AAAAh
+        jne .x
+        cmp word [si + 2], 0003h
+        jne .x
+        cmp word [si + 4], 0
+        jne .x
+        cmp word [si + 6], 3781h
+        jne .x
+        add si, 8
+.ipx:   mov [rx_ipx], si
+        add cx, rxbuf                   ; CX = bytes from the IPX header on
+        sub cx, si
+        mov ax, [si + 2]                ; the IPX length
         xchg al, ah
         cmp ax, 30
         jb .x
@@ -492,20 +549,32 @@ got_frame:
         ja .x
         mov [ipx_len], ax
         ; for this node (or everyone)?
-        mov si, rxbuf + 14 + 10
+        mov bp, si
+        add si, 10
         mov di, mac
         push cs
         pop es
         mov cx, 3
         repe cmpsw
         je .mine
-        cmp word [rxbuf + 14 + 10], 0FFFFh
+        cmp word [ds:bp + 10], 0FFFFh
         jne .x
-        cmp word [rxbuf + 14 + 12], 0FFFFh
+        cmp word [ds:bp + 12], 0FFFFh
         jne .x
-        cmp word [rxbuf + 14 + 14], 0FFFFh
+        cmp word [ds:bp + 14], 0FFFFh
         jne .x
-.mine:  mov dx, [rxbuf + 14 + 16]
+.mine:  ; the framing to send in: Ethernet II, unless IPX only comes in another
+        cmp bl, 0
+        jne .other
+        mov byte [seen_ii], 1
+        jmp .learnt
+.other: cmp byte [fmt_fixed], 0
+        jne .learnt
+        cmp byte [seen_ii], 0
+        jne .learnt
+        mov [tx_fmt], bl
+.learnt:
+        mov dx, [ds:bp + 16]
         call find_sock
         jc .x
         les di, [si + S_HEAD]
@@ -525,7 +594,7 @@ got_frame:
         mov [es:di + E_IMM + 4], ax
         ; scatter into the fragments
         mov dx, [ipx_len]               ; left to copy
-        mov si, rxbuf + 14
+        mov si, [rx_ipx]
         mov cx, [es:di + E_FRAGN]
         lea bx, [di + E_FRAG]
         mov byte [cc], 0
@@ -668,7 +737,12 @@ done_q:     times MAXD dd 0
 done_end:
 events:     times MAXE dd 0
 sockets:    times MAXS * S_SIZE db 0
-txbuf:      times 1514 db 0
+tx_fmt:     db 0                        ; 0 Ethernet II, 1 raw 802.3, 2 802.2, 3 SNAP
+fmt_fixed:  db 0
+seen_ii:    db 0
+rx_ipx:     dw 0
+txbuf:      times 22 db 0               ; the link header goes in front of
+tx_ipx:     times 1500 db 0             ; the IPX packet
 rxbuf:      times RXMAX db 0
             align 2
             times 1024 db 0
@@ -684,11 +758,36 @@ install:
         mov dx, msg_already
         jmp fail
 .noipx: mov si, 81h
-        call skipsp
-        cmp al, 13
-        je .scan
+.arg:   call skipsp
+        cmp byte [si], 13
+        je .args
+        mov di, kw_8023
+        mov bl, 1
+        call keyword
+        je .fmt
+        mov di, kw_8022
+        mov bl, 2
+        call keyword
+        je .fmt
+        mov di, kw_snap
+        mov bl, 3
+        call keyword
+        je .fmt
+        mov di, kw_ii
+        mov bl, 0
+        call keyword
+        je .fmt
         call hexnum
         jc usage
+        dec si
+        mov [want_vec], al
+        jmp .arg
+.fmt:   mov [tx_fmt], bl
+        mov byte [fmt_fixed], 1
+        jmp .arg
+.args:  mov al, [want_vec]
+        or al, al
+        jz .scan
         call has_sig
         jnc .nopkt
         jmp .have
@@ -703,6 +802,7 @@ install:
 .have:  mov [pkt_int1], al
         mov [pkt_int2], al
         mov [pkt_int3], al
+        mov [pkt_int4], al
         mov [pkt_vec], al
 
         mov ax, 0201h                   ; access_type: class 1, IPX's EtherType
@@ -719,6 +819,17 @@ pkt_int2 equ $ - 1
         mov dx, msg_type
         jmp fail
 .acc:   mov [handle], ax
+        mov ax, 0201h                   ; and everything else, for IPX in 802.3 frames
+        mov bx, 0FFFFh                  ; (if nobody has asked for that)
+        xor dl, dl
+        mov si, ipx_type
+        xor cx, cx
+        push cs
+        pop es
+        mov di, receiver
+        int 60h
+pkt_int4 equ $ - 1
+        mov ax, [handle]
         mov bx, ax
         mov ah, 6                       ; get_address
         push cs
@@ -759,6 +870,17 @@ pkt_int3 equ $ - 1
         call puthex2
         mov dx, msg_ok2
         call puts
+        mov bl, [tx_fmt]
+        xor bh, bh
+        shl bx, 1
+        mov dx, [fmt_names + bx]
+        call puts
+        cmp byte [fmt_fixed], 0
+        jne .fixed
+        mov dx, msg_auto
+        call puts
+.fixed: mov dx, msg_ok3
+        call puts
         mov si, mac
         mov cx, 6
 .mac:   lodsb
@@ -797,6 +919,37 @@ has_sig:
         clc
         ret
 .yes:   stc
+        ret
+
+; [SI] the keyword at DI (lower case, 0-terminated), whole word? ZF, SI past it
+keyword:
+        push si
+.k:     mov al, [di]
+        or al, al
+        jz .end
+        mov ah, [si]
+        cmp ah, 'A'
+        jb .c
+        cmp ah, 'Z'
+        ja .c
+        or ah, 20h
+.c:     cmp al, ah
+        jne .no
+        inc si
+        inc di
+        jmp .k
+.end:   mov al, [si]
+        cmp al, ' '
+        je .yes
+        cmp al, 9
+        je .yes
+        cmp al, 13
+        je .yes
+.no:    pop si
+        or sp, sp                       ; NZ
+        ret
+.yes:   add sp, 2
+        cmp al, al                      ; ZF
         ret
 
 skipsp: lodsb
@@ -858,10 +1011,22 @@ sig:        db 'PKT DRVR'
 ipx_type:   db 81h, 37h
 pkt_vec:    db 0
 msg_ok1:    db 'VMIPX: IPX on the packet driver at INT $'
-msg_ok2:    db 'h, Ethernet II, network 00000000, node $'
+msg_ok2:    db 'h, $'
+msg_auto:   db ' (auto)$'
+msg_ok3:    db ', network 00000000, node $'
+fmt_names:  dw f_ii, f_8023, f_8022, f_snap
+f_ii:       db 'Ethernet II$'
+f_8023:     db '802.3$'
+f_8022:     db '802.2$'
+f_snap:     db 'SNAP$'
+kw_8023:    db '802.3', 0
+kw_8022:    db '802.2', 0
+kw_snap:    db 'snap', 0
+kw_ii:      db 'ii', 0
+want_vec:   db 0
 msg_crlf:   db 13, 10, '$'
 msg_already: db 'VMIPX: an IPX driver is loaded already', 13, 10, '$'
 msg_nopkt:  db 'VMIPX: no packet driver (load VMPKT first)', 13, 10, '$'
 msg_type:   db 'VMIPX: the packet driver refused IPX', 27h, 's frame type', 13, 10, '$'
 msg_addr:   db 'VMIPX: the packet driver gave no address', 13, 10, '$'
-msg_usage:  db 'usage: VMIPX [packet driver vector, e.g. 0x60]', 13, 10, '$'
+msg_usage:  db 'usage: VMIPX [packet driver vector, e.g. 0x60] [802.3 | 802.2 | SNAP | II]', 13, 10, '$'
