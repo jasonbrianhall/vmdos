@@ -31,6 +31,19 @@ void xms_restart(void)
     set_a20(0);
 }
 
+/* What FreeDOS does (with DOS=HIGH) before it starts a program from
+   INT 21h AX=4B00h: an XMS local disable, so the program runs with A20 off
+   and EXEPACK's unpacker, loaded below 64 KiB, wraps around to low memory
+   instead of reading the HMA ("Packed file is corrupt"). The kernel turns
+   A20 back on at its next entry. v86.c does the same when an EXEPACK
+   unpacker loaded with AX=4B03h starts (see exepack_find there). */
+void xms_exec_a20_off(void)
+{
+    if (!hma_used || !a20_on) return;
+    if (a20_local) a20_local--;
+    if (!a20_local && !a20_global) set_a20(0);
+}
+
 /* noxms on the command line: no XMS driver at all (the installation check
    says none, VMXMS.SYS doesn't stay), for software that wants its own,
    such as Windows 3.1 Setup with its HIMEM.SYS. */

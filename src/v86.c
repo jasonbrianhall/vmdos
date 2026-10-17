@@ -146,6 +146,60 @@ static struct regs *deliver(struct regs *r)
     return r;
 }
 
+/* EXEPACK loaded with INT 21h AX=4B03h (load overlay) below 64 KiB.
+   EXEPACK's unpacker counts on segment arithmetic wrapping at 1 MiB: run
+   from below 64 KiB with A20 on it reads the HMA instead and stops with
+   "Packed file is corrupt" (or runs garbage). FreeDOS turns A20 off
+   when it starts a program from AX=4B00h, but not after AX=4B03h, and
+   a caller may call DOS again (turning it back on) before it jumps in:
+   Life & Death loads its surgery modules over itself that way. So the
+   unpacker's first byte becomes a HLT; when the program gets there, A20
+   goes off, the byte goes back, and the unpacker runs as on a plain PC. */
+static int ovl_pending;
+static u16 ovl_cs, ovl_ip, ovl_sp, ovl_seg;
+static u32 xp_at;                       /* the HLT put in for the unpacker (0: none) */
+static u8 xp_byte;
+
+static const u8 exepack_code[] = { 0x8C, 0xC0, 0x05, 0x10, 0x00, 0x0E, 0x1F, 0xA3, 0x04, 0x00 };
+
+static void exepack_find(u16 seg)
+{
+    for (u32 p = seg; p < 0xA000; p++) {
+        u32 a = p << 4, code;
+        if (rd16(a + 0x0E) == 0x4252) code = a + 0x10;           /* "RB": 16-byte header */
+        else if (rd16(a + 0x10) == 0x4252) code = a + 0x12;      /* 18-byte header (skip_len) */
+        else continue;
+        int i = 0;
+        while (i < (int)sizeof exepack_code && rd8(code + i) == exepack_code[i]) i++;
+        if (i < (int)sizeof exepack_code) continue;
+        if (xp_at && rd8(xp_at) == 0xF4) wr8(xp_at, xp_byte);    /* an older one never ran */
+        xp_at = code; xp_byte = rd8(code);
+        wr8(code, 0xF4);
+        dbg(1, "EXEPACK overlay at %04x: A20 off when its unpacker (%04x:%04x) starts\n",
+            seg, p, code - a);
+        return;
+    }
+}
+
+/* DOS's IRET back to the program that asked for the overlay. */
+static void ovl_check_return(struct regs *r)
+{
+    if (!ovl_pending || (r->cs & 0xFFFF) != ovl_cs || IP(r) != ovl_ip || SP(r) != ovl_sp) return;
+    ovl_pending = 0;
+    if (!(r->eflags & EFL_CF) && ovl_seg < 0x1000) exepack_find(ovl_seg);
+}
+
+/* A HLT: the one in front of an EXEPACK unpacker? */
+static int exepack_hlt(struct regs *r, u16 ip0)
+{
+    if (!xp_at || LIN(r->cs, ip0) != xp_at || rd8(xp_at) != 0xF4) return 0;
+    wr8(xp_at, xp_byte);
+    xp_at = 0;
+    xms_exec_a20_off();
+    IP(r) = ip0;
+    return 1;
+}
+
 static void do_int(struct regs *r, int n, u16 ip0)
 {
     u32 tgt = (u32)rd16(n * 4 + 2) << 4 | 0;
@@ -162,6 +216,10 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     if (n == 0x2F && AX(r) == 0x1680) { idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
     if (n == 0x21 && AH(r) == 0x4B) hd_dos_up();                        /* a program runs: DOS has its drives */
+    if (n == 0x21 && AX(r) == 0x4B03 && !xms_hidden) {                   /* overlay: see ovl_check_return */
+        ovl_pending = 1; ovl_cs = (u16)r->cs; ovl_ip = IP(r); ovl_sp = SP(r);
+        ovl_seg = rd16(LIN(r->v86_es, BX(r)));                          /* the parameter block: load segment */
+    }
     if (n == 0x28) guest_idle_poll();                                    /* DOS idle (then the vector, for TSRs) */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
@@ -353,6 +411,7 @@ static void gp_handler(struct regs *r)
             r->cs = pop32(r) & 0xFFFF;
             set_guest_flags(r, pop32(r));
         } else iret16(r, 0);
+        ovl_check_return(r);
         return;
     case 0xCD: {                                                    /* INT n */
         u8 n = rd8(LIN(r->cs, ip));
@@ -401,6 +460,7 @@ static void gp_handler(struct regs *r)
             else { vif = 1; wait_for_irq(); }
             return;
         }
+        if (exepack_hlt(r, ip0)) return;
         IP(r) = ip;
         wait_for_irq();
         return;
