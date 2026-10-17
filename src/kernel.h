@@ -240,6 +240,7 @@ int bios_stub_is_direct(int vec);
 void xms_init(void);
 extern int xms_hidden;                         /* noxms: no XMS driver */
 void xms_call(struct regs *r);
+void xms_exec_a20_off(void);                  /* A20 off for a program DOS just loaded, as FreeDOS's EXEC */
 
 /* ---- mouse.c: PS/2 and USB mice, INT 33h ---- */
 void mouse_ps2_init(void);
