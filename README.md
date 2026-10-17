@@ -425,7 +425,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 ## Network: packet driver and IPX
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
-Realtek RTL8111/8168, RTL8125, RTL810x and RTL8139, and USB Ethernet adapters
+Intel 82566-82579 and I217-I219 on the chipset, Realtek RTL8111/8168,
+RTL8125, RTL810x and RTL8139, and USB Ethernet adapters
 that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
 them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
 
