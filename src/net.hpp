@@ -9,7 +9,7 @@
 namespace net {
 
 // card kinds, as INT 2Fh AX=564Eh BL=0 (CH) and BL=6 report them
-enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB };
+enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB, KIND_IGC };
 const int QLEN = 64, FRAME_MAX = 1536, MAXCARDS = 8;
 
 struct Stats { uint32_t rx, tx, rx_bytes, tx_bytes, rx_err, tx_err, dropped; };
@@ -41,7 +41,7 @@ struct Card {
         struct {                                // e1000: the ICH/PCH family (82566-82579, I217-I219): NVM in the
             bool pch;                           // chipset's flash, a PHY on its own chip, the ME sharing the MAC
         } e;
-        struct { uint8_t type, port, phy_addr; } g;   // igb
+        struct { uint8_t type, port, phy_addr; } g;   // igb, igc
         struct { uint32_t rx_off; } r39;        // RTL8139
         struct {                                // r8169
             uint16_t xid;
@@ -76,7 +76,7 @@ struct NicDriver {
     bool (*send)(Card&, const uint8_t* f, unsigned len);
     void (*debug)(Card&, const char* why);      // debug=1: what it says while there's no link (0: nothing)
 };
-extern const NicDriver nic_e1000, nic_igb, nic_rtl8139, nic_r8169, nic_tg3, nic_usb;
+extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_usb;
 
 inline uint32_t r32(Card& c, int r) { return *(volatile uint32_t*)(c.mm + r); }
 inline uint16_t r16(Card& c, int r) { return *(volatile uint16_t*)(c.mm + r); }
