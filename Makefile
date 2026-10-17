@@ -361,7 +361,7 @@ QUSBHOST := $(if $(USBHOST),-device qemu-xhci$(comma)id=hostxhci $(foreach d,$(U
 # NET=lan: the network card on a LAN shared by every QEMU started with
 # NET=lan on this PC (UDP multicast), each with its own MAC: two of them play
 # IPX games (VMPKT, VMIPX). Default: QEMU's user-mode network. NIC=e1000
-# (default), e1000e, rtl8139, or usb (a USB Ethernet adapter, CDC-ECM, on
+# (default), e1000e, igb, rtl8139, or usb (a USB Ethernet adapter, CDC-ECM, on
 # an xHCI controller).
 NIC      ?= e1000
 QNETDEV_lan  := -netdev socket,id=vmnet,mcast=230.0.0.1:1234
