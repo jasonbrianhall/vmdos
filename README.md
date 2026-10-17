@@ -425,7 +425,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 ## Network: packet driver and IPX
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
-Intel 82566-82579 and I217-I219 on the chipset, Realtek RTL8111/8168,
+Intel 82566-82579 and I217-I219 on the chipset, Intel 82575/82576/82580,
+I350/I354 and I210/I211 (Linux's igb), Realtek RTL8111/8168,
 RTL8125/8126/8127, RTL810x, the PCI RTL8169/8110 (every chip Linux's r8169
 drives) and RTL8139, Broadcom NetXtreme/NetLink (every chip
 Linux's tg3 drives: BCM570x, 575x, 578x, 5906, 5717-5762), and USB Ethernet adapters
@@ -453,7 +454,7 @@ drivers, ODI/NDIS drivers for Windows 3.x. Use it or VMPKT, not both.
 
 IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
 PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
-`make run NET=lan` (any number of times, `NIC=rtl8139` for another card,
+`make run NET=lan` (any number of times, `NIC=rtl8139` or `NIC=igb` for another card,
 `NIC=usb` for a USB adapter) puts QEMU machines on one virtual LAN for trying
 it out.
 
