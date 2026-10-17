@@ -1,0 +1,93 @@
+// What net.cpp (the receive queue, the card in use, the INT 2Fh interface)
+// shares with the drivers, one per nic_*.cpp. A driver is a NicDriver: it
+// claims PCI IDs, starts its card, polls it (from the timer tick) and sends
+// for it; received frames go to enqueue().
+#pragma once
+#include "pci.hpp"
+#include "hw.hpp"
+
+namespace net {
+
+// card kinds, as INT 2Fh AX=564Eh BL=0 (CH) and BL=6 report them
+enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB };
+const int QLEN = 64, FRAME_MAX = 1536, MAXCARDS = 8;
+
+struct Stats { uint32_t rx, tx, rx_bytes, tx_bytes, rx_err, tx_err, dropped; };
+extern Stats st;
+extern int rx_mode;                             // packet driver numbering: 1 off .. 6 everything
+extern bool log_on;                             // netlog
+
+#define BARRIER() __asm__ volatile("" ::: "memory")
+inline void udelay(uint32_t us) { while (us--) inb(0x80); }   // ~1 us each (works with interrupts off)
+
+void enqueue(const uint8_t* f, unsigned len);   // a received frame (less its CRC)
+bool room();                                    // room for another? (else leave them in the card's ring)
+
+struct NicDriver;
+
+struct Card {
+    const NicDriver* drv;
+    int kind;
+    PciDevice pci;
+    uint16_t vendor, device;
+    bool running;
+    uint8_t mac[6];                             // its own
+    char name[20];
+    volatile uint8_t* mm;                       // MMIO (BAR)
+    uint16_t io;                                // I/O ports (RTL8139)
+    uint8_t *rxd, *txd, *rxb, *txb;             // descriptor rings, buffers
+    int rx_cur, tx_cur;
+    union {                                     // each driver's own
+        struct {                                // e1000: the ICH/PCH family (82566-82579, I217-I219): NVM in the
+            bool pch;                           // chipset's flash, a PHY on its own chip, the ME sharing the MAC
+        } e;
+        struct { uint8_t type, port, phy_addr; } g;   // igb
+        struct { uint32_t rx_off; } r39;        // RTL8139
+        struct {                                // r8169
+            uint16_t xid;
+            bool is8125, ocp_phy, gen_g;        // 8125 family; PHY over OCP (8168g+); 8168g..8117
+            bool evl_up;
+            uint8_t ver;                        // Linux's r8169 mac_version
+        } r;
+        struct {                                // tg3
+            volatile uint8_t* ape;              // the APE's registers (BAR 2)
+            uint32_t chiprev, tflags, misc_host, grc_mode, mac_mode, mi_mode, led, coalesce, clock_ctrl;
+            uint32_t dma_rwctrl, rx_mode_reg, ape_hb, hb_tick;
+            uint8_t pci_fn, phy_addr, ape_phy_lock, pcie_cap, pcix_cap;
+            uint16_t cls_lat, std_prod, ret_cons, tx_prod, tx_cons;
+            int std_size, ret_size, speed;
+            bool full;
+            uint8_t *stblk, *retd;              // status block, receive return ring
+        } t;
+        struct {                                // USB (CDC-ECM): its address can't be changed, so while
+            bool spoof;                         // DOS's differs the adapter takes everything and vmdos filters
+        } u;
+    };
+};
+
+struct NicDriver {
+    int kind;
+    bool (*match)(uint32_t id, uint32_t sub);   // PCI vendor/device, subsystem (0: not a PCI card)
+    bool (*init)(Card&);
+    bool (*link)(Card&);
+    void (*set_mode)(Card&, int m);             // 1: receiving nothing
+    void (*set_mac)(Card&, const uint8_t* a);
+    void (*poll)(Card&);                        // 0: frames come by themselves (USB)
+    bool (*send)(Card&, const uint8_t* f, unsigned len);
+    void (*debug)(Card&, const char* why);      // debug=1: what it says while there's no link (0: nothing)
+};
+extern const NicDriver nic_e1000, nic_igb, nic_rtl8139, nic_r8169, nic_tg3, nic_usb;
+
+inline uint32_t r32(Card& c, int r) { return *(volatile uint32_t*)(c.mm + r); }
+inline uint16_t r16(Card& c, int r) { return *(volatile uint16_t*)(c.mm + r); }
+inline uint8_t r8(Card& c, int r) { return c.mm[r]; }
+inline void w32(Card& c, int r, uint32_t v) { *(volatile uint32_t*)(c.mm + r) = v; }
+inline void w16(Card& c, int r, uint16_t v) { *(volatile uint16_t*)(c.mm + r) = v; }
+inline void w8(Card& c, int r, uint8_t v) { c.mm[r] = v; }
+
+int pci_d0(const PciDevice& d);                 // PCI power state D0; returns the state it was in
+int pci_cap(const PciDevice& d, int id);        // a capability's offset (0: none)
+volatile uint8_t* map_bar(const PciDevice& d, uint32_t len);          // the first memory BAR, mapped
+volatile uint8_t* map_bar_n(const PciDevice& d, int b, uint32_t len); // BAR b
+
+} // namespace net

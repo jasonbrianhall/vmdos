@@ -543,6 +543,8 @@ untested.
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
+| `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
+| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), USB (CDC-ECM) |
 | `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
