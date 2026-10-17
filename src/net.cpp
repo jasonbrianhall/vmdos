@@ -16,7 +16,8 @@
 //
 // Cards: Intel 8254x/8257x/I21x "e1000" (QEMU's default, -nic model=e1000
 // or e1000e), Realtek RTL8139 (-nic model=rtl8139), Realtek RTL8111/8168,
-// RTL8125 (2.5G) and RTL810x (10/100) on real PCs, Broadcom Tigon3
+// RTL8125 (2.5G), RTL8126 (5G), RTL8127 (10G), RTL810x (10/100) and the PCI
+// RTL8169/8110 (every chip Linux's r8169 drives) on real PCs, Broadcom Tigon3
 // (BCM570x/575x/578x/5906/5717-5762 NetXtreme and NetLink, Linux's tg3). Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log).
 //
@@ -96,6 +97,7 @@ struct Card {
     // r8169
     uint16_t xid;
     bool is8125, ocp_phy, gen_g;                // 8125 family; PHY over OCP (8168g+); 8168g..8117
+    uint8_t ver;                                // Linux's r8169 mac_version
     bool evl_up;
     // e1000: the ICH/PCH family (82566-82579, I217-I219): NVM in the
     // chipset's flash, a PHY on its own chip, the ME sharing the MAC
@@ -511,6 +513,7 @@ struct Chip { uint16_t xid; const char* name; uint8_t ver; };
 // XID ((TxConfig >> 20) & 0xFCF) -> Linux's mac_version; 0x7C8-masked ones
 // are matched with that mask too.
 const Chip chips[] = {
+    { 0x6C9, "RTL8127A", 80 }, { 0x64A, "RTL8126A", 70 }, { 0x649, "RTL8126A", 70 },   // 10G, 5G
     { 0x689, "RTL8125D", 64 }, { 0x688, "RTL8125D", 64 }, { 0x68A, "RTL8125K", 64 }, { 0x68B, "RTL9151A", 64 },
     { 0x708, "RTL8125CP", 65 }, { 0x681, "RTL8125BP", 66 },
     { 0x641, "RTL8125B", 63 }, { 0x609, "RTL8125A", 61 },
@@ -534,12 +537,26 @@ const Chip masked[] = {                         // matched on XID & 0x7C8
     { 0x348, "RTL8103e", 9 }, { 0x248, "RTL8103e", 9 }, { 0x340, "RTL8101e", 10 },
 };
 
-bool match(uint32_t id)
+const Chip masked8169[] = {                     // the PCI RTL8169/8110: XID & 0xFC8
+    { 0x980, "RTL8169sc", 6 }, { 0x180, "RTL8169sc", 5 }, { 0x100, "RTL8169sb", 4 },
+    { 0x040, "RTL8110s", 3 }, { 0x008, "RTL8169s", 2 },
+};
+
+// Linux r8169's PCI IDs (sub: the subsystem ID, vendor in the low word)
+bool match(uint32_t id, uint32_t sub)
 {
-    if ((id & 0xFFFF) != 0x10EC) return false;
-    uint16_t d = id >> 16;
-    return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8125 || d == 0x3000 || d == 0x5000 ||
-           d == 0x8136;                           // RTL810x Fast Ethernet
+    uint16_t v = id & 0xFFFF, d = id >> 16;
+    if (v == 0x10EC)
+        return d == 0x8168 || d == 0x8161 || d == 0x8162 || d == 0x8167 || d == 0x8169 || d == 0x8129 ||
+               d == 0x8136 ||                   // RTL810x Fast Ethernet
+               d == 0x8125 || d == 0x8126 || d == 0x8127 || d == 0x3000 || d == 0x5000 ||
+               d == 0x2502 || d == 0x2600 || d == 0x0E10;   // Killer E2600/E3000 and others
+    return id == 0x816810FF ||                  // NCube
+           id == 0x43001186 || id == 0x43021186 ||   // D-Link DGE-528T and others
+           id == 0xC1071259 ||                  // Allied Telesis
+           id == 0x011616EC ||                  // USRobotics
+           (id == 0x10321737 && (sub >> 16) == 0x0024) ||   // Linksys EG1032 v3
+           (id == 0x81680001 && (sub >> 16) == 0x2410);
 }
 
 void unlock(Card& c) { w8(c, Cfg9346, 0xC0); }
@@ -552,8 +569,24 @@ void mac_ocp_modify(Card& c, uint32_t reg, uint16_t clear, uint16_t set)
     mac_ocp_write(c, reg, (uint16_t)((mac_ocp_read(c, reg) & ~clear) | set));
 }
 
+// The 8168dp (r8169 versions 28, 31) shares the MDIO with its management
+// firmware: taken (0xD0 bit 17 clear) around each access.
+void dp_mdio(Card& c, bool take)
+{
+    if (c.ver == 28 || c.ver == 31) w32(c, 0xD0, take ? r32(c, 0xD0) & ~0x00020000u : r32(c, 0xD0) | 0x00020000u);
+}
+
 int phy_read(Card& c, int reg)
 {
+    if (c.ver == 28 || c.ver == 31) {
+        if (reg == 3) return 0xC912;            // the chip reports a wrong PHY ID
+        dp_mdio(c, true);
+        w32(c, PHYAR, (uint32_t)(reg & 0x1F) << 16);
+        int v = -1;
+        for (int i = 0; i < 100; i++) { udelay(20); uint32_t x = r32(c, PHYAR); if (x & 0x80000000u) { udelay(20); v = x & 0xFFFF; break; } }
+        dp_mdio(c, false);
+        return v;
+    }
     if (c.ocp_phy) {
         w32(c, GPHY_OCP, (uint32_t)(0xA400 + reg * 2) << 15);
         for (int i = 0; i < 100; i++) { udelay(10); uint32_t v = r32(c, GPHY_OCP); if (v & 0x80000000u) return v & 0xFFFF; }
@@ -570,6 +603,14 @@ int phy_read(Card& c, int reg)
 
 void phy_write(Card& c, int reg, uint16_t v)
 {
+    if (c.ver == 28 || c.ver == 31) {
+        dp_mdio(c, true);
+        w32(c, PHYAR, 0x80000000u | (uint32_t)(reg & 0x1F) << 16 | v);
+        for (int i = 0; i < 100 && (r32(c, PHYAR) & 0x80000000u); i++) udelay(20);
+        udelay(20);
+        dp_mdio(c, false);
+        return;
+    }
     if (c.ocp_phy) {
         w32(c, GPHY_OCP, 0x80000000u | (uint32_t)(0xA400 + reg * 2) << 15 | v);
         for (int i = 0; i < 100 && (r32(c, GPHY_OCP) & 0x80000000u); i++) udelay(10);
@@ -615,6 +656,48 @@ void irq_off(Card& c)
 
 void dump_phy(Card& c, const char* why);
 
+// rtl8169s/sb/scd/sce_hw_phy_config (Linux r8169_phy_config.c)
+void phy_8169(Card& c)
+{
+    static const uint16_t s[][2] = {            // 8169s, 8110s (versions 2, 3)
+        { 0x1f, 0x0001 }, { 0x06, 0x006e }, { 0x08, 0x0708 }, { 0x15, 0x4000 }, { 0x18, 0x65c7 },
+        { 0x1f, 0x0001 }, { 0x03, 0x00a1 }, { 0x02, 0x0008 }, { 0x01, 0x0120 }, { 0x00, 0x1000 },
+        { 0x04, 0x0800 }, { 0x04, 0x0000 }, { 0x03, 0xff41 }, { 0x02, 0xdf60 }, { 0x01, 0x0140 },
+        { 0x00, 0x0077 }, { 0x04, 0x7800 }, { 0x04, 0x7000 }, { 0x03, 0x802f }, { 0x02, 0x4f02 },
+        { 0x01, 0x0409 }, { 0x00, 0xf0f9 }, { 0x04, 0x9800 }, { 0x04, 0x9000 }, { 0x03, 0xdf01 },
+        { 0x02, 0xdf20 }, { 0x01, 0xff95 }, { 0x00, 0xba00 }, { 0x04, 0xa800 }, { 0x04, 0xa000 },
+        { 0x03, 0xff41 }, { 0x02, 0xdf20 }, { 0x01, 0x0140 }, { 0x00, 0x00bb }, { 0x04, 0xb800 },
+        { 0x04, 0xb000 }, { 0x03, 0xdf41 }, { 0x02, 0xdc60 }, { 0x01, 0x6340 }, { 0x00, 0x007d },
+        { 0x04, 0xd800 }, { 0x04, 0xd000 }, { 0x03, 0xdf01 }, { 0x02, 0xdf20 }, { 0x01, 0x100a },
+        { 0x00, 0xa0ff }, { 0x04, 0xf800 }, { 0x04, 0xf000 }, { 0x1f, 0x0000 }, { 0x0b, 0x0000 },
+        { 0x00, 0x9200 },
+    };
+    static const uint16_t sc[][2] = {           // the start the 8169sc's two share (versions 5, 6)
+        { 0x1f, 0x0001 }, { 0x04, 0x0000 }, { 0x03, 0x00a1 }, { 0x02, 0x0008 }, { 0x01, 0x0120 },
+        { 0x00, 0x1000 }, { 0x04, 0x0800 }, { 0x04, 0x9000 }, { 0x03, 0x802f }, { 0x02, 0x4f02 },
+        { 0x01, 0x0409 }, { 0x00, 0xf099 }, { 0x04, 0x9800 }, { 0x04, 0xa000 }, { 0x03, 0xdf01 },
+        { 0x02, 0xdf20 }, { 0x01, 0xff95 }, { 0x00, 0xba00 }, { 0x04, 0xa800 }, { 0x04, 0xf000 },
+        { 0x03, 0xdf01 }, { 0x02, 0xdf20 }, { 0x01, 0x101a }, { 0x00, 0xa0ff }, { 0x04, 0xf800 },
+        { 0x04, 0x0000 }, { 0x1f, 0x0000 },
+    };
+    static const uint16_t scd[][2] = {          // version 5
+        { 0x1f, 0x0001 }, { 0x10, 0xf41b }, { 0x14, 0xfb54 }, { 0x18, 0xf5c7 }, { 0x1f, 0x0000 },
+        { 0x1f, 0x0001 }, { 0x17, 0x0cc0 }, { 0x1f, 0x0000 },
+    };
+    static const uint16_t sce[][2] = {          // version 6
+        { 0x1f, 0x0001 }, { 0x0b, 0x8480 }, { 0x1f, 0x0000 },
+        { 0x1f, 0x0001 }, { 0x18, 0x67c7 }, { 0x04, 0x2000 }, { 0x03, 0x002f }, { 0x02, 0x4360 },
+        { 0x01, 0x0109 }, { 0x00, 0x3022 }, { 0x04, 0x2800 }, { 0x1f, 0x0000 },
+        { 0x1f, 0x0001 }, { 0x17, 0x0cc0 }, { 0x1f, 0x0000 },
+    };
+    switch (c.ver) {
+    case 2: case 3: for (const auto& w : s) phy_write(c, w[0], w[1]); break;
+    case 4: phy_write(c, 0x1f, 2); phy_write(c, 0x01, 0x90d0); phy_write(c, 0x1f, 0); break;
+    case 5: for (const auto& w : sc) phy_write(c, w[0], w[1]); for (const auto& w : scd) phy_write(c, w[0], w[1]); break;
+    case 6: for (const auto& w : sc) phy_write(c, w[0], w[1]); for (const auto& w : sce) phy_write(c, w[0], w[1]); break;
+    }
+}
+
 void eri_write(Card& c, int addr, uint32_t mask, uint32_t v)   // ERI (ExGMAC) register write
 {
     w32(c, 0x70, v);                            // ERIDR
@@ -635,11 +718,17 @@ bool init(Card& c)
     const Chip* chip = 0;
     for (const Chip& k : chips) if (k.xid == c.xid) { chip = &k; break; }
     if (!chip) for (const Chip& k : masked) if (k.xid == (c.xid & 0x7C8)) { chip = &k; break; }
+    if (!chip) for (const Chip& k : masked8169) if (k.xid == (c.xid & 0xFC8)) { chip = &k; break; }
+    static const Chip ext9151 = { 0x7C8, "RTL9151AS", 64 };
+    if (!chip && (c.xid & 0x7CF) == 0x7C8 && !(r32(c, 0x60B0) & 0x7FFFFFFF)) chip = &ext9151;   // TX_CONFIG_V2
     if (!chip) {
         kprintf("net: Realtek %04x, chip XID %03x vmdos doesn't know\n", c.device, c.xid);
         return false;
     }
     snprintf(c.name, sizeof c.name, "%s", chip->name);
+    if (c.device == 0x8136 && chip->ver == 42) snprintf(c.name, sizeof c.name, "RTL8106eus");   // gigabit MAC, 100M PHY
+    if (c.device == 0x8136 && chip->ver == 46) snprintf(c.name, sizeof c.name, "RTL8107e");
+    c.ver = chip->ver;
     c.is8125 = chip->ver >= 61;
     c.ocp_phy = chip->ver >= 40;
     c.gen_g = chip->ver >= 40 && chip->ver <= 52;
@@ -649,7 +738,7 @@ bool init(Card& c)
     irq_off(c);
     // stop it (it may still run from the firmware's network boot), then reset
     if (chip->ver >= 40) { w32(c, MISC, r32(c, MISC) | (1u << 19)); udelay(2000); }   // RXDV gate
-    else { w8(c, ChipCmd, r8(c, ChipCmd) | 0x80); udelay(100); }              // StopReq
+    else if (chip->ver > 6) { w8(c, ChipCmd, r8(c, ChipCmd) | 0x80); udelay(100); }   // StopReq (not on the 8169)
     w8(c, ChipCmd, 0x10);                       // CmdReset
     for (int i = 0; i < 1000 && (r8(c, ChipCmd) & 0x10); i++) udelay(100);
     if (r8(c, ChipCmd) & 0x10) { kprintf("net: %s didn't come out of reset\n", c.name); return false; }
@@ -686,6 +775,16 @@ bool init(Card& c)
         for (int i = 0; i < 60 && (phy_read(c, 0) & 0x8000); i++) udelay(10000);
         dbg(1, "net: %s: PHY patch (%u writes) applied\n", c.name, (unsigned)(sizeof rtl8106e_1_fw / sizeof rtl8106e_1_fw[0]));
     }
+    if (chip->ver <= 6 && step('p')) phy_8169(c);   // the PCI 8169's PHY settings (r8169_phy_config.c)
+    if (chip->ver <= 6) {                       // rtl8169_init_phy
+        pci_write(c.pci, 0x0C, (pci_read(c.pci, 0x0C) & 0xFFFF0000u) | 0x4008);   // latency 64, cache line 32
+        w8(c, 0x82, 1);                         // undocumented, as Linux
+        if (chip->ver == 5 && pci_read(c.pci, 0x2C) == 0xE0001458) {   // Gigabyte
+            phy_write(c, 0x1F, 1); phy_write(c, 0x10, 0xF01B); phy_write(c, 0x1F, 0);
+        }
+    }
+    if (chip->ver == 80 && (mac_ocp_read(c, 0xD006) & 0xFF) == 7)
+        kprintf("net: %s: an SFP+ port, which vmdos doesn't set up (copper only)\n", c.name);
 
     // rings
     c.rxd = (uint8_t*)phys_alloc(NRX * sizeof(Desc));
@@ -711,14 +810,21 @@ bool init(Card& c)
     w16(c, CPlusCmd, r16(c, CPlusCmd) & ~0x0063u);   // no VLAN / checksum offload, no interrupt timer
     if (c.is8125) {
         w8(c, IntCfg0_8125, 0);
-        for (int i = 0xA00; i < 0xA80; i += 4) w32(c, i, 0);   // interrupt coalescing off
-        if (chip->ver == 63) w16(c, IntCfg1_8125, 0);
+        int end = (chip->ver == 63 || chip->ver == 70) ? 0xA80 : 0xB00;
+        for (int i = 0xA00; i < end; i += 4) w32(c, i, 0);   // interrupt coalescing off
+        if (chip->ver == 63 || chip->ver == 70 || chip->ver == 80) w16(c, IntCfg1_8125, 0);
+        if (chip->ver == 70 || chip->ver == 80) w8(c, 0xD8, r8(c, 0xD8) & ~0x02);
         w32(c, RSS_CTRL_8125, 0);
         w16(c, Q_NUM_CTRL_8125, 0);
         mac_ocp_modify(c, 0xEB58, 0x0001, 0);   // the old descriptor format
     } else {
-        w8(c, MaxTxPacketSize, c.evl_up ? 0x27 : 0x3F);
+        w8(c, MaxTxPacketSize, c.evl_up ? 0x27 : 0x3F);   // on the 8169: EarlyTxThres, no early transmit
         w16(c, IntrMitigate, 0);
+        if (chip->ver <= 6) {                   // rtl_hw_start_8169
+            w16(c, CPlusCmd, r16(c, CPlusCmd) | 0x0008 | (chip->ver <= 3 ? 0x4000 : 0));   // PCIMulRW, EnAnaPLL
+            if (chip->ver >= 5)                 // rtl8169_set_magic_reg
+                w32(c, 0x7C, (chip->ver == 5 ? 0x000FFF00u : 0x00FFFF00u) | ((r8(c, 0x53) & 1) ? 0xFF : 0));
+        }
         if (fe) {
             w32(c, MISC, r32(c, MISC) | 0x002800);   // FuncEvent: leave ASPM while Rx/Tx are busy
             w8(c, 0xD3, r8(c, 0xD3) | 0x0C);         // MCU: EN_NDP, EN_OOB_RESET
@@ -2020,7 +2126,7 @@ static void net_init_cards(void)
     PciDevice d;
     for (int i = 0; ncards < MAXCARDS && pci_find_class(0x02, 0x00, -1, &d, i); i++) {
         uint32_t id = pci_read(d, 0);
-        int k = e1k::match(id) ? KIND_E1000 : id == 0x813910EC ? KIND_RTL8139 : r8169::match(id) ? KIND_R8169 :
+        int k = e1k::match(id) ? KIND_E1000 : id == 0x813910EC ? KIND_RTL8139 : r8169::match(id, pci_read(d, 0x2C)) ? KIND_R8169 :
                 tg3::match(id) ? KIND_TG3 : KIND_NONE;
         kprintf("net: PCI %02x:%02x.%u %04x:%04x%s\n", d.bus, d.dev, d.fn, id & 0xFFFF, id >> 16,
                 k ? "" : " (not supported)");
