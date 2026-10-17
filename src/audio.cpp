@@ -45,6 +45,7 @@ static void flush_lines(const volatile void* p, uint32_t bytes) {
     if (!bytes || !clflush_ok()) return;
     uintptr_t a = (uintptr_t)p & ~(uintptr_t)(clflush_line - 1), end = (uintptr_t)p + bytes;
     for (; a < end; a += clflush_line) __asm__ volatile("clflush %0" :: "m"(*(volatile char*)a));
+    __sync_synchronize();                             // flushed before the card is told to look
 }
 
 // ================================================================ AC'97
@@ -53,8 +54,15 @@ static AcBDL ac_bdl[RING_BUFS] __attribute__((aligned(8)));
 static uint16_t ac_nam, ac_nabm;
 
 static bool ac97_init() {
+    // Class 04/01 is also what Intel's HD Audio controllers (Skylake on, with
+    // the DSP enabled) report: an AC'97 has I/O BARs, they have memory BARs.
     PciDevice d;
-    if (!pci_find_class(0x04, 0x01, -1, &d)) return false;
+    bool found = false;
+    for (int i = 0; i < 8 && !found; i++) {
+        if (!pci_find_class(0x04, 0x01, -1, &d, i)) return false;
+        found = (pci_read(d, 0x10) & 1) && (pci_read(d, 0x14) & 1);
+    }
+    if (!found) return false;
     ac_nam  = pci_read(d, 0x10) & 0xFFFC;
     ac_nabm = pci_read(d, 0x14) & 0xFFFC;
     if (!ac_nam || !ac_nabm) return false;
@@ -123,22 +131,100 @@ static bool wait_bits32(uint32_t off, uint32_t mask, uint32_t want, int us) {
     return false;
 }
 
-// Send one verb and wait for its response. Returns false on timeout.
-static bool hda_cmd(uint32_t verb, uint32_t* resp) {
-    uint16_t wp = (r16(0x48) + 1) & 0xFF;
-    corb[wp] = verb;
+// Codec commands go through the CORB/RIRB rings, or (Lunar Lake and later,
+// as Linux's AZX_DCAPS_PIO_COMMANDS, and anything whose rings don't answer:
+// Linux's fallback to "single_cmd") the Immediate Command registers.
+static bool hda_pio;              // Immediate Command interface in use
+static uint16_t hda_dead;         // codecs that answer neither way: no more verbs to them
+
+static void corb_start() {
+    w8(0x4C, 0); w8(0x5C, 0);                         // stop DMA engines
+    for (int i = 0; i < 1000 && ((r8(0x4C) & 2) || (r8(0x5C) & 2)); i++) io_delay(1);
+    w32(0x40, (uint32_t)(uintptr_t)corb); w32(0x44, 0);
+    w8(0x4E, 0x02);                                   // 256 entries (ULI needs it said)
+    w16(0x48, 0);
+    w16(0x4A, 0x8000);                                // reset read pointer
+    for (int i = 0; i < 1000 && !(r16(0x4A) & 0x8000); i++) io_delay(1);   // (NVIDIA: clears itself)
+    w16(0x4A, 0);
+    for (int i = 0; i < 1000 && (r16(0x4A) & 0x8000); i++) io_delay(1);
+    w32(0x50, (uint32_t)(uintptr_t)rirb); w32(0x54, 0);
+    w8(0x5E, 0x02);
+    w16(0x58, 0x8000);                                // reset write pointer
+    w16(0x5A, 1);                                     // response interrupt count, as Linux
+    w8(0x5D, 0x05);
+    rirb_rp = 0;
+    if (hda_pio) return;                              // rings stay idle
+    w8(0x4C, 0x02);                                   // CORB run
+    w8(0x5C, 0x02);                                   // RIRB run
+}
+
+static bool pio_cmd(uint32_t v, uint32_t* resp) {
+    int i;
+    for (i = 0; i < 1000 && (r16(0x68) & 1); i++) io_delay(1);     // ICB: busy
+    if (r16(0x68) & 1) return false;
+    w16(0x68, r16(0x68) | 2);                         // clear IRV
+    w32(0x60, v);
+    w16(0x68, r16(0x68) | 1);                         // send
+    for (i = 0; i < 2000; i++) {
+        if (r16(0x68) & 2) { if (resp) *resp = r32(0x64); return true; }
+        io_delay(1);
+    }
+    return false;
+}
+
+static bool corb_cmd(uint32_t v, uint32_t* resp) {
+    int cad = (int)(v >> 28);
+    uint16_t wp = r16(0x48);
+    if (wp == 0xFFFF) return false;                   // controller gone (D3)
+    // Skip anything still in the RIRB (a late answer to an earlier verb),
+    // so this verb doesn't take it for its own and every later one shift.
+    rirb_rp = r16(0x58) & 0xFF;
+    wp = (wp + 1) & 0xFF;
+    corb[wp] = v;
     flush_lines(&corb[wp], 4);
     w16(0x48, wp);
-    for (int i = 0; i < 20000; i++) {
+    for (int i = 0; i < 300000; i++) {                // ~300 ms (Linux waits up to 1 s)
         uint16_t rwp = r16(0x58) & 0xFF;
-        if (rwp != rirb_rp) {
+        while (rirb_rp != rwp) {
             rirb_rp = (rirb_rp + 1) & 0xFF;
-            if (resp) *resp = (uint32_t)rirb[rirb_rp];
+            // The controller may not snoop: read the entry from RAM, not the cache.
+            flush_lines(&rirb[rirb_rp], 8);
+            volatile uint32_t* e = (volatile uint32_t*)&rirb[rirb_rp];
+            uint32_t res = e[0], ex = e[1];
+            if (ex & 0x10) continue;                  // unsolicited response
+            if ((int)(ex & 0xF) != cad) continue;     // another codec's
+            if (resp) *resp = res;
             w8(0x5D, 0x05);                           // clear RIRB status
             return true;
         }
         io_delay(1);
     }
+    return false;
+}
+
+// Send one verb and wait for its response. Returns false on timeout.
+static bool hda_cmd(uint32_t v, uint32_t* resp) {
+    int cad = (int)(v >> 28);
+    if (hda_dead & (1 << cad)) return false;
+    if (hda_pio) {
+        if (pio_cmd(v, resp)) return true;
+        printf("HDA: codec %d doesn't answer (verb %08x)\n", cad, v);
+        hda_dead |= 1 << cad;
+        return false;
+    }
+    if (corb_cmd(v, resp)) return true;
+    // No answer through the rings: try the Immediate Command registers,
+    // which need the rings stopped.
+    w8(0x4C, 0); w8(0x5C, 0);
+    for (int i = 0; i < 1000 && ((r8(0x4C) & 2) || (r8(0x5C) & 2)); i++) io_delay(1);
+    if (pio_cmd(v, resp)) {
+        printf("HDA: CORB/RIRB timed out (verb %08x); using immediate commands\n", v);
+        hda_pio = true;
+        return true;
+    }
+    printf("HDA: codec %d doesn't answer (verb %08x)\n", cad, v);
+    hda_dead |= 1 << cad;
+    corb_start();                                     // the rings again, for the others
     return false;
 }
 static uint32_t verb(int cad, int nid, uint32_t v, uint32_t payload) {   // 12-bit verb, 8-bit payload
@@ -153,31 +239,93 @@ static uint32_t verb4(int cad, int nid, uint32_t v, uint32_t payload) {  // 4-bi
 }
 static uint32_t param(int cad, int nid, int p) { return verb(cad, nid, 0xF00, p); }
 
-struct Widget { uint8_t type; uint8_t nconn; uint8_t conn[16]; uint32_t caps; };
+struct Widget { bool valid; uint8_t type; uint8_t nconn; uint8_t conn[32]; uint32_t caps; };
 static Widget widgets[128];
+static uint8_t afg_of[16];                            // each codec's audio function group
 
+// Amp capabilities: a widget without "amp param override" (caps bit 3) has
+// its function group's (as Linux's query_amp_caps). Reading the widget's own
+// gives 0 there, and a "0 dB" gain of 0 is the amp's minimum: near silence.
+static uint32_t amp_caps(int cad, int nid, uint32_t wcaps, bool out) {
+    int from = (wcaps & (1 << 3)) ? nid : afg_of[cad & 15];
+    return param(cad, from, out ? 0x12 : 0x0D);
+}
 static void unmute_out(int cad, int nid) {
-    uint32_t caps = param(cad, nid, 0x12);            // output amp caps
+    uint32_t caps = amp_caps(cad, nid, widgets[nid].caps, true);
     uint32_t gain = caps & 0x7F;                      // offset = 0 dB
     verb4(cad, nid, 0x3, 0xB000 | gain);              // output, L+R
 }
 static void unmute_in(int cad, int nid, int index) {
-    uint32_t caps = param(cad, nid, 0x0D);            // input amp caps
+    uint32_t caps = amp_caps(cad, nid, widgets[nid].caps, false);
     uint32_t gain = caps & 0x7F;
     verb4(cad, nid, 0x3, 0x7000 | (index << 8) | gain);
 }
+static void mute_in(int cad, int nid, int index) {
+    verb4(cad, nid, 0x3, 0x7080 | (index << 8));      // input, L+R, mute
+}
+
+// Power a node to D0 and wait until it is there (Linux: hda_sync_power_state).
+static void power_d0(int cad, int nid) {
+    verb(cad, nid, 0x705, 0);
+    for (int i = 0; i < 500; i++) {                   // up to ~500 ms
+        uint32_t s = verb(cad, nid, 0xF05, 0);
+        if (s == 0 || (s & 0x100) || ((s >> 4) & 0xF) == 0) break;   // D0, error, or no answer
+        io_delay(1000);
+    }
+}
+
+// Connection list, short or long form, with ranges expanded (as Linux's
+// snd_hdac_get_connections); the select index counts the expanded entries.
+static void read_conns(int cad, int n, Widget& w) {
+    w.nconn = 0;
+    if (!(w.caps & (1 << 8))) return;
+    uint32_t cl = param(cad, n, 0x0E);
+    int len = cl & 0x7F;
+    bool lng = cl & 0x80;
+    int shift = lng ? 16 : 8, per = lng ? 2 : 4;
+    uint32_t mask = (1u << (shift - 1)) - 1;
+    uint32_t e = 0, prev = 0;
+    int nulls = 0;
+    for (int i = 0; i < len; i++) {
+        if (i % per == 0) e = verb(cad, n, 0xF02, i);
+        bool range = (e >> (shift - 1)) & 1;
+        uint32_t val = e & mask;
+        e >>= shift;
+        if (val == 0 && nulls++) return;              // bogus list
+        if (range && prev && prev < val) {
+            for (uint32_t k = prev + 1; k <= val && w.nconn < 32; k++) w.conn[w.nconn++] = (uint8_t)(k < 128 ? k : 0);
+        } else if (!range && w.nconn < 32) w.conn[w.nconn++] = (uint8_t)(val < 128 ? val : 0);
+        prev = val;
+    }
+}
 
 // Depth-first search from a pin to a DAC; on success configures the path.
+// Analog paths skip digital (S/PDIF) converters.
+static bool route_digital;
 static int route_to_dac(int cad, int nid, int depth) {
-    if (depth > 6 || nid >= 128) return -1;
+    if (depth > 6 || nid <= 0 || nid >= 128) return -1;
     Widget& w = widgets[nid];
-    if (w.type == 0) return nid;                      // audio output (DAC)
+    if (!w.valid) return -1;
+    if (w.type == 0) {                                // audio output (DAC)
+        if (!route_digital && (w.caps & (1 << 9))) return -1;
+        return nid;
+    }
+    if (w.type == 1 || (w.type == 4 && depth > 0)) return -1;   // an ADC or another pin: dead end
     for (int i = 0; i < w.nconn; i++) {
         int dac = route_to_dac(cad, w.conn[i], depth + 1);
         if (dac < 0) continue;
         if (w.type != 2 && w.nconn > 1)
             verb(cad, nid, 0x701, i);                 // connection select (mixers sum instead)
-        if (w.caps & (1 << 1)) unmute_in(cad, nid, i);
+        if (w.caps & (1 << 1)) {
+            unmute_in(cad, nid, i);
+            // A mixer's other inputs (the loopback mixer: mic, line in, beep)
+            // muted, as Linux's generic parser leaves them.
+            if (w.type == 2)
+                for (int k = 0; k < w.nconn; k++) {
+                    int c = w.conn[k];
+                    if (k != i && c > 0 && c < 128 && widgets[c].type != 0) mute_in(cad, nid, k);
+                }
+        }
         if (w.caps & (1 << 2)) unmute_out(cad, nid);
         verb(cad, nid, 0x705, 0);                     // power D0
         return dac;
@@ -243,14 +391,15 @@ static int16_t cap_ring[RING_FRAMES * 2] __attribute__((aligned(4096)));
 static HdaBDL cap_bdl[RING_BUFS] __attribute__((aligned(128)));
 static bool cap_on;               // input stream running
 static int cap_cad = -1, cap_adc, cap_pin, cap_score;
+static uint32_t cap_pin_caps;     // its widget caps (widgets[] holds the last codec scanned)
 static uint32_t cap_read;
 
 // Depth-first from an ADC to pin `target`; on success configures the path.
 static bool route_to_pin(int cad, int nid, int target, int depth) {
     if (nid == target) return true;
-    if (depth > 6 || nid >= 128) return false;
+    if (depth > 6 || nid <= 0 || nid >= 128) return false;
     Widget& w = widgets[nid];
-    if (w.type == 0 || w.type == 4) return false;     // a DAC or another pin: dead end
+    if (!w.valid || w.type == 0 || w.type == 4) return false;   // a DAC or another pin: dead end
     for (int i = 0; i < w.nconn; i++) {
         if (!route_to_pin(cad, w.conn[i], target, depth + 1)) continue;
         if (w.type != 2 && w.nconn > 1) verb(cad, nid, 0x701, i);   // connection select
@@ -283,8 +432,9 @@ static void consider_mic(int cad, int n, uint32_t pcaps, int start, int count) {
         int vref = (pcaps >> 8) & 0xFF;               // 80% (bit 2), else 50% (bit 0)
         verb(cad, n, 0x707, 0x20 | ((vref & 0x04) ? 0x04 : (vref & 0x01) ? 0x01 : 0));
         verb(cad, n, 0x705, 0);
+        cap_pin_caps = widgets[n].caps;
         if (widgets[n].caps & (1 << 1)) {             // mic boost, about +20 dB
-            uint32_t c = param(cad, n, 0x0D);
+            uint32_t c = amp_caps(cad, n, widgets[n].caps, false);
             int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
             int g = off + 80 / q;
             if (g > steps) g = steps;
@@ -305,11 +455,16 @@ static int list_npins;
 static bool list_analog;
 
 static bool is_digital_out(uint32_t pcaps) { return (pcaps & (1 << 4)) && (pcaps & ((1 << 7) | (1u << 24))); }
-static bool is_analog_out(int cad, int n, uint32_t pcaps) {
+// relax 0: a connected line out / speaker / headphone (by the BIOS's pin
+// configuration). 1: the same, even if marked "not connected". 2: any
+// analog output pin. The later ones only if a codec has none of the first:
+// some boards leave the configuration blank.
+static bool is_analog_out(int cad, int n, uint32_t pcaps, int relax = 0) {
     if (!(pcaps & (1 << 4)) || (pcaps & ((1 << 7) | (1u << 24)))) return false;
+    if (relax >= 2) return true;
     uint32_t cfg = verb(cad, n, 0xF1C, 0);
     int conn = cfg >> 30, dev = (cfg >> 20) & 0xF;
-    return conn != 1 && (dev == 0x0 || dev == 0x1 || dev == 0x2);   // line out, speaker, HP
+    return (relax || conn != 1) && (dev == 0x0 || dev == 0x1 || dev == 0x2);   // line out, speaker, HP
 }
 
 // Digital pin n: route it from a converter, switch the converter to digital
@@ -322,6 +477,7 @@ static bool hdmi_config_pin(int cad, int n, uint8_t stream_tag, uint16_t fmt) {
     int type = hdmi_eld(cad, n, name, sizeof name);
     bool dp = type == 1 || (type < 0 && !(pcaps & (1 << 7)));
     verb(cad, n, 0x705, 0);                               // pin to D0
+    route_digital = true;
     int cvt = route_to_dac(cad, n, 0);
     if (cvt < 0) { printf("HDA: codec %d pin %d: no converter reaches it\n", cad, n); return false; }
     verb4(cad, cvt, 0x2, fmt);                            // converter format
@@ -376,29 +532,24 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
     uint32_t sub = param(cad, 0, 0x04);
     int fg_start = (sub >> 16) & 0xFF, fg_count = sub & 0xFF;
     bool any = false;
-    for (int fg = fg_start; fg < fg_start + fg_count; fg++) {
+    for (int fg = fg_start; fg < fg_start + fg_count && fg < 128; fg++) {
         if ((param(cad, fg, 0x05) & 0xFF) != 0x01) continue;  // audio function group only
-        verb(cad, fg, 0x705, 0);                               // power up the group
-        io_delay(10000);
+        afg_of[cad & 15] = (uint8_t)fg;
+        power_d0(cad, fg);                                     // power up the group, and wait for it
         if (hda_mode == HDA_ANALOG) hda_gpio(cad, fg);
         uint32_t ws = param(cad, fg, 0x04);
         int start = (ws >> 16) & 0xFF, count = ws & 0xFF;
+        route_digital = hda_mode == HDA_DIGITAL;
 
-        // Read every widget's type and connection list.
+        // Read every widget's type and connection list (nothing left over
+        // from another codec: a stale entry would pass for a DAC).
+        memset(widgets, 0, sizeof widgets);
         for (int n = start; n < start + count && n < 128; n++) {
             Widget& w = widgets[n];
             w.caps = param(cad, n, 0x09);
             w.type = (w.caps >> 20) & 0xF;
-            uint32_t cl = param(cad, n, 0x0E);
-            int len = cl & 0x7F;
-            bool lng = cl & 0x80;
-            w.nconn = 0;
-            if (!(w.caps & (1 << 8)) || lng) continue;          // no list, or long form (rare)
-            for (int i = 0; i < len && w.nconn < 16; i += 4) {
-                uint32_t e = verb(cad, n, 0xF02, i);
-                for (int k = 0; k < 4 && i + k < len; k++)
-                    w.conn[w.nconn++] = (e >> (8 * k)) & 0xFF;
-            }
+            w.valid = true;
+            read_conns(cad, n, w);
         }
 
         // IDT / SigmaTel (Linux: patch_sigmatel): ports the firmware left
@@ -420,14 +571,17 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
             continue;
         }
 
+        // Every pin's capabilities; HDMI pins listed, microphones weighed,
+        // and EAPD (the external amplifier) on wherever there is one: on
+        // Conexant and some Realtek codecs it sits on a pin other than the
+        // one played through (Linux: cx_auto_turn_eapd, alc_auto_setup_eapd).
+        static uint32_t pin_caps[128];
         for (int n = start; n < start + count && n < 128; n++) {
-            Widget& w = widgets[n];
-            if (w.type != 4) continue;                               // pin complex
-            uint32_t pcaps = param(cad, n, 0x0C);
+            if (widgets[n].type != 4) continue;                      // pin complex
+            uint32_t pcaps = pin_caps[n] = param(cad, n, 0x0C);
             if (hda_mode == HDA_LIST) {                              // just note what's there
-                if (is_analog_out(cad, n, pcaps)) list_analog = true;
-                else if (is_digital_out(pcaps) && (verb(cad, n, 0xF1C, 0) >> 30) != 1 &&
-                         list_npins < (int)(sizeof list_pins / sizeof list_pins[0])) {
+                if (!is_analog_out(cad, n, pcaps) && is_digital_out(pcaps) && (verb(cad, n, 0xF1C, 0) >> 30) != 1 &&
+                    list_npins < (int)(sizeof list_pins / sizeof list_pins[0])) {
                     HdaPin& p = list_pins[list_npins++];
                     p.cad = (uint8_t)cad; p.nid = (uint8_t)n;
                     p.present = hdmi_present(cad, n, pcaps);
@@ -436,106 +590,237 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
                 }
                 continue;
             }
-            // HDA_ANALOG: route every connected analog output pin.
-            if (!is_analog_out(cad, n, pcaps)) { consider_mic(cad, n, pcaps, start, count); continue; }
-            uint32_t cfg = verb(cad, n, 0xF1C, 0);
-            int dev = (cfg >> 20) & 0xF;
-            int dac = route_to_dac(cad, n, 0);
-            if (dac < 0) continue;
-            verb(cad, n, 0x707, dev == 0x2 ? 0xC0 : 0x40);           // out enable (+HP amp)
-            if (pcaps & (1 << 16)) verb(cad, n, 0x70C, 0x02);        // EAPD on
-            verb4(cad, dac, 0x2, fmt);                               // converter format
-            verb(cad, dac, 0x706, stream_tag << 4);                  // stream tag, channel 0
-            unmute_out(cad, dac);
-            verb(cad, dac, 0x705, 0);
-            printf("HDA: codec %d pin %d -> DAC %d (%s)\n", cad, n, dac,
-                   dev == 0 ? "line out" : dev == 1 ? "speaker" : "headphone");
-            if (debug_level >= 1)
-                printf("HDA:   pin power %x ctl %02x EAPD %x amp %04x, DAC power %x amp %04x, conn sel %x, power map %x\n",
-                       verb(cad, n, 0xF05, 0), verb(cad, n, 0xF07, 0) & 0xFF, verb(cad, n, 0xF0C, 0) & 0xFF,
-                       verb4(cad, n, 0xB, 0xA000) & 0xFFFF, verb(cad, dac, 0xF05, 0), verb4(cad, dac, 0xB, 0xA000) & 0xFFFF,
-                       verb(cad, n, 0xF01, 0) & 0xFF, verb(cad, fg, 0xFEC, 0));
-            any = true;
+            if ((pcaps & (1 << 16)) && !is_digital_out(pcaps))
+                verb(cad, n, 0x70C, (verb(cad, n, 0xF0C, 0) & 0xFF) | 0x02);   // EAPD on
+            if (!is_analog_out(cad, n, pcaps)) consider_mic(cad, n, pcaps, start, count);
         }
+
+        // Route every analog output pin; if the BIOS's pin configuration
+        // gives none, take what the pins themselves say they can do.
+        bool here = false;
+        for (int relax = 0; relax < 3 && !here; relax++) {
+            for (int n = start; n < start + count && n < 128; n++) {
+                if (widgets[n].type != 4) continue;
+                uint32_t pcaps = pin_caps[n];
+                if (!is_analog_out(cad, n, pcaps, relax)) continue;
+                if (hda_mode == HDA_LIST) { here = true; break; }
+                uint32_t cfg = verb(cad, n, 0xF1C, 0);
+                int dev = (cfg >> 20) & 0xF;
+                int dac = route_to_dac(cad, n, 0);
+                if (dac < 0) continue;
+                // Headphone amp only where the pin has one (pin caps bit 3).
+                verb(cad, n, 0x707, dev == 0x2 && (pcaps & (1 << 3)) ? 0xC0 : 0x40);   // out enable
+                if (pcaps & (1 << 16)) verb(cad, n, 0x70C, (verb(cad, n, 0xF0C, 0) & 0xFF) | 0x02);   // EAPD on
+                verb4(cad, dac, 0x2, fmt);                               // converter format
+                verb(cad, dac, 0x706, stream_tag << 4);                  // stream tag, channel 0
+                unmute_out(cad, dac);
+                power_d0(cad, dac);
+                printf("HDA: codec %d pin %d -> DAC %d (%s%s)\n", cad, n, dac,
+                       dev == 0 ? "line out" : dev == 1 ? "speaker" : dev == 2 ? "headphone" : "output",
+                       relax ? ", by pin caps" : "");
+                if (debug_level >= 1)
+                    printf("HDA:   pin power %x ctl %02x EAPD %x amp %04x, DAC power %x amp %04x, conn sel %x, power map %x\n",
+                           verb(cad, n, 0xF05, 0), verb(cad, n, 0xF07, 0) & 0xFF, verb(cad, n, 0xF0C, 0) & 0xFF,
+                           verb4(cad, n, 0xB, 0xA000) & 0xFFFF, verb(cad, dac, 0xF05, 0), verb4(cad, dac, 0xB, 0xA000) & 0xFFFF,
+                           verb(cad, n, 0xF01, 0) & 0xFF, verb(cad, fg, 0xFEC, 0));
+                here = true;
+            }
+        }
+        if (here && hda_mode == HDA_LIST) list_analog = true;
+        any |= here;
     }
     return any;
+}
+
+// Intel controllers Linux drives as AZX_DRIVER_SKL (Skylake and later):
+// clock gating off while the link resets, and the link clock off 6 MHz.
+static const uint16_t kIntelSkl[] = {
+    0x02c8, 0x06c8, 0x3198, 0x34c8, 0x38c8, 0x3dc8, 0x43c8, 0x490d, 0x4b55, 0x4b58, 0x4d28, 0x4dc8,
+    0x4f90, 0x4f91, 0x4f92, 0x51c8, 0x51c9, 0x51ca, 0x51cb, 0x51cc, 0x51cd, 0x51ce, 0x51cf, 0x54c8,
+    0x5a98, 0x6e50, 0x7728, 0x7a50, 0x7ad0, 0x7e28, 0x7f50, 0x9d70, 0x9d71, 0x9dc8, 0xa0c8, 0xa170,
+    0xa171, 0xa2f0, 0xa348, 0xa3f0, 0xa828, 0xd328, 0xe2f7, 0xe328, 0xe428, 0xf0c8, 0xf1c8,
+};
+// ... of which these take codec commands only through the Immediate Command
+// registers (AZX_DCAPS_PIO_COMMANDS): Lunar Lake, Panther Lake, Wildcat Lake, Nova Lake.
+static const uint16_t kIntelPio[] = { 0xa828, 0xe428, 0xe328, 0x4d28, 0xd328, 0x6e50 };
+static bool id_in(uint16_t id, const uint16_t* list, int n) {
+    for (int i = 0; i < n; i++) if (list[i] == id) return true;
+    return false;
+}
+
+// Find a PCI capability; 0 if absent.
+static int pci_cap(const PciDevice& d, int id) {
+    if (!(pci_read(d, 0x04) & (1u << 20))) return 0;      // status: a capability list
+    int cap = pci_read(d, 0x34) & 0xFC;
+    for (int n = 0; cap >= 0x40 && n < 48; n++) {
+        uint32_t h = pci_read(d, cap);
+        if ((int)(h & 0xFF) == id) return cap;
+        cap = (h >> 8) & 0xFC;
+    }
+    return 0;
+}
+static void pci_byte_update(const PciDevice& d, int off, uint8_t mask, uint8_t val) {
+    uint32_t v = pci_read(d, off & ~3);
+    int sh = (off & 3) * 8;
+    v = (v & ~((uint32_t)mask << sh)) | ((uint32_t)(val & mask) << sh);
+    pci_write(d, off & ~3, v);
+}
+
+// Intel Skylake+: select a link clock other than 6 MHz through the
+// multi-link capability (Linux: intel_init_lctl).
+static void intel_init_lctl() {
+    uint32_t off = r16(0x14);                         // LLCH: first capability
+    uint32_t ml = 0;
+    for (int n = 0; off && off < 0x3F00 && n < 10; n++) {
+        uint32_t h = r32(off);
+        if (h == 0xFFFFFFFF) break;
+        if (((h >> 16) & 0xFFF) == 0x2) { ml = off; break; }
+        off = h & 0xFFFF;
+    }
+    if (!ml) return;
+    uint32_t lcap = ml + 0x40, lctl = ml + 0x44;
+    uint32_t v = r32(lctl);
+    if (v & 0xF) return;                              // SCF not 6 MHz: leave it
+    if (((v >> 16) & 1) != ((v >> 23) & 1)) return;   // SPA and CPA disagree: hands off
+    auto set_power = [&](uint32_t st) {
+        uint32_t x = (r32(lctl) & ~(1u << 16)) | (st << 16);
+        w32(lctl, x);
+        for (int i = 0; i < 50; i++) { if (((r32(lctl) >> 23) & 1) == st) return true; io_delay(10); }
+        return false;
+    };
+    bool down = set_power(0);
+    io_delay(100);
+    if (down) {
+        static const int pref[] = {2, 3, 1, 4, 5};    // 24, 48, 12, 96, 192 MHz
+        uint32_t c = r32(lcap), scf = 0;
+        for (int b : pref) if (c & (1u << b)) { scf = (uint32_t)b; break; }
+        w32(lctl, (r32(lctl) & ~0xFu) | scf);
+    }
+    set_power(1);
+    io_delay(100);
 }
 
 // Reset controller d and start its command rings. Returns its codecs (a bit
 // each), 0 if it won't come up.
 static uint16_t hda_open(const PciDevice& d) {
     uint32_t id = pci_read(d, 0x00);
-    uint16_t vendor = id & 0xFFFF;
+    uint16_t vendor = id & 0xFFFF, device = id >> 16;
+    hda_pio = false;
+    hda_dead = 0;
+
+    // Into D0 if the firmware left it asleep (its registers read as all
+    // ones in D3); some lose their BARs on the way, so put those back.
+    if (int pm = pci_cap(d, 0x01)) {
+        uint32_t csr = pci_read(d, pm + 4);
+        if (csr & 3) {
+            uint32_t b0 = pci_read(d, 0x10), b1 = pci_read(d, 0x14), cmd = pci_read(d, 0x04) & 0xFFFF;
+            pci_write(d, pm + 4, (csr & ~3u) | (1u << 15));   // D0 (and clear PME status)
+            io_delay(10000);
+            if (pci_read(d, 0x10) != b0) { pci_write(d, 0x10, b0); pci_write(d, 0x14, b1); }
+            pci_write(d, 0x04, (pci_read(d, 0x04) & 0xFFFF0000u) | cmd);
+            printf("HDA: %02x:%02x.%x: woken from D%u\n", d.bus, d.dev, d.fn, csr & 3);
+        }
+    }
+
     uint32_t bar = pci_read(d, 0x10);
+    if (bar & 1) { printf("HDA: %02x:%02x.%x: BAR 0 is I/O, not HD Audio\n", d.bus, d.dev, d.fn); return 0; }
     uint64_t base = bar & 0xFFFFFFF0;
     if ((bar & 0x6) == 0x4) base |= (uint64_t)pci_read(d, 0x14) << 32;
     if (base == 0) { printf("HDA: %02x:%02x.%x: BAR not set\n", d.bus, d.dev, d.fn); return 0; }
     hda = (volatile uint8_t*)map_mmio64(base, 0x4000);
     if (!hda) { printf("HDA: %02x:%02x.%x: can't map its registers\n", d.bus, d.dev, d.fn); return 0; }
     pci_write(d, 0x04, pci_read(d, 0x04) | 0x06);    // memory + bus master
-    // AMD/ATI controllers: have the controller snoop the CPU caches, as
-    // Linux does (misc control 2, offset 0x42), or it can read stale
-    // commands and sound from memory.
-    if (vendor == 0x1022 || vendor == 0x1002) {
-        uint32_t v = pci_read(d, 0x40);
-        pci_write(d, 0x40, (v & ~(0x07u << 16)) | (0x02u << 16));
+    if (r32(0x08) == 0xFFFFFFFF) { printf("HDA: %02x:%02x.%x: registers don't answer\n", d.bus, d.dev, d.fn); return 0; }
+    // Something else in class 04/01 or 04/80 (an Intel DSP in I2S mode):
+    // HD Audio is version 1.0.
+    if (r8(0x03) != 1 || r8(0x02) != 0) {
+        printf("HDA: %02x:%02x.%x: not an HD Audio controller (version %d.%d)\n", d.bus, d.dev, d.fn, r8(0x03), r8(0x02));
+        return 0;
     }
-    // Intel: traffic class 0 (TCSEL, offset 44h, bits 0-2), which Linux
-    // sets because otherwise some play static.
-    if (vendor == 0x8086) {
-        uint32_t v = pci_read(d, 0x44);
-        pci_write(d, 0x44, v & ~0x07u);
+
+    // Snooping, as Linux's azx_init_pci, or the controller can read stale
+    // commands and sound from memory (static, or silence).
+    bool ati_snoop = vendor == 0x1022 ||
+                     (vendor == 0x1002 && (device == 0x437b || device == 0x4383));   // ATI SB450/SB600, AMD
+    if (ati_snoop) pci_byte_update(d, 0x42, 0x07, 0x02);
+    if (vendor == 0x10DE) {                           // NVIDIA: coherent transactions
+        pci_byte_update(d, 0x4E, 0x0F, 0x0F);
+        pci_byte_update(d, 0x4D, 0x01, 0x01);
+        pci_byte_update(d, 0x4C, 0x01, 0x01);
     }
+    // Traffic class 0 (TCSEL, 44h bits 0-2; Linux on all but AMD/ATI/VIA-likes)
+    if (vendor == 0x8086 || vendor == 0x10DE) pci_byte_update(d, 0x44, 0x07, 0);
     // PCI Express: no "no snoop" requests (Device Control bit 11), so the
     // controller's reads see what is in the CPU's caches. (Intel's SCH and
     // PCH controllers, for which Linux clears bit 11 at 78h, are this.)
-    if (pci_read(d, 0x04) & (1u << 20)) {             // status: a capability list
-        int cap = pci_read(d, 0x34) & 0xFC;
-        for (int n = 0; cap >= 0x40 && n < 48; n++) {
-            uint32_t h = pci_read(d, cap);
-            if ((h & 0xFF) == 0x10) {                 // PCI Express
-                uint32_t dc = pci_read(d, cap + 8);   // device control (low 16 bits)
-                if (dc & (1u << 11)) pci_write(d, cap + 8, dc & ~(1u << 11) & 0xFFFFu);
-                break;
-            }
-            cap = (h >> 8) & 0xFC;
-        }
+    if (int ex = pci_cap(d, 0x10)) {
+        uint32_t dc = pci_read(d, ex + 8);            // device control (low 16 bits)
+        if (dc & (1u << 11)) pci_write(d, ex + 8, dc & ~(1u << 11) & 0xFFFFu);
     }
+    bool skl = vendor == 0x8086 && id_in(device, kIntelSkl, sizeof kIntelSkl / sizeof kIntelSkl[0]);
+    if (vendor == 0x8086 && id_in(device, kIntelPio, sizeof kIntelPio / sizeof kIntelPio[0])) hda_pio = true;
 
-    // Controller reset.
+    // Stop whatever the firmware left running (its boot chime, its rings).
+    uint16_t gcap = r16(0x00);
+    int iss = (gcap >> 8) & 0xF, oss = (gcap >> 12) & 0xF, bss = (gcap >> 3) & 0x1F;
+    for (int s = 0; s < iss + oss + bss && s < 30; s++) w8(0x80 + s * 0x20, 0);
+    w32(0x20, 0);                                     // no interrupts
+    w8(0x4C, 0); w8(0x5C, 0);
+    for (int i = 0; i < 1000 && ((r8(0x4C) & 2) || (r8(0x5C) & 2)); i++) io_delay(1);
+
+    // Controller reset (Linux: snd_hdac_bus_reset_link), clock gating off
+    // around it on Skylake+ (CGCTL.MISCBDCGE).
+    if (skl) pci_write(d, 0x48, pci_read(d, 0x48) & ~(1u << 6));
+    if (r32(0x08) & 1) w16(0x0E, 0x7FFF);             // clear STATESTS (sticky)
     w32(0x08, r32(0x08) & ~1u);
-    if (!wait_bits32(0x08, 1, 0, 100000)) return 0;
+    if (!wait_bits32(0x08, 1, 0, 100000)) { printf("HDA: %02x:%02x.%x: won't enter reset\n", d.bus, d.dev, d.fn); return 0; }
+    io_delay(1000);                                   // >= 100 us for the codecs' PLLs
     w32(0x08, r32(0x08) | 1);
-    if (!wait_bits32(0x08, 1, 1, 100000)) return 0;
+    if (!wait_bits32(0x08, 1, 1, 100000)) { printf("HDA: %02x:%02x.%x: won't leave reset\n", d.bus, d.dev, d.fn); return 0; }
     io_delay(2000);                                   // codecs report in within 521 us
-    uint16_t codecs = r16(0x0E);
-    if (!codecs) { printf("HDA: %02x:%02x.%x: no codecs\n", d.bus, d.dev, d.fn); return 0; }
+    uint16_t codecs = r16(0x0E) & 0x7FFF;
+    w16(0x0E, 0x7FFF);
 
     // CORB / RIRB, 256 entries each.
-    w8(0x4C, 0); w8(0x5C, 0);                         // stop DMA engines
-    io_delay(1000);
-    w32(0x40, (uint32_t)(uintptr_t)corb); w32(0x44, 0);
-    w8(0x4E, 0x02);
-    w16(0x48, 0);
-    w16(0x4A, 0x8000);                                // reset read pointer
-    for (int i = 0; i < 1000 && !(r16(0x4A) & 0x8000); i++) io_delay(1);
-    w16(0x4A, 0);
-    for (int i = 0; i < 1000 && (r16(0x4A) & 0x8000); i++) io_delay(1);
-    w32(0x50, (uint32_t)(uintptr_t)rirb); w32(0x54, 0);
-    w8(0x5E, 0x02);
-    w16(0x58, 0x8000);                                // reset write pointer
-    w16(0x5A, 0xFF);                                  // response interrupt count (unused)
-    rirb_rp = 0;
-    w8(0x4C, 0x02);                                   // CORB run
-    w8(0x5C, 0x02);                                   // RIRB run
+    corb_start();
+    if (skl) pci_write(d, 0x48, pci_read(d, 0x48) | (1u << 6));
+    if (skl) intel_init_lctl();
+    if (vendor == 0x8086 && device == 0x5a98)        // Apollo Lake: shorter DMA latency, less noise
+        w32(0x1040, r32(0x1040) & (0x3u << 20));
+    if (!codecs) { printf("HDA: %02x:%02x.%x: no codecs\n", d.bus, d.dev, d.fn); return 0; }
+
+    // A codec bit with nothing behind it (BIOSes get these wrong): drop it now
+    // rather than time out on every verb.
+    for (int cad = 0; cad < 15; cad++) {
+        if (!(codecs & (1 << cad))) continue;
+        uint32_t r = 0;
+        if (!hda_cmd((uint32_t)cad << 28 | 0xF0000, &r) || r == 0 || r == 0xFFFFFFFF) codecs &= ~(1 << cad);
+    }
+    if (!codecs) { printf("HDA: %02x:%02x.%x: no codec answers\n", d.bus, d.dev, d.fn); return 0; }
+    if (hda_pio) printf("HDA: %02x:%02x.%x: immediate command mode\n", d.bus, d.dev, d.fn);
 
     // First output stream: descriptors follow the input streams.
-    uint16_t gcap = r16(0x00);
-    int iss = (gcap >> 8) & 0xF, oss = (gcap >> 12) & 0xF;
     if (!oss) { printf("HDA: %02x:%02x.%x: no output streams\n", d.bus, d.dev, d.fn); return 0; }
     sd = 0x80 + iss * 0x20;
     hda_iss = iss;
     return codecs;
+}
+
+// The ith HD Audio controller: class 04/03, or an Intel one with its DSP
+// enabled (Skylake on), which reports 04/01 or 04/80 and is driven the same
+// way when the DSP is left alone (Linux: snd-hda-intel with dsp_driver=1).
+static bool hda_find(int i, PciDevice* out) {
+    int n = 0;
+    PciDevice d;
+    for (int k = 0; k < 16 && pci_find_class(0x04, 0x03, -1, &d, k); k++)
+        if (n++ == i) { *out = d; return true; }
+    static const uint8_t subs[] = {0x01, 0x80};
+    for (uint8_t sub : subs)
+        for (int k = 0; k < 16 && pci_find_class(0x04, sub, -1, &d, k); k++) {
+            if ((pci_read(d, 0x00) & 0xFFFF) != 0x8086 || (pci_read(d, 0x10) & 1)) continue;
+            if (n++ == i) { *out = d; return true; }
+        }
+    return false;
 }
 
 // What controller d can play through: list_analog, list_pins.
@@ -707,8 +992,8 @@ extern "C" int audio_capture_stats(uint32_t* peak, uint32_t* clips, uint32_t* re
 }
 // VMSB BOOST n: the mic pin's boost, in dB (rounded to the codec's steps).
 extern "C" int audio_capture_boost(int db) {
-    if (!cap_on || driver != AUDIO_HDA || !(widgets[cap_pin].caps & (1 << 1))) return -1;
-    uint32_t c = param(cap_cad, cap_pin, 0x0D);
+    if (!cap_on || driver != AUDIO_HDA || !(cap_pin_caps & (1 << 1))) return -1;
+    uint32_t c = amp_caps(cap_cad, cap_pin, cap_pin_caps, false);
     int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
     int g = off + db * 4 / q;
     if (g > steps) g = steps;
@@ -1068,7 +1353,7 @@ AudioDriver audio_init(const char* cmdline) {
     // Find every output. HD Audio: each controller's analog jacks, and every
     // HDMI/DisplayPort pin with a monitor the codec knows about.
     PciDevice d;
-    for (int i = 0; i < 8 && pci_find_class(0x04, 0x03, -1, &d, i); i++) {
+    for (int i = 0; i < 8 && hda_find(i, &d); i++) {
         char name[64];
         hda_list(d);
         if (list_analog) {
