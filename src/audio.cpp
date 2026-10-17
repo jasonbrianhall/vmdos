@@ -401,6 +401,19 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
             }
         }
 
+        // IDT / SigmaTel (Linux: patch_sigmatel): ports the firmware left
+        // powered down (power map, a bit each: 1 = down) and the amps,
+        // which on the 92HD8x/9x follow the widgets' power states only
+        // when told to; the volume knob to "direct", leaving the amps alone.
+        uint32_t cid = param(cad, 0, 0x00);
+        if (hda_mode == HDA_ANALOG && (cid >> 16) == 0x111D) {
+            verb(cad, fg, 0x7EC, 0);                               // every port powered
+            if ((cid & 0xFF00) == 0x7600) verb(cad, fg, 0x788, 1 << 2);   // power state controls amps
+        }
+        if (hda_mode == HDA_ANALOG && ((cid >> 16) == 0x111D || (cid >> 16) == 0x8384))
+            for (int n = start; n < start + count && n < 128; n++)
+                if (widgets[n].type == 6) verb(cad, n, 0x70F, 0xFF);   // volume knob: direct, full
+
         if (hda_mode == HDA_DIGITAL) {                        // one HDMI / DisplayPort pin
             if (cad == want_cad && want_pin >= start && want_pin < start + count && widgets[want_pin].type == 4)
                 return hdmi_config_pin(cad, want_pin, stream_tag, fmt);
@@ -437,6 +450,11 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
             verb(cad, dac, 0x705, 0);
             printf("HDA: codec %d pin %d -> DAC %d (%s)\n", cad, n, dac,
                    dev == 0 ? "line out" : dev == 1 ? "speaker" : "headphone");
+            if (debug_level >= 1)
+                printf("HDA:   pin power %x ctl %02x EAPD %x amp %04x, DAC power %x amp %04x, conn sel %x, power map %x\n",
+                       verb(cad, n, 0xF05, 0), verb(cad, n, 0xF07, 0) & 0xFF, verb(cad, n, 0xF0C, 0) & 0xFF,
+                       verb4(cad, n, 0xB, 0xA000) & 0xFFFF, verb(cad, dac, 0xF05, 0), verb4(cad, dac, 0xB, 0xA000) & 0xFFFF,
+                       verb(cad, n, 0xF01, 0) & 0xFF, verb(cad, fg, 0xFEC, 0));
             any = true;
         }
     }
