@@ -426,7 +426,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
 Intel 82566-82579 and I217-I219 on the chipset, Intel 82575/82576/82580,
-I350/I354 and I210/I211 (Linux's igb), Realtek RTL8111/8168,
+I350/I354 and I210/I211 (Linux's igb), I225/I226 (igc), Realtek RTL8111/8168,
 RTL8125/8126/8127, RTL810x, the PCI RTL8169/8110 (every chip Linux's r8169
 drives) and RTL8139, Broadcom NetXtreme/NetLink (every chip
 Linux's tg3 drives: BCM570x, 575x, 578x, 5906, 5717-5762), and USB Ethernet adapters
@@ -543,6 +543,8 @@ untested.
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
+| `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
+| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), USB (CDC-ECM) |
 | `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
