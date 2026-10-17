@@ -426,7 +426,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 
 vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
 Intel 82566-82579 and I217-I219 on the chipset, Realtek RTL8111/8168,
-RTL8125, RTL810x and RTL8139, and USB Ethernet adapters
+RTL8125, RTL810x and RTL8139, Broadcom NetXtreme/NetLink (every chip
+Linux's tg3 drives: BCM570x, 575x, 578x, 5906, 5717-5762), and USB Ethernet adapters
 that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
 them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
 
@@ -439,8 +440,10 @@ that one loses it for 3 s; `nic=2` on the kernel command line or `VMNIC 2`
 fixes the choice. A card changed to takes over the address DOS already has,
 so VMPKT and the programs on it carry on. VMIPX sends Ethernet II, and
 changes to raw 802.3, 802.2 or SNAP when that is all the other IPX machines
-use (NetWare ODI drivers default to 802.3); `VMIPX 802.3` fixes it. The RTL8168/8125 driver relies on
-the firmware having set up the PHY (`debug=1` logs what vmdos found).
+use (NetWare ODI drivers default to 802.3); `VMIPX 802.3` fixes it. The RTL8168/8125 and Broadcom drivers rely on
+the firmware having set up the PHY (`debug=1` logs what vmdos found); the
+Broadcom 5700-5704's fiber (TBI) ports aren't driven, and a 5701 A0 wants a
+firmware patch vmdos doesn't have.
 
 vmdos also shows DOS an ISA NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
 `ne2k=off` removes it) on the same card and address, for drivers that want
