@@ -176,15 +176,39 @@ u64 hv_host_pte(u32 lin) { return ((u64 *)pt_for(lin))[(lin >> 12) & 511]; }   /
 void hv_swap_pde0(u64 pde)
 {
     if (pde) {
-        if (!pde0_temp_on) { rlock_take(&video_lock); pde0_real = pae_pd[0][0]; }   /* the helper CPU's redraw reads 0-1 MiB */
+        if (!pde0_temp_on) pde0_real = pae_pd[0][0];
         pde0_temp_on = &pae_pd[0][0];
         pae_pd[0][0] = pde;
     } else if (pde0_temp_on) {
         pae_pd[0][0] = pde0_real;
         pde0_temp_on = 0;
-        rlock_drop(&video_lock);
     }
     __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
+}
+
+/* The helper CPU's (smp.c) top of the page tables, with PAE: the same as
+   the boot CPU's, except that linear 0-2 MiB is always the real table, never
+   the one hv_swap_pde0 puts in while VMHV runs a BIOS call (that can last:
+   the BIOS idles in it), so its redraw and sound see the guest's memory
+   meanwhile. The rest of the first GiB's directory is copied over before
+   each round (ap_tables_sync). Returns its CR3, 0 without PAE. */
+static u64 *ap_pdpt, *ap_pd0, ap_pde0;
+void ap_tables_sync(void)
+{
+    if (!ap_pd0) return;
+    for (int i = 1; i < 512; i++) ap_pd0[i] = pae_pd[0][i];
+    ap_pd0[0] = ap_pde0;
+}
+u32 ap_tables(void)
+{
+    if (!pae) return 0;
+    ap_pdpt = phys_alloc(4096);
+    ap_pd0 = phys_alloc(4096);
+    ap_pde0 = pde0_temp_on ? pde0_real : pae_pd[0][0];
+    ap_tables_sync();
+    ap_pdpt[0] = (u32)(uintptr_t)ap_pd0 | 1;
+    for (int i = 1; i < 4; i++) ap_pdpt[i] = pdpt[i];
+    return (u32)(uintptr_t)ap_pdpt;
 }
 
 /* The page table's dirty bit for lin; cleared if clear. */

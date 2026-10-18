@@ -29,6 +29,8 @@ extern u64 gdt[];
 void ap_entry32(void);
 void idt_load(void);
 void *map_firmware(u32 phys, u32 len);
+u32 ap_tables(void);
+void ap_tables_sync(void);
 
 volatile int smp_active;                       /* the helper does the screen and the sound */
 static volatile int ap_alive;
@@ -133,7 +135,8 @@ void ap_main(void)
         frame += t - last;
         last = t;
         if (!smp_active) continue;
-        __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");   /* the boot CPU's page table changes */
+        ap_tables_sync();                                                          /* the boot CPU's page table changes */
+        __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
         sound_tick();
         if (frame >= TICK_HZ / 60 && rlock_try(&video_lock)) {
             frame = 0;
@@ -283,6 +286,8 @@ void smp_start(u32 tramp)
     *(u32 *)(page + (ap_tramp_jump - ap_tramp_start)) = (u32)(uintptr_t)ap_entry32;
     __asm__ volatile("mov %%cr0,%0" : "=r"(ap_cr0));
     __asm__ volatile("mov %%cr3,%0" : "=r"(ap_cr3));
+    u32 own = ap_tables();                                           /* its own 0-2 MiB (VMHV): cpu.c */
+    if (own) ap_cr3 = own;
     __asm__ volatile("mov %%cr4,%0" : "=r"(ap_cr4));
     ap_esp = (u32)(uintptr_t)ap_stack + AP_STACK;
     __asm__ volatile("wbinvd" ::: "memory");
