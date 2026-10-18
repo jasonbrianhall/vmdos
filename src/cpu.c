@@ -467,7 +467,9 @@ void reboot(void)
     cli();
     for (int i = 0; i < 10000 && (inb(0x64) & 2); i++) ;
     outb(0x64, 0xFE);
-    outb(0xCF9, 0x0E);
+    outb(0xCF9, 0x02);
+    // short delay
+    outb(0xCF9, 0x06);
     struct __attribute__((packed)) { u16 lim; u32 base; } z = { 0, 0 };
     __asm__ volatile("lidt %0; int3" ::"m"(z));
     for (;;) __asm__ volatile("hlt");
