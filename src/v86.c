@@ -599,7 +599,23 @@ struct regs *isr_dispatch(struct regs *r)
                              { r->v86_es << 4, r->cs << 4, r->ss << 4, r->v86_ds << 4, r->v86_fs << 4, r->v86_gs << 4 }, 0 };
         if (!vga16_fault(&e, cr2)) dump(r, "page fault in the DOS guest");
         break; }
-    case 0: case 1: case 5: case 6: case 7:          /* real-mode style: guest's own vector */
+    case 6:                                           /* invalid opcode: the guest's INT 6, and the log says what it was */
+        if (from_v86) {
+            static int told;
+            if (told++ < 8) {
+                u32 a = r->cs * 16 + (r->eip & 0xFFFF);
+                kprintf("invalid opcode in DOS at %04x:%04x: %02x %02x %02x %02x %02x %02x %02x %02x; "
+                        "AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x SP=%04x DS=%04x ES=%04x; INT 6 at %04x:%04x\n",
+                        r->cs, r->eip & 0xFFFF, rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), rd8(a + 5),
+                        rd8(a + 6), rd8(a + 7), AX(r), BX(r), CX(r), DX(r), SI(r), DI(r), SP(r), r->v86_ds & 0xFFFF,
+                        r->v86_es & 0xFFFF, rd16(6 * 4 + 2), rd16(6 * 4));
+                kprintf("  code before it: %02x %02x %02x %02x %02x %02x %02x %02x\n", rd8(a - 8), rd8(a - 7),
+                        rd8(a - 6), rd8(a - 5), rd8(a - 4), rd8(a - 3), rd8(a - 2), rd8(a - 1));
+            }
+        }
+        v86_reflect(r, vec);
+        break;
+    case 0: case 1: case 5: case 7:                  /* real-mode style: guest's own vector */
         v86_reflect(r, vec);
         break;
     case 16:                                          /* x87 error: a PC reports it on IRQ 13 */
