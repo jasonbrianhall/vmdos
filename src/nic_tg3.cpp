@@ -222,8 +222,8 @@ int phy_rd(Card& c, int reg)
     ape_lock(c, c.t.ape_phy_lock);
     twf(c, MAC_MI_COM, (uint32_t)c.t.phy_addr << 21 | (uint32_t)reg << 16 | 0x08000000u | 0x20000000u);
     int v = -1;
-    for (int i = 0; i < 5000; i++) {
-        udelay(10);
+    for (int i = 0; i < 50000; i++) {          // short steps: a port 80h read can take 5 us, not 1
+        udelay(1);
         uint32_t f = tr(c, MAC_MI_COM);
         if (!(f & 0x20000000u)) { udelay(5); v = tr(c, MAC_MI_COM) & 0xFFFF; break; }
     }
@@ -234,7 +234,7 @@ void phy_wr(Card& c, int reg, uint16_t val)
 {
     ape_lock(c, c.t.ape_phy_lock);
     twf(c, MAC_MI_COM, (uint32_t)c.t.phy_addr << 21 | (uint32_t)reg << 16 | val | 0x04000000u | 0x20000000u);
-    for (int i = 0; i < 5000; i++) { udelay(10); if (!(tr(c, MAC_MI_COM) & 0x20000000u)) break; }
+    for (int i = 0; i < 50000; i++) { udelay(1); if (!(tr(c, MAC_MI_COM) & 0x20000000u)) break; }
     ape_unlock(c, c.t.ape_phy_lock);
 }
 

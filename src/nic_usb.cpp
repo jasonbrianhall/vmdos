@@ -5,6 +5,7 @@ using namespace net;
 
 extern "C" {
 int usb_net_present(void);
+int usb_net_link(void);
 const char* usb_net_name(void);
 void usb_net_mac(uint8_t* m);
 int usb_net_send(const uint8_t* f, unsigned len);
@@ -22,7 +23,7 @@ bool init(Card& c)
     c.u.spoof = false;
     return true;
 }
-bool link(Card&) { return usb_net_present(); }
+bool link(Card&) { return usb_net_link(); }
 void set_mode(Card& c, int m)
 {
     int bits = 0;                               // SET_ETHERNET_PACKET_FILTER

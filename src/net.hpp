@@ -38,6 +38,8 @@ struct Card {
     uint16_t io;                                // I/O ports (RTL8139)
     uint8_t *rxd, *txd, *rxb, *txb;             // descriptor rings, buffers
     int rx_cur, tx_cur;
+    uint32_t link_tick;                         // card_link: when the driver was last asked
+    bool link_up, link_known;                   // and what it said
     union {                                     // each driver's own
         struct {                                // e1000: the ICH/PCH family (82566-82579, I217-I219): NVM in the
             bool pch;                           // chipset's flash, a PHY on its own chip, the ME sharing the MAC

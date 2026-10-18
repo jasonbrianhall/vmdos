@@ -16,7 +16,7 @@ enum {
     RDBAL = 0x2800, RDBAH = 0x2804, RDLEN = 0x2808, RDH = 0x2810, RDT = 0x2818, RDTR = 0x2820,
     TDBAL = 0x3800, TDBAH = 0x3804, TDLEN = 0x3808, TDH = 0x3810, TDT = 0x3818, TIDV = 0x3820,
     TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, RXDCTL0 = 0x2828, TARC0 = 0x3840, TARC1 = 0x3940,
-    RFCTL = 0x5008, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404, PBA = 0x1000, MANC = 0x5820,
+    RFCTL = 0x5008, KMRNCTRLSTA = 0x34, FEXTNVM4 = 0x24, FFLT_DBG = 0x5F04, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404, PBA = 0x1000, MANC = 0x5820,
     // statistics (clear on read)
     CRCERRS = 0x4000, RXERRC = 0x400C, MPC = 0x4010, GPRC = 0x4074, BPRC = 0x4078, GPTC = 0x4080,
     RNBC = 0x40A0, TPR = 0x40D0, TPT = 0x40D4,
@@ -98,6 +98,54 @@ int hv_phy(Card& c, int r, bool write, uint16_t v)
     return mdic(c, addr, reg, write, v);
 }
 
+// Kumeran: the MAC-PHY interconnect's own registers (Linux: e1000e_read_kmrn_reg).
+uint16_t kmrn_read(Card& c, int off)
+{
+    w32(c, KMRNCTRLSTA, (uint32_t)off << 16 | (1u << 21));
+    r32(c, STATUS);
+    udelay(2);
+    return (uint16_t)r32(c, KMRNCTRLSTA);
+}
+void kmrn_write(Card& c, int off, uint16_t v)
+{
+    w32(c, KMRNCTRLSTA, (uint32_t)off << 16 | v);
+    r32(c, STATUS);
+    udelay(2);
+}
+// 82579+ extended (EMI) PHY registers, through address/data registers 16/17.
+void emi_write(Card& c, uint16_t addr, uint16_t v)
+{
+    if (hv_phy(c, 0x10, true, addr) >= 0) hv_phy(c, 0x11, true, v);
+}
+
+// 82579 after a PHY reset (Linux: e1000_lv_phy_workarounds_ich8lan,
+// e1000_lv_jumbo_workaround_ich8lan(false) from e1000_setup_rctl,
+// e1000_setup_copper_link_ich8lan): MDIO slow mode, the MSE thresholds, the
+// jumbo-frame path back at its defaults, and the Kumeran timeouts. Flag held.
+void lv_setup(Card& c)
+{
+    int m = hv_phy(c, PHY_REG(769, 16), false, 0);              // HV_KMRN_MODE_CTRL: MDIO slow
+    if (m >= 0) hv_phy(c, PHY_REG(769, 16), true, (uint16_t)(m | 0x0400));
+    emi_write(c, 0x084F, 0x0034);                               // MSE threshold
+    emi_write(c, 0x2411, 0x0005);                               // MSE count before dropping link
+
+    int rx = hv_phy(c, PHY_REG(769, 20), false, 0);             // receive path off meanwhile
+    if (rx >= 0) hv_phy(c, PHY_REG(769, 20), true, (uint16_t)(rx | 0x4000));
+    w32(c, FFLT_DBG, r32(c, FFLT_DBG) & ~(0xFu << 14));
+    kmrn_write(c, 0x01, kmrn_read(c, 0x01) & ~1u);              // Kumeran control
+    kmrn_write(c, 0x10, (uint16_t)((kmrn_read(c, 0x10) & ~(0xFu << 8)) | (0xBu << 8)));   // HD control
+    int d = hv_phy(c, PHY_REG(769, 23), false, 0);
+    if (d >= 0) hv_phy(c, PHY_REG(769, 23), true, (uint16_t)(d & ~(0x7F << 5)));
+    d = hv_phy(c, PHY_REG(769, 16), false, 0);
+    if (d >= 0) hv_phy(c, PHY_REG(769, 16), true, (uint16_t)(d | (1 << 13)));
+    d = hv_phy(c, PHY_REG(776, 20), false, 0);
+    if (d >= 0) hv_phy(c, PHY_REG(776, 20), true, (uint16_t)((d & ~(0x3FF << 2)) | (0x8 << 2)));
+    hv_phy(c, PHY_REG(776, 23), true, 0x7E00);
+    d = hv_phy(c, PHY_REG(770, 17), false, 0);                  // HV_PM_CTRL
+    if (d >= 0) hv_phy(c, PHY_REG(770, 17), true, (uint16_t)(d & ~(1 << 10)));
+    if (rx >= 0) hv_phy(c, PHY_REG(769, 20), true, (uint16_t)(rx & ~0x4000));
+}
+
 // The PHY (address 2 on a PCH, 1 on an ICH): powered up and negotiating.
 // Firmware that didn't use the LAN may have left it powered down.
 void pch_phy(Card& c)
@@ -118,21 +166,38 @@ void pch_phy(Card& c)
             hv_phy(c, PHY_REG(769, 17), true, (uint16_t)(g & ~0x10));
             dbg(1, "net: %s: PHY host wake-up was on, turned off\n", c.name);
         }
+        if (c.e.lv) lv_setup(c);
     }
+    // All ICH/PCH (Linux: e1000_setup_copper_link_ich8lan): the MAC waits
+    // longest between polls of the PHY over Kumeran.
+    kmrn_write(c, 0x04, 0xFFFF);                                // timeouts
+    kmrn_write(c, 0x09, (uint16_t)(kmrn_read(c, 0x09) | 0x3F)); // in-band parameters
     swflag_off(c);
 }
 
-// 82579 (Linux: e1000_k1_workaround_lv, on every link up): K1, the MAC-PHY
-// link's power-saving state, drops packets at 1000 and 100 Mb/s: off there.
-void k1_workaround(Card& c)
+bool pch_lpt(Card& c);
+// On each link up, before transmit is turned on (Linux:
+// e1000_check_for_copper_link_ich8lan, e1000_k1_workaround_lv):
+// 82579: K1, the MAC-PHY link's power-saving state, drops packets at 1000
+// and 100 Mb/s: off there; at 10 its beacon at 16 us. 82579 and later: the
+// inter-packet gap and the PHY's receive configuration for the speed.
+void link_up_pch(Card& c)
 {
     if (!swflag(c)) return;
     int st = hv_phy(c, 26, false, 0);           // HV_M_STATUS
-    if (st >= 0 && (st & 0x1040) == 0x1040 && (st & 0x0300)) {   // link up, autonegotiated, 1000 / 100
-        int pm = hv_phy(c, PHY_REG(770, 17), false, 0);          // HV_PM_CTRL
-        if (pm >= 0 && (pm & 0x4000)) hv_phy(c, PHY_REG(770, 17), true, (uint16_t)(pm & ~0x4000));
-        dbg(1, "net: %s: link at %s Mb/s, K1 %s\n", c.name, (st & 0x0200) ? "1000" : "100",
-            pm >= 0 && (pm & 0x4000) ? "was on, now off" : "off");
+    if (c.e.lv && st >= 0 && (st & 0x1040) == 0x1040) {          // link up, autonegotiated
+        if (st & 0x0300) {                                        // 1000 / 100
+            int pm = hv_phy(c, PHY_REG(770, 17), false, 0);      // HV_PM_CTRL
+            if (pm >= 0 && (pm & 0x4000)) hv_phy(c, PHY_REG(770, 17), true, (uint16_t)(pm & ~0x4000));
+            dbg(1, "net: %s: link at %s Mb/s, K1 %s\n", c.name, (st & 0x0200) ? "1000" : "100",
+                pm >= 0 && (pm & 0x4000) ? "was on, now off" : "off");
+        } else w32(c, FEXTNVM4, (r32(c, FEXTNVM4) & ~7u) | 3u);
+    }
+    if (c.e.lv || pch_lpt(c)) {
+        uint32_t s = r32(c, STATUS);
+        bool fd = s & 1, ten = ((s >> 6) & 3) == 0;
+        w32(c, TIPG, (r32(c, TIPG) & ~0x3FFu) | (!fd && ten ? 0xFF : 0x08));
+        emi_write(c, c.e.lv ? 0x3412 : 0xB20C, !fd && ten ? 0 : 1);   // RX_CONFIG
     }
     swflag_off(c);
 }
@@ -198,6 +263,7 @@ void pch_bits(Card& c)
     if (c.e.lv || pch_lpt(c)) w32(c, PBA, 26);  // Linux (e1000e_reset): 26 KB receive, the rest transmit
 }
 
+bool link(Card& c);
 bool init(Card& c)
 {
     const Pch* pch = pch_of((uint32_t)c.device << 16 | c.vendor);
@@ -275,7 +341,12 @@ bool init(Card& c)
     w32(c, TDH, 0); w32(c, TDT, 0);
     c.tx_cur = 0;
     w32(c, TIPG, 0x0060200A);
-    w32(c, TCTL, (1u << 1) | (1u << 3) | (0x0Fu << 4) | (0x40u << 12) | (1u << 24));   // EN, PSP, CT, COLD, RTLC
+    // PSP, CT, COLD, RTLC; enabled (EN) once there's a link and the link-up
+    // workarounds are done, as Linux: an 82579 told to send before then
+    // never fetches a descriptor.
+    w32(c, TCTL, (1u << 3) | (0x0Fu << 4) | (0x40u << 12) | (1u << 24));
+    c.e.was_up = false;
+    if (r32(c, STATUS) & 2) link(c);
     if (c.e.pch && !(hi & 0x80000000u)) kprintf("net: %s: no address from the NVM\n", c.name);
     return true;
 }
@@ -283,7 +354,11 @@ bool init(Card& c)
 bool link(Card& c)
 {
     bool up = r32(c, STATUS) & 2;
-    if (up && !c.e.was_up && c.e.lv) k1_workaround(c);
+    if (up && !c.e.was_up) {
+        if (c.e.pch) link_up_pch(c);
+        w32(c, TCTL, r32(c, TCTL) | (1u << 1));    // EN
+        dbg(1, "net: %s: link up, transmit on\n", c.name);
+    }
     c.e.was_up = up;
     return up;
 }
@@ -334,6 +409,7 @@ void poll(Card& c)
 
 bool send(Card& c, const uint8_t* f, unsigned len)
 {
+    if (!c.e.was_up && !link(c)) return false;  // no link: transmit isn't on
     volatile TxD& d = ((volatile TxD*)c.txd)[c.tx_cur];
     for (int i = 0; i < 2000 && !(d.status & 1); i++) udelay(5);
     if (!(d.status & 1)) {                      // the card never finished the frame this slot had
