@@ -20,12 +20,13 @@
 // RTL8125 (2.5G), RTL8126 (5G), RTL8127 (10G), RTL810x (10/100) and the PCI
 // RTL8169/8110 (every chip Linux's r8169 drives) on real PCs, Broadcom Tigon3
 // (BCM570x/575x/578x/5906/5717-5762 NetXtreme and NetLink, Linux's tg3), Atheros/Killer AR8161/8162/8171/8172
-// and E2200/E2400/E2500 (alx), Atheros AR8131/8132/8151/8152 (atl1c). Kernel options: net=off (none), nic=N,
+// and E2200/E2400/E2500 (alx), Atheros AR8131/8132/8151/8152 (atl1c), virtio-net (QEMU,
+// -nic model=virtio-net-pci). Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log).
 //
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
 //   0  query: AX = 1 card / 0 none, CL = link up, CH = card kind
-//      (1 e1000, 2 RTL8139, 3 RTL8168/8125, 4 USB, 5 Broadcom, 6 igb, 7 igc, 8 alx, 9 atl1c), DX = frames waiting,
+//      (1 e1000, 2 RTL8139, 3 RTL8168/8125, 4 USB, 5 Broadcom, 6 igb, 7 igc, 8 alx, 9 atl1c, 10 virtio), DX = frames waiting,
 //      ES:DI <- the MAC (6 bytes). From then on that MAC stays.
 //   1  CL = IRQ to raise while frames wait (FFh: none)
 //   2  send DS:SI, CX bytes (14..1514): AX = 0 sent, 1 failed
@@ -151,7 +152,7 @@ uint8_t dos_mac[6];
 
 // ---------------- the cards ----------------
 // Probed in this order: the first whose match() claims the PCI ID drives it.
-const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c };
+const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio };
 
 bool card_link(Card& c) { return c.running && c.drv->link(c); }
 void card_mode(Card& c, int m) { c.drv->set_mode(c, m); }   // 1: receiving nothing
