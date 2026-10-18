@@ -379,8 +379,9 @@ static int console_on;
    row is blended from the two source rows it falls between. Needs 8 bits
    a primary in the framebuffer's low three bytes (24 and 32 bpp).
 
-   scale=xbrz (off by default): graphics modes up to 640x480 go through
-   xBRZ (xbrz.c) first, enlarged k times (2-6, the least that reaches the
+   scale=xbrz (or Ctrl+Shift+F8, which steps sharp, smooth, xBRZ; off by
+   default): graphics modes up to 640x480 go through xBRZ (xbrz.c) first,
+   enlarged k times (2-6, the least that reaches the
    picture's size), and that is then scaled to fit as above. The source is
    kept in xs; the rows near a changed one are scaled again. Text modes
    are scaled smoothly. Costly (several ms a full frame): on the helper CPU
@@ -1592,11 +1593,16 @@ static void video_refresh_(void)
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
-        smooth_opt = !smooth_opt;
+        if (!smooth_opt) smooth_opt = 1, xbrz_opt = 0;             /* sharp -> smooth -> xBRZ -> sharp */
+        else if (!xbrz_opt) xbrz_opt = 1;
+        else smooth_opt = 0, xbrz_opt = 0;
         last_layout_mode = -1;
         layout();
-        video_osd(xbrz_k ? "xBRZ scaling on" : smooth ? "Smooth scaling on" : smooth_opt ? "Smooth scaling: not on this screen" : "Smooth scaling off");
-        kprintf("video: %s scaling %s\n", xbrz_k ? "xBRZ" : "smooth", smooth ? "on" : "off");
+        const char *m = !smooth_opt ? "Sharp scaling (whole pixels)" :
+                        !smooth ? (xbrz_opt ? "xBRZ scaling: not on this screen" : "Smooth scaling: not on this screen") :
+                        xbrz_k ? "xBRZ scaling" : xbrz_opt ? "xBRZ scaling (smooth in text modes)" : "Smooth scaling";
+        video_osd(m);
+        kprintf("video: %s\n", m);
     }
     layout();
     if (palette_dirty) {

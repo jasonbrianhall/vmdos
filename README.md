@@ -225,8 +225,8 @@ scaler, first (2x-6x, rounding off edges and diagonals without blurring),
 then fits that to the box as `scale=smooth` does; text modes are scaled
 smoothly. It costs several ms a full frame: meant for a PC with a second
 core (see below), where it runs alongside DOS. `aspect=fill` stretches
-the picture to the whole screen. Ctrl+Shift+F8 turns smoothing on and off
-while a program runs. Set them on the kernel command line
+the picture to the whole screen. Ctrl+Shift+F8 steps through sharp,
+smooth and xBRZ while a program runs, whatever the command line chose. Set them on the kernel command line
 (`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 
