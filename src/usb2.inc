@@ -733,11 +733,13 @@ static void hc2_unlink(Keyboard& k) {
     delay_ms(2);                                         // the controller may still be on it
 }
 
-static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval) {
+// ilen: bytes a transfer (0: a report, the packet size up to REPORT_MAX),
+// into k.reports.
+static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval, int ilen) {
     (void)ep_interval;
     k.dci = ep_addr & 0xF;
     k.mps = ep_mps;
-    k.ilen = ep_mps < 1 ? 8 : ep_mps > REPORT_MAX ? REPORT_MAX : ep_mps;
+    k.ilen = ilen ? ilen : ep_mps < 1 ? 8 : ep_mps > REPORT_MAX ? REPORT_MAX : ep_mps;
     k.itog = 0;
     hc2_unlink(k);
     if (H->type == HC_OHCI) return o_intr(k);
@@ -746,6 +748,7 @@ static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval) {
     if (H->type == HC_EHCI) {
         q[1] = e_chars(k, k.dci, ep_mps, false, false);
         q[2] = e_caps(k, true);
+        if (k.kind == NET && k.speed == 3) q[2] |= 0xFE;   // Ethernet at high speed: polled every microframe
         q[4] = 1; q[5] = 1;
         e_intr_arm(k);
     } else {
@@ -776,6 +779,47 @@ static void hc2_clear_halt(Keyboard& k, bool in) {
     (in ? k.tog_in : k.tog_out) = 0;
 }
 
+// ================================================================ USB Ethernet
+// usb.cpp's un on EHCI, UHCI or OHCI. Its bulk IN endpoint is polled from
+// the periodic schedule, as an interrupt endpoint would be (the device
+// can't tell the difference): one transfer waiting at a time, into the
+// first receive buffer, taken and re-armed by hc2_poll. EHCI and OHCI take
+// a whole frame in one transfer (it ends with the short packet); UHCI's
+// transfer is one packet, so the frame is put together in the second
+// buffer until a short one. Sending is a bulk OUT on the async schedule
+// (hc2_bulk), as for disks.
+static uint32_t un2_have;                              // UHCI: bytes of the frame so far
+
+static bool un2_start(Keyboard& k) {
+    k.reports = un.rxb;
+    un2_have = 0;
+    int len = H->type == HC_UHCI ? k.mps : UNET_BUF;
+    return hc2_intr(k, k.ep_in, k.mps, 1, len);
+}
+
+static void un2_rx(Keyboard& k, int got, bool err) {
+    if (err) {                                          // stalled or a bus error: clear it, toggle back to DATA0
+        if (++un.errors <= 10) printf("USB: Ethernet on %s: receive error\n", k.where);
+        hc2_clear_halt(k, true);
+        k.itog = 0;
+        un2_have = 0;
+        if (H->type == HC_EHCI) k.iqh[6] = 0;           // the queue head's overlay: not halted, DATA0
+        else if (H->type == HC_OHCI) k.iqh[2] &= ~3u;   // the ED: not halted, toggle carry DATA0
+    } else if (H->type == HC_UHCI) {
+        k.itog ^= 1;
+        volatile uint8_t* f = un.rxb + UNET_BUF;
+        if (got > 0 && un2_have + (uint32_t)got <= UNET_BUF) {
+            memcpy((void*)(f + un2_have), (const void*)k.reports, (size_t)got);
+            un2_have += (uint32_t)got;
+        } else if (got > 0) un2_have = UNET_BUF + 1;    // too long: dropped at its end
+        if (got < k.mps) {                              // a short packet ends the frame
+            if (un2_have >= 14 && un2_have <= UNET_BUF) net_usb_rx((const uint8_t*)f, un2_have);
+            un2_have = 0;
+        }
+    } else if (got >= 14) net_usb_rx((const uint8_t*)k.reports, (unsigned)got);
+    if (H->type == HC_EHCI) e_intr_arm(k); else if (H->type == HC_OHCI) o_intr_arm(k); else u_intr_arm(k);
+}
+
 // Reports and hub status that came in; root ports that changed.
 static void hc2_poll() {
     // Disconnects first: an unplugged device's transfers fail too, and it
@@ -802,6 +846,7 @@ static void hc2_poll() {
             err = st & U_ERRS;
             got = u_actlen(st);
         }
+        if (k.kind == NET) { un2_rx(k, got, err); continue; }
         if (err) {                                     // goes quiet; unplugging it forgets it
             if (k.kind != HUB) release_all(k);
             hc2_unlink(k);

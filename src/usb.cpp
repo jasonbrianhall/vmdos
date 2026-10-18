@@ -291,7 +291,7 @@ static struct {
 
 // EHCI / UHCI (usb2.inc).
 static bool hc2_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index, uint16_t len, volatile void* buf);
-static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval);
+static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval, int ilen = 0);
 static int hc2_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t* got);
 static void hc2_clear_halt(Keyboard& k, bool in);
 static bool hc2_address(Keyboard& k);
@@ -1404,7 +1404,9 @@ extern "C" void usb_audio_pump(void) {
 // their own (RTL8153...) often offer ECM as another configuration, and
 // QEMU's usb-net has RNDIS first: every configuration is looked through.
 // Received frames go to net.cpp (net_usb_rx) as their transfers complete;
-// UNET_RX transfers wait on the bulk IN endpoint all the time. xHCI only.
+// UNET_RX transfers wait on the bulk IN endpoint all the time (xHCI); on
+// EHCI, UHCI and OHCI the endpoint is polled from the periodic schedule
+// (usb2.inc's un2_*).
 extern "C" void net_usb_rx(const uint8_t* f, unsigned len);
 #define UNET_RX 16
 #define UNET_BUF 2048
@@ -1419,6 +1421,8 @@ static struct {
 } un;
 
 static bool un_is() { return un.dev >= 0 && kbds[un.dev].active && kbds[un.dev].kind == NET; }
+static bool un2_start(Keyboard& k);                    // EHCI / UHCI / OHCI (usb2.inc)
+static const char* hc_type_name(int t);
 
 static void un_queue(Keyboard& k, int b)
 {
@@ -1484,7 +1488,6 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
         if (cur_class == 0x0A && in_ep && out_ep && data < 0) { data = cur; alt = cur_alt; ep_in = in_ep; ep_out = out_ep; mps = cur_mps; }
         if (ctl < 0 || data < 0 || !mac_idx) continue;
 
-        if (H->type != HC_XHCI) { printf("USB: %s: Ethernet adapter %04x:%04x: only on xHCI so far\n", k.where, vid, pid); return false; }
         if (!control(k, 0x00, 9, (uint16_t)config, 0, 0, nullptr)) { printf("USB: %s: SET_CONFIGURATION %d failed\n", k.where, config); return false; }
         static volatile uint8_t str[64] __attribute__((aligned(64)));
         if (!control(k, 0x80, 6, (uint16_t)(0x0300 | mac_idx), 0x0409, sizeof str, str) || str[0] < 26) {
@@ -1510,15 +1513,21 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
         un.ctl_iface = ctl; un.data_iface = data;
         control(k, 0x21, 0x43, 0x0C, (uint16_t)ctl, 0, nullptr);   // SET_ETHERNET_PACKET_FILTER: directed, broadcast
         k.kind = NET;
+        if (H->type == HC_XHCI) {
+            for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
+            H->db[k.slot] = k.dci;
+        } else if (!un2_start(k)) {                     // EHCI / UHCI / OHCI: polled from the periodic schedule
+            printf("USB: %s: Ethernet adapter %04x:%04x: receive not set up\n", k.where, vid, pid);
+            k.kind = KBD;
+            return false;
+        }
         k.active = true;
         un.dev = ki;
         un.gen++;
         un.errors = 0;
         snprintf(un.name, sizeof un.name, "USB %04x:%04x", vid, pid);
-        for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
-        H->db[k.slot] = k.dci;
-        printf("USB: Ethernet adapter %04x:%04x on %s (CDC-ECM, configuration %d, %s speed), MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-               vid, pid, k.where, config, speed_name(k.speed), un.mac[0], un.mac[1], un.mac[2], un.mac[3], un.mac[4], un.mac[5]);
+        printf("USB: Ethernet adapter %04x:%04x on %s (CDC-ECM, configuration %d, %s, %s speed), MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+               vid, pid, k.where, config, hc_type_name(H->type), speed_name(k.speed), un.mac[0], un.mac[1], un.mac[2], un.mac[3], un.mac[4], un.mac[5]);
         return true;
     }
     return false;
