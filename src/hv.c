@@ -860,6 +860,7 @@ int hv_start(int key)
     int e = hv_setup();
     if (e) { kprintf("VMHV: %s\n", hv_err[e]); return e; }
     kprintf("VMHV: restarting DOS in a virtual machine (%s, 640 KB + %u KB)\n", vmx ? "Intel VT-x" : "AMD-V", (VM_TOP >> 10) - 1024);
+    smp_park();                                                   /* VMHV on the boot CPU alone */
     disk_flush();
     rlock_take(&sound_lock);                     /* the helper CPU's render */
     cdaudio_stop();

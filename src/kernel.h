@@ -312,6 +312,7 @@ extern volatile int smp_active;               /* the helper CPU redraws and rend
 int smp_on_ap(void);                          /* running on the helper */
 void smp_start(u32 tramp);                    /* tramp: a free physical page below 1 MiB */
 void smp_go(void);
+void smp_park(void);                          /* VMHV: everything back on the boot CPU, for good */
 void smp_ap_fault(struct regs *r) __attribute__((noreturn));
 
 /* ---- sound.c ---- */
