@@ -5,7 +5,9 @@
    and the Sound Blaster / OPL3 / MIDI render (sound.c) are the big parts,
    and while they run DOS stands still. With a second core, that core does
    both instead, in a loop that follows the timer ticks; the boot CPU keeps
-   DOS, the devices, USB, the network and the disks.
+   DOS, the devices, USB, the network and the disks. When VMHV starts, the
+   helper is parked for good (smp_park): VMHV runs on the boot CPU alone,
+   as without one (DOOM crashed in VMHV with the helper running).
 
    The helper is found in the ACPI MADT (the RSDP from vmdos.efi, rsdp= on
    the command line, or the BIOS areas) and started with INIT-SIPI-SIPI
@@ -34,6 +36,7 @@ void ap_tables_sync(void);
 
 volatile int smp_active;                       /* the helper does the screen and the sound */
 static volatile int ap_alive;
+static volatile int ap_busy, ap_park;         /* in a round of work; told to stop for good */
 static int has_mwait, has_pat;
 static u64 ap_pat;                            /* PAT: the boot CPU's (write-combining framebuffer) */
 
@@ -108,6 +111,7 @@ void smp_ap_fault(struct regs *r)
 {
     smp_active = 0;
     ap_alive = 0;
+    ap_busy = 0;
     force_drop(&video_lock);
     force_drop(&sound_lock);
     force_drop(&log_lock);
@@ -134,7 +138,9 @@ void ap_main(void)
         }
         frame += t - last;
         last = t;
-        if (!smp_active) continue;
+        __atomic_store_n(&ap_busy, 1, __ATOMIC_SEQ_CST);                         /* then look: smp_park's other half */
+        if (ap_park) { ap_busy = 0; for (;;) __asm__ volatile("cli; hlt"); }
+        if (!smp_active) { ap_busy = 0; continue; }
         ap_tables_sync();                                                          /* the boot CPU's page table changes */
         __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
         sound_tick();
@@ -144,6 +150,7 @@ void ap_main(void)
             rlock_drop(&video_lock);
             video_refresh_late();
         }
+        __atomic_store_n(&ap_busy, 0, __ATOMIC_RELEASE);
     }
 }
 
@@ -306,6 +313,17 @@ void smp_start(u32 tramp)
     if (!ap_alive) { kprintf("smp: CPU %u (APIC ID) didn't start: one CPU\n", (u32)id); return; }
     kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s\n", ncpu, (u32)id,
             x2apic ? " (x2APIC)" : "");
+}
+
+/* VMHV (hv.c) is starting: the screen and the sound back on the boot CPU,
+   once the helper has finished the round it's in, and the helper halted. */
+void smp_park(void)
+{
+    if (!ap_alive) return;
+    __atomic_store_n(&ap_park, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&smp_active, 0, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&ap_busy, __ATOMIC_SEQ_CST) && ap_alive) __asm__ volatile("pause");
+    kprintf("smp: VMHV runs on one CPU; the helper is halted\n");
 }
 
 /* From kmain, last thing before DOS: the helper takes over. */
