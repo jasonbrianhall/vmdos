@@ -154,10 +154,21 @@ uint8_t dos_mac[6];
 // Probed in this order: the first whose match() claims the PCI ID drives it.
 const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio };
 
-bool card_link(Card& c) { return c.running && c.drv->link(c); }
+// Asking the driver can mean several PHY reads over MDIO (Broadcom: about a
+// millisecond), and the packet driver asks with every poll: at most every 100 ms.
+bool card_link(Card& c)
+{
+    if (!c.running) return false;
+    if (!c.link_known || ticks - c.link_tick >= 100) {
+        c.link_up = c.drv->link(c);
+        c.link_tick = ticks;
+        c.link_known = true;
+    }
+    return c.link_up;
+}
 void card_mode(Card& c, int m) { c.drv->set_mode(c, m); }   // 1: receiving nothing
 void card_mac(Card& c, const uint8_t* a) { c.drv->set_mac(c, a); }
-bool card_start(Card& c) { c.kind = c.drv->kind; return c.running = c.drv->init(c); }
+bool card_start(Card& c) { c.kind = c.drv->kind; c.link_known = false; return c.running = c.drv->init(c); }
 
 void poll_card()
 {

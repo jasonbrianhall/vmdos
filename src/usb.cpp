@@ -1418,7 +1418,17 @@ static struct {
     volatile uint8_t *rxb, *txb;
     int buf_of[RING_TRBS];
     uint32_t gen, errors;
+    // The communications interface's notification endpoint (interrupt IN):
+    // NETWORK_CONNECTION says whether a cable is in (xHCI only; elsewhere,
+    // and until the adapter says, the link is taken as up).
+    int st_ep, st_mps, st_int, st_dci;
+    Ring st;
+    volatile Trb* st_mem;
+    volatile uint8_t* st_buf;
+    int link;                                       // -1 not heard yet, 0 down, 1 up
+    uint32_t link_since;                            // ticks when the notifications started
 } un;
+extern "C" volatile uint32_t ticks;
 
 static bool un_is() { return un.dev >= 0 && kbds[un.dev].active && kbds[un.dev].kind == NET; }
 static bool un2_start(Keyboard& k);                    // EHCI / UHCI / OHCI (usb2.inc)
@@ -1431,10 +1441,82 @@ static void un_queue(Keyboard& k, int b)
     ring_push(k.intr, (uint32_t)p, (uint32_t)(p >> 32), UNET_BUF, TRB_NORMAL << 10 | (1 << 5) | (1 << 2));   // IOC, ISP
 }
 
+static void un_st_queue()
+{
+    uint64_t p = phys(un.st_buf);
+    ring_push(un.st, (uint32_t)p, (uint32_t)(p >> 32), 64, TRB_NORMAL << 10 | (1 << 5) | (1 << 2));   // IOC, ISP
+}
+
+// A notification: NETWORK_CONNECTION (00h, wValue 1 = connected); others
+// (CONNECTION_SPEED_CHANGE) ignored. Then wait for the next.
+static void un_st_event(Keyboard& k, const Trb& e)
+{
+    int cc = e.d2 >> 24;
+    if (cc == 1 || cc == 13) {
+        uint32_t got = 64 - (e.d2 & 0xFFFFFF);
+        const volatile uint8_t* n = un.st_buf;
+        if (got >= 8 && n[0] == 0xA1 && n[1] == 0x00) {
+            int up = (n[2] | n[3] << 8) != 0;
+            if (up != un.link) printf("USB: Ethernet on %s: cable %s\n", k.where, up ? "connected" : "unplugged");
+            un.link = up;
+        }
+    } else if (cc == 6) {                               // stalled: reset the endpoint, move on
+        command(0, 0, 0, 14u << 10 | (uint32_t)un.st_dci << 16 | (uint32_t)k.slot << 24, nullptr);
+        uint64_t dq = phys(&un.st.trb[un.st.enq]) | un.st.cycle;
+        command((uint32_t)dq, (uint32_t)(dq >> 32), 0, 16u << 10 | (uint32_t)un.st_dci << 16 | (uint32_t)k.slot << 24, nullptr);
+        control(k, 0x02, 1, 0, (uint16_t)un.st_ep, 0, nullptr);
+    } else return;                                      // stopped / other: leave it
+    un_st_queue();
+    H->db[k.slot] = (uint32_t)un.st_dci;
+}
+
+// Add the notification endpoint to the device's configured endpoints (xHCI).
+static void un_st_start(Keyboard& k)
+{
+    un.link = -1;
+    un.link_since = ticks;
+    un.st_dci = 0;
+    if (H->type != HC_XHCI || !un.st_ep) return;
+    if (!un.st_mem) {
+        un.st_mem = (volatile Trb*)dma_alloc(RING_TRBS * sizeof(Trb), 64);
+        un.st_buf = (volatile uint8_t*)dma_alloc(64, 64);
+        if (!un.st_mem || !un.st_buf) { un.st_mem = nullptr; return; }
+    }
+    ring_attach(un.st, un.st_mem);
+    int dci = (un.st_ep & 0xF) * 2 + 1;
+    int interval;
+    if (k.speed == 1 || k.speed == 2) {                 // bInterval in ms -> 2^n x 125 us
+        interval = 3;
+        while (interval < 10 && (1 << (interval + 1)) <= un.st_int * 8) interval++;
+    } else {
+        interval = un.st_int ? un.st_int - 1 : 0;
+        if (interval > 15) interval = 15;
+    }
+    int last = dci;
+    if (k.dci > last) last = k.dci;
+    if (k.dci_out > last) last = k.dci_out;
+    memset((void*)k.in_ctx, 0, 33 * H->csz);
+    ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
+    fill_slot(k, last);
+    volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+    ep[0] = (uint32_t)interval << 16;
+    ep[1] = 3 << 1 | 7 << 3 | (uint32_t)un.st_mps << 16;   // CErr 3, interrupt IN
+    uint64_t ri = phys(un.st.trb) | 1;
+    ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+    ep[4] = 16 | (uint32_t)un.st_mps << 16;
+    uint64_t ic = phys(k.in_ctx);
+    int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+    if (cc != 1) { printf("USB: %s: Ethernet notifications not set up (%d)\n", k.where, cc); return; }
+    un.st_dci = dci;
+    un_st_queue();
+    H->db[k.slot] = (uint32_t)dci;
+}
+
 static bool un_dispatch(int slot, int ep, const Trb& e)
 {
     if (!un_is()) return false;
     Keyboard& k = kbds[un.dev];
+    if (k.hc == H && k.slot == slot && un.st_dci && ep == un.st_dci) { un_st_event(k, e); return true; }
     if (k.hc != H || k.slot != slot || k.dci != ep) return false;
     int cc = e.d2 >> 24;
     uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
@@ -1471,6 +1553,7 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
         int config = desc[5];
         int ctl = -1, data = -1, alt = 0, mac_idx = 0, ep_in = 0, ep_out = 0, mps = 512;
         int cur = -1, cur_alt = 0, cur_class = -1, cur_sub = -1, in_ep = 0, out_ep = 0, cur_mps = 512;
+        int st_ep = 0, st_mps = 8, st_int = 8;
         for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
             uint8_t t = desc[i + 1];
             if (t == 4) {
@@ -1480,6 +1563,10 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
                 if (cur_class == 2 && cur_sub == 6 && ctl < 0) ctl = cur;
             } else if (t == 0x24 && cur == ctl && cur_class == 2 && i + 3 < total && desc[i + 2] == 0x0F) {
                 mac_idx = desc[i + 3];                  // Ethernet networking functional descriptor
+            } else if (t == 5 && cur == ctl && cur_class == 2 && (desc[i + 3] & 3) == 3 && (desc[i + 2] & 0x80) && !st_ep) {
+                st_ep = desc[i + 2];                    // notifications
+                st_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+                st_int = desc[i + 6] ? desc[i + 6] : 1;
             } else if (t == 5 && cur_class == 0x0A && (desc[i + 3] & 3) == 2) {
                 if (desc[i + 2] & 0x80) in_ep = desc[i + 2]; else out_ep = desc[i + 2];
                 cur_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
@@ -1507,10 +1594,17 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
             un.txb = (volatile uint8_t*)dma_alloc(UNET_BUF, 4096);
             if (!un.rxb || !un.txb) { printf("USB: out of memory for the Ethernet adapter\n"); un.rxb = nullptr; return false; }
         }
-        if (alt) control(k, 0x01, 11, (uint16_t)alt, (uint16_t)data, 0, nullptr);   // SET_INTERFACE: the data alternate
+        // The data interface to alternate 0 (no endpoints: the function resets
+        // its data path, as the CDC spec has it), then to the one with them.
+        if (alt) {
+            control(k, 0x01, 11, 0, (uint16_t)data, 0, nullptr);
+            control(k, 0x01, 11, (uint16_t)alt, (uint16_t)data, 0, nullptr);
+        }
         k.iface = data; k.ep_in = ep_in; k.ep_out = ep_out; k.mps = mps;
         if (!configure_bulk(k)) return false;
         un.ctl_iface = ctl; un.data_iface = data;
+        un.st_ep = st_ep; un.st_mps = st_mps ? st_mps : 8; un.st_int = st_int;
+        un_st_start(k);
         control(k, 0x21, 0x43, 0x0C, (uint16_t)ctl, 0, nullptr);   // SET_ETHERNET_PACKET_FILTER: directed, broadcast
         k.kind = NET;
         if (H->type == HC_XHCI) {
@@ -1535,6 +1629,14 @@ static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int
 
 // net.cpp's side (from the kernel, interrupts off: never inside usb_poll).
 extern "C" int usb_net_present(void) { return un_is(); }
+// Cable in: what the adapter last said; up if it has no notifications, or
+// hasn't said anything 3 s after they started (some only report changes).
+extern "C" int usb_net_link(void)
+{
+    if (!un_is()) return 0;
+    if (un.link >= 0) return un.link;
+    return !un.st_dci || ticks - un.link_since > 3000;
+}
 extern "C" uint32_t usb_net_gen(void) { return un.gen; }
 extern "C" const char* usb_net_name(void) { return un.name; }
 extern "C" void usb_net_mac(uint8_t* m) { memcpy(m, un.mac, 6); }
