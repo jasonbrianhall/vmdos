@@ -219,9 +219,14 @@ break up dithered art and make letters uneven, but blending costs a lot of
 CPU on a slow machine. `scale=sharp` is the default, whole pixels;
 `scale=off` draws without resampling, at the size a VGA card puts out
 (320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
-whole number that fits, centered with black borders. `aspect=fill` stretches
-the picture to the whole screen. Ctrl+Shift+F8 turns smoothing on and off
-while a program runs. Set them on the kernel command line
+whole number that fits, centered with black borders. `scale=xbrz` (off by
+default) runs graphics modes up to 640x480 through xBRZ, the pixel-art
+scaler, first (2x-6x, rounding off edges and diagonals without blurring),
+then fits that to the box as `scale=smooth` does; text modes are scaled
+smoothly. It costs several ms a full frame: meant for a PC with a second
+core (see below), where it runs alongside DOS. `aspect=fill` stretches
+the picture to the whole screen. Ctrl+Shift+F8 steps through sharp,
+smooth and xBRZ while a program runs, whatever the command line chose. Set them on the kernel command line
 (`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 

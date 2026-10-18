@@ -377,13 +377,30 @@ static int console_on;
    and some two (dithering breaks up, letters come out uneven). Each source row that changed is scaled
    across into hs (g_w wide, kept for the next frame), then every screen
    row is blended from the two source rows it falls between. Needs 8 bits
-   a primary in the framebuffer's low three bytes (24 and 32 bpp). */
+   a primary in the framebuffer's low three bytes (24 and 32 bpp).
+
+   scale=xbrz (or Ctrl+Shift+F8, which steps sharp, smooth, xBRZ; off by
+   default): graphics modes up to 640x480 go through xBRZ (xbrz.c) first,
+   enlarged k times (2-6, the least that reaches the
+   picture's size), and that is then scaled to fit as above. The source is
+   kept in xs; the rows near a changed one are scaled again. Text modes
+   are scaled smoothly. Costly (several ms a full frame): on the helper CPU
+   (smp.c) it runs after video_lock is let go (video_refresh_late), so DOS
+   isn't held up at the VGA registers meanwhile; only the redraw touches
+   these buffers, and a redraw on the boot CPU waits for it. */
 static int smooth_opt = -1, smooth;
 volatile int smooth_toggle_req;
 static u32 *hs, hs_cap;
 static u16 hx0[4096], vy0[4096];
-static u8 hxf[4096], vyf[4096], sdirty[1024];
-static u32 s_w, s_h;                           /* the source size the tables are for */
+static u8 hxf[4096], vyf[4096], sdirty[4096];
+static u32 s_w, s_h;                           /* the source size the tables are for (xBRZ's output with it on) */
+static int xbrz_opt = -1;
+static u32 xbrz_k, x_w, x_h;                   /* xBRZ on: its factor and the source size */
+static u32 xs[640 * 480];
+static u8 xcor[640 * 480], xdirty[480];
+void xbrz_format(u8 rpos, u8 gpos, u8 bpos);
+void xbrz_corners(const u32 *src, u32 w, u32 h, u32 y, u8 *out);
+void xbrz_row(const u32 *src, const u8 *cor, u32 w, u32 h, u32 y, u32 k, u32 *dst);
 
 static u32 lerp(u32 a, u32 b, u32 f)            /* f/256 of the way from a to b */
 {
@@ -406,14 +423,26 @@ static void smooth_map(u32 n, u32 w, u16 *i0, u8 *fr)
 static void smooth_setup(u32 w, u32 h)
 {
     smooth = 0;
+    xbrz_k = 0;
     if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
-    if (h > sizeof sdirty || g_h > 4096 || w < 2 || h < 2) return;
+    if (xbrz_opt && !is_text(video_mode) && w <= 640 && h <= 480 && w >= 2 && h >= 2) {
+        u32 k = (g_w + w - 1) / w, kh = (g_h + h - 1) / h;
+        if (kh > k) k = kh;
+        if (k < 2) k = 2;
+        if (k > 6) k = 6;
+        while (k > 2 && (w * k > 4096 || h * k > 4096)) k--;
+        static int formatted;
+        if (!formatted) { xbrz_format(rpos, gpos, bpos); formatted = 1; }
+        xbrz_k = k; x_w = w; x_h = h;
+        w *= k; h *= k;
+    }
+    if (h > sizeof sdirty || g_h > 4096 || w > 4096 || w < 2 || h < 2) { xbrz_k = 0; return; }
     u32 need = g_w * h * 4;
     if (need > hs_cap) {
         if (hs) phys_release(hs, hs_cap);
         hs = phys_try_alloc(need);
         hs_cap = hs ? need : 0;
-        if (!hs) { kprintf("video: no memory for scale=smooth\n"); return; }
+        if (!hs) { kprintf("video: no memory for scale=smooth\n"); xbrz_k = 0; return; }
     }
     smooth_map(g_w, w, hx0, hxf);
     smooth_map(g_h, h, vy0, vyf);
@@ -422,7 +451,7 @@ static void smooth_setup(u32 w, u32 h)
 }
 
 /* Source row y (s_w pixels, framebuffer format) has changed. */
-static void smooth_row(u32 y, const u32 *src)
+static void bl_row(u32 y, const u32 *src)
 {
     u32 *d = hs + y * g_w;
     row_poll();
@@ -434,7 +463,7 @@ static void smooth_row(u32 y, const u32 *src)
 }
 
 /* The screen rows that depend on a changed source row. */
-static void smooth_out(void)
+static void bl_out(void)
 {
     static u32 line[4096];
     for (u32 Y = 0; Y < g_h; Y++) {
@@ -450,6 +479,49 @@ static void smooth_out(void)
     memset(sdirty, 0, s_h);
 }
 
+/* The redraw's source row y (framebuffer format) has changed. */
+static void smooth_row(u32 y, const u32 *src)
+{
+    if (!xbrz_k) { bl_row(y, src); return; }
+    row_poll();
+    memcpy(xs + y * x_w, src, x_w * 4);
+    xdirty[y] = 1;
+}
+
+static volatile int xbrz_late;                 /* the helper's xBRZ pass, still to do */
+static void smooth_finish(void);
+
+static int xdirty_near(u32 y, int above, int below)
+{
+    for (int d = -above; d <= below; d++)
+        if ((int)y + d >= 0 && (int)y + d < (int)x_h && xdirty[y + d]) return 1;
+    return 0;
+}
+
+static void smooth_out(void)
+{
+    if (xbrz_k && smp_on_ap()) { xbrz_late = 1; return; }
+    smooth_finish();
+}
+
+static void smooth_finish(void)
+{
+    if (xbrz_k) {
+        static u32 big[6 * 4096];
+        u32 bw = x_w * xbrz_k;
+        for (u32 y = 0; y < x_h; y++)                  /* corners: from rows y-1..y+2 */
+            if (xdirty_near(y, 1, 2)) { row_poll(); xbrz_corners(xs, x_w, x_h, y, xcor + y * x_w); }
+        for (u32 y = 0; y < x_h; y++) {                /* rows: corners of y-1 and y, pixels of y-1..y+1 */
+            if (!xdirty_near(y, 2, 2)) continue;
+            row_poll();
+            xbrz_row(xs, xcor, x_w, x_h, y, xbrz_k, big);
+            for (u32 r = 0; r < xbrz_k; r++) bl_row(y * xbrz_k + r, big + r * bw);
+        }
+        memset(xdirty, 0, x_h);
+    }
+    bl_out();
+}
+
 static u32 text_pixels_w(void) { return text_cols == 40 ? 640 : (u32)text_cols * 8; }
 
 static void layout(void)
@@ -457,7 +529,8 @@ static void layout(void)
     static int last_w, last_h;
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
-    if (smooth_opt < 0) smooth_opt = strstr(cmdline, "scale=smooth") && !no_scale;
+    if (xbrz_opt < 0) xbrz_opt = strstr(cmdline, "scale=xbrz") != 0;
+    if (smooth_opt < 0) smooth_opt = (strstr(cmdline, "scale=smooth") || xbrz_opt) && !no_scale;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
@@ -1404,9 +1477,9 @@ static void video_osd_(const char *msg)
     osd_until = ticks + 2000;
 }
 
+static void draw_osd_text(void);
 static void draw_osd(void)
 {
-    static u32 line[(OSD_MAX + 2) * 8 * 2];
     if (!osd_msg[0]) return;
     if ((int32_t)(ticks - osd_until) >= 0) {        /* expired: redraw what it covered */
         osd_msg[0] = 0;
@@ -1414,6 +1487,12 @@ static void draw_osd(void)
         last_layout_mode = -1;
         return;
     }
+    draw_osd_text();
+}
+
+static void draw_osd_text(void)
+{
+    static u32 line[(OSD_MAX + 2) * 8 * 2];
     int n = 0;
     while (osd_msg[n]) n++;
     int s = fb_w >= 1280 ? 2 : 1;
@@ -1487,10 +1566,24 @@ static void video_shot_api_(struct regs *r)
 
 static void video_refresh_(void);
 void video_refresh(void) { rlock_take(&video_lock); video_refresh_(); rlock_drop(&video_lock); }
+/* The helper CPU, after video_refresh with video_lock let go: the xBRZ
+   pass and the scaling of its output, then the note again on top. */
+void video_refresh_late(void)
+{
+    if (!xbrz_late) return;
+    smooth_finish();
+    if (osd_msg[0] && (int32_t)(ticks - osd_until) < 0) draw_osd_text();
+    xbrz_late = 0;
+}
+
 static void video_refresh_(void)
 {
     static int busy;
     if (busy) return;
+    if (xbrz_late && !smp_on_ap()) {               /* the helper is at it: wait (unless it's gone) */
+        while (xbrz_late && smp_active) __asm__ volatile("pause");
+        if (xbrz_late) { xbrz_late = 0; full_redraw = 1; }
+    }
     busy = 1;
     frame_no++;
     if ((frame_no & 15) == 0) blink_phase ^= 1;
@@ -1500,11 +1593,16 @@ static void video_refresh_(void)
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
-        smooth_opt = !smooth_opt;
+        if (!smooth_opt) smooth_opt = 1, xbrz_opt = 0;             /* sharp -> smooth -> xBRZ -> sharp */
+        else if (!xbrz_opt) xbrz_opt = 1;
+        else smooth_opt = 0, xbrz_opt = 0;
         last_layout_mode = -1;
         layout();
-        video_osd(smooth ? "Smooth scaling on" : smooth_opt ? "Smooth scaling: not on this screen" : "Smooth scaling off");
-        kprintf("video: smooth scaling %s\n", smooth ? "on" : "off");
+        const char *m = !smooth_opt ? "Sharp scaling (whole pixels)" :
+                        !smooth ? (xbrz_opt ? "xBRZ scaling: not on this screen" : "Smooth scaling: not on this screen") :
+                        xbrz_k ? "xBRZ scaling" : xbrz_opt ? "xBRZ scaling (smooth in text modes)" : "Smooth scaling";
+        video_osd(m);
+        kprintf("video: %s\n", m);
     }
     layout();
     if (palette_dirty) {
