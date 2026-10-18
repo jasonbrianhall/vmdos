@@ -202,6 +202,9 @@ static bool u_reset_port(int p) {
 static void hc2_forget_port(int p) {
     for (int i = 0; i < MAX_KBD; i++)
         if (kbds[i].active && kbds[i].hc == H && kbds[i].port == p && kbds[i].parent < 0) forget(i);
+    char w[16];
+    snprintf(w, sizeof w, "port %d", p);
+    seen_drop(H, w);
 }
 
 static void u_root_poll(bool first) {

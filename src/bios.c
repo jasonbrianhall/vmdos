@@ -540,6 +540,7 @@ int bios_service(struct regs *r, int id, int via_stub)
         if (AX(r) == 0x564C) log_api(r);                        /* DMESG: called here directly (dos/vmapi.inc) */
         else if (AX(r) == 0x5644) cd_api(r);                    /* VMCD.SYS / VMCD.COM: likewise */
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
+        else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
         else if (xms_hidden) ;                                  /* noxms: none here */
         else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }

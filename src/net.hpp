@@ -40,6 +40,9 @@ struct Card {
     union {                                     // each driver's own
         struct {                                // e1000: the ICH/PCH family (82566-82579, I217-I219): NVM in the
             bool pch;                           // chipset's flash, a PHY on its own chip, the ME sharing the MAC
+            bool lv, was_up;                    // 82579 (K1 workaround on each link up); link at the last look
+            uint32_t dbg_tick, dbg_n, sent;     // debug=1: the counters now and then
+            uint32_t gprc, gptc, mpc, rnbc, crc;
         } e;
         struct { uint8_t type, port, phy_addr; } g;   // igb, igc
         struct { uint32_t rx_off; } r39;        // RTL8139
