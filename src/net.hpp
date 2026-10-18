@@ -9,7 +9,7 @@
 namespace net {
 
 // card kinds, as INT 2Fh AX=564Eh BL=0 (CH) and BL=6 report them
-enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB, KIND_IGC, KIND_ALX, KIND_ATL1C };
+enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB, KIND_IGC, KIND_ALX, KIND_ATL1C, KIND_VIRTIO };
 const int QLEN = 64, FRAME_MAX = 1536, MAXCARDS = 8;
 
 struct Stats { uint32_t rx, tx, rx_bytes, tx_bytes, rx_err, tx_err, dropped; };
@@ -71,6 +71,17 @@ struct Card {
             uint8_t* rrd;                       // receive return ring
             uint32_t dma_rd, dma_wr;            // atl1c: DMA burst sizes (as the register wants them)
         } x;
+        struct {                                // virtio-net (QEMU): legacy (I/O ports) or modern (1.0, MMIO)
+            bool modern, status;                // VIRTIO_F_VERSION_1; link status in the config
+            volatile uint8_t *common, *notify, *dev;   // modern: the capabilities' registers
+            uint32_t notify_mult;
+            uint16_t qsz[2], qoff[2];           // queue sizes; modern: notify offsets
+            uint8_t* ring[2];                   // 0 receive, 1 transmit: descriptors, available, used
+            uint16_t rx_used, tx_avail, tx_used, hdr;   // where we are; the header before each frame
+            uint32_t tx_busy;                   // transmit slots the device hasn't given back (bit n)
+            uint8_t addr[6];                    // the address we answer to (we filter)
+            int mode;
+        } v;
         struct {                                // USB (CDC-ECM): its address can't be changed, so while
             bool spoof;                         // DOS's differs the adapter takes everything and vmdos filters
         } u;
@@ -88,7 +99,7 @@ struct NicDriver {
     bool (*send)(Card&, const uint8_t* f, unsigned len);
     void (*debug)(Card&, const char* why);      // debug=1: what it says while there's no link (0: nothing)
 };
-extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_alx, nic_atl1c, nic_usb;
+extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_alx, nic_atl1c, nic_virtio, nic_usb;
 
 inline uint32_t r32(Card& c, int r) { return *(volatile uint32_t*)(c.mm + r); }
 inline uint16_t r16(Card& c, int r) { return *(volatile uint16_t*)(c.mm + r); }
