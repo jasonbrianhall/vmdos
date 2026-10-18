@@ -1,6 +1,6 @@
 /* Drive C: (BIOS disk 80h). Two backends:
-   - a FAT partition on a real disk (SATA/AHCI, ahci.cpp, or a USB stick,
-     usb.cpp's mass storage): the default when one
+   - a FAT partition on a real disk (any of the disk drivers, blk_*.c(pp):
+     SATA/AHCI, IDE, virtio-blk, USB mass storage): the default when one
      holds KERNEL.SYS, so a vmdos ESP prepared by "make esp" (or by hand)
      is C: and changes are kept. DOS sees a virtual disk: sector 0 is a
      made-up MBR with that one partition (GPT disks too), the partition's
@@ -13,46 +13,49 @@
    vmdos.efi passes esp=LBA and espsig= (the partition it was started from),
    which is preferred over others. */
 #include "kernel.h"
+#include "blk.h"
 
-int ahci_init(void);
-u64 ahci_sectors(int d);
-const char *ahci_model(int d);
-int ahci_rw(int d, u64 lba, u32 count, void *buf, int write);
-int ide_init(void);
-u64 ide_sectors(int d);
-const char *ide_model(int d);
-int ide_rw(int d, u64 lba, u32 count, void *buf, int write);
-int usb_msd_count(void);
-u64 usb_msd_sectors(int i);
-const char *usb_msd_name(int i);
-u32 usb_msd_gen(int i);
-int usb_msd_rw(int i, u64 lba, u32 count, void *buf, int write);
 void usb_kick_ports(void);
 
-/* The real disks: AHCI (SATA) disks, IDE disks and USB mass storage,
-   512-byte sectors. */
+/* The disk drivers, in the order their disks are numbered. The hotplug
+   ones (USB) last: their disks are taken in as they turn up. */
+static const struct blk_driver *const drivers[] = { &blk_ahci, &blk_ide, &blk_virtio };
+static const struct blk_driver *const hot = &blk_usb;
+
+/* The real disks, 512-byte sectors: a driver and its disk number. */
 #define MAX_DEVS 16
-static struct { int usb, ide, idx; u64 sectors; const char *name; } dev[MAX_DEVS];
+static struct { const struct blk_driver *drv; int idx; u64 sectors; const char *name; } dev[MAX_DEVS];
 static int n_dev;
 
 u32 disk_sectors;                     /* size DOS sees (0: no C:) */
 int disk_on_a;                        /* no C:; the RAM disk is A: */
 static int on_dev, cdev;              /* C: is on dev[cdev] */
-static int usb_seen;                  /* USB disks taken into dev[] */
-static const char *dev_kind(int d) { return dev[d].usb ? "USB" : dev[d].ide ? "IDE" : "SATA"; }
+static int usb_seen;                  /* hotplug (USB) disks taken into dev[] */
+static const char *dev_kind(int d) { return dev[d].drv->kind; }
 static u32 pstart, psize;
 static u8 vmbr[512];
-static u8 *bounce;                    /* 64 KiB, identity-mapped, for AHCI DMA */
+static u8 *bounce;                    /* 64 KiB, identity-mapped, for drivers that DMA */
 #define BOUNCE_SECS 128
 
 static int dev_rw(int d, u32 lba, u32 n, void *buf, int write)
 {
-    if (dev[d].usb) return usb_msd_rw(dev[d].idx, lba, n, buf, write);
-    if (dev[d].ide) return ide_rw(dev[d].idx, lba, n, buf, write);    /* PIO: any buffer */
+    const struct blk_driver *k = dev[d].drv;
+    if (!k->dma) return k->rw(dev[d].idx, lba, n, buf, write);   /* PIO, or the driver copies: any buffer */
     if (write) memcpy(bounce, buf, n * 512);
-    if (ahci_rw(dev[d].idx, lba, n, bounce, write)) return -1;
+    if (k->rw(dev[d].idx, lba, n, bounce, write)) return -1;
     if (!write) memcpy(buf, bounce, n * 512);
     return 0;
+}
+
+/* Hotplug disks that turned up since the last look, into dev[]: returns the first one's index. */
+static int take_hot(void)
+{
+    int first = n_dev;
+    while (usb_seen < hot->count() && n_dev < MAX_DEVS) {
+        int i = usb_seen++, d = n_dev++;
+        dev[d].drv = hot; dev[d].idx = i; dev[d].sectors = hot->sectors(i); dev[d].name = hot->name(i);
+    }
+    return first;
 }
 
 /* Raw reads from dev[probe_disk] while probing. */
@@ -277,7 +280,7 @@ static int candidate(int d, u64 start, u64 size, const u8 *sig, int sig_len)
     if (fat_mount(&v, probe_rd, (u32)start)) return 0;
     cand_os = dos_kind(&v);
     if (!cand_os) return 0;
-    int q = dev[d].usb ? 3 : 2;
+    int q = dev[d].drv->hotplug ? 3 : 2;
     if (hint && hint == start) {
         q = 6;
         if (hint_sig_len && sig_len == hint_sig_len && !memcmp(sig, hint_sig, (size_t)sig_len)) q = 8;
@@ -444,22 +447,21 @@ void disk_init(void)
     int want_ram = strstr(cmdline, "c=ram") != 0;
     if (!want_ram) {
         bounce = phys_try_alloc(BOUNCE_SECS * 512);
-        int na = (bounce && !strstr(cmdline, "ahci=off")) ? ahci_init() : 0;
-        for (int i = 0; i < na && n_dev < MAX_DEVS; i++) {
-            dev[n_dev].usb = 0; dev[n_dev].idx = i; dev[n_dev].sectors = ahci_sectors(i); dev[n_dev].name = ahci_model(i);
-            n_dev++;
-        }
-        int ni = !strstr(cmdline, "ide=off") ? ide_init() : 0;
-        for (int i = 0; i < ni && n_dev < MAX_DEVS; i++) {
-            dev[n_dev].ide = 1; dev[n_dev].idx = i; dev[n_dev].sectors = ide_sectors(i); dev[n_dev].name = ide_model(i);
-            n_dev++;
+        for (unsigned k = 0; k < sizeof drivers / sizeof *drivers; k++) {
+            const struct blk_driver *b = drivers[k];
+            if ((b->off && strstr(cmdline, b->off)) || (b->dma && !bounce)) continue;
+            int n = b->start();
+            for (int i = 0; i < n && n_dev < MAX_DEVS; i++) {
+                dev[n_dev].drv = b; dev[n_dev].idx = i; dev[n_dev].sectors = b->sectors(i); dev[n_dev].name = b->name(i);
+                n_dev++;
+            }
         }
         /* USB sticks show up a little after the controller reset (USB 3 link
            training, slow sticks): keep polling for a while, longer when
            vmdos.efi says it came from a USB device (bootdev=usb), until the
            partition it started from (or, without a hint, any) turns up. */
         int boot_usb = strstr(cmdline, "bootdev=usb") != 0;
-        int wait_ms = boot_usb ? 10000 : usb_msd_count() || hint ? 2000 : 1000;
+        int wait_ms = boot_usb ? 10000 : hot->count() || hint ? 2000 : 1000;
         int bd = -1, bq = 0, waited = 0;
         u32 bs = 0, bz = 0;
         for (int d = 0; d < n_dev; d++) {
@@ -470,19 +472,18 @@ void disk_init(void)
             if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
         }
         for (;;) {
-            while (usb_seen < usb_msd_count() && n_dev < MAX_DEVS) {
-                int i = usb_seen++, d = n_dev++;
-                dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
+            for (int d = take_hot(); d < n_dev; d++) {
+                int i = dev[d].idx;
                 u32 s = 0, z = 0;
                 const char *os = 0;
                 int q = scan(d, &s, &z, &os);
-                kprintf("disk: USB disk %d (%s, %u MiB): %s%s\n", i, dev[d].name, (u32)(dev[d].sectors >> 11),
+                kprintf("disk: %s disk %d (%s, %u MiB): %s%s\n", dev_kind(d), i, dev[d].name, (u32)(dev[d].sectors >> 11),
                         q >= 8 ? "the boot partition, " : "", q ? os : "no FAT partition with DOS");
                 if (q) note(d, s, z, q, os);
                 if (q > bq) { bq = q; bd = d; bs = s; bz = z; }
             }
             int good = hint ? bq >= (hint_sig_len ? 8 : 6) : bq > 0;
-            if (good && !(boot_usb && bd >= 0 && !dev[bd].usb && waited < wait_ms)) break;
+            if (good && !(boot_usb && bd >= 0 && !dev[bd].drv->hotplug && waited < wait_ms)) break;
             if (waited >= wait_ms) break;
             if (waited == 0) kprintf("disk: waiting for USB disks (up to %d s)\n", wait_ms / 1000);
             usb_tick();
@@ -506,7 +507,7 @@ void disk_init(void)
         return;
     }
     if (!disk_image)
-        panic("No C: drive: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on a SATA (AHCI), IDE or USB disk, and no boot floppy or "
+        panic("No C: drive: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on a SATA (AHCI), IDE, virtio or USB disk, and no boot floppy or "
               "RAM disk to fall back to (floppy.img or dos.img next to vmdos.efi, a GRUB module, or QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
@@ -518,16 +519,13 @@ void disk_init(void)
    in when the list is asked for. */
 int disk_dev_count(void)
 {
-    while (usb_seen < usb_msd_count() && n_dev < MAX_DEVS) {
-        int i = usb_seen++, d = n_dev++;
-        dev[d].usb = 1; dev[d].idx = i; dev[d].sectors = usb_msd_sectors(i); dev[d].name = usb_msd_name(i);
-    }
+    take_hot();
     return n_dev;
 }
-u64 disk_dev_sectors(int d) { return dev[d].usb ? usb_msd_sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
-const char *disk_dev_name(int d) { return dev[d].usb ? usb_msd_name(dev[d].idx) : dev[d].name; }
+u64 disk_dev_sectors(int d) { return dev[d].drv->hotplug ? dev[d].drv->sectors(dev[d].idx) : dev[d].sectors; }   /* 0: unplugged */
+const char *disk_dev_name(int d) { return dev[d].drv->hotplug ? dev[d].drv->name(dev[d].idx) : dev[d].name; }
 const char *disk_dev_kind(int d) { return dev_kind(d); }
-u32 disk_dev_gen(int d) { return dev[d].usb ? usb_msd_gen(dev[d].idx) : 0; }   /* changes when another disk (or the same one again) is plugged in */
+u32 disk_dev_gen(int d) { return dev[d].drv->gen ? dev[d].drv->gen(dev[d].idx) : 0; }   /* changes when another disk (or the same one again) is plugged in */
 int disk_dev_index(int d) { return dev[d].idx; }
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
 {
@@ -542,4 +540,10 @@ int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length 
 /* The disk and partition C: is on; -1 if C: isn't on a real disk. */
 int disk_c_dev(u32 *start, u32 *size) { *start = pstart; *size = psize; return on_dev ? cdev : -1; }
 
-const char *disk_kind(void) { return on_dev ? (dev[cdev].usb ? "USB disk" : dev[cdev].ide ? "IDE disk" : "SATA disk") : disk_on_a ? "no disk" : "RAM disk"; }
+const char *disk_kind(void)
+{
+    static char k[24];
+    if (!on_dev) return disk_on_a ? "no disk" : "RAM disk";
+    snprintf(k, sizeof k, "%s disk", dev[cdev].drv->kind);
+    return k;
+}

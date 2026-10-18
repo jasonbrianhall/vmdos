@@ -5,6 +5,7 @@
 #pragma once
 #include "pci.hpp"
 #include "hw.hpp"
+#include "virtio.hpp"
 
 namespace net {
 
@@ -71,13 +72,11 @@ struct Card {
             uint8_t* rrd;                       // receive return ring
             uint32_t dma_rd, dma_wr;            // atl1c: DMA burst sizes (as the register wants them)
         } x;
-        struct {                                // virtio-net (QEMU): legacy (I/O ports) or modern (1.0, MMIO)
-            bool modern, status;                // VIRTIO_F_VERSION_1; link status in the config
-            volatile uint8_t *common, *notify, *dev;   // modern: the capabilities' registers
-            uint32_t notify_mult;
-            uint16_t qsz[2], qoff[2];           // queue sizes; modern: notify offsets
-            uint8_t* ring[2];                   // 0 receive, 1 transmit: descriptors, available, used
-            uint16_t rx_used, tx_avail, tx_used, hdr;   // where we are; the header before each frame
+        struct {                                // virtio-net (QEMU): transport in virtio.cpp
+            VirtioDev d;
+            Virtq rxq, txq;                     // queue 0 receives, 1 sends
+            bool status;                        // link status in the configuration
+            uint16_t hdr;                       // the header before each frame
             uint32_t tx_busy;                   // transmit slots the device hasn't given back (bit n)
             uint8_t addr[6];                    // the address we answer to (we filter)
             int mode;
