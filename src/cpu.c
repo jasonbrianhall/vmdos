@@ -40,19 +40,24 @@ static void fr_add(u32 lo, u32 hi)
     fr[i].lo = lo; fr[i].hi = hi; nfr++;
 }
 
+static struct rlock heap_lock;          /* the helper CPU's redraw allocates too (scale=smooth, xbrz) */
+
 void *phys_try_alloc(u32 bytes)
 {
     bytes = (bytes + 4095) & ~4095u;
     if (!bytes) return 0;
+    void *p = 0;
+    rlock_take(&heap_lock);
     for (int i = 0; i < nfr; i++)
         if (fr[i].hi - fr[i].lo >= bytes) {
-            void *p = (void *)(uintptr_t)fr[i].lo;
+            p = (void *)(uintptr_t)fr[i].lo;
             fr[i].lo += bytes;
             if (fr[i].lo == fr[i].hi) { nfr--; for (int k = i; k < nfr; k++) fr[k] = fr[k + 1]; }
-            memset(p, 0, bytes);
-            return p;
+            break;
         }
-    return 0;
+    rlock_drop(&heap_lock);
+    if (p) memset(p, 0, bytes);
+    return p;
 }
 
 void *phys_alloc(u32 bytes)
@@ -65,11 +70,28 @@ void *phys_alloc(u32 bytes)
 void phys_release(void *p, u32 bytes)
 {
     bytes = (bytes + 4095) & ~4095u;
-    if (p && bytes) fr_add((u32)(uintptr_t)p, (u32)(uintptr_t)p + bytes);
+    if (!p || !bytes) return;
+    rlock_take(&heap_lock);
+    fr_add((u32)(uintptr_t)p, (u32)(uintptr_t)p + bytes);
+    rlock_drop(&heap_lock);
 }
 
-u32 phys_free(void) { u32 n = 0; for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo; return n; }
-u32 phys_largest(void) { u32 n = 0; for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo; return n; }
+u32 phys_free(void)
+{
+    u32 n = 0;
+    rlock_take(&heap_lock);
+    for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo;
+    rlock_drop(&heap_lock);
+    return n;
+}
+u32 phys_largest(void)
+{
+    u32 n = 0;
+    rlock_take(&heap_lock);
+    for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo;
+    rlock_drop(&heap_lock);
+    return n;
+}
 u32 ram_top_addr(void) { return ram_top; }
 u32 phys_spare(void) { u32 f = phys_free(); return f > HEAP_RESERVE ? f - HEAP_RESERVE : 0; }
 

@@ -5,7 +5,9 @@
    and the Sound Blaster / OPL3 / MIDI render (sound.c) are the big parts,
    and while they run DOS stands still. With a second core, that core does
    both instead, in a loop that follows the timer ticks; the boot CPU keeps
-   DOS, the devices, USB, the network and the disks.
+   DOS, the devices, USB, the network and the disks. In VMHV the boot CPU
+   redraws again, as without a helper (DOOM's display failed there with the
+   helper drawing); the helper keeps the sound.
 
    The helper is found in the ACPI MADT (the RSDP from vmdos.efi, rsdp= on
    the command line, or the BIOS areas) and started with INIT-SIPI-SIPI
@@ -138,7 +140,7 @@ void ap_main(void)
         ap_tables_sync();                                                          /* the boot CPU's page table changes */
         __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
         sound_tick();
-        if (frame >= TICK_HZ / 60 && rlock_try(&video_lock)) {
+        if (frame >= TICK_HZ / 60 && !hv_active && rlock_try(&video_lock)) {   /* VMHV: the boot CPU redraws */
             frame = 0;
             video_refresh();
             rlock_drop(&video_lock);

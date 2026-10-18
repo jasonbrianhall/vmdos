@@ -575,7 +575,7 @@ struct regs *isr_dispatch(struct regs *r)
         }
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
-            if (!smp_active) video_refresh();         /* else the helper CPU's */
+            if (!smp_active || hv_active) video_refresh();   /* else the helper CPU's (not in VMHV: smp.c) */
         }
         goto out;
     }
