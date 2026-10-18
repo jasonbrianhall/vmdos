@@ -95,7 +95,8 @@ option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
 EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
-(parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them) and USB
+(parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them), virtio
+disks (QEMU `-drive if=virtio`, `make run DISK=virtio`; `virtio=off` skips them) and USB
 sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
 Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature);
@@ -548,7 +549,8 @@ untested.
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
-| `src/disk.c`, `src/ahci.cpp`, `src/ide.cpp`, `src/fat.c` | drive C: (SATA / IDE / USB partition or RAM disk), SATA and IDE drivers, FAT reader |
+| `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |
+| `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |

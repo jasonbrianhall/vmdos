@@ -46,7 +46,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin 
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o ahci.o ide.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_usb.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_usb.o virtio.o hd.o joy.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_usb.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -379,8 +379,13 @@ ACCEL ?= -accel kvm -accel tcg
 QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QNET) $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)
 # C=disk: esp.img on an AHCI controller (C:), after the CD in the boot order.
 BOOTDISK ?= 1
-QESP  = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \
-        -device ide-hd,drive=cdisk,bus=ahci.0,bootindex=$(BOOTDISK)
+# DISK=virtio: on a virtio-blk disk instead (DISK=ide: IDE).
+DISK ?= ahci
+QESP_ahci   = -device ahci,id=ahci -drive if=none,id=cdisk,format=raw,file=esp.img \
+              -device ide-hd,drive=cdisk,bus=ahci.0,bootindex=$(BOOTDISK)
+QESP_ide    = -drive if=none,id=cdisk,format=raw,file=esp.img -device ide-hd,drive=cdisk,bootindex=$(BOOTDISK)
+QESP_virtio = -drive if=none,id=cdisk,format=raw,file=esp.img -device virtio-blk-pci,drive=cdisk,bootindex=$(BOOTDISK)
+QESP  = $(QESP_$(DISK))
 QDISK = $(if $(filter ram,$(C)),,$(QESP))
 DISK_DEP := $(if $(filter ram,$(C)),,esp.img)
 

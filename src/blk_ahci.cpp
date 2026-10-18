@@ -1,10 +1,11 @@
-// AHCI (SATA) disks, for C: on a real disk (disk.c), and SATA CD/DVD drives
+// AHCI (SATA) disks (blk.h, for disk.c), and SATA CD/DVD drives
 // (ATAPI, for cd.c). Polled, one command slot per port; disks: 512-byte
 // sectors, LBA48 DMA; optical drives: SCSI commands in ATA PACKET, DMA. The firmware's controller
 // state is taken over: each port is stopped and given our own command
 // list, FIS area and command table, then restarted.
 #include "hw.hpp"
 #include "pci.hpp"
+#include "blk.h"
 
 static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
 
@@ -180,6 +181,10 @@ extern "C" int ahci_rw(int d, uint64_t lba, uint32_t count, void* buf, int write
     if (d >= n_disks || !count || lba + count > disks[d].sectors) return -1;
     return issue(disks[d], write ? 0x35 : 0x25, lba, count, buf, count * 512, write) ? 0 : -1;
 }
+
+extern "C" const struct blk_driver blk_ahci = {
+    "SATA", "ahci=off", 1, 0, ahci_init, nullptr, ahci_sectors, ahci_model, nullptr, ahci_rw,
+};
 
 // CD/DVD drives. A SCSI command (cdb, 12 bytes) with bytes of data in to
 // buf (identity-mapped, word aligned; 0 for none). 0, or the sense key of

@@ -14,7 +14,7 @@
    Changing the image is reported to DOS as a media change. There is
    always at least one image drive (cdrives=N, 1-4, for more).
 
-   Real CD/DVD drives on SATA (AHCI, ahci.cpp), IDE (ide.cpp) and USB (usb.cpp) come after
+   Real CD/DVD drives on SATA (AHCI, blk_ahci.cpp), IDE (blk_ide.cpp) and USB (usb.cpp) come after
    the image drives, one unit each: the disc in the drive, read with SCSI
    commands; eject and close work, a disc swap is a media change.
    cdphys=off leaves them out.
