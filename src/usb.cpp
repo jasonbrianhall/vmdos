@@ -142,6 +142,8 @@ static uint64_t ring_push(Ring& r, uint32_t d0, uint32_t d1, uint32_t d2, uint32
 enum { HC_XHCI = 0, HC_EHCI = 1, HC_UHCI = 2, HC_OHCI = 3 };   // EHCI / UHCI / OHCI: usb2.inc
 struct Hc {
     int type;
+    PciDevice pci;                         // where it is (LSUSB)
+    uint16_t vendor, device;
     // EHCI / UHCI
     uint16_t io;                           // UHCI I/O ports
     volatile uint8_t* eop;                 // EHCI operational registers
@@ -245,6 +247,39 @@ struct Keyboard {
 };
 #define MAX_KBD 32
 static Keyboard kbds[MAX_KBD];
+
+// Every device seen on a port (LSUSB), driven or not: what its descriptors
+// said, and the kbds entry it was set up in. Dropped when its port goes
+// empty (or its hub does); a device set up again on the same port replaces it.
+#define MAX_SEEN 48
+static struct Seen {
+    bool used, have_ids, have_iface;
+    Hc* hc;
+    char where[24];
+    int speed, ki;
+    uint16_t vid, pid, bcd_usb;
+    uint8_t dclass, dsub, dproto, iclass, isub, iproto, nconf, nifaces;
+} seen[MAX_SEEN];
+static Seen* seen_cur;                          // the device being set up
+
+static bool where_under(const char* w, const char* top) {   // w is top, or behind it ("port 1.4" under "port 1")
+    size_t n = strlen(top);
+    return !strncmp(w, top, n) && (w[n] == 0 || w[n] == '.');
+}
+static void seen_drop(Hc* hc, const char* where) {
+    for (auto& e : seen) if (e.used && e.hc == hc && where_under(e.where, where)) e.used = false;
+}
+static Seen* seen_begin(Hc* hc, const char* where, int speed, int ki) {
+    seen_drop(hc, where);
+    for (auto& e : seen)
+        if (!e.used) {
+            memset(&e, 0, sizeof e);
+            e.used = true; e.hc = hc; e.speed = speed; e.ki = ki;
+            snprintf(e.where, sizeof e.where, "%s", where);
+            return &e;
+        }
+    return nullptr;
+}
 /* Each table entry's controller-visible memory, allocated the first time
  * the entry is used and reused by whatever is plugged in next: the pool is
  * never freed, so allocating per plug-in ran it dry after a few hundred. */
@@ -701,6 +736,8 @@ static void setup_device(int root_port, int parent, int hub_port, int speed) {
             else { k.tt_slot = h.tt_slot; k.tt_port = h.tt_port; }
         }
     }
+
+    seen_cur = seen_begin(H, k.where, speed, ki);
 
     if (H->type != HC_XHCI) {                          // EHCI / UHCI: a bus address
         k.slot = alloc_addr();
@@ -1641,7 +1678,13 @@ static bool setup_slot(Keyboard& k, int ki) {
     }
     uint16_t vid = 0, pid = 0;
     int nconf = 1;
-    if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) { vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; nconf = desc[17]; }
+    if (control(k, 0x80, 6, 0x0100, 0, 18, desc)) {
+        vid = desc[8] | desc[9] << 8; pid = desc[10] | desc[11] << 8; nconf = desc[17];
+        if (Seen* e = seen_cur) {
+            e->have_ids = true; e->vid = vid; e->pid = pid; e->bcd_usb = (uint16_t)(desc[2] | desc[3] << 8);
+            e->dclass = desc[4]; e->dsub = desc[5]; e->dproto = desc[6]; e->nconf = desc[17];
+        }
+    }
     if (!control(k, 0x80, 6, 0x0200, 0, 9, desc)) {
         printf("USB: %s: %04x:%04x: no configuration descriptor (cc=%d)\n", k.where, vid, pid, ctl_cc);
         return false;
@@ -1656,6 +1699,14 @@ static bool setup_slot(Keyboard& k, int ki) {
         return false;
     }
     int config = desc[5];
+    if (Seen* e = seen_cur) {                           // the first interface's class (LSUSB)
+        e->nifaces = desc[4];
+        for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i])
+            if (desc[i + 1] == 4 && i + 7 < total) {
+                e->have_iface = true; e->iclass = desc[i + 5]; e->isub = desc[i + 6]; e->iproto = desc[i + 7];
+                break;
+            }
+    }
 
     // A boot keyboard or mouse interface, or a hub's, and its interrupt IN endpoint.
     int iface = -1, ep_addr = 0, ep_mps = 8, ep_interval = 10;
@@ -1802,6 +1853,7 @@ static void forget(int i) {
         if (H->type != HC_XHCI) ua2_unlink();
     }
     k.active = false;
+    seen_drop(k.hc, k.where);
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
     printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == NET ? "Ethernet adapter" : k.kind == AUDIO ? "audio device" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
@@ -1832,6 +1884,11 @@ static void hub_port_change(int h, int port) {
     if (existing >= 0 && (!connected || (change & 1))) { forget(existing); existing = -1; }
     uint32_t bit = port < 32 ? 1u << port : 0;
     if (!connected && port < 32) { hb.given_up &= ~bit; hb.port_fails[port] = 0; }   // unplugged: a fresh start
+    if (!connected) {                                   // whatever was there (driven or not) is gone
+        char w[32];
+        snprintf(w, sizeof w, "%s.%d", hb.where, port);
+        seen_drop(hb.hc, w);
+    }
     if (!connected || existing >= 0 || (hb.given_up & bit)) return;
     // A device that fails its setup again and again (an internal one that
     // never answers, and keeps changing its port's state) would be reset and
@@ -2132,6 +2189,7 @@ bool usb_init(const char* cmdline) {
         memset((void*)H, 0, sizeof *H);
         H->evt_cycle = 1;
         uint32_t vd = pci_read(d, 0);
+        H->pci = d; H->vendor = (uint16_t)vd; H->device = (uint16_t)(vd >> 16);
         printf("USB: xHCI %d at PCI %02x:%02x.%x (%04x:%04x)\n", num_hc, d.bus, d.dev, d.fn, vd & 0xFFFF, vd >> 16);
         if (!init_controller(d)) continue;              // try the others
         num_hc++;
@@ -2162,6 +2220,7 @@ bool usb_init(const char* cmdline) {
             memset((void*)H, 0, sizeof *H);
             H->type = o.type;
             uint32_t vd = pci_read(d, 0);
+            H->pci = d; H->vendor = (uint16_t)vd; H->device = (uint16_t)(vd >> 16);
             printf("USB: %s %d at PCI %02x:%02x.%x (%04x:%04x)\n", o.name, num_hc, d.bus, d.dev, d.fn, vd & 0xFFFF, vd >> 16);
             if (!(o.type == HC_EHCI ? e_init(d) : o.type == HC_UHCI ? u_init(d) : o_init(d))) continue;
             num_hc++;
@@ -2205,6 +2264,9 @@ void usb_poll() {
             } else {
                 for (int i = 0; i < MAX_KBD; i++)
                     if (kbds[i].active && kbds[i].hc == H && kbds[i].port == p && kbds[i].parent < 0) forget(i);
+                char w[16];
+                snprintf(w, sizeof w, "port %d", p);
+                seen_drop(H, w);
             }
         }
     }
@@ -2267,4 +2329,123 @@ extern "C" int usb_cd_packet(int i, const uint8_t* cdb, void* buf, uint32_t byte
     H = saved;
     usb_busy = 0;
     return r == 0 ? 0 : key ? key : -1;
+}
+
+// ---------------------------------------------------------------- LSUSB
+// The controllers and every device seen on them, as text (CR LF lines) for
+// LSUSB.COM (INT 2Fh AX=5649h, sysinfo.cpp). verbose: descriptor classes too.
+static const char* usb_class_name(int c) {
+    switch (c) {
+    case 0x00: return "(per interface)";
+    case 0x01: return "audio";
+    case 0x02: return "communications";
+    case 0x03: return "HID";
+    case 0x05: return "physical";
+    case 0x06: return "imaging";
+    case 0x07: return "printer";
+    case 0x08: return "mass storage";
+    case 0x09: return "hub";
+    case 0x0A: return "CDC data";
+    case 0x0B: return "smart card";
+    case 0x0D: return "content security";
+    case 0x0E: return "video";
+    case 0x0F: return "personal healthcare";
+    case 0x10: return "audio/video";
+    case 0x11: return "billboard";
+    case 0xDC: return "diagnostic";
+    case 0xE0: return "wireless (Bluetooth?)";
+    case 0xEF: return "miscellaneous";
+    case 0xFE: return "application specific";
+    case 0xFF: return "vendor specific";
+    }
+    return "unknown class";
+}
+
+namespace {
+struct Out {
+    char* p; int max, n;
+    void indent(int n) { while (n-- > 0) add(" "); }
+    void add(const char* fmt, ...) {
+        if (n >= max - 1) return;
+        va_list ap;
+        va_start(ap, fmt);
+        int w = vsnprintf(p + n, (size_t)(max - n), fmt, ap);
+        va_end(ap);
+        n += w < 0 ? 0 : w;
+        if (n > max - 1) n = max - 1;
+    }
+};
+}
+
+static const char* hc_type_name(int t) { return t == HC_XHCI ? "xHCI" : t == HC_EHCI ? "EHCI" : t == HC_OHCI ? "OHCI" : "UHCI"; }
+
+extern "C" int usb_list(char* buf, int max, int verbose)
+{
+    Out o{buf, max, 0};
+    if (!num_hc) { o.add("No USB controller driven by vmdos (usb=off, or none found)\r\n"); return o.n; }
+    for (int c = 0; c < num_hc; c++) {
+        Hc& h = hcs[c];
+        int nd = 0;
+        for (auto& e : seen) nd += e.used && e.hc == &h;
+        o.add("Bus %03d: %s at PCI %02x:%02x.%x [%04x:%04x], %d port%s, %d device%s\r\n", c + 1, hc_type_name(h.type),
+              h.pci.bus, h.pci.dev, h.pci.fn, h.vendor, h.device, h.num_ports, h.num_ports == 1 ? "" : "s", nd, nd == 1 ? "" : "s");
+        // in port order: a hub's devices right after it
+        bool done[MAX_SEEN] = {};
+        for (;;) {
+            int best = -1;
+            for (int i = 0; i < MAX_SEEN; i++) {
+                const Seen& e = seen[i];
+                if (!e.used || e.hc != &h || done[i]) continue;
+                if (best < 0) { best = i; continue; }
+                // compare "port a.b.c" numerically, tier by tier
+                const char *x = e.where + 5, *y = seen[best].where + 5;
+                int cmp = 0;
+                while (!cmp) {
+                    int a = 0, b = 0;
+                    while (*x >= '0' && *x <= '9') a = a * 10 + (*x++ - '0');
+                    while (*y >= '0' && *y <= '9') b = b * 10 + (*y++ - '0');
+                    if (a != b) { cmp = a < b ? -1 : 1; break; }
+                    if (!*x || !*y) { cmp = !*x && *y ? -1 : *x && !*y ? 1 : 0; break; }
+                    x++; y++;
+                }
+                if (cmp < 0) best = i;
+            }
+            if (best < 0) break;
+            done[best] = true;
+            const Seen& e = seen[best];
+            int depth = 0;
+            for (const char* q = e.where; *q; q++) depth += *q == '.';
+            o.indent(2 + depth * 2);
+            o.add("%c%s: ", e.where[0] - 32, e.where + 1);   // "Port 3.2"
+            if (e.have_ids) o.add("ID %04x:%04x", e.vid, e.pid);
+            else o.add("ID ????:????");
+            o.add(", %s speed", speed_name(e.speed));
+            const Keyboard& k = kbds[e.ki];
+            bool driven = k.active && k.hc == e.hc && !strncmp(k.where, e.where, sizeof e.where);
+            if (driven) {
+                switch (k.kind) {
+                case KBD: o.add(", keyboard"); break;
+                case MOUSE: o.add(", mouse"); break;
+                case HUB: o.add(", hub, %d ports", k.nports); break;
+                case MSD: o.add(", %s: %s", k.bsize == 2048 ? "CD/DVD drive" : "disk", k.model); break;
+                case JOY: o.add(", gamepad: joystick %c", 'A' + k.pad); break;
+                case AUDIO: o.add(", audio (vmdos's sound output)"); break;
+                case NET: o.add(", Ethernet adapter"); break;
+                }
+            } else {
+                int cl = e.have_ids && e.dclass ? e.dclass : e.have_iface ? e.iclass : -1;
+                if (cl >= 0) o.add(", %s", usb_class_name(cl));
+                o.add(e.have_ids ? ", not used by vmdos" : ", didn't answer (no descriptor)");
+            }
+            o.add("\r\n");
+            if (verbose && e.have_ids) {                // "USB 2.00, class 00/00/00, interface 03/01/01 (HID), slot 3"
+                o.indent(6 + depth * 2);
+                o.add("USB %x.%02x, class %02x/%02x/%02x", e.bcd_usb >> 8, e.bcd_usb & 0xFF, e.dclass, e.dsub, e.dproto);
+                if (e.have_iface) o.add(", interface %02x/%02x/%02x (%s)", e.iclass, e.isub, e.iproto, usb_class_name(e.iclass));
+                if (driven) o.add(", %s %d%s", e.hc->type == HC_XHCI ? "slot" : "address", k.slot, k.tt_slot ? " via TT" : "");
+                o.add("\r\n");
+            }
+        }
+    }
+    return o.n;
 }

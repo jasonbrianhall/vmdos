@@ -297,6 +297,7 @@ extern int net_ready;
 void net_init(void);
 void net_tick(void);                          /* every timer tick: poll the card */
 void net_api(struct regs *r);
+void info_api(struct regs *r);                /* INT 2Fh AX=5649h: LSPCI.COM / LSUSB.COM (sysinfo.cpp) */
 int ne2k_port(u16 port, int size, int write, u32 *val);   /* ne2k.c: the emulated ISA NE2000 */
 
 /* ---- sound.c ---- */

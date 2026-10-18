@@ -247,6 +247,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     }
     if (n == 0x2F && AX(r) == 0x564C) { log_api(r); return; }         /* DMESG */
     if (n == 0x2F && AX(r) == 0x564E) { net_api(r); return; }         /* VMPKT */
+    if (n == 0x2F && AX(r) == 0x5649) { info_api(r); return; }        /* LSPCI / LSUSB */
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
         AX(r) = (u16)speed_api(BX(r));
         BX(r) = 0x564D;
