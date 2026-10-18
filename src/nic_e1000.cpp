@@ -15,8 +15,8 @@ enum {
     RCTL = 0x100, TCTL = 0x400, TIPG = 0x410,
     RDBAL = 0x2800, RDBAH = 0x2804, RDLEN = 0x2808, RDH = 0x2810, RDT = 0x2818, RDTR = 0x2820,
     TDBAL = 0x3800, TDBAH = 0x3804, TDLEN = 0x3808, TDH = 0x3810, TDT = 0x3818, TIDV = 0x3820,
-    TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, TARC0 = 0x3840, TARC1 = 0x3940,
-    RFCTL = 0x5008, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404,
+    TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, RXDCTL0 = 0x2828, TARC0 = 0x3840, TARC1 = 0x3940,
+    RFCTL = 0x5008, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404, PBA = 0x1000, MANC = 0x5820,
     // statistics (clear on read)
     CRCERRS = 0x4000, RXERRC = 0x400C, MPC = 0x4010, GPRC = 0x4074, BPRC = 0x4078, GPTC = 0x4080,
     RNBC = 0x40A0, TPR = 0x40D0, TPT = 0x40D4,
@@ -165,6 +165,8 @@ void set_mac(Card& c, const uint8_t* a)
 
 // ICH/PCH (Linux: e1000_reset_hw_ich8lan's tail, e1000_initialize_hw_bits_ich8lan,
 // e1000_init_hw_ich8lan): the bits the MAC needs set before it moves frames.
+bool pch_lpt(Card& c) { return c.device >= 0x1500 && !(c.device == 0x1501 || c.device == 0x1502 || c.device == 0x1503); }   // I217-I219
+
 void pch_bits(Card& c)
 {
     bool ich8 = c.device == 0x1049 || c.device == 0x104A || c.device == 0x104B || c.device == 0x104C ||
@@ -175,8 +177,10 @@ void pch_bits(Card& c)
     // descriptor write-back: GRAN 1, WTHRESH 1 (each done descriptor written
     // back at once), PTHRESH 31
     t0 = (t0 & ~0x003F003Fu) | 0x01010000u | 0x0100001Fu;
+    t0 |= 1u << 25;                             // queue enable: ignored by most, wanted by some (iPXE sets it always)
     w32(c, TXDCTL0, t0);
     w32(c, TXDCTL1, t0);                        // erratum: both queues the same
+    w32(c, RXDCTL0, r32(c, RXDCTL0) | 1u << 25);
     uint32_t a0 = r32(c, TARC0) | (1u << 23) | (1u << 24) | (1u << 26) | (1u << 27);
     if (ich8) a0 |= (1u << 28) | (1u << 29);
     w32(c, TARC0, a0);
@@ -191,6 +195,7 @@ void pch_bits(Card& c)
     else g = (g & ~0x3Fu) | ~0x3Fu;             // as Linux: e1000e_set_pcie_no_snoop(~PCIE_NO_SNOOP_ALL)
     w32(c, GCR, g);
     w32(c, RDTR, 0); w32(c, TIDV, 0);           // no interrupt delays (no interrupts anyway)
+    if (c.e.lv || pch_lpt(c)) w32(c, PBA, 26);  // Linux (e1000e_reset): 26 KB receive, the rest transmit
 }
 
 bool init(Card& c)
@@ -227,7 +232,7 @@ bool init(Card& c)
     for (int i = 0; i < 1000 && (r32(c, CTRL) & (1u << 26)); i++) udelay(100);
     if (c.e.pch) {                                // the NVM's settings loaded
         for (int i = 0; i < 150 && !(r32(c, STATUS) & (1u << 9)); i++) udelay(100);
-        w32(c, STATUS, r32(c, STATUS) & ~(1u << 9));
+        w32(c, STATUS, r32(c, STATUS) & ~((1u << 9) | (1u << 10)));   // LAN_INIT_DONE, PHYRA (PHY reset asserted)
         w32(c, CTRL_EXT, r32(c, CTRL_EXT) | (1u << 28));        // DRV_LOAD: a driver has it (to the ME)
         if (r32(c, PHY_CTRL) & 0x40) w32(c, PHY_CTRL, r32(c, PHY_CTRL) & ~0x40u);   // GbE disable
     }
@@ -302,6 +307,12 @@ void stats(Card& c, bool force)
             c.name, c.e.sent, c.e.gptc, c.e.gprc, c.e.mpc, c.e.rnbc, c.e.crc,
             r32(c, TDH), r32(c, TDT), tx[last].status, r32(c, RDH), r32(c, RDT),
             r32(c, STATUS), r32(c, CTRL), r32(c, RCTL), r32(c, TCTL), r32(c, GCR));
+    if (c.e.dbg_n == 1 || force)                // the first time: what DMA depends on
+        kprintf("net: %s: PCI command %x; TDBAL %x TDLEN %u RDBAL %x; TXDCTL %x TARC0 %x PBA %x CTRL_EXT %x; "
+                "FWSM %x MANC %x PHY_CTRL %x EXTCNF_CTRL %x; desc 0: addr %x len %u cmd %x\n",
+                c.name, pci_read(c.pci, 4) & 0xFFFF, r32(c, TDBAL), r32(c, TDLEN), r32(c, RDBAL), r32(c, TXDCTL0),
+                r32(c, TARC0), r32(c, PBA), r32(c, CTRL_EXT), r32(c, FWSM), r32(c, MANC), r32(c, PHY_CTRL),
+                r32(c, EXTCNF_CTRL), (uint32_t)tx[0].addr, tx[0].len, tx[0].cmd);
 }
 
 void poll(Card& c)
