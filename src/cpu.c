@@ -176,12 +176,13 @@ u64 hv_host_pte(u32 lin) { return ((u64 *)pt_for(lin))[(lin >> 12) & 511]; }   /
 void hv_swap_pde0(u64 pde)
 {
     if (pde) {
-        if (!pde0_temp_on) pde0_real = pae_pd[0][0];
+        if (!pde0_temp_on) { rlock_take(&video_lock); pde0_real = pae_pd[0][0]; }   /* the helper CPU's redraw reads 0-1 MiB */
         pde0_temp_on = &pae_pd[0][0];
         pae_pd[0][0] = pde;
     } else if (pde0_temp_on) {
         pae_pd[0][0] = pde0_real;
         pde0_temp_on = 0;
+        rlock_drop(&video_lock);
     }
     __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
 }
@@ -346,6 +347,21 @@ void *map_mmio64(u64 phys, u32 len)
     return (void *)(uintptr_t)(lin + off);
 }
 
+/* Firmware tables (ACPI) below 4 GiB, to read: linear space below the
+   MMIO window, never identity (below 16 MiB that's the guest's and DPMI's). */
+void *map_firmware(u32 phys, u32 len)
+{
+    if (phys + len <= GUEST_TOP && phys + len > phys) return phys_low(phys);
+    u32 off = phys & 0xFFF;
+    len = (len + off + 4095) & ~4095u;
+    u32 lin = (mmio_window - len) & ~0xFFFu;
+    if (lin < ram_top + 0x1000000u) return 0;
+    mmio_window = lin;
+    map_range(lin, phys - off, len, 3);
+    flush_tlb();
+    return (void *)(uintptr_t)(lin + off);
+}
+
 /* ---------------- GDT, TSS, IDT ---------------- */
 struct __attribute__((packed)) tss {
     u32 prev, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags;
@@ -357,6 +373,12 @@ struct __attribute__((packed)) tss {
 };
 static struct tss tss __attribute__((aligned(16)));
 static u64 idt[48];
+
+void idt_load(void)                   /* smp.c: the helper CPU uses the same IDT */
+{
+    struct __attribute__((packed)) { u16 lim; u32 base; } idtr = { sizeof idt - 1, (u32)(uintptr_t)idt };
+    __asm__ volatile("lidt %0" ::"m"(idtr));
+}
 
 static void tables_init(void)
 {
@@ -374,8 +396,7 @@ static void tables_init(void)
         u32 h = isr_table[i];
         idt[i] = (h & 0xFFFF) | ((u64)0x08 << 16) | ((u64)0x8E << 40) | ((u64)(h >> 16) << 48);
     }
-    struct __attribute__((packed)) { u16 lim; u32 base; } idtr = { sizeof idt - 1, (u32)(uintptr_t)idt };
-    __asm__ volatile("lidt %0" ::"m"(idtr));
+    idt_load();
 }
 
 static void pic_init(void)
@@ -434,6 +455,7 @@ static u32 pit_count0(void)
 void tick_poll_begin(void)
 {
     u32 fl;
+    if (smp_on_ap()) return;                          /* the helper's redraw: the PIT is the boot CPU's */
     __asm__ volatile("pushf; pop %0" : "=r"(fl));
     tp_on = !(fl & EFL_IF);
     if (!tp_on) return;
@@ -444,7 +466,7 @@ void tick_poll_begin(void)
 
 void tick_poll(void)
 {
-    if (!tp_on) return;
+    if (!tp_on || smp_on_ap()) return;
     u32 c = pit_count0();
     if (c > tp_count) {                               /* reloaded: a tick went by */
         if (tp_pending) ticks++;                      /* one already waits: the PIC drops this one */
@@ -455,6 +477,7 @@ void tick_poll(void)
 
 void tick_poll_end(void)
 {
+    if (smp_on_ap()) return;
     tick_poll();
     tp_on = 0;
 }
@@ -593,6 +616,14 @@ void kmain(u32 magic, struct mb_info *mb)
         }
     }
     dbg(1, "ISA DMA buffer at %x\n", isa_dma_phys);
+    /* A page below 1 MiB to start the helper CPU from (smp.c; put back after). */
+    u32 tramp = 0;
+    for (int r = 0; r < nr && !tramp; r++)
+        for (u32 a = rgn[r].b < 0x1000 ? 0x1000 : (rgn[r].b + 4095) & ~4095u; a + 4096 <= rgn[r].t && a + 4096 <= 0x9F000; a += 4096) {
+            int clash = isa_dma_phys && a < isa_dma_phys + ISA_DMA_LEN && isa_dma_phys < a + 4096;
+            for (int i = 0; i < nex; i++) if (a < ex[i].hi && ex[i].lo < a + 4096) clash = 1;
+            if (!clash) { tramp = a; break; }
+        }
     kprintf("RAM top %u MiB, heap %u MiB in %d piece%s\n", ram_top >> 20, phys_free() >> 20, nfr, nfr == 1 ? "" : "s");
     for (int i = 0; i < nfr; i++) dbg(1, "  heap %x-%x\n", fr[i].lo, fr[i].hi);
     if (phys_largest() < (2u << 20)) panic("not enough memory");
@@ -654,7 +685,9 @@ void kmain(u32 magic, struct mb_info *mb)
     xms_init();
     mouse_ps2_init();
     usb_ready = 1;
+    smp_start(tramp);
     kprintf("starting DOS\n");
     bootcon_stop();
+    smp_go();
     guest_start();
 }

@@ -513,6 +513,7 @@ struct regs *isr_dispatch(struct regs *r)
     int from_pm = !from_v86 && (r->cs & 3) == 3;     /* a DPMI client */
     u32 vec = r->vec;
 
+    if (smp_on_ap()) smp_ap_fault(r);                /* the helper CPU takes no interrupts: a fault */
     if (vec >= 0x20) {
         int irq = vec - 0x20;
         if (irq == 7 || irq == 15) {                 /* spurious? */
@@ -525,7 +526,7 @@ struct regs *isr_dispatch(struct regs *r)
         if (irq == 0) {
             ticks++;
             vdev_tick();
-            if (usb_ready) sound_tick();
+            if (usb_ready) { if (smp_active) sound_irq_poll(); else sound_tick(); }
             if (usb_ready) disk_tick();
             if (net_ready) net_tick();
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
@@ -574,7 +575,7 @@ struct regs *isr_dispatch(struct regs *r)
         }
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
-            video_refresh();
+            if (!smp_active) video_refresh();         /* else the helper CPU's */
         }
         goto out;
     }

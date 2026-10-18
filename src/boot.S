@@ -92,6 +92,54 @@ reload_gdt:
     lgdt gdt_ptr
     ret
 
+# ---- the helper CPU (smp.c): copied to a page below 1 MiB, started there
+# by a STARTUP IPI in real mode (CS = the page, IP = 0). smp.c fills in
+# the GDTR (our GDT) and the jump's target (ap_entry32).
+.global ap_tramp_start, ap_tramp_end, ap_tramp_gdtr, ap_tramp_jump
+.code16
+ap_tramp_start:
+    cli
+    cld
+    mov  %cs, %ax
+    mov  %ax, %ds
+    lgdtl ap_tramp_gdtr - ap_tramp_start
+    mov  %cr0, %eax
+    or   $1, %eax
+    mov  %eax, %cr0
+    .byte 0x66, 0xEA             # ljmpl $0x08, ap_entry32
+ap_tramp_jump:
+    .long 0
+    .word 0x08
+.align 8
+ap_tramp_gdtr:
+    .word 0
+    .long 0
+ap_tramp_end:
+.code32
+
+# Protected mode, paging off (the kernel's linear addresses are physical):
+# the boot CPU's CR4, CR3 and CR0 (paging on), its stack, then ap_main.
+.global ap_entry32
+ap_entry32:
+    mov  $0x10, %ax
+    mov  %ax, %ds
+    mov  %ax, %es
+    mov  %ax, %ss
+    mov  %ax, %fs
+    mov  %ax, %gs
+    mov  ap_cr4, %eax
+    mov  %eax, %cr4
+    mov  ap_cr3, %eax
+    mov  %eax, %cr3
+    mov  ap_cr0, %eax
+    mov  %eax, %cr0
+    jmp  1f
+1:  mov  ap_esp, %esp
+    call ap_main
+2:  cli
+    hlt
+    jmp  2b
+
 # ---- interrupt stubs: vectors 0..47 ----
 .macro STUB n
 isr\n:

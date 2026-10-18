@@ -1,7 +1,9 @@
 /* Sound: the guest's Sound Blaster Pro 2.0 + OPL3 (port 220h, IRQ 5, DMA 1),
    AdLib (388h) and MPU-401 / General MIDI (330h), emulated by SBPRO's core
    (src/sb), played through the real card by audio.cpp (HD Audio, AC'97 or
-   a real Sound Blaster). Rendered from the timer interrupt. */
+   a real Sound Blaster). Rendered from the timer interrupt, or by the
+   helper CPU (smp.c); sound_lock keeps the guest's port accesses and the
+   render apart. */
 #include "kernel.h"
 #include "sb/dsp.h"
 #include "sb/sbout.h"
@@ -38,7 +40,9 @@ int sound_sb_api(int bx)
 {
     if (!sb_ready) return 0;
     if (bx == 2 || bx == 16) {
+        rlock_take(&sound_lock);
         dsp_set_sb16(bx == 16);
+        rlock_drop(&sound_lock);
         kprintf("SB: now a Sound Blaster %s\n", bx == 16 ? "16 (DSP 4.05)" : "Pro (DSP 3.02)");
     }
     return dsp.sb16 ? 16 : 2;
@@ -49,9 +53,8 @@ static void check_irq(void)
     if (sb_take_irq()) vpic_raise(sb_irq_line());
 }
 
-int sound_port(u16 port, int write, u8 *v)
+static int sound_port_(u16 port, int write, u8 *v)
 {
-    if (!sb_ready) return 0;
     if (dsp_owns(port)) {
         if (write) dsp_out(port, *v); else *v = dsp_in(port);
         if (debug_level >= 4) kprintf("SB %s %03x %02x\n", write ? "out" : "in ", port, *v);
@@ -67,6 +70,15 @@ int sound_port(u16 port, int write, u8 *v)
         return 1;
     }
     return 0;
+}
+
+int sound_port(u16 port, int write, u8 *v)
+{
+    if (!sb_ready) return 0;
+    rlock_take(&sound_lock);
+    int r = sound_port_(port, write, v);
+    rlock_drop(&sound_lock);
+    return r;
 }
 
 void cdaudio_mix(int16_t *buf, int n);       /* cd.c: CD audio, mixed in (buf 0: just advance) */
@@ -122,24 +134,35 @@ static void switch_output(void)
 
 /* Every TICKS_PER_RENDER ticks: render the time that has passed. By the
    tick count, not by calls, so ticks counted in arrears (tick_poll, after a
-   long stretch with interrupts off) are made up here too. */
+   long stretch with interrupts off) are made up here too. On the helper
+   CPU, a render the guest's port access holds up is made up the same way,
+   and the IRQ goes to the virtual PIC from the boot CPU (sound_irq_poll). */
 void sound_tick(void)
 {
     static u32 last;
     if (switch_req) { switch_req = 0; switch_output(); }
     u32 el = ticks - last;
     if (el < TICKS_PER_RENDER) return;
+    if (!rlock_try(&sound_lock)) return;
     last = ticks;
     if (el > 40) el = 40;                          /* a long stall: no point making it all up */
     int nominal = (int)(48000 / TICK_HZ * el);
-    if (!sb_ready) { cdaudio_mix(0, nominal); return; }
+    if (!sb_ready) { cdaudio_mix(0, nominal); rlock_drop(&sound_lock); return; }
     static int16_t buf[2 * 2048];
     int n = sound_on ? audio_wanted(nominal) : nominal;
     if (n > 2048) n = 2048;
     if (n > 0) {
         sb_render(buf, n);
         cdaudio_mix(buf, n);
-        if (sound_on) audio_put_stereo(buf, n);
     }
+    if (!smp_on_ap()) check_irq();
+    rlock_drop(&sound_lock);
+    if (n > 0 && sound_on) audio_put_stereo(buf, n);
+}
+
+void sound_irq_poll(void)
+{
+    if (!sb_ready || !rlock_try(&sound_lock)) return;
     check_irq();
+    rlock_drop(&sound_lock);
 }

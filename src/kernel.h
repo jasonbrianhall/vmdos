@@ -300,9 +300,24 @@ void net_api(struct regs *r);
 void info_api(struct regs *r);                /* INT 2Fh AX=5649h: LSPCI.COM / LSUSB.COM (sysinfo.cpp) */
 int ne2k_port(u16 port, int size, int write, u32 *val);   /* ne2k.c: the emulated ISA NE2000 */
 
+/* ---- smp.c: a second CPU does the screen and the sound ---- */
+struct rlock { volatile u32 held; volatile int owner; int depth; u32 fl; };   /* the CPU holding it may take it again */
+void rlock_take(struct rlock *l);
+int rlock_try(struct rlock *l);
+void rlock_drop(struct rlock *l);
+extern struct rlock video_lock;               /* video.c's state: the helper's redraw against mode and register changes */
+extern struct rlock sound_lock;               /* the Sound Blaster core, the CD audio ring */
+extern struct rlock log_lock;                 /* kprintf */
+extern volatile int smp_active;               /* the helper CPU redraws and renders (not the timer tick) */
+int smp_on_ap(void);                          /* running on the helper */
+void smp_start(u32 tramp);                    /* tramp: a free physical page below 1 MiB */
+void smp_go(void);
+void smp_ap_fault(struct regs *r) __attribute__((noreturn));
+
 /* ---- sound.c ---- */
 void sound_init(void);
-void sound_tick(void);                        /* every timer tick */
+void sound_tick(void);                        /* every timer tick (on the helper CPU if there is one) */
+void sound_irq_poll(void);                    /* every timer tick when the helper renders: the SB's IRQ */
 int sound_port(u16 port, int write, u8 *v);   /* 1 if it's a sound port */
 
 /* ---- video.c ---- */
