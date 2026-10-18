@@ -463,17 +463,27 @@ void idle_wait(void) { __asm__ volatile("sti; hlt; cli" ::: "memory"); }
 
 void reboot(void)
 {
-    disk_flush();                                 /* gathered writes first */
+    disk_flush();
     cli();
-    for (int i = 0; i < 10000 && (inb(0x64) & 2); i++) ;
+
+    /* 1. Keyboard-controller pulse reset (classic AT) */
+    for (int i = 0; i < 10000 && (inb(0x64) & 2); i++)
+        ;
     outb(0x64, 0xFE);
-    outb(0xCF9, 0x02);
-    // short delay
-    outb(0xCF9, 0x06);
+
+    /* 2. CF9 – prefer a cold/full reset so USB/AHCI are re-initialised */
+    u8 cf9 = inb(0xCF9) & ~0x0E;
+    outb(cf9 | 0x02, 0xCF9);          /* “reset requested” */
+    for (volatile int d = 0; d < 10000; d++) ;   /* short delay */
+    outb(cf9 | 0x0E, 0xCF9);          /* full system reset (cold) */
+
+    /* 3. Triple-fault as last resort */
     struct __attribute__((packed)) { u16 lim; u32 base; } z = { 0, 0 };
-    __asm__ volatile("lidt %0; int3" ::"m"(z));
-    for (;;) __asm__ volatile("hlt");
+    __asm__ volatile("lidt %0; int3" :: "m"(z));
+    for (;;)
+        __asm__ volatile("hlt");
 }
+
 
 /* ---------------- multiboot ---------------- */
 struct mb_info {
