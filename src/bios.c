@@ -646,8 +646,10 @@ int bios_restart_floppy(struct regs *r, int d)
     static u8 sec[512];
     if (fd_boot_sector(d, sec)) return -1;
     disk_flush();
+    rlock_take(&sound_lock);                     /* the helper CPU's render */
     cdaudio_stop();
     sb_out_stop();
+    rlock_drop(&sound_lock);
     mouse_restart();
     ems_restart();
     xms_restart();

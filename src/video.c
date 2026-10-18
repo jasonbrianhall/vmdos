@@ -1,6 +1,10 @@
 /* The guest's display: VGA text (B800h), CGA graphics (modes 4-6, B800h) and
    mode 13h (A000h) kept in guest memory, drawn onto the boot framebuffer
-   (GRUB / GOP / Bochs VBE), plus the VGA registers and INT 10h. */
+   (GRUB / GOP / Bochs VBE), plus the VGA registers and INT 10h.
+   With a helper CPU (smp.c) it redraws while DOS runs on the boot CPU:
+   video_lock keeps the redraw and the entry points that change the video
+   state (mode sets, INT 10h, register writes, page mappings) apart. The
+   palette and video memory are written without it, as on the real card. */
 #include "kernel.h"
 #include "font437.h"
 
@@ -266,7 +270,9 @@ static void sync_cursor_crtc(void)
 static void vbe_off(void);
 static int vbe_setting;                    /* vbe_set is setting up the VGA state under a VESA mode */
 static int reg_mode;                       /* graphics turned on through the registers, not the BIOS */
-void video_set_mode(int mode, int clear)
+static void video_set_mode_(int mode, int clear);
+void video_set_mode(int mode, int clear) { rlock_take(&video_lock); video_set_mode_(mode, clear); rlock_drop(&video_lock); }
+static void video_set_mode_(int mode, int clear)
 {
     mode &= 0x7F;
     vbe_off();
@@ -674,7 +680,9 @@ void video_vgalog_giveup(void)
     vdd_code_at = 0;
 }
 
-void video_b000_map(void)
+static void video_b000_map_(void);
+void video_b000_map(void) { rlock_take(&video_lock); video_b000_map_(); rlock_drop(&video_lock); }
+static void video_b000_map_(void)
 {
     if (b_trap & 1) return;                                   /* the planes are there */
     u8 *hole = hv_hole_page();
@@ -1066,7 +1074,9 @@ static void vbe_set(int m, int clear)
 }
 
 /* BH=0: set window BL to bank DX; BH=1: get it (INT 10h 4F05h and WinFuncPtr). */
-void video_vbe_window(struct regs *r)
+static void video_vbe_window_(struct regs *r);
+void video_vbe_window(struct regs *r) { rlock_take(&video_lock); video_vbe_window_(r); rlock_drop(&video_lock); }
+static void video_vbe_window_(struct regs *r)
 {
     if (BL(r) != 0) { AX(r) = 0x014F; return; }
     if (BH(r) == 1) { DX(r) = (u16)vbe_bank; AX(r) = 0x004F; return; }
@@ -1182,7 +1192,9 @@ static int et_mode(int mode, int clear)
 
 /* The protected-mode interface's routines (4F0Ah): 47h set window,
    48h set display start (CX:DX = byte offset / 4), 49h set palette. */
-void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
+static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin);
+void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin) { rlock_take(&video_lock); video_vbe_pm_(id, ebx, ecx, edx, pal_lin); rlock_drop(&video_lock); }
+static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
 {
     if (id == 0x47) {
         u32 b = edx & 0xFFFF;
@@ -1382,7 +1394,9 @@ static void refresh_vbe(void)
 static char osd_msg[OSD_MAX + 1];
 static u32 osd_until;
 
-void video_osd(const char *msg)
+static void video_osd_(const char *msg);
+void video_osd(const char *msg) { rlock_take(&video_lock); video_osd_(msg); rlock_drop(&video_lock); }
+static void video_osd_(const char *msg)
 {
     int i = 0;
     for (; msg[i] && i < OSD_MAX; i++) osd_msg[i] = msg[i];
@@ -1455,7 +1469,9 @@ static void take_shot(void)
 
 /* BL=0: DX:CX = the BMP's size (0: none yet). BL=1: copy CX bytes from
    offset DX:SI to ES:DI; CX = what was copied. BX = 'VM' either way. */
-void video_shot_api(struct regs *r)
+static void video_shot_api_(struct regs *r);
+void video_shot_api(struct regs *r) { rlock_take(&video_lock); video_shot_api_(r); rlock_drop(&video_lock); }
+static void video_shot_api_(struct regs *r)
 {
     u32 off = (u32)DX(r) << 16 | SI(r);
     if (BL(r) == 1) {
@@ -1469,7 +1485,9 @@ void video_shot_api(struct regs *r)
     BX(r) = 0x564D;
 }
 
-void video_refresh(void)
+static void video_refresh_(void);
+void video_refresh(void) { rlock_take(&video_lock); video_refresh_(); rlock_drop(&video_lock); }
+static void video_refresh_(void)
 {
     static int busy;
     if (busy) return;
@@ -1490,11 +1508,12 @@ void video_refresh(void)
     }
     layout();
     if (palette_dirty) {
+        palette_dirty = 0;                       /* first: the DAC is written without video_lock */
+        __asm__ volatile("" ::: "memory");
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
             const u8 *d = vga_dac[i & dac_mask];
             pal[i] = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
         }
-        palette_dirty = 0;
         full_redraw = 1;
     }
     if (console_on) { refresh_text(console_cells, -1); }
@@ -1513,7 +1532,9 @@ void video_refresh(void)
 
 /* A full screen of text over whatever the guest shows: title, then msg.
    attr: 4Fh white on red (vmdos stopped), 1Fh white on blue (the log). */
-void video_console_attr(const char *title, const char *msg, u16 attr)
+static void video_console_attr_(const char *title, const char *msg, u16 attr);
+void video_console_attr(const char *title, const char *msg, u16 attr) { rlock_take(&video_lock); video_console_attr_(title, msg, attr); rlock_drop(&video_lock); }
+static void video_console_attr_(const char *title, const char *msg, u16 attr)
 {
     u16 a = (u16)(attr << 8);
     for (int i = 0; i < 80 * 25; i++) console_cells[i] = a | 0x20;
@@ -1537,13 +1558,17 @@ void video_console(const char *msg) { video_console_attr("vmdos stopped", msg, 0
 /* Around a console the guest gets back (Ctrl+Shift+F10, the log): its
    mode, text width and palette, then a full redraw. */
 static struct { int on, mode, cols, dac8; u8 mask; u8 dac[256][3]; } saved;
-void video_console_save(void)
+static void video_console_save_(void);
+void video_console_save(void) { rlock_take(&video_lock); video_console_save_(); rlock_drop(&video_lock); }
+static void video_console_save_(void)
 {
     saved.on = 1; saved.mode = video_mode; saved.cols = text_cols;
     saved.dac8 = dac8; saved.mask = dac_mask;                  /* the 8-bit DAC too: the console's is 6-bit */
     memcpy(saved.dac, vga_dac, sizeof vga_dac);
 }
-void video_console_restore(void)
+static void video_console_restore_(void);
+void video_console_restore(void) { rlock_take(&video_lock); video_console_restore_(); rlock_drop(&video_lock); }
+static void video_console_restore_(void)
 {
     if (!saved.on) return;
     saved.on = 0;
@@ -1674,7 +1699,10 @@ void video_port_out(u16 port, u8 v)
             kprintf("VDD code after (int 20h calls that ran are patched):\n"); hv_dump_lin(gc6_eip - 0x40, 0x180);
             vdd_code_at = gc6_eip; }
     }
+    if (port >= 0x3C6 && port <= 0x3C9) { video_port_out_(port, v); return; }   /* the DAC: data only (palette fades) */
+    rlock_take(&video_lock);
     video_port_out_(port, v);
+    rlock_drop(&video_lock);
 }
 static void video_port_out_(u16 port, u8 v)
 {
@@ -1994,7 +2022,9 @@ static int mode_replay(void)
     return 1;
 }
 
-int video_int10(struct regs *r)
+static int video_int10_(struct regs *r);
+int video_int10(struct regs *r) { rlock_take(&video_lock); int v = video_int10_(r); rlock_drop(&video_lock); return v; }
+static int video_int10_(struct regs *r)
 {
     int cont = 0;
     if (vgalog < 0) vgalog = strstr(cmdline, "vgalog") != 0;
@@ -2129,7 +2159,9 @@ int video_int10(struct regs *r)
 }
 
 /* Text for the user from the monitor (e.g. why a DPMI client was stopped). */
-void video_puts(const char *s)
+static void video_puts_(const char *s);
+void video_puts(const char *s) { rlock_take(&video_lock); video_puts_(s); rlock_drop(&video_lock); }
+static void video_puts_(const char *s)
 {
     if (!is_text(video_mode)) video_set_mode(3, 1);
     while (*s) teletype((u8)*s++, rd8(BDA + 0x62), 7);

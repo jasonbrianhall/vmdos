@@ -130,12 +130,14 @@ void kprintf(const char *fmt, ...)
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+    rlock_take(&log_lock);                        /* the helper CPU logs too */
     for (char *p = buf; *p; p++) {
         if (*p == '\n') serial_putc('\r');
         serial_putc(*p);
         bootcon_putc(*p);
         logbuf[logpos++ % sizeof logbuf] = *p;
     }
+    rlock_drop(&log_lock);
 }
 
 /* ---- the "vmdos stopped" screen: the message, then the log, scrollable
@@ -318,6 +320,7 @@ void panic(const char *fmt, ...)
 {
     char buf[1024];
     cli();
+    smp_active = 0;                               /* the helper CPU stops drawing over the screen */
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);

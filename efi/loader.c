@@ -330,6 +330,24 @@ static int usable_after_exit(UINT32 t) {
 
 static int overlaps(UINT64 a, UINT64 alen, UINT64 b, UINT64 blen) { return a < b + blen && b < a + alen; }
 
+// The ACPI RSDP from the firmware's configuration table (2.0 preferred),
+// for the kernel's rsdp= (it finds the CPUs in the MADT): 0 if none or
+// above 4 GiB. Without the firmware it can't be found later.
+static UINT32 acpi_rsdp(EFI_SYSTEM_TABLE* st) {
+    static const UINT8 acpi20[16] = { 0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11, 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 };
+    static const UINT8 acpi10[16] = { 0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11, 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d };
+    UINT64 found = 0;
+    for (int want = 0; want < 2 && !found; want++)
+        for (UINTN i = 0; i < st->NumberOfTableEntries && !found; i++) {
+            const UINT8* g = (const UINT8*)&st->ConfigurationTable[i].VendorGuid;
+            const UINT8* w = want ? acpi10 : acpi20;
+            int same = 1;
+            for (int k = 0; k < 16; k++) if (g[k] != w[k]) same = 0;
+            if (same) found = (UINT64)(UINTN)st->ConfigurationTable[i].VendorTable;
+        }
+    return found >> 32 ? 0 : (UINT32)found;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     InitializeLib(image, st);
     ST_ = st;
@@ -535,6 +553,14 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     mod->string = (UINT32)(UINTN)modname;
     copy(cmdline, "vmdos.efi ", 10);
     copy(cmdline + 10, opts, sizeof opts);
+    UINT32 rsdp = acpi_rsdp(st);
+    if (rsdp) {
+        char* e = cmdline;
+        while (*e) e++;
+        copy(e, " rsdp=", 6);
+        for (int k = 0; k < 8; k++) e[6 + k] = "0123456789abcdef"[(rsdp >> (28 - 4 * k)) & 15];
+        e[14] = 0;
+    }
     mbi->flags = (1 << 2) | (1 << 3) | (1 << 12);
     mbi->cmdline = (UINT32)(UINTN)cmdline;
     for (int i = 0; i < n_iso; i++) {

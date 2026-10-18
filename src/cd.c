@@ -594,9 +594,11 @@ static int fill_ring(u32 most)
     int e = unit_raw(pl.unit, pl.fill, k, xbuf);
     if (e) return e;
     const u32 *s = (const u32 *)xbuf;
+    rlock_take(&sound_lock);                     /* cdaudio_mix on the helper CPU */
     for (u32 i = 0; i < k * SPF; i++) ring[(wr + i) & (RING - 1)] = s[i];
     wr += k * SPF;
     pl.fill += k;
+    rlock_drop(&sound_lock);
     return 0;
 }
 
@@ -639,15 +641,25 @@ static void stop_all(void)
     pl.state = 0;
 }
 
-void cdaudio_stop(void) { stop_all(); pl.unit = -1; }
+/* The play's state changes under sound_lock: cdaudio_mix may be running on
+   the helper CPU. (Not the disk reads: fill_ring takes it for the copy.) */
+void cdaudio_stop(void) { rlock_take(&sound_lock); stop_all(); pl.unit = -1; rlock_drop(&sound_lock); }
 
-static void audio_unit_gone(int unit) { if (pl.unit == unit) { stop_all(); pl.unit = -1; } }
+static void audio_unit_gone(int unit) { if (pl.unit == unit) cdaudio_stop(); }
 
 /* Start playing [start, end) on a unit. ST_DONE-style status. */
 #define ST_DONE 0x0100
 #define ST_BUSY 0x0200
 #define ST_ERR(e) (0x8100 | (e))          /* 2 not ready, 3 unknown command, 8 sector not found, F invalid disk change */
+static u16 play_(int unit, u32 start, u32 end);
 static u16 play(int unit, u32 start, u32 end)
+{
+    rlock_take(&sound_lock);
+    u16 st = play_(unit, start, end);
+    rlock_drop(&sound_lock);
+    return st;
+}
+static u16 play_(int unit, u32 start, u32 end)
 {
     stop_all();
     pl.unit = unit;
@@ -885,8 +897,8 @@ void cd_api(struct regs *r)
         case 12: st = ioctl_out(unit, cb); break;
         case 128: st = read_long(unit, rh); break;
         case 132: st = play_request(unit, rh); break;
-        case 133: st = stop_audio(unit); break;
-        case 136: st = resume_audio(unit); break;
+        case 133: rlock_take(&sound_lock); st = stop_audio(unit); rlock_drop(&sound_lock); break;
+        case 136: rlock_take(&sound_lock); st = resume_audio(unit); rlock_drop(&sound_lock); break;
         case 13: case 14: case 130: case 131: st = ST_DONE; break;    /* open, close, prefetch, seek */
         default: st = ST_ERR(3);
         }
