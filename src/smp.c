@@ -139,6 +139,7 @@ void ap_main(void)
             frame = 0;
             video_refresh();
             rlock_drop(&video_lock);
+            video_refresh_late();
         }
     }
 }
