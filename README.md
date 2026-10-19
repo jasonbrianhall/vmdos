@@ -246,6 +246,15 @@ Slowdown for games that time themselves by the CPU (as MoSlo does):
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
+Serial ports: by default COM1 carries vmdos's log and DOS sees no serial
+port. `serial=dos` on the kernel command line keeps the log off it and gives
+DOS the PC's own COM1 (3F8h, IRQ 4) and COM2 (2F8h, IRQ 3), whichever are
+there: the program drives the UART directly, its interrupts reach DOS, and
+INT 14h and the BIOS data area know the ports, so null-modem links, terminal
+programs and serial mice work. Only those two legacy ports: a motherboard's
+COM header usually is COM1, but a USB-to-serial adapter or a PCIe card at
+another address isn't seen. `serial=off` only turns the log off.
+
 Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
 Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.

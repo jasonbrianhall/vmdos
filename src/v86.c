@@ -542,6 +542,8 @@ struct regs *isr_dispatch(struct regs *r)
             } else vif_off = 0;
         } else if (irq == 1) {
             vkbd_real_scancode(inb(0x60));
+        } else if (irq == 3 || irq == 4) {
+            serial_irq(irq);                         /* serial=dos: the UART's, for the guest */
         } else if (irq == 12) {
             mouse_ps2_byte(inb(0x60));
         }

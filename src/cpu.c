@@ -550,7 +550,7 @@ static int n_cdmod;
 
 void kmain(u32 magic, struct mb_info *mb)
 {
-    serial_init();
+    serial_init(magic == 0x2BADB002 && (mb->flags & 4) && mb->cmdline ? (const char *)(uintptr_t)mb->cmdline : 0);
     if (magic == 0x2BADB002 && (mb->flags & (1 << 12)) && mb->fb_type == 1 &&
         !((mb->flags & 4) && mb->cmdline && strstr((const char *)(uintptr_t)mb->cmdline, "bootlog=off")))
         bootcon_start(mb->fb_addr, mb->fb_pitch, mb->fb_width, mb->fb_height, mb->fb_bpp, mb->rpos, mb->gpos, mb->bpos);
@@ -702,6 +702,7 @@ void kmain(u32 magic, struct mb_info *mb)
     disk_init();
     vdev_init();
     speed_init();
+    serial_dos_init();                            /* serial=dos: before the BIOS lists the ports */
     bios_init();
     sound_init();
     net_init();

@@ -100,8 +100,20 @@ int snprintf(char *buf, size_t n, const char *fmt, ...)
 }
 
 #define COM1 0x3F8
-void serial_init(void)
+/* serial=off: no log on COM1; serial=dos: nor that, and COM1/COM2 are
+   DOS's (serial.c). Read from the loader's command line, before the
+   first line of the log, so the port never sees it. */
+static int serial_mode;                          /* 0: the log, 1: off, 2: DOS's */
+int serial_mode_dos(void) { return serial_mode == 2; }
+
+void serial_init(const char *cmd)
 {
+    const char *s = cmd ? strstr(cmd, "serial=") : 0;
+    if (s && (s == cmd || s[-1] == ' ')) {
+        if (!strncmp(s + 7, "dos", 3)) serial_mode = 2;
+        else if (!strncmp(s + 7, "off", 3)) serial_mode = 1;
+    }
+    if (serial_mode) return;                     /* serial_ok stays 0: the port untouched */
     outb(COM1 + 1, 0);
     outb(COM1 + 3, 0x80);
     outb(COM1 + 0, 1);           /* 115200 */
