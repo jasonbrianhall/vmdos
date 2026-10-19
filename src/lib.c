@@ -104,6 +104,50 @@ int snprintf(char *buf, size_t n, const char *fmt, ...)
    DOS's (serial.c). Read from the loader's command line, before the
    first line of the log, so the port never sees it. */
 static int serial_mode;                          /* 0: the log, 1: off, 2: DOS's */
+
+/* Time stamps on the log ("[  12.345] "): seconds since the CPU was reset
+   (the TSC), so the first line also shows how long the firmware and the
+   loader took. The TSC is timed against PIT channel 2 for 10 ms in
+   serial_init. logtime=off leaves them out. */
+static u32 tsc_per_ms;                           /* 0: no time stamps */
+static int at_bol = 1;
+
+static u64 tsc_now(void)
+{
+    u32 lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (u64)hi << 32 | lo;
+}
+
+static void tsc_calibrate(void)
+{
+    u32 a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(d & 0x10)) return;                     /* no TSC */
+    u8 p61 = inb(0x61);
+    outb(0x61, (p61 & ~0x02) | 0x01);            /* gate on, speaker off */
+    outb(0x43, 0xB0);                            /* channel 2, mode 0, lo/hi */
+    outb(0x42, 11932 & 0xFF); outb(0x42, 11932 >> 8);   /* 10 ms at 1.193182 MHz */
+    u64 t0 = tsc_now();
+    u32 n = 0;
+    while (!(inb(0x61) & 0x20) && ++n < 50000000) ;
+    u64 t1 = tsc_now();
+    outb(0x61, p61);
+    if (n >= 50000000) return;                   /* no PIT channel 2 (some new chipsets) */
+    u32 dlo = (u32)(t1 - t0), dhi = (u32)((t1 - t0) >> 32);
+    if (dhi) return;
+    tsc_per_ms = dlo / 10;
+}
+
+static u32 ms_since_reset(void)
+{
+    u64 t = tsc_now();
+    u32 lo = (u32)t, hi = (u32)(t >> 32), q, r;
+    if (!tsc_per_ms || hi >= tsc_per_ms) return 0;
+    __asm__("divl %4" : "=a"(q), "=d"(r) : "a"(lo), "d"(hi), "rm"(tsc_per_ms));
+    (void)r;
+    return q;
+}
 int serial_mode_dos(void) { return serial_mode == 2; }
 
 void serial_init(const char *cmd)
@@ -113,6 +157,7 @@ void serial_init(const char *cmd)
         if (!strncmp(s + 7, "dos", 3)) serial_mode = 2;
         else if (!strncmp(s + 7, "off", 3)) serial_mode = 1;
     }
+    if (!(cmd && strstr(cmd, "logtime=off"))) tsc_calibrate();
     if (serial_mode) return;                     /* serial_ok stays 0: the port untouched */
     outb(COM1 + 1, 0);
     outb(COM1 + 3, 0x80);
@@ -138,17 +183,33 @@ static u32 logpos;
 
 void kprintf(const char *fmt, ...)
 {
-    char buf[256];
+    char buf[256], ts[24];
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     rlock_take(&log_lock);                        /* the helper CPU logs too */
     for (char *p = buf; *p; p++) {
+        if (at_bol && tsc_per_ms && *p != '\n') {
+            u32 ms = ms_since_reset();
+            snprintf(ts, sizeof ts, "[%4u.%03u] ", ms / 1000, ms % 1000);
+            for (char *t = ts; *t; t++) { serial_putc(*t); bootcon_putc(*t); logbuf[logpos++ % sizeof logbuf] = *t; }
+        }
+        at_bol = *p == '\n';
         if (*p == '\n') serial_putc('\r');
         serial_putc(*p);
         bootcon_putc(*p);
         logbuf[logpos++ % sizeof logbuf] = *p;
     }
+    rlock_drop(&log_lock);
+}
+
+/* The log so far onto the boot console, when it starts late (a
+   framebuffer above 4 GiB: only reachable once paging is on). */
+void log_to_bootcon(void)
+{
+    rlock_take(&log_lock);
+    for (u32 p = logpos > sizeof logbuf ? logpos - sizeof logbuf : 0; p < logpos; p++)
+        bootcon_putc(logbuf[p % sizeof logbuf]);
     rlock_drop(&log_lock);
 }
 

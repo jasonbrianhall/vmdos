@@ -54,10 +54,12 @@ static void title(void)
     draw_row(0);
 }
 
-/* Multiboot framebuffer (32 bpp, below 4 GiB) at its physical address. */
-void bootcon_start(u64 addr, u32 p, u32 w, u32 h, u32 bpp, u8 rp, u8 gp, u8 bp)
+/* A 32 bpp framebuffer at addr: its physical address before paging (below
+   4 GiB), or its mapping after (cpu.c starts it late for one above 4 GiB).
+   0: not usable. */
+int bootcon_start(u64 addr, u32 p, u32 w, u32 h, u32 bpp, u8 rp, u8 gp, u8 bp)
 {
-    if (bpp != 32 || !addr || addr + (u64)p * h > 0x100000000ull || w < 320 || h < 200) return;
+    if (bpp != 32 || !addr || addr + (u64)p * h > 0x100000000ull || w < 320 || h < 200) return 0;
     fb = (volatile u8 *)(uintptr_t)addr; pitch = p; width = w; height = h;
     rpos = rp; gpos = gp; bpos = bp;
     scale = w >= 1600 && h >= 1000 ? 2 : 1;
@@ -72,6 +74,7 @@ void bootcon_start(u64 addr, u32 p, u32 w, u32 h, u32 bpp, u8 rp, u8 gp, u8 bp)
     row = 1; col = 0;
     bootcon_on = 1;
     title();
+    return 1;
 }
 
 /* Paging is on: the framebuffer is at lin now (0: not mapped; stop). */

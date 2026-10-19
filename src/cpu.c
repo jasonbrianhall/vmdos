@@ -686,7 +686,10 @@ void kmain(u32 magic, struct mb_info *mb)
     }
 
     paging_init();
-    bootcon_remap(fb_len ? fb_lin : 0);
+    if (bootcon_on) bootcon_remap(fb_len ? fb_lin : 0);
+    else if (have_fb && fb_len && !strstr(cmdline, "bootlog=off") &&   /* above 4 GiB: only now */
+             bootcon_start(fb_lin, fbi.fb_pitch, fbi.fb_width, fbi.fb_height, fbi.fb_bpp, fbi.rpos, fbi.gpos, fbi.bpos))
+        log_to_bootcon();
     tables_init();
     pic_init();
     pit_init();

@@ -342,7 +342,8 @@ void video_console_save(void);
 void video_console_restore(void);
 /* ---- bootcon.c: the log on screen while vmdos starts ---- */
 extern int bootcon_on;
-void bootcon_start(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp, u8 rpos, u8 gpos, u8 bpos);
+int bootcon_start(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp, u8 rpos, u8 gpos, u8 bpos);
+void log_to_bootcon(void);
 void bootcon_remap(u32 lin);
 void bootcon_stop(void);
 void bootcon_putc(char c);
