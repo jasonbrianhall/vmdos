@@ -528,7 +528,7 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
     case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
     case 0x13: return int13(r);
-    case 0x14: AH(r) = 0x80; return BIOS_DONEF;
+    case 0x14: serial_int14(r); return BIOS_DONEF;     /* serial=dos (serial.c); else time-out */
     case 0x15: return int15(r);
     case 0x16: return int16(r);
     case 0x17: AH(r) = 0x09; return BIOS_DONEF;
@@ -580,6 +580,8 @@ void bios_init(void)
     u16 equip = 0x0065;                                  /* 80x25 color, PS/2 mouse port, two floppy drives (floppy.c) */
     extern u32 fpu_present;
     if (fpu_present) equip |= 2;
+    for (int i = 0; i < 4; i++) wr16(BDA + i * 2, serial_dos_port(i));   /* serial=dos: COM1, COM2 */
+    for (int i = 0; serial_dos_port(i); i++) equip += 0x200;             /* serial ports, bits 9-11 */
     wr16(BDA + 0x10, equip);
     wr16(BDA + 0x13, 640);
     wr16(BDA + 0x1A, 0x1E); wr16(BDA + 0x1C, 0x1E);

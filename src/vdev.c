@@ -603,6 +603,7 @@ static u8 in8(u16 port)
     case 0x201: return joy_port_in();                    /* game port (joy.c) */
     }
     u8 v;
+    if (serial_port(port, 0, &v)) return v;             /* serial=dos: the real UART (serial.c) */
     if (sound_port(port, 0, &v)) return v;
     if (port >= 0x3B0 && port <= 0x3DF) return (u8)video_port_in(port);
     dbg(2, "guest in  %04x\n", port);
@@ -627,6 +628,7 @@ static void out8(u16 port, u8 v)
     case 0x80: case 0xED: return;               /* POST / delay ports */
     case 0x201: joy_port_out(); return;
     }
+    if (serial_port(port, 1, &v)) return;
     if (sound_port(port, 1, &v)) return;
     if (port >= 0x3B0 && port <= 0x3DF) { video_port_out(port, v); return; }
     dbg(2, "guest out %04x <- %02x\n", port, v);

@@ -84,7 +84,14 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strstr(const char *h, const char *n);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
-void serial_init(void);
+void serial_init(const char *cmd);            /* the log on COM1 (or not: serial=off / serial=dos) */
+int serial_mode_dos(void);
+void serial_dos_init(void);                   /* serial.c: serial=dos, COM1/COM2 for DOS */
+u16 serial_dos_port(int n);                   /* DOS's n-th serial port's base, or 0 */
+int serial_port(u16 port, int write, u8 *v);  /* a guest access to a DOS-owned UART */
+void serial_irq(int irq);                     /* the real IRQ 3 or 4 */
+struct regs;
+void serial_int14(struct regs *r);
 void kprintf(const char *fmt, ...);
 extern int debug_level;
 #define dbg(lvl, ...) do { if (debug_level >= (lvl)) kprintf(__VA_ARGS__); } while (0)
