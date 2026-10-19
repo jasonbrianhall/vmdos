@@ -69,7 +69,7 @@ with vmdos.efi as BOOTX64.EFI.
 The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
 `C=ram`): then esp.img carries EFI/BOOT/dos.img, the ISO carries the GRUB
 module and `make run` passes it to QEMU, as a fallback for machines whose
-disk vmdos can't drive (not SATA, IDE or USB) and for `c=ram`.
+disk vmdos can't drive (not SATA, IDE, virtio, NVMe or USB) and for `c=ram`.
 
 Without a C: (no disk with DOS that vmdos can drive, and no
 dos.img), vmdos boots the built-in boot floppy instead of stopping: every

@@ -445,17 +445,19 @@ void disk_init(void)
         if (hint_sig_len != 4 && hint_sig_len != 16) hint_sig_len = 0;
     }
     int want_ram = strstr(cmdline, "c=ram") != 0;
-    if (!want_ram) {
-        bounce = phys_try_alloc(BOUNCE_SECS * 512);
-        for (unsigned k = 0; k < sizeof drivers / sizeof *drivers; k++) {
-            const struct blk_driver *b = drivers[k];
-            if ((b->off && strstr(cmdline, b->off)) || (b->dma && !bounce)) continue;
-            int n = b->start();
-            for (int i = 0; i < n && n_dev < MAX_DEVS; i++) {
-                dev[n_dev].drv = b; dev[n_dev].idx = i; dev[n_dev].sectors = b->sectors(i); dev[n_dev].name = b->name(i);
-                n_dev++;
-            }
+    /* The disks, also with c=ram: C: isn't taken from them then, but VMHD
+       still reaches them. */
+    bounce = phys_try_alloc(BOUNCE_SECS * 512);
+    for (unsigned k = 0; k < sizeof drivers / sizeof *drivers; k++) {
+        const struct blk_driver *b = drivers[k];
+        if ((b->off && strstr(cmdline, b->off)) || (b->dma && !bounce)) continue;
+        int n = b->start();
+        for (int i = 0; i < n && n_dev < MAX_DEVS; i++) {
+            dev[n_dev].drv = b; dev[n_dev].idx = i; dev[n_dev].sectors = b->sectors(i); dev[n_dev].name = b->name(i);
+            n_dev++;
         }
+    }
+    if (!want_ram) {
         /* USB sticks show up a little after the controller reset (USB 3 link
            training, slow sticks): keep polling for a while, longer when
            vmdos.efi says it came from a USB device (bootdev=usb), until the
