@@ -303,34 +303,44 @@ static void kq_put(u8 v)
 /* ---------------- slowdown, like MoSlo ----------------
    Old games time themselves by the CPU. After each 1 ms timer tick the
    monitor waits, so the guest runs only a slice of every millisecond:
-   speed= on the command line (percent of full speed, e.g. speed=5 or
-   speed=0.3), Ctrl+Shift+F11 slower and Ctrl+Shift+F12 faster, or
-   VMSPEED.COM (INT 2Fh AX=5653h, BX = permille, 0 to ask). */
-static const u16 speed_steps[] = { 1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 700, 1000 };   /* permille */
+   speed= on the command line (percent of full speed, to 0.01%: speed=5,
+   speed=0.3, speed=0.05), Ctrl+Shift+F11 slower and Ctrl+Shift+F12 faster,
+   or VMSPEED.COM (INT 2Fh AX=5653h; BX = permille, 0 to ask, AX = permille
+   back; with CX = 'HP', BX and AX in hundredths of a percent). */
+static const u16 speed_steps[] = { 1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 700,
+                                   1000, 1500, 2000, 3000, 5000, 7000, 10000 };   /* hundredths of a percent */
 #define N_SPEED (sizeof speed_steps / sizeof speed_steps[0])
-static u32 speed_pm = 1000;
+#define SPEED_FULL 10000u
+static u32 speed_u = SPEED_FULL;             /* hundredths of a percent */
 
-static void speed_set(u32 pm, const char *why)
+static void speed_set(u32 u, const char *why)
 {
-    if (pm < 1) pm = 1;
-    if (pm > 1000) pm = 1000;
-    speed_pm = pm;
-    kprintf("speed: %u.%u%% of full (%s)\n", pm / 10, pm % 10, why);
+    if (u < 1) u = 1;
+    if (u > SPEED_FULL) u = SPEED_FULL;
+    speed_u = u;
+    u32 ip = u / 100, fr = u % 100;
+    kprintf("speed: %u.%u%u%% of full (%s)\n", ip, fr / 10, fr % 10, why);
     char msg[32] = "Speed ";
     int n = 6;
-    if (pm / 10 >= 100) msg[n++] = '0' + pm / 1000;
-    if (pm / 10 >= 10) msg[n++] = '0' + pm / 100 % 10;
-    msg[n++] = '0' + pm / 10 % 10;
-    if (pm % 10) { msg[n++] = '.'; msg[n++] = '0' + pm % 10; }
+    if (ip >= 100) msg[n++] = '0' + ip / 100;
+    if (ip >= 10) msg[n++] = '0' + ip / 10 % 10;
+    msg[n++] = '0' + ip % 10;
+    if (fr) {
+        msg[n++] = '.';
+        msg[n++] = '0' + fr / 10;
+        if (fr % 10) msg[n++] = '0' + fr % 10;
+    }
     msg[n++] = '%'; msg[n] = 0;
     video_osd(msg);
 }
 
-/* INT 2Fh AX=5653h: BX = permille to set (0: just ask); AX = current. */
-u32 speed_api(u32 pm)
+/* INT 2Fh AX=5653h: BX = speed to set (0: just ask); AX = current. In
+   permille, or with fine set (CX = 'HP') in hundredths of a percent. */
+u32 speed_api(u32 v, int fine)
 {
-    if (pm) speed_set(pm, "VMSPEED");
-    return speed_pm;
+    if (v) speed_set(fine ? v : v * 10, "VMSPEED");
+    if (fine) return speed_u;
+    return speed_u >= 10 ? speed_u / 10 : 1;
 }
 
 void speed_init(void)
@@ -339,36 +349,81 @@ void speed_init(void)
     if (!p) return;
     u32 v = 0, frac = 0;
     for (p += 6; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
-    if (*p == '.' && p[1] >= '0' && p[1] <= '9') frac = p[1] - '0';
-    speed_set(v * 10 + frac, "command line");
+    if (*p == '.' && p[1] >= '0' && p[1] <= '9') {
+        frac = (p[1] - '0') * 10;
+        if (p[2] >= '0' && p[2] <= '9') frac += p[2] - '0';
+    }
+    speed_set(v * 100 + frac, "command line");
 }
 
 static void speed_step(int dir)
 {
     unsigned i = 0;
-    while (i < N_SPEED - 1 && speed_steps[i] < speed_pm) i++;    /* nearest step at or above */
-    if (dir > 0 && speed_steps[i] == speed_pm && i < N_SPEED - 1) i++;
+    while (i < N_SPEED - 1 && speed_steps[i] < speed_u) i++;    /* nearest step at or above */
+    if (dir > 0 && speed_steps[i] == speed_u && i < N_SPEED - 1) i++;
     else if (dir < 0 && i > 0) i--;
     speed_set(speed_steps[i], dir > 0 ? "faster" : "slower");
 }
 
-/* Called at the end of a timer tick that interrupted the guest: wait in
-   proportion to how long the guest has run since the last wait (so the
-   share is right however regularly ticks arrive), with interrupts on so
-   the monitor's clock, keyboard and sound go on meanwhile. */
+/* The TSC, for waits finer than the PIT's 0.84 us: at 0.1% the guest's
+   share of a tick is under a microsecond, at 0.01% a tenth of one. Measured against the PIT the
+   first time it's needed; without one (a 386 or 486), the PIT. */
+static int tsc_state;                        /* 0: not yet measured, 1: tsc_per_k set, -1: none */
+static u32 tsc_per_k;                        /* TSC counts per 1024 PIT clocks */
+
+static u64 rdtsc64(void)
+{
+    u32 lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (u64)hi << 32 | lo;
+}
+
+static void tsc_measure(void)                /* interrupts off, just after a tick */
+{
+    u32 a, b;
+    tsc_state = -1;
+    __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                     : "=&r"(a), "=&r"(b));
+    if (!((a ^ b) & 0x200000)) return;       /* no CPUID */
+    u32 eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (!(edx & (1u << 4))) return;          /* no TSC */
+    u64 t0 = rdtsc64(), t1;
+    u32 p0 = pit_clock(), p1;
+    do { t1 = rdtsc64(); p1 = pit_clock(); } while (p1 - p0 < 600);   /* half a tick: one wrap at most */
+    u32 d = (u32)(t1 - t0), n = p1 - p0;   /* no 64-bit division here: no libgcc */
+    tsc_per_k = d / n * 1024 + d % n * 1024 / n;
+    tsc_state = tsc_per_k ? 1 : -1;
+    kprintf("speed: TSC %u kHz\n", (u32)((u64)tsc_per_k * (PIT_HZ / 1000) >> 10));
+}
+
+/* Called at the very end of a timer tick that interrupted the guest. The
+   guest gets its share of every 1 ms tick, at the end of it: the monitor
+   waits (interrupts on, so keyboard and sound go on) until that share
+   before the next tick, then lets it run until the tick takes it back.
+   So even at 0.01% it runs a little every millisecond, not in bursts:
+   a millisecond of a modern CPU is seconds of an 8088's work. */
 void speed_throttle(void)
 {
-    static u32 last;
+    if (speed_u >= SPEED_FULL) return;
+    if (!tsc_state) tsc_measure();
+    u32 next = (ticks + 1) * PIT_PER_TICK;   /* the next tick, on pit_clock's scale */
+    u64 t0 = tsc_state > 0 ? rdtsc64() : 0;
     u32 now = pit_clock();
-    if (speed_pm >= 1000) { last = now; return; }
-    u32 ran = now - last;
-    if (ran > 1193 * 20) ran = 1193 * 20;
-    u32 wait = ran * (1000 - speed_pm) / speed_pm;
-    if (wait > 1193 * 200) wait = 1193 * 200;
+    int32_t left = (int32_t)(next - now);    /* PIT clocks to the next tick */
+    if (left <= 0 || left > (int32_t)PIT_PER_TICK) return;   /* already late: the tick's own work took it */
     sti();
-    while (pit_clock() - now < wait) __asm__ volatile("pause");
+    if (tsc_state > 0) {
+        u32 tick = (u32)((u64)tsc_per_k * PIT_PER_TICK >> 10);
+        u32 run = tick / SPEED_FULL * speed_u + tick % SPEED_FULL * speed_u / SPEED_FULL;   /* the guest's share, in TSC counts */
+        u32 gap = (u32)((u64)(u32)left * tsc_per_k >> 10);
+        u64 end = t0 + gap - (run < gap ? run : gap);
+        while (rdtsc64() < end) __asm__ volatile("pause");
+    } else {
+        u32 target = next - PIT_PER_TICK * speed_u / SPEED_FULL;
+        while ((int32_t)(pit_clock() - target) < 0) __asm__ volatile("pause");
+    }
     __asm__ volatile("cli");
-    last = pit_clock();
 }
 
 /* Real keyboard bytes (PS/2 IRQ and USB): Ctrl+Shift+F11/F12/F2 stay here. */
