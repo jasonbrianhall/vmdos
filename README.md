@@ -212,6 +212,15 @@ takes mode N from that list, `vga=640x480` the mode of that size, and
 scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
 submenu's sizes.
 
+Which screen (UEFI, before `vga=`): `display=ask` lists the display outputs
+the firmware has (a laptop's panel and its HDMI port, two graphics cards)
+with their kind and asks for a number, `display=N` takes output N,
+`display=external` the first HDMI/DisplayPort/DVI/VGA one and
+`display=internal` the built-in panel. Without it vmdos uses the screen the
+firmware shows its console on. Some firmware gives the GPU only one output
+and picks the connector itself; then there is nothing to choose here, and
+the firmware's own display setting (if it has one) decides.
+
 The picture is scaled to the largest 4:3 box that fits (text too),
 black bars at the sides of a wide screen, by whole pixels. `scale=smooth`
 blends instead, as a QEMU window does (needs a 24- or 32-bit framebuffer):

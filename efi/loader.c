@@ -53,6 +53,16 @@ static void wait_key(void) {
     uefi_call_wrapper(ST_->BootServices->WaitForEvent, 3, 1, &ST_->ConIn->WaitForKey, &idx);
 }
 
+// A key, or secs seconds with none.
+static void wait_key_secs(int secs) {
+    uefi_call_wrapper(ST_->ConIn->Reset, 2, ST_->ConIn, FALSE);
+    for (int i = 0; i < secs * 100; i++) {
+        EFI_INPUT_KEY k;
+        if (!EFI_ERROR(uefi_call_wrapper(ST_->ConIn->ReadKeyStroke, 2, ST_->ConIn, &k))) return;
+        uefi_call_wrapper(ST_->BootServices->Stall, 1, 10000);
+    }
+}
+
 static void fail(CHAR16* msg) {
     Print(L"\r\nvmdos.efi: %s\r\nPress any key to return.\r\n", msg);
     wait_key();
@@ -73,11 +83,8 @@ static int gop_format_ok(EFI_GRAPHICS_PIXEL_FORMAT f) {
 
 // Keep the current mode if it's 32-bit and at least 640x400; else the
 // smallest 32-bit mode that is (text at 1:1 is crisp and fast to draw).
-static EFI_GRAPHICS_OUTPUT_PROTOCOL* setup_gop(void) {
-    EFI_GUID guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = NULL;
-    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateProtocol, 3, &guid, NULL, (void**)&gop)) || !gop)
-        return NULL;
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* fit_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
+    if (!gop || !gop->Mode || !gop->Mode->Info) return NULL;
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* cur = gop->Mode->Info;
     if (gop_format_ok(cur->PixelFormat) && cur->HorizontalResolution >= 640 && cur->VerticalResolution >= 400)
         return gop;
@@ -93,6 +100,15 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* setup_gop(void) {
     if (best == (UINT32)-1) return gop_format_ok(cur->PixelFormat) ? gop : NULL;
     uefi_call_wrapper(gop->SetMode, 2, gop, best);
     return gop;
+}
+
+// The firmware's own choice: the GOP the console draws on.
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* setup_gop(void) {
+    EFI_GUID guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = NULL;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateProtocol, 3, &guid, NULL, (void**)&gop)) || !gop)
+        return NULL;
+    return fit_mode(gop);
 }
 
 static void* read_file(EFI_HANDLE image, CHAR16* name, UINTN* size) {
@@ -323,6 +339,127 @@ static void apply_vga(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop, const char* opts) {
           gop->Mode->Info->VerticalResolution, m, gop->Mode->Info->HorizontalResolution, gop->Mode->Info->VerticalResolution);
 }
 
+// display= (kernel options): which screen vmdos draws on, when the firmware
+// has more than one display output (a laptop's panel and its HDMI port, two
+// graphics cards). Like vga=, only possible here: the kernel draws on the
+// framebuffer of the output picked now. display=ask lists them and asks,
+// display=N takes output N, display=external the first external one
+// (HDMI, DisplayPort, DVI, VGA), display=internal the built-in panel.
+// Outputs are the GOP handles with a device path (the console splitter
+// has none); an ACPI _ADR node in it, where the firmware gives one, says
+// what kind of connector it is (ACPI _DOD display type, bits 11-8).
+#define MAX_OUTS 8
+struct Output { EFI_GRAPHICS_OUTPUT_PROTOCOL* gop; CHAR16* path; int type; };
+enum { DT_OTHER = 0, DT_CRT = 1, DT_TV = 2, DT_EXTERNAL = 3, DT_PANEL = 4, DT_NONE = -1 };
+
+static int output_type(EFI_DEVICE_PATH* dp) {
+    int t = DT_NONE;
+    for (int k = 0; dp && !IsDevicePathEnd(dp) && k < 64; k++, dp = NextDevicePathNode(dp)) {
+        if (DevicePathNodeLength(dp) < 4) break;
+        if (DevicePathType(dp) == ACPI_DEVICE_PATH && DevicePathSubType(dp) == ACPI_ADR_DP && DevicePathNodeLength(dp) >= 8) {
+            UINT32 adr;
+            copy(&adr, (UINT8*)dp + 4, 4);
+            if (adr & 0x80000000u) t = (int)((adr >> 8) & 0xF);    // the _DOD layout
+            else t = DT_OTHER;
+        }
+    }
+    return t;
+}
+
+static const CHAR16* type_name(int t) {
+    switch (t) {
+    case DT_CRT: return L"external (VGA)";
+    case DT_TV: return L"TV out";
+    case DT_EXTERNAL: return L"external (HDMI/DP/DVI)";
+    case DT_PANEL: return L"built-in panel";
+    case DT_NONE: return L"display adapter";
+    default: return L"display output";
+    }
+}
+
+static int list_outputs(struct Output* o) {
+    EFI_GUID gg = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, dg = DEVICE_PATH_PROTOCOL;
+    EFI_HANDLE* hb = NULL;
+    UINTN hn = 0;
+    int n = 0;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &gg, NULL, &hn, &hb)) || !hb)
+        return 0;
+    for (UINTN i = 0; i < hn && n < MAX_OUTS; i++) {
+        EFI_DEVICE_PATH* dp = NULL;
+        EFI_GRAPHICS_OUTPUT_PROTOCOL* g = NULL;
+        if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &dg, (void**)&dp)) || !dp) continue;
+        if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &gg, (void**)&g)) || !g || !g->Mode) continue;
+        o[n].gop = g;
+        o[n].path = DevicePathToStr(dp);
+        o[n].type = output_type(dp);
+        n++;
+    }
+    uefi_call_wrapper(ST_->BootServices->FreePool, 1, hb);
+    return n;
+}
+
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL* cur, const char* opts) {
+    const char* v = opt_value(opts, "display=");
+    if (!v) return cur;
+    static struct Output o[MAX_OUTS];
+    int n = list_outputs(o), pick = -1;
+    int ask = v[0] == 'a' && v[1] == 's' && v[2] == 'k';
+    if (n == 0) {
+        Print(L"  display=: the firmware lists no display outputs; keeping this screen\r\n");
+        if (ask) { Print(L"Press a key to go on (10 s).\r\n"); wait_key_secs(10); }
+        return cur;
+    }
+    if (ask) {
+        Print(L"\r\nDisplay outputs (* = this screen):\r\n");
+        for (int i = 0; i < n; i++) {
+            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* in = o[i].gop->Mode->Info;
+            Print(L" %c%d: %s, %dx%d\r\n      %s\r\n", o[i].gop == cur ? L'*' : L' ', i + 1, type_name(o[i].type),
+                  in ? in->HorizontalResolution : 0, in ? in->VerticalResolution : 0, o[i].path ? o[i].path : L"?");
+        }
+        if (n == 1) {
+            Print(L"  only one output: nothing to choose (the firmware may drive the others itself)\r\n"
+                  L"Press a key to go on (10 s).\r\n");
+            wait_key_secs(10);
+            return cur;
+        }
+        Print(L"Number, then Enter (Enter alone or 15 s: keep this screen): ");
+        int k = read_mode_number();
+        if (k < 1 || k > n) return cur;
+        pick = k - 1;
+    } else if (v[0] >= '0' && v[0] <= '9') {
+        int k = 0;
+        for (const char* p = v; *p >= '0' && *p <= '9' && k < 100; p++) k = k * 10 + (*p - '0');
+        if (k < 1 || k > n) { Print(L"  display=%d: there are %d outputs (display=ask lists them)\r\n", k, n); return cur; }
+        pick = k - 1;
+    } else {
+        int ext = v[0] == 'e' && v[1] == 'x' && v[2] == 't', in = v[0] == 'i' && v[1] == 'n' && v[2] == 't';
+        if (!ext && !in) { Print(L"  display=: ask, a number, external or internal\r\n"); return cur; }
+        for (int i = 0; i < n && pick < 0; i++)
+            if (ext ? (o[i].type == DT_EXTERNAL || o[i].type == DT_CRT) : o[i].type == DT_PANEL) pick = i;
+        if (pick < 0) {
+            Print(L"  display=%a: no %s output found (display=ask lists them); keeping this screen\r\n",
+                  ext ? "external" : "internal", ext ? L"external" : L"built-in panel");
+            return cur;
+        }
+    }
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* g = o[pick].gop;
+    if (g == cur) return cur;
+    // Light it up: an output the firmware wasn't showing may have no mode set
+    // yet (QueryMode says EFI_NOT_STARTED); setting one starts it.
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
+    UINTN size;
+    if (uefi_call_wrapper(g->QueryMode, 4, g, g->Mode->Mode, &size, &info) == EFI_NOT_STARTED || !g->Mode->Info ||
+        !g->Mode->Info->HorizontalResolution)
+        uefi_call_wrapper(g->SetMode, 2, g, g->Mode->Mode < g->Mode->MaxMode ? g->Mode->Mode : 0);
+    if (!fit_mode(g)) {
+        Print(L"  output %d has no 32-bit mode of 640x400 or more; keeping this screen\r\n", pick + 1);
+        return cur;
+    }
+    Print(L"  display:      output %d, %s, %dx%d\r\n", pick + 1, type_name(o[pick].type),
+          g->Mode->Info->HorizontalResolution, g->Mode->Info->VerticalResolution);
+    return g;
+}
+
 static int usable_after_exit(UINT32 t) {
     return t == EfiConventionalMemory || t == EfiBootServicesCode || t == EfiBootServicesData ||
            t == EfiLoaderCode || t == EfiLoaderData;
@@ -424,6 +561,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (cfg) Print(L"  options from  %s: %a\r\n", cfg_path, opts);
         else Print(L"  no %s (no options from it)\r\n", cfg_path);
     }
+    gop = choose_display(gop, opts);
     apply_vga(gop, opts);
     // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
     // (the kernel's SATA or USB driver reads it); dos.img only for c=ram or else.
