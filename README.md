@@ -96,7 +96,8 @@ EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
 (parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them), virtio
-disks (QEMU `-drive if=virtio`, `make run DISK=virtio`; `virtio=off` skips them) and USB
+disks (QEMU `-drive if=virtio`, `make run DISK=virtio`; `virtio=off` skips them), NVMe disks (`make run DISK=nvme`; `nvme=off` skips them; namespaces
+with 512-byte sectors) and USB
 sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
 Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature);
@@ -106,7 +107,7 @@ waits 5 s for a number (Enter or the countdown: the preferred one;
 own boot code; other DOSes through the partition's boot sector (`SYS C:`;
 MS-DOS 6.22 needs FAT12/FAT16 of at most 2 GB); other
 partitions are only touched when you put one in a VMHD drive (below; DOS
-sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe): the RAM
+sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe formatted with 4 KiB sectors, say): the RAM
 disk if built with `RAMDISK=1`. To use an
 existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
 COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)

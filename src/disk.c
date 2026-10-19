@@ -1,6 +1,6 @@
 /* Drive C: (BIOS disk 80h). Two backends:
    - a FAT partition on a real disk (any of the disk drivers, blk_*.c(pp):
-     SATA/AHCI, IDE, virtio-blk, USB mass storage): the default when one
+     SATA/AHCI, IDE, virtio-blk, NVMe, USB mass storage): the default when one
      holds KERNEL.SYS, so a vmdos ESP prepared by "make esp" (or by hand)
      is C: and changes are kept. DOS sees a virtual disk: sector 0 is a
      made-up MBR with that one partition (GPT disks too), the partition's
@@ -19,7 +19,7 @@ void usb_kick_ports(void);
 
 /* The disk drivers, in the order their disks are numbered. The hotplug
    ones (USB) last: their disks are taken in as they turn up. */
-static const struct blk_driver *const drivers[] = { &blk_ahci, &blk_ide, &blk_virtio };
+static const struct blk_driver *const drivers[] = { &blk_ahci, &blk_ide, &blk_virtio, &blk_nvme };
 static const struct blk_driver *const hot = &blk_usb;
 
 /* The real disks, 512-byte sectors: a driver and its disk number. */
@@ -507,7 +507,7 @@ void disk_init(void)
         return;
     }
     if (!disk_image)
-        panic("No C: drive: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on a SATA (AHCI), IDE, virtio or USB disk, and no boot floppy or "
+        panic("No C: drive: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on a SATA (AHCI), IDE, virtio, NVMe or USB disk, and no boot floppy or "
               "RAM disk to fall back to (floppy.img or dos.img next to vmdos.efi, a GRUB module, or QEMU -initrd).");
     disk_sectors = disk_size / 512;
     kprintf("disk: C: is the RAM disk (dos.img, %u MiB)%s\n", disk_size >> 20,
