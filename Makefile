@@ -180,15 +180,15 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 # drivers go in C:\VMDOS (on the PATH).
 VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE
-DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT $(VMDOS_FILES)
-DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/README.TXT \
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES)
+DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT \
              $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
 
 # The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
-FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT \
+FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT \
                 $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
 $(FLOPPY): $(BUILD)/fat12.bin $(VMDOS_FILES) $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS \
-           dos/floppy/AUTOEXEC.BAT tools/mkfloppy.py
+           dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT tools/mkfloppy.py
 	python3 tools/mkfloppy.py $@ $(BUILD)/fat12.bin $(FLOPPY_FILES)
 
 dos.img: $(BUILD)/fat32lba.bin $(BUILD)/fat16.bin $(DOS_DEPS) tools/mkdisk.py $(BUILD)/extra.stamp
