@@ -1,12 +1,14 @@
 ; VMSPEED.COM: set or show how fast vmdos runs DOS, in percent of full speed.
 ;   VMSPEED 2      run at 2%      VMSPEED 0.5   half a percent
+;   VMSPEED 0.05   five hundredths of a percent (the finest step: 0.01)
 ;   VMSPEED 100    full speed     VMSPEED       show the current setting
-; (INT 2Fh AX=5653h, BX = permille or 0; returns AX = permille, BX = 'VM'.)
+; (INT 2Fh AX=5653h, CX = 'HP', BX = hundredths of a percent or 0; returns
+;  AX = hundredths of a percent, BX = 'VM'. Without CX = 'HP': permille.)
 ; Ctrl+Shift+F11 / Ctrl+Shift+F12 change it while a program runs.
         org 100h
         mov si, 81h
-        xor bx, bx                      ; permille
-        xor cx, cx                      ; digits seen
+        xor bx, bx                      ; whole percent
+        xor di, di                      ; digits seen
 .skip:  lodsb
         cmp al, ' '
         je .skip
@@ -22,31 +24,44 @@
         mov dx, 10
         mul dx
         add bx, ax
-        inc cx
+        cmp bx, 100
+        jbe .intok
+        mov bx, 100                     ; more than 100%: full speed
+.intok: inc di
         lodsb
         jmp .int
-.frac:  mov ax, bx                      ; percent -> permille
-        mov dx, 10
+.frac:  mov ax, bx                      ; percent -> hundredths
+        mov dx, 100
         mul dx
         mov bx, ax
         cmp byte [si - 1], '.'
         jne .call
-        lodsb
+        lodsb                           ; tenths
         cmp al, '0'
         jb .call
         cmp al, '9'
         ja .call
         sub al, '0'
-        cbw
+        mov ah, 10
+        mul ah
         add bx, ax
-        inc cx
-.call:  or cx, cx
+        inc di
+        lodsb                           ; hundredths
+        cmp al, '0'
+        jb .call
+        cmp al, '9'
+        ja .call
+        sub al, '0'
+        xor ah, ah
+        add bx, ax
+.call:  or di, di
         jnz .set
         xor bx, bx                      ; no number: just ask
-.set:   cmp bx, 1000
+.set:   cmp bx, 10000
         jbe .ok
-        mov bx, 1000
+        mov bx, 10000
 .ok:    mov ax, 5653h
+        mov cx, 4850h                   ; 'HP': hundredths of a percent
         int 2Fh
         cmp bx, 564Dh
         jne .novm
@@ -56,18 +71,30 @@
         int 21h
         pop ax
         xor dx, dx
-        mov cx, 10
-        div cx                          ; AX = percent, DX = tenths
+        mov cx, 100
+        div cx                          ; AX = percent, DX = hundredths
         push dx
         call pnum
         pop dx
         or dx, dx
         jz .pct
-        push dx
+        mov ax, dx
+        mov cl, 10
+        div cl                          ; AL = tenths, AH = hundredths
+        push ax
         mov dl, '.'
         mov ah, 2
         int 21h
-        pop dx
+        pop ax
+        push ax
+        mov dl, al
+        add dl, '0'
+        mov ah, 2
+        int 21h
+        pop ax
+        or ah, ah
+        jz .pct
+        mov dl, ah
         add dl, '0'
         mov ah, 2
         int 21h

@@ -21,7 +21,7 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
 
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
                           (default VMSHOT.BMP)
-  VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 100)
+  VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 0.05, VMSPEED 100)
   DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
   DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
                           when it stops, or on S in the Ctrl+Shift+F10 log

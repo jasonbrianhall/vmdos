@@ -241,7 +241,7 @@ quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current
 directory (`VMSHOT WAR2.BMP` names it).
 
 Slowdown for games that time themselves by the CPU (as MoSlo does):
-`VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 100`,
+`VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 0.05`, `VMSPEED 100`,
 `VMSPEED` alone shows it), Ctrl+Shift+F11 / Ctrl+Shift+F12 step it slower /
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).

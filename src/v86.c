@@ -249,7 +249,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x564E) { net_api(r); return; }         /* VMPKT */
     if (n == 0x2F && AX(r) == 0x5649) { info_api(r); return; }        /* LSPCI / LSUSB */
     if (n == 0x2F && AX(r) == 0x5653) {                                 /* VMSPEED */
-        AX(r) = (u16)speed_api(BX(r));
+        AX(r) = (u16)speed_api(BX(r), CX(r) == 0x4850);                  /* CX = 'HP': hundredths of a percent */
         BX(r) = 0x564D;
         return;
     }

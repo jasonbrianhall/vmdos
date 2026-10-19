@@ -215,7 +215,7 @@ int fd_ram(int d, u8 *image, u32 size);       /* a floppy-sized RAM disk in driv
 int fd_is_dos(int d);
 void fd_api(struct regs *r);                  /* INT 2Fh AX=5646h (VMFD.COM) */
 void speed_throttle(void);                    /* after each timer tick */
-u32 speed_api(u32 pm);                        /* INT 2Fh AX=5653h */
+u32 speed_api(u32 v, int fine);               /* INT 2Fh AX=5653h (fine: CX = 'HP', hundredths of a percent) */
 void video_osd(const char *msg);              /* a note at the top right for 2 s */
 void video_vbe_window(struct regs *r);        /* VESA bank switch (4F05h / WinFuncPtr) */
 void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin);   /* VBE PM interface call */
