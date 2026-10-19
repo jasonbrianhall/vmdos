@@ -10,7 +10,7 @@ extern "C" {
 #include "kernel.h"
 
 struct blk_driver {
-    const char *kind;                     /* "SATA", "IDE", "USB", "virtio": in messages, VMHD */
+    const char *kind;                     /* "SATA", "IDE", "USB", "virtio", "NVMe": in messages, VMHD */
     const char *off;                      /* command-line option that skips it ("ahci=off"), 0: none */
     int dma;                              /* rw's buffer must be identity-mapped vmdos memory (disk.c bounces) */
     int hotplug;                          /* disks come and go: count() asked again later, sectors() 0 while gone */
@@ -22,7 +22,7 @@ struct blk_driver {
     int (*rw)(int i, u64 lba, u32 n, void *buf, int write);   /* n <= 128; 0 done, else failed */
 };
 
-extern const struct blk_driver blk_ahci, blk_ide, blk_virtio, blk_usb;
+extern const struct blk_driver blk_ahci, blk_ide, blk_virtio, blk_nvme, blk_usb;
 
 #ifdef __cplusplus
 }
