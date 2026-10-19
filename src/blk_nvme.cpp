@@ -146,12 +146,16 @@ void probe(const PciDevice& pd)
     uint32_t bar = pci_read(pd, 0x10);
     uint64_t base = bar & ~0xFull;
     if ((bar & 0x6) == 0x4) base |= (uint64_t)pci_read(pd, 0x14) << 32;
-    if (!base || (bar & 1)) return;
+    if (!base || (bar & 1)) { kprintf("nvme %02x:%02x.%u: no memory BAR (%x), skipped\n", pd.bus, pd.dev, pd.fn, bar); return; }
     pci_write(pd, 0x04, pci_read(pd, 0x04) | 0x406);   // memory space, bus master, no INTx: polled
     c.r = (volatile uint8_t*)map_mmio64(base, 0x2000);   // registers, doorbells (stride <= 1 KiB)
-    if (!c.r) { kprintf("nvme %02x:%02x.%u: registers not mappable\n", pd.bus, pd.dev, pd.fn); return; }
+    if (!c.r) {
+        kprintf("nvme %02x:%02x.%u: registers at %x%08x not mappable, skipped\n", pd.bus, pd.dev, pd.fn,
+                (uint32_t)(base >> 32), (uint32_t)base);
+        return;
+    }
     uint32_t cap_lo = rd(c, CAP), cap_hi = rd(c, CAP + 4);
-    if (cap_lo == 0xFFFFFFFF) return;
+    if (cap_lo == 0xFFFFFFFF) { kprintf("nvme %02x:%02x.%u: registers read all ones (powered down?), skipped\n", pd.bus, pd.dev, pd.fn); return; }
     c.dstrd = 4u << (cap_hi & 0xF);
     uint32_t to_ms = ((cap_lo >> 24) & 0xFF) * 500 + 500;
     uint32_t mpsmin = (cap_hi >> 16) & 0xF;
@@ -161,17 +165,20 @@ void probe(const PciDevice& pd)
     if (mqes < (uint32_t)QD) { kprintf("nvme %02x:%02x.%u: queues of %u entries only\n", pd.bus, pd.dev, pd.fn, mqes); return; }
     if (0x1000 + 4 * c.dstrd > 0x2000) {              // wide doorbell stride: map the rest
         c.r = (volatile uint8_t*)map_mmio64(base, 0x1000 + 4 * c.dstrd);
-        if (!c.r) return;
+        if (!c.r) { kprintf("nvme %02x:%02x.%u: doorbells not mappable, skipped\n", pd.bus, pd.dev, pd.fn); return; }
     }
 
     // Reset: the firmware may have it running with queues of its own.
     if (rd(c, CC) & 1) {
         wr(c, CC, rd(c, CC) & ~1u);
         if (!wait_rdy(c, 0, to_ms)) { kprintf("nvme %02x:%02x.%u: won't reset\n", pd.bus, pd.dev, pd.fn); return; }
-    } else if (!wait_rdy(c, 0, to_ms)) return;
+    } else if (!wait_rdy(c, 0, to_ms)) {
+        kprintf("nvme %02x:%02x.%u: still busy after reset (CSTS %x), skipped\n", pd.bus, pd.dev, pd.fn, rd(c, CSTS));
+        return;
+    }
 
     uint8_t* mem = (uint8_t*)phys_try_alloc(6 * 4096);
-    if (!mem) return;
+    if (!mem) { kprintf("nvme %02x:%02x.%u: out of memory\n", pd.bus, pd.dev, pd.fn); return; }
     c.asq = mem; c.acq = mem + 4096; c.isq = mem + 2 * 4096; c.icq = mem + 3 * 4096;
     c.prp = (uint64_t*)(mem + 4 * 4096);
     uint8_t* id = mem + 5 * 4096;
@@ -188,7 +195,13 @@ void probe(const PciDevice& pd)
         return;
     }
     snprintf(c.model, sizeof c.model, "NVMe");
-    if (admin(c, 0x06, 0, id, 1, 0)) { phys_release(mem, 6 * 4096); return; }   // IDENTIFY controller
+    if (admin(c, 0x06, 0, id, 1, 0)) {                // IDENTIFY controller
+        kprintf("nvme %02x:%02x.%u: IDENTIFY failed, skipped\n", pd.bus, pd.dev, pd.fn);
+        wr(c, CC, rd(c, CC) & ~1u);
+        wait_rdy(c, 0, to_ms);
+        phys_release(mem, 6 * 4096);
+        return;
+    }
     trim(c.model, id + 24, 40);
     if (!c.model[0]) snprintf(c.model, sizeof c.model, "NVMe");
     uint8_t mdts = id[77];
@@ -216,7 +229,9 @@ void probe(const PciDevice& pd)
     } else {
         for (uint32_t n = 1; n <= nn && nl < 64; n++) list[nl++] = n;
     }
+    int before = n_disks;
     for (int i = 0; i < nl; i++) add_ns(c, list[i], id, nl > 1);
+    if (n_disks == before) kprintf("nvme: %s: no namespace usable here\n", c.model);
 }
 
 int start(void)
@@ -224,7 +239,22 @@ int start(void)
     if (started) return n_disks;
     started = true;
     PciDevice pd;
-    for (int k = 0; n_ctrl < MAX_CTRL && pci_find_class(1, 8, 2, &pd, k); k++) probe(pd);
+    int found = 0;
+    for (int k = 0; n_ctrl < MAX_CTRL && pci_find_class(1, 8, 2, &pd, k); k++, found++) probe(pd);
+    if (!found) {
+        // NVMe drives the PCI bus doesn't show: behind a RAID controller,
+        // above all Intel VMD ("RST", "RAID On", "Intel Optane"), common on
+        // laptops. Only the firmware setting gets them out.
+        for (int k = 0; pci_find_class(1, 4, -1, &pd, k); k++) {
+            uint32_t id = pci_read(pd, 0);
+            kprintf("nvme: none on PCI; RAID controller %04x:%04x at %02x:%02x.%u%s may hide NVMe drives: "
+                    "set the storage mode to AHCI (or NVMe) in the firmware setup\n", id & 0xFFFF, id >> 16,
+                    pd.bus, pd.dev, pd.fn, (id & 0xFFFF) == 0x8086 ? " (Intel VMD/RST)" : "");
+        }
+        for (int k = 0; pci_find_class(1, 8, -1, &pd, k); k++)
+            kprintf("nvme: %02x:%02x.%u: non-volatile memory controller, interface %02x (not NVMe), skipped\n",
+                    pd.bus, pd.dev, pd.fn, (pci_read(pd, 0x08) >> 8) & 0xFF);
+    }
     return n_disks;
 }
 
