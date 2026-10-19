@@ -53,6 +53,16 @@ static void wait_key(void) {
     uefi_call_wrapper(ST_->BootServices->WaitForEvent, 3, 1, &ST_->ConIn->WaitForKey, &idx);
 }
 
+// A key, or secs seconds with none.
+static void wait_key_secs(int secs) {
+    uefi_call_wrapper(ST_->ConIn->Reset, 2, ST_->ConIn, FALSE);
+    for (int i = 0; i < secs * 100; i++) {
+        EFI_INPUT_KEY k;
+        if (!EFI_ERROR(uefi_call_wrapper(ST_->ConIn->ReadKeyStroke, 2, ST_->ConIn, &k))) return;
+        uefi_call_wrapper(ST_->BootServices->Stall, 1, 10000);
+    }
+}
+
 static void fail(CHAR16* msg) {
     Print(L"\r\nvmdos.efi: %s\r\nPress any key to return.\r\n", msg);
     wait_key();
@@ -393,15 +403,25 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
     if (!v) return cur;
     static struct Output o[MAX_OUTS];
     int n = list_outputs(o), pick = -1;
-    if (n == 0) { Print(L"  display=: the firmware lists no display outputs; keeping this screen\r\n"); return cur; }
-    if (v[0] == 'a' && v[1] == 's' && v[2] == 'k') {
+    int ask = v[0] == 'a' && v[1] == 's' && v[2] == 'k';
+    if (n == 0) {
+        Print(L"  display=: the firmware lists no display outputs; keeping this screen\r\n");
+        if (ask) { Print(L"Press a key to go on (10 s).\r\n"); wait_key_secs(10); }
+        return cur;
+    }
+    if (ask) {
         Print(L"\r\nDisplay outputs (* = this screen):\r\n");
         for (int i = 0; i < n; i++) {
             EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* in = o[i].gop->Mode->Info;
             Print(L" %c%d: %s, %dx%d\r\n      %s\r\n", o[i].gop == cur ? L'*' : L' ', i + 1, type_name(o[i].type),
                   in ? in->HorizontalResolution : 0, in ? in->VerticalResolution : 0, o[i].path ? o[i].path : L"?");
         }
-        if (n == 1) { Print(L"  only one output: nothing to choose (the firmware may drive the others itself)\r\n"); return cur; }
+        if (n == 1) {
+            Print(L"  only one output: nothing to choose (the firmware may drive the others itself)\r\n"
+                  L"Press a key to go on (10 s).\r\n");
+            wait_key_secs(10);
+            return cur;
+        }
         Print(L"Number, then Enter (Enter alone or 15 s: keep this screen): ");
         int k = read_mode_number();
         if (k < 1 || k > n) return cur;
