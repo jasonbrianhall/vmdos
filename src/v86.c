@@ -547,7 +547,6 @@ struct regs *isr_dispatch(struct regs *r)
         }
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
-        if (irq == 0 && (from_v86 || from_pm)) speed_throttle();
         static int in_usb;
         if (irq == 0 && usb_ready && (ticks & 7) == 0) {
             if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
@@ -577,6 +576,7 @@ struct regs *isr_dispatch(struct regs *r)
             refresh_div = 0;
             if (!smp_active) video_refresh();         /* else the helper CPU's */
         }
+        if (irq == 0 && (from_v86 || from_pm)) speed_throttle();   /* last: the tick's work comes out of the wait, not the guest's share */
         goto out;
     }
 
