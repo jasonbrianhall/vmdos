@@ -134,6 +134,7 @@ void map_mmio(u32 phys, u32 len);
 void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */
 void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
 void usb_start(const char *cmdline);
+void usb_shutdown(void);                      /* usb.cpp: before a reboot */
 void usb_tick(void);
 extern u32 kernel_stack_top;
 void v86_enter(struct regs *r) __attribute__((noreturn));
