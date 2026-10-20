@@ -1,6 +1,7 @@
 @ECHO OFF
 PROMPT $P$G
-PATH C:\;C:\VMDOS
+PATH C:\;C:\VMDOS;C:\VMDOS\NET
+SET MTCPCFG=C:\VMDOS\NET\VMTCP.CFG
 SET BLASTER=A220 I5 D1 T4 P330
 SET DIRCMD=/O:GN
 REM Sound Blaster 16 (16-bit sound; Creative's own programs like Parrot

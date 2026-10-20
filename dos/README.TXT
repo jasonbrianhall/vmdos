@@ -41,6 +41,17 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSB MIC              Mic level meter (written for parrot but the parrot game doesn't
                           work because of the way it handles audio)
 
+NETWORK: TCP/IP, IPv4 AND IPv6 (in C:\VMDOS\NET; STARTNET loads it all)
+
+  DHCP [-4 | -6]        Get addresses (DHCPv4; IPv6 router, SLAAC, DHCPv6)
+  VMTCP                 Show the settings (C:\VMDOS\NET\VMTCP.CFG)
+  VMTCP IPADDR 1.2.3.4  Set one by hand (IPV6ADDR 2001:db8::5/64, ...)
+  PING [-4 | -6] host   Ping a name or address
+  NSLOOKUP name         Look up a name (-type=MX, AAAA, ...; or an address)
+  VMIPXBOX SERVER       Bridge for DOSBox IPX players (they IPXNET CONNECT
+                          to this PC); VMIPXBOX CONNECT host joins a DOSBox
+                          server. Not with VMIPX loaded on the same PC.
+
 SCREEN RESOLUTION AND SCALING
 
   vmdos can't switch the PC's real screen mode while DOS runs: the

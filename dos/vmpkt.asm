@@ -319,7 +319,8 @@ irq_entry:
         iret
 
 ; the frame in rxbuf (rxlen bytes) to the handle whose type matches:
-; a specific type first, then one that takes everything
+; a specific type first, else every handle that takes everything (so a
+; TCP/IP program run while VMIPX holds one for 802.3 frames gets them too)
 deliver:
         mov si, handles
         mov dx, MAXH
@@ -342,7 +343,12 @@ deliver:
 .any:   cmp byte [si + H_USED], 0
         je .anext
         cmp byte [si + H_TLEN], 0
-        je upcall
+        jne .anext
+        push si
+        push dx
+        call upcall
+        pop dx
+        pop si
 .anext: add si, H_SIZE
         dec dx
         jnz .any

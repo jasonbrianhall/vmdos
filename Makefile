@@ -11,6 +11,7 @@
 #   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img (SATA)
 #   make run-usb         QEMU, UEFI (OVMF), booting esp.img as a USB stick
 #   make run-bios        QEMU, legacy BIOS (SeaBIOS), booting esp.img (GRUB in the MBR)
+#   make net             rebuild the TCP/IP tools in net/bin (needs Open Watcom)
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
@@ -180,14 +181,17 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 # drivers go in C:\VMDOS (on the PATH).
 VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE
-DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES)
+# TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
+# Open Watcom on mTCP (make net), committed prebuilt in net/bin.
+NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT \
-             $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
+             $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f)))
 
 # The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
 FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT \
-                $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f)))
-$(FLOPPY): $(BUILD)/fat12.bin $(VMDOS_FILES) $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS \
+                $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f)))
+$(FLOPPY): $(BUILD)/fat12.bin $(VMDOS_FILES) $(NET_FILES) $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS \
            dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT tools/mkfloppy.py
 	python3 tools/mkfloppy.py $@ $(BUILD)/fat12.bin $(FLOPPY_FILES)
 
@@ -421,6 +425,12 @@ run-usb: esp.img
 
 clean:
 	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
+
+# Rebuild net/bin (VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX) with Open Watcom:
+# WATCOM=/path, or tools/fetch-watcom.sh puts a copy in .watcom/.
+net:
+	$(MAKE) -C net install
+.PHONY: net
 
 .PHONY: FORCE all iso efi esp run run-hv run-iso run-efi run-efi-app run-usb run-bios clean
 -include $(OBJS:.o=.d)
