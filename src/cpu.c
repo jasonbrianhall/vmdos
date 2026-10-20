@@ -724,6 +724,7 @@ void kmain(u32 magic, struct mb_info *mb)
     mouse_ps2_init();
     usb_ready = 1;
     smp_start(tramp);
+    perf_io_probe();
     kprintf("starting DOS\n");
     bootcon_stop();
     smp_go();

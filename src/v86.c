@@ -507,7 +507,90 @@ static void gp_handler(struct regs *r)
 
 static u32 refresh_div;
 
+static struct regs *isr_dispatch_inner(struct regs *r);
+
+/* perf: TSC counts the boot CPU spends in the monitor, by cause, and how
+   many times; the rest of the time is the guest's. Logged every 5 s. */
+enum { PF_IRQ0, PF_IRQ_OTHER, PF_GP_V86, PF_PF_V86, PF_V86_OTHER, PF_GP_PM, PF_PF_PM, PF_PM_OTHER, PF_N };
+static const char *const pf_name[PF_N] = { "timer", "other IRQs", "#GP v86", "#PF v86", "v86 other", "#GP pm", "#PF pm", "pm other" };
+static u64 pf_tsc[PF_N];
+static u32 pf_cnt[PF_N];
+enum { PT_USB, PT_NET, PT_SOUND, PT_DISK, PT_VIDEO, PT_OTHER, PT_N };
+static const char *const pt_name[PT_N] = { "usb", "net", "sound", "disk", "video", "rest" };
+static u64 pt_tsc[PT_N];
+#define PERF_PART(slot, stmt) do { if (perf_on) { u64 _t = tsc_read(); stmt; pt_tsc[slot] += tsc_read() - _t; } else { stmt; } } while (0)
+
+static u32 pct(u64 part, u64 whole)          /* tenths of a percent, no 64-bit division */
+{
+    if (part > whole) part = whole;
+    while (whole >> 22) { whole >>= 1; part >>= 1; }
+    return whole ? (u32)part * 1000u / (u32)whole : 0;
+}
+
+static void perf_report(void)
+{
+    static u64 since;
+    u64 now = tsc_read();
+    if (!since) {                             /* the first: start counting from here */
+        since = now;
+        for (int i = 0; i < 1024; i++) perf_ports[i] = 0;
+        for (int i = 0; i < PF_N; i++) { pf_tsc[i] = 0; pf_cnt[i] = 0; }
+        for (int i = 0; i < PT_N; i++) pt_tsc[i] = 0;
+        return;
+    }
+    u64 total = now - since, mon = 0;
+    since = now;
+    char b[400]; int n = 0;
+    for (int i = 0; i < PF_N; i++) mon += pf_tsc[i];
+    u32 g = pct(total - (mon < total ? mon : total), total);
+    n += snprintf(b + n, sizeof b - n, "perf: guest %u.%u%%", g / 10, g % 10);
+    for (int i = 0; i < PF_N; i++) {
+        if (!pf_cnt[i]) continue;
+        u32 p = pct(pf_tsc[i], total);
+        n += snprintf(b + n, sizeof b - n, ", %s %u.%u%% (%u/s)", pf_name[i], p / 10, p % 10, pf_cnt[i] / 5);
+    }
+    kprintf("%s\n", b);
+    u64 parts = 0;
+    for (int i = 0; i < PT_OTHER; i++) parts += pt_tsc[i];
+    pt_tsc[PT_OTHER] = pf_tsc[PF_IRQ0] > parts ? pf_tsc[PF_IRQ0] - parts : 0;
+    n = snprintf(b, sizeof b, "perf: timer tick:");
+    for (int i = 0; i < PT_N; i++) {
+        u32 p = pct(pt_tsc[i], total);
+        n += snprintf(b + n, sizeof b - n, " %s %u.%u%%", pt_name[i], p / 10, p % 10);
+    }
+    kprintf("%s\n", b);
+    /* the guest's busiest ports */
+    n = snprintf(b, sizeof b, "perf: guest ports/s:");
+    for (int k = 0; k < 6; k++) {
+        int best = -1;
+        for (int i = 0; i < 1024; i++) if (perf_ports[i] && (best < 0 || perf_ports[i] > perf_ports[best])) best = i;
+        if (best < 0) break;
+        n += snprintf(b + n, sizeof b - n, " %03xh %u", best, perf_ports[best] / 5);
+        perf_ports[best] = 0;
+    }
+    kprintf("%s\n", b);
+    for (int i = 0; i < 1024; i++) perf_ports[i] = 0;
+    for (int i = 0; i < PF_N; i++) { pf_tsc[i] = 0; pf_cnt[i] = 0; }
+    for (int i = 0; i < PT_N; i++) pt_tsc[i] = 0;
+}
+
 struct regs *isr_dispatch(struct regs *r)
+{
+    if (!perf_on || smp_on_ap()) return isr_dispatch_inner(r);
+    u32 vec = r->vec;
+    int slot = vec == 0x20 ? PF_IRQ0 : vec > 0x20 ? PF_IRQ_OTHER
+             : (r->eflags & EFL_VM) ? (vec == 13 ? PF_GP_V86 : vec == 14 ? PF_PF_V86 : PF_V86_OTHER)
+             : (vec == 13 ? PF_GP_PM : vec == 14 ? PF_PF_PM : PF_PM_OTHER);
+    u64 t0 = tsc_read();
+    r = isr_dispatch_inner(r);
+    pf_tsc[slot] += tsc_read() - t0;
+    pf_cnt[slot]++;
+    static u32 last_report;
+    if (slot == PF_IRQ0 && ticks - last_report >= 5000) { last_report = ticks; perf_report(); }   /* ticks can skip a value */
+    return r;
+}
+
+static struct regs *isr_dispatch_inner(struct regs *r)
 {
     int from_v86 = (r->eflags & EFL_VM) != 0;
     int from_pm = !from_v86 && (r->cs & 3) == 3;     /* a DPMI client */
@@ -527,9 +610,9 @@ struct regs *isr_dispatch(struct regs *r)
             ticks++;
             smp_tick();
             vdev_tick();
-            if (usb_ready) { if (smp_active) sound_irq_poll(); else sound_tick(); }
-            if (usb_ready) disk_tick();
-            if (net_ready) net_tick();
+            if (usb_ready) PERF_PART(PT_SOUND, if (smp_active) sound_irq_poll(); else sound_tick());
+            if (usb_ready) PERF_PART(PT_DISK, disk_tick());
+            if (net_ready) PERF_PART(PT_NET, net_tick());
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
@@ -552,7 +635,7 @@ struct regs *isr_dispatch(struct regs *r)
         outb(0x20, 0x20);
         static int in_usb;
         if (irq == 0 && usb_ready && (ticks & 7) == 0) {
-            if (!in_usb) { in_usb = 1; usb_tick(); in_usb = 0; }
+            if (!in_usb) { in_usb = 1; PERF_PART(PT_USB, usb_tick()); in_usb = 0; }
         }
         if (irq == 0 && log_view_req && !in_usb && usb_quiet()) {             /* Ctrl+Shift+F10 */
             extern int vif;
@@ -578,7 +661,7 @@ struct regs *isr_dispatch(struct regs *r)
         if (irq == 0) video_tlb_tick();
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
-            if (!smp_active) video_refresh();         /* else the helper CPU's */
+            if (!smp_active) PERF_PART(PT_VIDEO, video_refresh());   /* else the helper CPU's */
         }
         if (irq == 0 && (from_v86 || from_pm)) speed_throttle();   /* last: the tick's work comes out of the wait, not the guest's share */
         goto out;

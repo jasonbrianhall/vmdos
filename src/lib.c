@@ -158,6 +158,32 @@ static void p80_calibrate(void)
     if (n < 50000000 && n >= 10) p80_per_ms = n / 10;
 }
 
+u64 tsc_read(void) { return tsc_now(); }
+u32 tsc_khz(void) { return tsc_per_ms; }
+
+/* perf: what one access to each legacy port costs on this PC. A port that
+   takes ~15 us instead of ~1 is usually trapped to SMM by the firmware. */
+static void io_probe(void)
+{
+    if (!tsc_per_ms) return;
+    static const struct { u16 port; const char *what; } p[] = {
+        { 0x80, "80h (POST)" }, { 0x61, "61h (PIT gate)" }, { 0x21, "21h (PIC mask)" },
+        { 0x40, "40h (PIT)" }, { 0x64, "64h (keyboard status)" }, { 0x3F8 + 5, "3FDh (COM1)" } };
+    char b[256]; int n = 0;
+    u32 fl;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(fl));
+    for (unsigned i = 0; i < sizeof p / sizeof *p; i++) {
+        u64 t0 = tsc_now();
+        for (int k = 0; k < 64; k++) (void)inb(p[i].port);
+        u32 per = (u32)(tsc_now() - t0) / 64, mhz = tsc_per_ms / 1000;
+        u32 ns = mhz ? per * 1000 / mhz : 0;
+        n += snprintf(b + n, sizeof b - n, "%s %u.%02u us%s", p[i].what, ns / 1000, ns % 1000 / 10,
+                      i + 1 < sizeof p / sizeof *p ? ", " : "");
+    }
+    if (fl & 0x200) sti();
+    kprintf("perf: one read of port %s\n", b);
+}
+
 void kdelay_us(u32 us)
 {
     if (tsc_per_us_q10) {
@@ -440,4 +466,17 @@ void panic(const char *fmt, ...)
     bootcon_stop();
     log_screen(buf, 0);
     for (;;) __asm__ volatile("cli; hlt");
+}
+
+int perf_on;
+void perf_io_probe(void)
+{
+    /* "perf" or "perf=..." anywhere on the command line (any case) */
+    for (const char *c = cmdline; *c; c++)
+        if ((c == cmdline || c[-1] == ' ' || c[-1] == '\t') && (c[0] | 32) == 'p' && (c[1] | 32) == 'e' &&
+            (c[2] | 32) == 'r' && (c[3] | 32) == 'f' && (!c[4] || c[4] == ' ' || c[4] == '=' || c[4] == '\t'))
+            perf_on = 1;
+    if (!perf_on) return;
+    kprintf("perf: on, a report every 5 s\n");
+    io_probe();
 }
