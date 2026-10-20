@@ -299,6 +299,14 @@ $(BUILD)/grub/BOOTX64.EFI: $(BUILD)/grub/early.cfg $(BUILD)/grub/mods
 # The fixed choices in the boot menu's screen resolution submenu.
 GRUB_RES ?= 640x480 800x600 1024x768 1280x1024
 VGA_TITLE_ask := Ask: list the modes this screen has
+# BIOS/CSM boots: GRUB sets the screen mode (gfxpayload), so vga= from KARGS
+# is turned into that here; vga=N (a UEFI mode number) has no meaning there.
+GRUB_ASK = echo '      set pager=1'; echo '      videoinfo'; echo '      set pager=0'; \
+	echo '      echo "Size to use, as WIDTHxHEIGHT (e.g. 1024x768), then Enter (Enter alone: $(FB_W)x$(FB_H)):"'; \
+	echo '      read vmdos_res'; \
+	echo '      if [ -n "$${vmdos_res}" ]; then set gfxpayload=$${vmdos_res}x32$(comma)$${vmdos_res}; fi';
+VGA_ARG := $(firstword $(patsubst vga=%,%,$(filter vga=%,$(KARGS_ALL))))
+bios_vga = $(if $(filter ask,$(1)),$(GRUB_ASK),$(if $(filter max,$(1)),echo '      set gfxpayload=auto';,$(if $(findstring x,$(1)),echo '      set gfxpayload=$(1)x32$(comma)$(1)';)))
 VGA_TITLE_max := Largest (usually the panel native size)
 $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	@mkdir -p $(BUILD)/grub
@@ -321,21 +329,18 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
+	   $(call bios_vga,$(VGA_ARG)) \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
+	   $(call bios_vga,$(VGA_ARG)) \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo '  submenu "FreeDOS (vmdos), screen resolution" {'; \
 	   echo '    menuentry "$(VGA_TITLE_ask)" {'; \
-	   echo '      set pager=1'; \
-	   echo '      videoinfo'; \
-	   echo '      set pager=0'; \
-	   echo '      echo "Size to use, as WIDTHxHEIGHT (e.g. 1024x768), then Enter (Enter alone: $(FB_W)x$(FB_H)):"'; \
-	   echo '      read vmdos_res'; \
 	   echo '      multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
-	   echo '      if [ -n "$${vmdos_res}" ]; then set gfxpayload=$${vmdos_res}x32,$${vmdos_res}; fi'; \
+	   $(GRUB_ASK) \
 	   echo '      module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; echo '    }'; \
 	   echo '    menuentry "$(VGA_TITLE_max)" {'; \
 	   echo '      multiboot /boot/vmdos.elf $(KARGS_ALL)'; echo '      set gfxpayload=auto'; \

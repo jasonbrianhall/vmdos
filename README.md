@@ -207,7 +207,10 @@ shows only its own size, so something scales either way. The boot menu has
 a "screen resolution" submenu (640x480 up to 1280x1024, "Ask" and
 "Largest"; on a BIOS/CSM boot, "Ask" shows GRUB's list of the card's VESA
 modes and takes a size typed as 1024x768, and "Largest" is the monitor's
-preferred mode from its EDID); on UEFI the `vga=` kernel option picks it too:
+preferred mode from its EDID); the `vga=` kernel option picks it too (on a
+BIOS/CSM boot, `vga=ask`, `vga=max` and `vga=WxH` given to `make esp
+KARGS=...` go into the GRUB menu's main entries; GRUB doesn't read
+vmdos.cfg, so there it takes a rebuild):
 `vga=ask` lists the modes the screen has and asks for a number, `vga=N`
 takes mode N from that list, `vga=640x480` the mode of that size, and
 `vga=max` the largest, usually the panel's own (vmdos then does all the
