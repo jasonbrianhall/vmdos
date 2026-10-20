@@ -42,6 +42,7 @@ struct Config {                    // as src/ipxnet.cpp
   uint8_t  my6[16];
   uint8_t  my6ll[16];
   uint16_t localPort;
+  uint8_t  hop4[4];                // IPv4: the next hop, so vmdos can find it again
 };
 struct Entry {
   uint8_t  used, family;
@@ -109,7 +110,7 @@ static int showStatus( void ) {
       printf( "  node %s  %s port %u\n", nodeText( st.e[i].node, nb ), Addr::format( &a, ab ), st.e[i].port );
     }
   } else {
-    printf( "IPXNET connected to a server on port %u: %s", st.port, st.registered ? "this PC is node " : "not registered yet" );
+    printf( "IPXNET connected to a server on port %u: %s", st.port, st.registered ? "this PC is node " : "registering (vmdos keeps trying)" );
     if ( st.registered ) printf( "%s", nodeText( st.node, nb ) );
     puts( "" );
     for ( int i=0; i < st.entries; i++ ) {
@@ -137,8 +138,7 @@ static void usage( void ) {
 
 
 // The MAC of the next hop to an IPv4 address: it, or the gateway.
-static bool nextHop4( const uint8_t *dst, uint8_t *mac ) {
-  IpAddr_t hop;
+static bool nextHop4( const uint8_t *dst, uint8_t *mac, uint8_t *hop ) {
   if ( ((*(uint32_t *)dst) & Netmask_u) == (MyIpAddr_u & Netmask_u) ) Ip::copy( hop, dst );
   else Ip::copy( hop, Gateway );
   clockTicks_t start = TIMER_GET_CURRENT( );
@@ -206,7 +206,7 @@ int main( int argc, char *argv[] ) {
     cfg.family = srv.family;
     memcpy( cfg.server, srv.a, 16 );
     bool ok;
-    if ( srv.family == 4 ) ok = Net::haveIpv4( ) && nextHop4( srv.a, cfg.hopMac );
+    if ( srv.family == 4 ) ok = Net::haveIpv4( ) && nextHop4( srv.a, cfg.hopMac, cfg.hop4 );
     else ok = Ip6::enabled && Ip6::resolveWait( srv.a, cfg.hopMac, 4000 ) == 0;
     if ( !ok ) { puts( "No route to it (no address, or the gateway didn't answer)." ); Net::stop( ); return 1; }
     srand( (unsigned)time( NULL ) );

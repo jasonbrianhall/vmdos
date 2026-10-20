@@ -30,7 +30,12 @@
 namespace {
 
 const int IPX_HLEN = 30, MAX_IPX = 1500, OUTQ = 24, MAX_CLIENTS = 16, MAX_PEERS = 12, MAX_REMOTE = 32;
-const uint32_t KEEPALIVE_MS = 20000, REG_RETRY_MS = 1000;
+// CONNECT: a keepalive (to our own node, which the server sends back) every
+// 5 s; nothing back from the server for 16 s and the registration is taken
+// as lost (the server restarted, a NAT mapping changed...): register again,
+// from a new UDP port (a DOSBox server would otherwise hold two entries for
+// it), and find the next hop's MAC again.
+const uint32_t KEEPALIVE_MS = 5000, LOST_MS = 16000, REG_RETRY_MS = 1000, REG_SLOW_MS = 3000, REG_SLOW_AFTER = 30000;
 
 // INT 2Fh AX=564Eh BL=8: ES:DI -> this (mode 0: stop)
 struct __attribute__((packed)) Config {
@@ -43,6 +48,7 @@ struct __attribute__((packed)) Config {
     uint8_t  my6[16];               // our IPv6 address (0: none)
     uint8_t  my6ll[16];             // our link-local address
     uint16_t local_port;            // connect: our first UDP port
+    uint8_t  hop4[4];               // connect, IPv4: the next hop (to ARP for it again)
 };
 
 // BL=9: ES:DI <- this
@@ -84,7 +90,7 @@ struct Peer {                       // connect: this PC (slot 0) or a LAN machin
     bool     used, registered, dos;
     uint8_t  mac[6], node[6];
     uint16_t port;
-    uint32_t last, last_reg, last_keep;
+    uint32_t last, last_reg, last_keep, heard, reg_since;
 };
 
 Config cfg;
@@ -95,7 +101,19 @@ uint8_t remote[MAX_REMOTE][6];      // nodes seen on the other side
 int remote_n, remote_next;
 int frame_type;                     // LAN framing: 0 Ethernet II, 1 802.3, 2 802.2, 3 SNAP
 uint32_t udp_in, udp_out, ipx_in, ipx_out, dropped;
+int logging = -1;                   // ipxlog on the kernel command line: every packet
 
+void plog(const char* what, const uint8_t* ipx)
+{
+    if (logging < 0) logging = strstr(cmdline, "ipxlog") != 0;
+    if (!logging) return;
+    const uint8_t* d = ipx + 10; const uint8_t* s = ipx + 22;
+    kprintf("ipxnet: %s %02x%02x%02x%02x%02x%02x:%02x%02x <- %02x%02x%02x%02x%02x%02x:%02x%02x len %u\n", what,
+            d[0], d[1], d[2], d[3], d[4], d[5], ipx[16], ipx[17], s[0], s[1], s[2], s[3], s[4], s[5], ipx[28], ipx[29],
+            (ipx[2] << 8) | ipx[3]);
+}
+
+uint16_t next_port;                 // connect: the next fresh UDP port
 uint8_t* outq;                      // OUTQ frames of FRAME_MAX
 uint16_t outlen[OUTQ];
 bool out_dos[OUTQ];                 // to DOS instead of the wire
@@ -166,6 +184,7 @@ void send_udp(uint8_t family, const uint8_t* addr, const uint8_t* mac, uint16_t 
     u[0] = sport >> 8; u[1] = sport; u[2] = dport >> 8; u[3] = dport;
     u[4] = (8 + len) >> 8; u[5] = 8 + len; u[6] = u[7] = 0;
     memcpy(u + 8, data, len);
+    plog("udp out ", data);
     if (family == 6) {                          // mandatory over IPv6
         uint8_t* ip = f + 14;
         uint32_t s = csum_add(0, ip + 8, 32);
@@ -197,6 +216,7 @@ void send_ipx(const uint8_t* ipx, unsigned len, const uint8_t* dmac, bool to_dos
             f[14] = 0xAA; f[15] = 0xAA; f[16] = 0x03; f[17] = f[18] = f[19] = 0; f[20] = 0x81; f[21] = 0x37; h = 22; break;
     }
     memcpy(f + h, ipx, len);
+    plog(to_dos ? "to DOS  " : "to LAN  ", ipx);
     out_commit(h + len);
     ipx_out++;
 }
@@ -342,6 +362,40 @@ void register_peer(Peer* p)
     h.ssock = be16(2);
     peer_send(p, (uint8_t*)&h, IPX_HLEN);
     p->last_reg = ticks;
+    if (!p->reg_since) p->reg_since = ticks | 1;
+}
+
+uint16_t fresh_port()
+{
+    uint16_t pt = next_port++;
+    if (next_port >= cfg.local_port + 0x400) next_port = cfg.local_port + MAX_PEERS;
+    return pt;
+}
+
+void arp_hop()                                  // who has the next hop? (the answer: answer_neighbors)
+{
+    if (cfg.family != 4 || zero(cfg.hop4, 4) || zero(cfg.my4, 4)) return;
+    uint8_t* o = out_slot(false);
+    if (!o) return;
+    const uint8_t* me = net_cur_mac();
+    memset(o, 0xFF, 6); memcpy(o + 6, me, 6);
+    o[12] = 0x08; o[13] = 0x06; o[14] = 0; o[15] = 1; o[16] = 0x08; o[17] = 0; o[18] = 6; o[19] = 4;
+    o[20] = 0; o[21] = 1;
+    memcpy(o + 22, me, 6); memcpy(o + 28, cfg.my4, 4);
+    memset(o + 32, 0, 6); memcpy(o + 38, cfg.hop4, 4);
+    out_commit(42);
+}
+
+void lost(Peer* p)
+{
+    log_node(p->dos ? "ipxnet: no answer from the server for this PC (node " : "ipxnet: no answer from the server for a LAN machine (node ", p->node);
+    kprintf("): registering again\n");
+    p->registered = false;
+    p->port = fresh_port();
+    p->reg_since = 0;
+    p->heard = ticks;
+    arp_hop();
+    register_peer(p);
 }
 void keepalive(Peer* p)                         // keeps NAT open: to our own node, back to us
 {
@@ -381,8 +435,8 @@ Peer* new_peer(const uint8_t* mac)
     memset(p, 0, sizeof *p);
     p->used = true;
     memcpy(p->mac, mac, 6);
-    p->port = cfg.local_port + s;
-    p->last = ticks;
+    p->port = fresh_port();
+    p->last = p->heard = ticks;
     register_peer(p);
     return p;
 }
@@ -391,10 +445,15 @@ void connect_udp(uint16_t dport, uint8_t* ipx, unsigned len)
 {
     Peer* p = peer_by_port(dport);
     if (!p) { dropped++; return; }
+    p->heard = ticks;
     IpxHdr* h = (IpxHdr*)ipx;
     if (be16(h->dsock) == 2 && be16(h->ssock) == 2 && !is_bcast(h->dnode) && h->snet[3] == 1 && len == (unsigned)IPX_HLEN) {
         bool first = !p->registered;            // the registration's answer
+        bool changed = memcmp(p->node, h->dnode, 6) != 0;
+        if (!first && !changed) return;
+        if (first && !zero(p->node, 6) && changed) log_node("ipxnet: was node ", p->node), kprintf("\n");
         memcpy(p->node, h->dnode, 6);
+        p->reg_since = 0;
         p->registered = true;
         p->last_keep = ticks;
         if (first) {
@@ -456,6 +515,11 @@ void answer_neighbors(const uint8_t* f, unsigned len)
 {
     const uint8_t* me = net_cur_mac();
     uint16_t t = (f[12] << 8) | f[13];
+    if (t == 0x0806 && len >= 42 && f[21] == 2 && cfg.mode == 1 && cfg.family == 4 && !zero(cfg.hop4, 4) &&
+        !memcmp(f + 28, cfg.hop4, 4) && memcmp(cfg.hop_mac, f + 22, 6)) {
+        memcpy(cfg.hop_mac, f + 22, 6);         // the next hop moved
+        kprintf("ipxnet: the next hop is now %02x:%02x:%02x:%02x:%02x:%02x\n", f[22], f[23], f[24], f[25], f[26], f[27]);
+    }
     if (t == 0x0806 && len >= 42 && f[20] == 0 && f[21] == 1 && !zero(cfg.my4, 4) && !memcmp(f + 38, cfg.my4, 4)) {
         uint8_t* o = out_slot(false);
         if (!o) return;
@@ -524,7 +588,7 @@ bool our_udp(const uint8_t* f, unsigned len)
     if (cfg.mode == 2) {
         if (dport != cfg.port) return false;
     } else {
-        if (dport < cfg.local_port || dport >= cfg.local_port + MAX_PEERS) return false;
+        if (!peer_by_port(dport)) return false;
         if (family != cfg.family || sport != cfg.port || memcmp(src, cfg.server, family == 4 ? 4 : 16)) return false;
     }
     udp_in++;
@@ -532,6 +596,7 @@ bool our_udp(const uint8_t* f, unsigned len)
     memcpy(buf, u + 8, n);
     unsigned il = be16(((IpxHdr*)buf)->length);
     if (il < (unsigned)IPX_HLEN || il > n) { dropped++; return true; }
+    plog("udp in  ", buf);
     if (cfg.mode == 2) server_udp(family, src, f + 6, sport, buf, il);
     else connect_udp(dport, buf, il);
     return true;
@@ -588,6 +653,7 @@ bool ipxnet_tx(const uint8_t* f, unsigned len)
     if (!l) return true;
     frame_type = ft;
     ipx_in++;
+    plog("from DOS", ipx);
     static uint8_t buf[MAX_IPX];
     memcpy(buf, ipx, l);
     bool wire = cfg.mode == 2 ? server_ipx(buf, l) : connect_ipx(buf, l, net_cur_mac(), true);
@@ -602,8 +668,18 @@ void ipxnet_tick()
     if (cfg.mode == 1) {
         for (auto& p : peers) {
             if (!p.used) continue;
-            if (!p.registered) { if (ticks - p.last_reg >= REG_RETRY_MS) register_peer(&p); }
-            else if (ticks - p.last_keep >= KEEPALIVE_MS) keepalive(&p);
+            if (!p.registered) {
+                uint32_t every = p.reg_since && ticks - p.reg_since > REG_SLOW_AFTER ? REG_SLOW_MS : REG_RETRY_MS;
+                if (ticks - p.last_reg >= every) {
+                    if (p.reg_since && ticks - p.reg_since > REG_SLOW_AFTER && (ticks - p.reg_since) % 30000 < every) arp_hop();
+                    register_peer(&p);
+                }
+                continue;
+            }
+            // LAN machines that went quiet: let them go (they register again when they talk)
+            if (!p.dos && ticks - p.last > 600000) { p.used = false; continue; }
+            if (ticks - p.heard >= LOST_MS) { lost(&p); continue; }
+            if (ticks - p.last_keep >= KEEPALIVE_MS) keepalive(&p);
         }
     }
     flush();
@@ -629,8 +705,9 @@ void ipxnet_api(struct regs* r, int fn)
             Peer* d = &peers[0];
             d->used = d->dos = true;
             memcpy(d->mac, net_cur_mac(), 6);
+            next_port = cfg.local_port + MAX_PEERS;
             d->port = cfg.local_port;
-            d->last = ticks;
+            d->last = d->heard = ticks;
             register_peer(d);
             kprintf("ipxnet: connecting to port %u (IPv%u)\n", cfg.port, cfg.family);
         } else kprintf("ipxnet: server on UDP port %u\n", cfg.port);
