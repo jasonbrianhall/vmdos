@@ -1,3 +1,5 @@
+/* Created Oct 20, 2026 Jason Hall */
+
 /* The guest's BIOS: data area, IVT, and the services behind the bios.asm stubs
    (INT 08h/09h/11h-17h/1Ah; INT 10h is in video.c). */
 #include "kernel.h"
