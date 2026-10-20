@@ -509,10 +509,12 @@ mTCP's own FTP, TELNET, etc. work with it too.
     NSLOOKUP [-type=T] name [server]
     VMIPXBOX SERVER [port]      DOSBox players: IPXNET CONNECT <this PC>
     VMIPXBOX CONNECT host [port]   join a DOSBox IPXNET server (IPv4 or IPv6)
+    VMIPXBOX [STOP]             how it's doing / stop it
 
-VMIPXBOX bridges the LAN's IPX and DOSBox's IPX over UDP (port 213), so
-DOSBox players and real or vmdos PCs play together. The PC running it is the
-bridge only: don't load VMIPX on it. The programs are prebuilt in net/bin;
+VMIPXBOX sets up IPXNET, DOSBox's IPX over UDP (port 213), which vmdos then
+runs itself underneath DOS (`src/ipxnet.cpp`): load VMIPX and play, and this
+PC's games reach the DOSBox players; the LAN's IPX machines are bridged too.
+The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
@@ -602,6 +604,7 @@ untested.
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
+| `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |
 | `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |

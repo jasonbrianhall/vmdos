@@ -115,3 +115,16 @@ volatile uint8_t* map_bar(const PciDevice& d, uint32_t len);          // the fir
 volatile uint8_t* map_bar_n(const PciDevice& d, int b, uint32_t len); // BAR b
 
 } // namespace net
+
+// IPXNET (ipxnet.cpp): DOSBox's IPX over UDP, under DOS. net.cpp calls it
+// with every frame from the wire and from DOS while it runs.
+bool ipxnet_active();
+bool ipxnet_rx(const uint8_t* f, unsigned len);    // true: it was IPXNET's, not for DOS
+bool ipxnet_tx(const uint8_t* f, unsigned len);    // false: it needn't go on the wire
+void ipxnet_tick();
+void ipxnet_api(struct regs* r, int fn);           // INT 2Fh AX=564Eh BL=8, 9
+// ... and these from net.cpp
+const uint8_t* net_cur_mac();                       // the address DOS uses
+bool net_wire_send(const uint8_t* f, unsigned len);
+void net_dos_inject(const uint8_t* f, unsigned len);
+void net_promisc(bool on);                          // the card takes everything (DOS still gets its own)
