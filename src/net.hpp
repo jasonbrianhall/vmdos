@@ -19,7 +19,7 @@ extern int rx_mode;                             // packet driver numbering: 1 of
 extern bool log_on;                             // netlog
 
 #define BARRIER() __asm__ volatile("" ::: "memory")
-inline void udelay(uint32_t us) { while (us--) inb(0x80); }   // ~1 us each (works with interrupts off)
+inline void udelay(uint32_t us) { kdelay_us(us); }           // TSC-timed (works with interrupts off)
 
 void enqueue(const uint8_t* f, unsigned len);   // a received frame (less its CRC)
 bool room();                                    // room for another? (else leave them in the card's ring)

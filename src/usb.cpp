@@ -21,25 +21,10 @@
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
 static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
 
-// Delays count port 80h reads, ~1 us each on most PCs but several times
-// faster on some (AMD chipsets): usb_init measures them against the PIT
-// (channel 0, reloaded once a millisecond) and scales.
-static uint32_t io_per_ms = 1000;
-static void io_delay(int us) { for (uint32_t n = (uint32_t)us * io_per_ms / 1000; n; n--) inb(0x80); }
-static void delay_ms(int ms) { while (ms--) io_delay(1000); }
-static uint16_t pit_count() { outb(0x43, 0x00); uint16_t c = inb(0x40); return c | (uint16_t)(inb(0x40) << 8); }
-static void calibrate_delay() {
-    uint16_t prev = pit_count();
-    int ms = -1;
-    uint32_t n = 0;
-    while (ms < 20 && n < 100000000u) {                 // 20 whole milliseconds, counted from a reload
-        uint16_t c = pit_count();
-        if (c > prev) ms++;
-        prev = c;
-        if (ms >= 0) { inb(0x80); n++; }
-    }
-    if (ms == 20 && n / 20 >= 100) io_per_ms = n / 20;
-}
+// Delays: kdelay_us (lib.c), timed by the TSC, or by port 80h reads
+// measured against the PIT where there's no TSC.
+static void io_delay(int us) { kdelay_us((uint32_t)us); }
+static void delay_ms(int ms) { while (ms--) kdelay_us(1000); }
 #define barrier() __asm__ volatile("" ::: "memory")
 
 // ---------------------------------------------------------------- memory
@@ -164,6 +149,7 @@ struct Hc {
     volatile uint64_t* dcbaa;
     int max_slots, num_ports;
     bool port_dirty[256];
+    bool cmd_dead;                         // a command timed out: the ring is stuck, don't wait 5 s again
     int legsup;                            // BIOS handoff register: xHCI cap offset / EHCI PCI offset (0: none)
 };
 #define MAX_HC 8
@@ -605,13 +591,17 @@ static int command(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, Trb* ev) 
     H->db[0] = 0;
     Trb e;
     for (;;) {
-        if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e, 5000)) {
+        if (!wait_event(TRB_CMD_COMPLETION, 0, 0, &e, H->cmd_dead ? 100 : 5000)) {
+            if (!H->cmd_dead) printf("USB: xHCI %d: command %u timed out, giving up on its command ring\n",
+                                     (int)(H - hcs), (d3 >> 10) & 0x3F);
+            H->cmd_dead = true;
             wr(H->op, 0x18, 1u << 2);                   // CRCR.CA: abort it
             for (int i = 0; i < 5000 && (rd(H->op, 0x18) & (1u << 3)); i++) delay_ms(1);
             return -1;
         }
         if ((e.d0 & ~15u) == (uint32_t)trb && e.d1 == (uint32_t)(trb >> 32)) break;
     }
+    H->cmd_dead = false;                                // it answers again
     if (ev) *ev = e;
     return e.d2 >> 24;
 }
@@ -2291,9 +2281,7 @@ extern "C" void usb_kick_ports(void) {
 bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
-    calibrate_delay();
     pad_keys_option(cmdline);
-    dbg(1, "USB: %u port 80h reads a millisecond\n", io_per_ms);
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
     PciDevice d;

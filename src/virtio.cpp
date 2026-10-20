@@ -17,7 +17,7 @@ inline void w32(volatile uint8_t* p, uint32_t v) { *(volatile uint32_t*)p = v; }
 inline uint16_t r16(volatile uint8_t* p) { return *(volatile uint16_t*)p; }
 inline uint32_t r32(volatile uint8_t* p) { return *(volatile uint32_t*)p; }
 inline void barrier() { __asm__ volatile("" ::: "memory"); }
-inline void delay_us(uint32_t us) { while (us--) inb(0x80); }
+inline void delay_us(uint32_t us) { kdelay_us(us); }
 
 uint8_t status(VirtioDev& v) { return v.modern ? v.common[M_STATUS] : inb(v.io + L_STATUS); }
 void set_status(VirtioDev& v, uint8_t s)

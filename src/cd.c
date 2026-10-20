@@ -430,7 +430,7 @@ static void phys_poll(int d, int unit)
         if (k != 2) break;
         int asc = pkt_asc(d);
         if (asc == 0x04 && waited < 10000) {
-            for (int i = 0; i < 250000; i++) inb(0x80);                 /* ~250 ms */
+            kdelay_us(250000);
             waited += 250; tries--; continue;
         }
         if (asc != 0x3A || ++empty > 1) break;
