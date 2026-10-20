@@ -2,7 +2,9 @@
    scale=xbrz (video.c). Integer only: the colour distance (YCbCr, BT.2020
    weights) is in 1/16 units with an integer square root, and the
    thresholds are scaled by 10. Distances between two colours are cached:
-   a palette mode has few distinct pairs.
+   a palette mode has few distinct pairs. Render helpers (smp.c) fill the
+   cache at the same time, so an entry carries a check word: one read
+   half from two writes fails it and is worked out again.
 
    Per source pixel F, the corner it shares with G, J and K (right, below,
    below right) is classified first (xbrz_corners, from a 4x4 window: rows
@@ -13,7 +15,8 @@
 #include "kernel.h"
 
 static u8 rp = 16, gp = 8, bp = 0;           /* where the 8-bit primaries are in a pixel */
-static struct dc { u32 a, b, d; } dcache[65536];
+static struct dc { u32 a, b, d, c; } dcache[65536];
+#define DC_SALT 0x5BD1E995u
 
 void xbrz_format(u8 rpos, u8 gpos, u8 bpos) { rp = rpos; gp = gpos; bp = bpos; memset(dcache, 0, sizeof dcache); }
 
@@ -33,17 +36,19 @@ static u32 dist(u32 a, u32 b)
 {
     if (a == b) return 0;
     if (a > b) { u32 t = a; a = b; b = t; }
-    struct dc *e = &dcache[(a * 0x9E3779B1u ^ b * 0x85EBCA77u) >> 16];
-    if (e->a == a && e->b == b) return e->d;
+    volatile struct dc *e = &dcache[(a * 0x9E3779B1u ^ b * 0x85EBCA77u) >> 16];
+    u32 ea = e->a, eb = e->b, ed = e->d, ec = e->c;
+    if (ea == a && eb == b && ec == (ea ^ eb ^ ed ^ DC_SALT)) return ed;
     int dr = (int)(a >> rp & 255) - (int)(b >> rp & 255);
     int dg = (int)(a >> gp & 255) - (int)(b >> gp & 255);
     int db = (int)(a >> bp & 255) - (int)(b >> bp & 255);
     int y = (269 * dr + 694 * dg + 61 * db) >> 6;            /* k_r 0.2627, k_g 0.6780, k_b 0.0593 */
     int cb = (544 * (db * 16 - y)) >> 10;                     /* 0.5 / (1 - k_b) */
     int cr = (694 * (dr * 16 - y)) >> 10;                     /* 0.5 / (1 - k_r) */
-    e->a = a; e->b = b;
-    e->d = isqrt((u32)(y * y + cb * cb + cr * cr));
-    return e->d;
+    u32 d = isqrt((u32)(y * y + cb * cb + cr * cr));
+    e->c = 0; e->a = a; e->b = b; e->d = d;
+    e->c = a ^ b ^ d ^ DC_SALT;
+    return d;
 }
 
 static int eq(u32 a, u32 b) { return dist(a, b) < 30 * 16; }  /* equal colour tolerance 30 */

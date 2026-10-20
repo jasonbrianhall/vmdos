@@ -15,6 +15,13 @@
    the core at 100% even when there is nothing to draw. Without a local
    APIC it can take that on, it waits as before.
 
+   With more CPUs, up to three more start as render helpers (render=N:
+   at most N; render=0: none). They take no part but this: when the
+   helper's redraw has rows to scale and write out (par_for), they take
+   chunks of them alongside it, so a frame that one CPU can't draw in
+   time at 1080p or with xBRZ is split. Between those they halt, woken by
+   the helper's IPI; a still screen never wakes them.
+
    The helper is found in the ACPI MADT (the RSDP from vmdos.efi, rsdp= on
    the command line, or the BIOS areas) and started with INIT-SIPI-SIPI
    through a page below 1 MiB (its contents put back afterwards). It takes
@@ -49,22 +56,43 @@ static int has_mwait, has_pat;
 static u32 ap_id;                              /* the helper's APIC ID */
 static int ap_x2apic;
 static volatile int ap_apic_ready, ap_hlt_ok;  /* its APIC is set for the wake-up IPI; one has come */
-static volatile u32 ap_wakes;
 static volatile int ap_probe_done;
 static volatile int ap_sleeping;               /* halted till the next tick's IPI */
-static void ap_wake_setup(void);
+static int ap_wake_setup(void);
 static void ap_wait(u32 last);
 static void udelay(u32 us);
 static u64 ap_pat;                            /* PAT: the boot CPU's (write-combining framebuffer) */
 
+/* Render helpers (par_for) */
+#define MAX_RENDER (SMP_SLOTS - 1)
+static u8 rh_stack[MAX_RENDER][AP_STACK] __attribute__((aligned(16)));
+static u32 rh_apic[MAX_RENDER];
+static int n_render;                           /* started; rh_ok says which take wake-ups */
+static volatile int ap_role;                   /* the CPU being started: 0 the helper, 1 + i render helper i */
+static volatile int rh_alive[MAX_RENDER], rh_ok[MAX_RENDER], rh_probed[MAX_RENDER];
+static volatile int rh_sleeping[MAX_RENDER];
+static volatile u32 cpu_wakes[2 + MAX_RENDER];  /* wake-up IPIs taken, by smp_cpu() */
+static volatile int rh_fault;                  /* one faulted: par_for draws alone from then on */
+static volatile u32 rh_fault_vec, rh_fault_eip;
+static void render_main(int i);
+
 struct rlock video_lock, sound_lock, log_lock;
 
-int smp_on_ap(void)
+/* Which CPU this is: 0 the boot CPU, 1 the helper, 2 + i render helper i. */
+int smp_cpu(void)
 {
     u32 sp;
     __asm__ volatile("mov %%esp,%0" : "=r"(sp));
-    return sp - (u32)(uintptr_t)ap_stack < AP_STACK;
+    if (sp - (u32)(uintptr_t)ap_stack < AP_STACK) return 1;
+    u32 o = sp - (u32)(uintptr_t)rh_stack;
+    return o < sizeof rh_stack ? 2 + (int)(o / AP_STACK) : 0;
 }
+
+int smp_on_ap(void) { return smp_cpu() != 0; }
+
+/* Per-CPU scratch for par_for's work: 0 on the boot CPU and the helper
+   (they never draw at the same time), 1 + i on render helper i. */
+int smp_slot(void) { int c = smp_cpu(); return c >= 2 ? c - 1 : 0; }
 
 /* ---------------- locks ----------------
    Spinlocks that the CPU holding one may take again; interrupts stay off
@@ -89,7 +117,7 @@ static void lock_got(struct rlock *l, int me, u32 fl) { l->owner = me; l->depth 
 void rlock_take(struct rlock *l)
 {
     u32 fl = irq_save();
-    int me = smp_on_ap() + 1;
+    int me = smp_cpu() + 1;
     if (lock_mine(l, me)) return;
     while (__atomic_exchange_n(&l->held, 1, __ATOMIC_ACQUIRE))
         while (l->held) __asm__ volatile("pause");
@@ -99,7 +127,7 @@ void rlock_take(struct rlock *l)
 int rlock_try(struct rlock *l)
 {
     u32 fl = irq_save();
-    int me = smp_on_ap() + 1;
+    int me = smp_cpu() + 1;
     if (lock_mine(l, me)) return 1;
     if (__atomic_exchange_n(&l->held, 1, __ATOMIC_ACQUIRE)) { irq_restore(fl); return 0; }
     lock_got(l, me, fl);
@@ -126,6 +154,13 @@ static void force_drop(struct rlock *l)
 
 void smp_ap_fault(struct regs *r)
 {
+    int c = smp_cpu();
+    if (c >= 2) {                              /* a render helper: it takes no locks; the helper reports it */
+        rh_ok[c - 2] = 0;
+        rh_fault_vec = r->vec; rh_fault_eip = r->eip;
+        __atomic_store_n(&rh_fault, 1, __ATOMIC_SEQ_CST);
+        for (;;) __asm__ volatile("cli; hlt");
+    }
     ap_hlt_ok = 0;
     ap_sleeping = 0;
     smp_active = 0;
@@ -142,15 +177,17 @@ void smp_ap_fault(struct regs *r)
 /* ---------------- the helper's loop ---------------- */
 void ap_main(void)
 {
+    int role = ap_role;
     if (has_pat) __asm__ volatile("wbinvd; wrmsr; wbinvd" :: "a"((u32)ap_pat), "d"((u32)(ap_pat >> 32)), "c"(0x277) : "memory");
     idt_load();
-    ap_wake_setup();
+    if (role) render_main(role - 1);
+    ap_apic_ready = ap_wake_setup();
     ap_alive = 1;
     if (ap_apic_ready) {                       /* the boot CPU's test IPI (smp_start): HLT only once one got here */
         __asm__ volatile("sti" ::: "memory");
-        for (int i = 0; i < 50000 && !ap_wakes; i++) udelay(1);
+        for (int i = 0; i < 50000 && !cpu_wakes[1]; i++) udelay(1);
         __asm__ volatile("cli" ::: "memory");
-        ap_hlt_ok = ap_wakes != 0;
+        ap_hlt_ok = cpu_wakes[1] != 0;
     }
     ap_probe_done = 1;
 
@@ -198,26 +235,26 @@ static u32 lapic_pa;                          /* where the boot CPU's xAPIC regi
 /* On the helper: software-enable its local APIC (INIT leaves it off, and
    off it takes no fixed IPIs), let every priority through, and have the
    wake-up IPI's vector. Its LINT pins and timer stay masked from INIT. */
-static void ap_wake_setup(void)
+static int ap_wake_setup(void)
 {
     u64 base = rdmsr(0x1B);
-    if (!(base & (1u << 11))) return;          /* globally off */
+    if (!(base & (1u << 11))) return 0;        /* globally off */
     ap_x2apic = (base >> 10) & 1;
     if (ap_x2apic) {
         wrmsr(0x808, 0);                       /* TPR */
         wrmsr(0x80F, 0x100 | AP_SPURIOUS_VEC); /* SVR: on */
     } else {
-        if (!lapic || ((u32)base & 0xFFFFF000u) != lapic_pa) return;   /* not where it's mapped */
+        if (!lapic || ((u32)base & 0xFFFFF000u) != lapic_pa) return 0;   /* not where it's mapped */
         lapic[0x80 / 4] = 0;
         lapic[0xF0 / 4] = 0x100 | AP_SPURIOUS_VEC;
     }
-    ap_apic_ready = 1;
+    return 1;
 }
 
 /* boot.S's ap_wake_isr. */
 void ap_wake_eoi(void)
 {
-    ap_wakes++;
+    cpu_wakes[smp_cpu()]++;
     if (ap_x2apic) wrmsr(0x80B, 0);
     else lapic[0xB0 / 4] = 0;
 }
@@ -245,6 +282,97 @@ void smp_tick(void)
     if (!ap_hlt_ok) return;
     __asm__ volatile("lock orl $0,(%%esp)" ::: "memory");             /* ticks++ out before ap_sleeping is read */
     if (ap_sleeping) apic_ipi(ap_id, 0x00004000 | AP_WAKE_VEC);       /* fixed, edge, assert */
+}
+
+/* ---------------- par_for: the helper's rows, shared ----------------
+   The helper posts a job (fn over 0..n-1 in chunks), wakes the render
+   helpers that are halted, and takes chunks itself; each CPU claims the
+   next chunk with a locked XADD. A job's fields change only while no
+   render helper is inside one (job_active) and claims are blocked
+   (job_next past any chunk count), so a late one can't take a chunk of
+   the wrong job. Everything runs on this CPU when there are no render
+   helpers, on the boot CPU, or for a handful of rows. */
+#define JOB_BLOCKED 0x80000000u
+static struct { void (*fn)(u32, void *); void *arg; u32 n, chunk, nchunks; } job;
+static volatile u32 job_gen, job_next = JOB_BLOCKED, job_done, job_active;
+
+static u32 xadd(volatile u32 *p, u32 v)
+{
+    __asm__ volatile("lock xaddl %0,%1" : "+r"(v), "+m"(*p) :: "memory");   /* SMP: a 486 or later */
+    return v;
+}
+
+static void run_chunks(void)
+{
+    for (;;) {
+        u32 c = xadd(&job_next, 1);
+        if (c >= job.nchunks) return;
+        u32 a = c * job.chunk, b = a + job.chunk;
+        if (b > job.n) b = job.n;
+        for (u32 i = a; i < b; i++) job.fn(i, job.arg);
+        xadd(&job_done, 1);
+    }
+}
+
+/* 0: a render helper faulted part way (some rows may be undrawn). */
+int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
+{
+    if (!n_render || rh_fault || smp_cpu() != 1 || n < 2 * chunk) {
+        for (u32 i = 0; i < n; i++) fn(i, arg);
+        return 1;
+    }
+    while (job_active && !rh_fault) __asm__ volatile("pause");
+    job_next = JOB_BLOCKED;
+    job.fn = fn; job.arg = arg; job.n = n; job.chunk = chunk; job.nchunks = (n + chunk - 1) / chunk;
+    job_done = 0;
+    __asm__ volatile("" ::: "memory");
+    job_next = 0;
+    xadd(&job_gen, 1);                         /* locked: a fence before rh_sleeping is read */
+    for (int i = 0; i < n_render; i++)
+        if (rh_ok[i] && rh_sleeping[i]) apic_ipi(rh_apic[i], 0x00004000 | AP_WAKE_VEC);
+    run_chunks();
+    while (job_done < job.nchunks && !rh_fault) __asm__ volatile("pause");
+    job_next = JOB_BLOCKED;
+    while (job_active && !rh_fault) __asm__ volatile("pause");
+    if (!rh_fault) return 1;
+    static int told;
+    if (!told) {
+        told = 1;
+        kprintf("smp: a render helper faulted (exception %u, EIP %x): the helper draws alone\n", rh_fault_vec, rh_fault_eip);
+    }
+    return 0;
+}
+
+/* A render helper: its wake-up test, then jobs. Between jobs it spins a
+   little (a frame's jobs come close together) and then halts. */
+static void render_main(int i)
+{
+    int ready = ap_wake_setup();
+    rh_alive[i] = 1;
+    if (ready) {
+        __asm__ volatile("sti" ::: "memory");
+        for (int k = 0; k < 50000 && !cpu_wakes[2 + i]; k++) udelay(1);
+        __asm__ volatile("cli" ::: "memory");
+    }
+    rh_ok[i] = ready && cpu_wakes[2 + i] != 0;
+    rh_probed[i] = 1;
+    if (!rh_ok[i]) for (;;) __asm__ volatile("cli; hlt");      /* no wake-ups: it would have to poll */
+    u32 seen = job_gen;
+    for (;;) {
+        for (int s = 0; s < 4000 && job_gen == seen; s++) __asm__ volatile("pause");
+        while (job_gen == seen) {
+            __atomic_exchange_n(&rh_sleeping[i], 1, __ATOMIC_SEQ_CST);  /* XCHG: fenced before job_gen is read */
+            if (job_gen == seen) __asm__ volatile("sti; hlt; cli" ::: "memory");
+            rh_sleeping[i] = 0;
+        }
+        seen = job_gen;
+        xadd(&job_active, 1);
+        if (job_gen == seen) {
+            __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");   /* the helper's page table changes */
+            run_chunks();
+        }
+        xadd(&job_active, (u32)-1);
+    }
 }
 
 static void udelay(u32 us) { while (us--) inb(0x80); }   /* ~1 us each, interrupts off or on */
@@ -310,10 +438,10 @@ static const u8 *madt_find(void)
 }
 
 /* The APIC ID of an enabled CPU that isn't this one, or -1. */
-static int64_t pick_cpu(const u8 *madt, u32 self, int *ncpu)
+static int pick_cpus(const u8 *madt, u32 self, int *ncpu, u32 *ids, int max)
 {
     u32 len = *(const u32 *)(madt + 4);
-    int64_t pick = -1;
+    int n = 0;
     *ncpu = 0;
     for (u32 o = 44; o + 2 <= len && madt[o + 1] >= 2; o += madt[o + 1]) {
         u32 id, flags;
@@ -322,9 +450,25 @@ static int64_t pick_cpu(const u8 *madt, u32 self, int *ncpu)
         else continue;
         if (!(flags & 1)) continue;
         ++*ncpu;
-        if (id != self && pick < 0 && (x2apic || id < 255)) pick = id;
+        if (id != self && n < max && (x2apic || id < 255)) ids[n++] = id;
     }
-    return pick;
+    return n;
+}
+
+/* INIT-SIPI-SIPI to CPU id through the trampoline at tramp; *alive turns 1
+   once it runs. */
+static int start_cpu(u32 id, u32 tramp, volatile int *alive)
+{
+    apic_ipi(id, 0x0000C500);                                        /* INIT, assert */
+    udelay(200);
+    apic_ipi(id, 0x00008500);                                        /* INIT, deassert */
+    udelay(10000);
+    for (int k = 0; k < 2 && !*alive; k++) {
+        apic_ipi(id, 0x00004600 | tramp >> 12);                      /* STARTUP */
+        for (int i = 0; i < (k ? 100000 : 200) && !*alive; i++) udelay(1);
+    }
+    for (int i = 0; i < 100000 && !*alive; i++) udelay(1);
+    return *alive;
 }
 
 /* ---------------- start-up ---------------- */
@@ -355,10 +499,12 @@ void smp_start(u32 tramp)
     if (!madt) { kprintf("smp: no ACPI MADT: one CPU\n"); return; }
     u32 self = apic_id();
     int ncpu;
-    int64_t id = pick_cpu(madt, self, &ncpu);
-    if (id < 0) { kprintf("smp: one CPU\n"); return; }
+    u32 ids[1 + MAX_RENDER];
+    int nids = pick_cpus(madt, self, &ncpu, ids, 1 + MAX_RENDER);
+    if (!nids) { kprintf("smp: one CPU\n"); return; }
     if (!tramp) { kprintf("smp: no free page below 1 MiB to start a CPU from\n"); return; }
-    ap_id = (u32)id;
+    u32 id = ids[0];
+    ap_id = id;
 
     /* The trampoline: real mode at tramp, into protected mode on our GDT,
        then ap_entry32 (paging on with this CPU's CR0/3/4, the stack). */
@@ -377,23 +523,38 @@ void smp_start(u32 tramp)
     if (own) ap_cr3 = own;
     __asm__ volatile("mov %%cr4,%0" : "=r"(ap_cr4));
     ap_esp = (u32)(uintptr_t)ap_stack + AP_STACK;
+    ap_role = 0;
     __asm__ volatile("wbinvd" ::: "memory");
 
-    apic_ipi((u32)id, 0x0000C500);                                   /* INIT, assert */
-    udelay(200);
-    apic_ipi((u32)id, 0x00008500);                                   /* INIT, deassert */
-    udelay(10000);
-    for (int k = 0; k < 2 && !ap_alive; k++) {
-        apic_ipi((u32)id, 0x00004600 | tramp >> 12);                 /* STARTUP */
-        for (int i = 0; i < (k ? 100000 : 200) && !ap_alive; i++) udelay(1);
+    if (!start_cpu(id, tramp, &ap_alive)) {
+        memcpy(page, saved, 4096);
+        kprintf("smp: CPU %u (APIC ID) didn't start: one CPU\n", id);
+        return;
     }
-    for (int i = 0; i < 100000 && !ap_alive; i++) udelay(1);
-    memcpy(page, saved, 4096);
-    if (!ap_alive) { kprintf("smp: CPU %u (APIC ID) didn't start: one CPU\n", (u32)id); return; }
-    if (ap_apic_ready) apic_ipi((u32)id, 0x00004000 | AP_WAKE_VEC);   /* the test: does a wake-up get there? */
+    if (ap_apic_ready) apic_ipi(id, 0x00004000 | AP_WAKE_VEC);       /* the test: does a wake-up get there? */
     for (int i = 0; i < 100000 && !ap_probe_done; i++) udelay(1);
-    kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s%s\n", ncpu, (u32)id,
-            x2apic ? " (x2APIC)" : "", ap_hlt_ok ? "" : has_mwait ? ", waits with MWAIT" : ", waits by polling");
+
+    /* Render helpers: the rest, up to render=N. */
+    int want = nids - 1;
+    const char *rc = strstr(cmdline, "render=");
+    if (rc && rc[7] >= '0' && rc[7] <= '9' && rc[7] - '0' < want) want = rc[7] - '0';
+    int rendering = 0;
+    for (int i = 0; i < want; i++) {
+        ap_role = 1 + i;
+        ap_esp = (u32)(uintptr_t)rh_stack[i] + AP_STACK;
+        rh_apic[i] = ids[1 + i];
+        __asm__ volatile("wbinvd" ::: "memory");
+        if (!start_cpu(ids[1 + i], tramp, &rh_alive[i])) { kprintf("smp: CPU %u (APIC ID) didn't start\n", ids[1 + i]); break; }
+        apic_ipi(ids[1 + i], 0x00004000 | AP_WAKE_VEC);
+        for (int k = 0; k < 100000 && !rh_probed[i]; k++) udelay(1);
+        n_render = i + 1;
+        rendering += rh_ok[i] != 0;
+    }
+    memcpy(page, saved, 4096);
+    static const char *const more[] = { "", ", 1 more draws with it", ", 2 more draw with it", ", 3 more draw with it" };
+    kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s%s%s\n", ncpu, id,
+            x2apic ? " (x2APIC)" : "", ap_hlt_ok ? "" : has_mwait ? ", waits with MWAIT" : ", waits by polling",
+            more[rendering < 4 ? rendering : 3]);
 }
 
 /* VMHV (hv.c) is starting: the screen and the sound back on the boot CPU,
