@@ -44,6 +44,7 @@
 //   7  use card CL (0-based; FFh: auto): AX = 0, 1 no such card, 2 it didn't start
 //   8  IPXNET (DOSBox's IPX over UDP, ipxnet.cpp): set up from ES:DI, or stop
 //   9  IPXNET status into ES:DI
+//  10  the IPX node DOS should use into ES:DI (IPXNET's in CONNECT, else the MAC)
 #include "net.hpp"
 
 extern "C" {
@@ -484,7 +485,7 @@ extern "C" void net_api(struct regs* r)
         CX(r) = (uint16_t)(active >= 0 ? active : 0xFFFF);
         DX(r) = auto_pick ? 1 : 0;
         return; }
-    case 8: case 9:
+    case 8: case 9: case 10:
         ipxnet_api(r, fn);
         return;
     case 7: {

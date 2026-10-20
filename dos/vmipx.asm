@@ -247,11 +247,12 @@ f_send: mov byte [bp + F_AX], 0
         mov [tx_ipx + 18], ax
         mov ax, [net + 2]
         mov [tx_ipx + 20], ax
-        mov ax, [mac]
+        call get_node
+        mov ax, [node]
         mov [tx_ipx + 22], ax
-        mov ax, [mac + 2]
+        mov ax, [node + 2]
         mov [tx_ipx + 24], ax
-        mov ax, [mac + 4]
+        mov ax, [node + 4]
         mov [tx_ipx + 26], ax
         mov ax, [es:di + E_SOCK]
         mov [tx_ipx + 28], ax
@@ -464,11 +465,32 @@ f_marker:
         ret
 
 ; BX=9 internetwork address: ES:SI <- network (4), node (6)
-f_addr: mov es, [bp + F_ES]
+f_addr: call get_node
+        mov es, [bp + F_ES]
         mov di, [bp + F_SI]
         mov si, net
         mov cx, 5
         rep movsw
+        ret
+
+; The IPX node: the MAC, unless vmdos's IPXNET has registered this PC with
+; a DOSBox server under another node (INT 2Fh AX=564Eh BL=10); then that,
+; so games that put their own address in their packets get answers.
+get_node:
+        push ax
+        push bx
+        push di
+        push es
+        mov ax, 564Eh
+        mov bl, 10
+        push cs
+        pop es
+        mov di, node
+        int 2Fh
+        pop es
+        pop di
+        pop bx
+        pop ax
         ret
 
 ; ---- the packet driver's receiver ----
@@ -548,12 +570,17 @@ got_frame:
         cmp ax, cx
         ja .x
         mov [ipx_len], ax
-        ; for this node (or everyone)?
+        ; for this node, this MAC (or everyone)?
         mov bp, si
         add si, 10
-        mov di, mac
+        mov di, node
         push cs
         pop es
+        mov cx, 3
+        repe cmpsw
+        je .mine
+        lea si, [ds:bp + 10]
+        mov di, mac
         mov cx, 3
         repe cmpsw
         je .mine
@@ -721,7 +748,8 @@ old7a:      dd 0
 old8:       dd 0
 esr_ptr:    dd 0
 net:        dd 0                        ; network 00000000h
-mac:        times 6 db 0                ; (follows net: GetInternetworkAddress copies both)
+node:       times 6 db 0                ; (follows net: GetInternetworkAddress copies both)
+mac:        times 6 db 0                ; the card's, as frames go out
 next_dyn:   dw 3FFFh
 handle:     dw 0
 rx_busy:    db 0
@@ -842,7 +870,13 @@ pkt_int3 equ $ - 1
         mov dx, msg_addr
         jmp fail
 
-.addr:  mov ax, 352Fh
+.addr:  mov si, mac                     ; the node: the MAC (or IPXNET's)
+        mov di, node
+        movsw
+        movsw
+        movsw
+        call get_node
+        mov ax, 352Fh
         int 21h
         mov [old2f], bx
         mov [old2f + 2], es
@@ -881,7 +915,7 @@ pkt_int3 equ $ - 1
         call puts
 .fixed: mov dx, msg_ok3
         call puts
-        mov si, mac
+        mov si, node
         mov cx, 6
 .mac:   lodsb
         call puthex2

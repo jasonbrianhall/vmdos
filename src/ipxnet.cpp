@@ -113,7 +113,8 @@ void plog(const char* what, const uint8_t* ipx)
             (ipx[2] << 8) | ipx[3]);
 }
 
-uint16_t next_port;                 // connect: the next fresh UDP port
+uint16_t next_port;
+bool dos_uses_node;                 // DOS's IPX sends from the registration's node (VMIPX asks, BL=10)                 // connect: the next fresh UDP port
 uint8_t* outq;                      // OUTQ frames of FRAME_MAX
 uint16_t outlen[OUTQ];
 bool out_dos[OUTQ];                 // to DOS instead of the wire
@@ -484,7 +485,10 @@ void connect_udp(uint16_t dport, uint8_t* ipx, unsigned len)
     }
     if (memcmp(h->dnode, p->node, 6)) { dropped++; return; }
     note_remote(h->snode);
-    memcpy(h->dnode, p->mac, 6);
+    // This PC: VMIPX knows the node (games put it in their packets, so it
+    // must be the one the server knows); an IPX driver that doesn't, and
+    // LAN machines, get their MAC back in the header.
+    if (!(p->dos && dos_uses_node)) memcpy(h->dnode, p->mac, 6);
     send_ipx(ipx, len, p->mac, p->dos);
 }
 
@@ -503,6 +507,7 @@ bool connect_ipx(uint8_t* ipx, unsigned len, const uint8_t* smac, bool dos)
     static uint8_t buf[MAX_IPX];
     memcpy(buf, ipx, len);
     IpxHdr* c = (IpxHdr*)buf;
+    if (dos) dos_uses_node = !memcmp(c->snode, p->node, 6);
     if (!memcmp(c->snode, smac, 6)) memcpy(c->snode, p->node, 6);
     peer_send(p, buf, len);
     return b;
@@ -685,10 +690,18 @@ void ipxnet_tick()
     flush();
 }
 
-// INT 2Fh AX=564Eh BL=8 (set up / stop) and BL=9 (status).
+// INT 2Fh AX=564Eh BL=8 (set up / stop), BL=9 (status), BL=10 (the IPX
+// node DOS should use: this PC's registration's in CONNECT, else its MAC;
+// AX = 1 if it's IPXNET's).
 void ipxnet_api(struct regs* r, int fn)
 {
     uint8_t* p = gptr(LIN(r->v86_es, DI(r)));
+    if (fn == 10) {
+        bool reg = active && cfg.mode == 1 && peers[0].registered;
+        memcpy(p, reg ? peers[0].node : net_cur_mac(), 6);
+        AX(r) = reg;
+        return;
+    }
     if (fn == 8) {
         stop();
         memcpy(&cfg, p, sizeof cfg);
@@ -697,6 +710,7 @@ void ipxnet_api(struct regs* r, int fn)
         memset(clients, 0, sizeof clients);
         memset(peers, 0, sizeof peers);
         remote_n = remote_next = 0;
+        dos_uses_node = false;
         frame_type = 0;
         udp_in = udp_out = ipx_in = ipx_out = dropped = 0;
         active = true;
