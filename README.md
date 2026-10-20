@@ -515,8 +515,9 @@ VMIPXBOX sets up IPXNET, DOSBox's IPX over UDP (port 213), which vmdos then
 runs itself underneath DOS (`src/ipxnet.cpp`): load VMIPX and play, and this
 PC's games reach the DOSBox players; the LAN's IPX machines are bridged too.
 In CONNECT mode vmdos checks the link every 5 s and registers again if the
-server stops answering (it restarted, a NAT mapping changed). `ipxlog` on the
-kernel command line logs every IPXNET packet (DMESG).
+server stops answering (it restarted, a NAT mapping changed). It logs nothing
+unless the kernel command line has `ipxlog`, which logs its events and
+every packet (DMESG).
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 

@@ -17,6 +17,8 @@
 //   port and a registration of their own; node addresses in the headers
 //   are translated (MAC <-> that registration's node).
 //
+// Nothing goes in the log unless the kernel command line has ipxlog.
+//
 // Both: the LAN's IPX machines are bridged too, so the card listens to
 // everything while IPXNET runs (what isn't for DOS is filtered out here),
 // and frames for DOS players' nodes are carried over. vmdos answers ARP
@@ -101,12 +103,18 @@ uint8_t remote[MAX_REMOTE][6];      // nodes seen on the other side
 int remote_n, remote_next;
 int frame_type;                     // LAN framing: 0 Ethernet II, 1 802.3, 2 802.2, 3 SNAP
 uint32_t udp_in, udp_out, ipx_in, ipx_out, dropped;
-int logging = -1;                   // ipxlog on the kernel command line: every packet
+int logging = -1;                   // ipxlog on the kernel command line: IPXNET logs (every packet too)
+
+bool log_on()
+{
+    if (logging < 0) logging = strstr(cmdline, "ipxlog") != 0;
+    return logging;
+}
+#define ilog(...) do { if (log_on()) kprintf(__VA_ARGS__); } while (0)
 
 void plog(const char* what, const uint8_t* ipx)
 {
-    if (logging < 0) logging = strstr(cmdline, "ipxlog") != 0;
-    if (!logging) return;
+    if (!log_on()) return;
     const uint8_t* d = ipx + 10; const uint8_t* s = ipx + 22;
     kprintf("ipxnet: %s %02x%02x%02x%02x%02x%02x:%02x%02x <- %02x%02x%02x%02x%02x%02x:%02x%02x len %u\n", what,
             d[0], d[1], d[2], d[3], d[4], d[5], ipx[16], ipx[17], s[0], s[1], s[2], s[3], s[4], s[5], ipx[28], ipx[29],
@@ -256,7 +264,7 @@ void note_remote(const uint8_t* node)
 
 void log_node(const char* what, const uint8_t* n)
 {
-    kprintf("%s%02x%02x%02x%02x%02x%02x", what, n[0], n[1], n[2], n[3], n[4], n[5]);
+    ilog("%s%02x%02x%02x%02x%02x%02x", what, n[0], n[1], n[2], n[3], n[4], n[5]);
 }
 
 // ---------------- SERVER ----------------
@@ -301,7 +309,7 @@ void server_udp(uint8_t family, const uint8_t* src, const uint8_t* smac, uint16_
             }
             c->node[4] = sport >> 8; c->node[5] = sport;
             log_node("ipxnet: client connected, node ", c->node);
-            kprintf(", port %u\n", sport);
+            ilog(", port %u\n", sport);
         }
         memcpy(c->mac, smac, 6);
         c->last = ticks;
@@ -390,7 +398,7 @@ void arp_hop()                                  // who has the next hop? (the an
 void lost(Peer* p)
 {
     log_node(p->dos ? "ipxnet: no answer from the server for this PC (node " : "ipxnet: no answer from the server for a LAN machine (node ", p->node);
-    kprintf("): registering again\n");
+    ilog("): registering again\n");
     p->registered = false;
     p->port = fresh_port();
     p->reg_since = 0;
@@ -452,7 +460,7 @@ void connect_udp(uint16_t dport, uint8_t* ipx, unsigned len)
         bool first = !p->registered;            // the registration's answer
         bool changed = memcmp(p->node, h->dnode, 6) != 0;
         if (!first && !changed) return;
-        if (first && !zero(p->node, 6) && changed) log_node("ipxnet: was node ", p->node), kprintf("\n");
+        if (first && !zero(p->node, 6) && changed) { log_node("ipxnet: was node ", p->node); ilog("\n"); }
         memcpy(p->node, h->dnode, 6);
         p->reg_since = 0;
         p->registered = true;
@@ -460,7 +468,7 @@ void connect_udp(uint16_t dport, uint8_t* ipx, unsigned len)
         if (first) {
             log_node(p->dos ? "ipxnet: connected, this PC is node " : "ipxnet: a LAN machine is node ", p->node);
             if (!p->dos) log_node(", MAC ", p->mac);
-            kprintf("\n");
+            ilog("\n");
         }
         return;
     }
@@ -523,7 +531,7 @@ void answer_neighbors(const uint8_t* f, unsigned len)
     if (t == 0x0806 && len >= 42 && f[21] == 2 && cfg.mode == 1 && cfg.family == 4 && !zero(cfg.hop4, 4) &&
         !memcmp(f + 28, cfg.hop4, 4) && memcmp(cfg.hop_mac, f + 22, 6)) {
         memcpy(cfg.hop_mac, f + 22, 6);         // the next hop moved
-        kprintf("ipxnet: the next hop is now %02x:%02x:%02x:%02x:%02x:%02x\n", f[22], f[23], f[24], f[25], f[26], f[27]);
+        ilog("ipxnet: the next hop is now %02x:%02x:%02x:%02x:%02x:%02x\n", f[22], f[23], f[24], f[25], f[26], f[27]);
     }
     if (t == 0x0806 && len >= 42 && f[20] == 0 && f[21] == 1 && !zero(cfg.my4, 4) && !memcmp(f + 38, cfg.my4, 4)) {
         uint8_t* o = out_slot(false);
@@ -623,7 +631,7 @@ void stop()
     active = false;
     out_n = 0;
     net_promisc(false);
-    kprintf("ipxnet: stopped\n");
+    ilog("ipxnet: stopped\n");
 }
 
 } // namespace
@@ -723,8 +731,8 @@ void ipxnet_api(struct regs* r, int fn)
             d->port = cfg.local_port;
             d->last = d->heard = ticks;
             register_peer(d);
-            kprintf("ipxnet: connecting to port %u (IPv%u)\n", cfg.port, cfg.family);
-        } else kprintf("ipxnet: server on UDP port %u\n", cfg.port);
+            ilog("ipxnet: connecting to port %u (IPv%u)\n", cfg.port, cfg.family);
+        } else ilog("ipxnet: server on UDP port %u\n", cfg.port);
         flush();
         AX(r) = 0;
         return;
