@@ -531,7 +531,13 @@ static void perf_report(void)
 {
     static u64 since;
     u64 now = tsc_read();
-    if (!since) { since = now; return; }
+    if (!since) {                             /* the first: start counting from here */
+        since = now;
+        for (int i = 0; i < 1024; i++) perf_ports[i] = 0;
+        for (int i = 0; i < PF_N; i++) { pf_tsc[i] = 0; pf_cnt[i] = 0; }
+        for (int i = 0; i < PT_N; i++) pt_tsc[i] = 0;
+        return;
+    }
     u64 total = now - since, mon = 0;
     since = now;
     char b[400]; int n = 0;
@@ -579,7 +585,8 @@ struct regs *isr_dispatch(struct regs *r)
     r = isr_dispatch_inner(r);
     pf_tsc[slot] += tsc_read() - t0;
     pf_cnt[slot]++;
-    if (slot == PF_IRQ0 && ticks % 5000 == 0) perf_report();
+    static u32 last_report;
+    if (slot == PF_IRQ0 && ticks - last_report >= 5000) { last_report = ticks; perf_report(); }   /* ticks can skip a value */
     return r;
 }
 

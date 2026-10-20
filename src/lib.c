@@ -219,8 +219,6 @@ void serial_init(const char *cmd)
     tsc_calibrate();                             /* kdelay_us needs it even with logtime=off */
     if (!tsc_per_ms) p80_calibrate();
     log_times = !(cmd && strstr(cmd, "logtime=off"));
-    const char *pf = cmd ? strstr(cmd, "perf") : 0;
-    perf_on = pf && (pf == cmd || pf[-1] == ' ') && (!pf[4] || pf[4] == ' ');
     if (serial_mode) return;                     /* serial_ok stays 0: the port untouched */
     outb(COM1 + 1, 0);
     outb(COM1 + 3, 0x80);
@@ -471,4 +469,14 @@ void panic(const char *fmt, ...)
 }
 
 int perf_on;
-void perf_io_probe(void) { if (perf_on) io_probe(); }
+void perf_io_probe(void)
+{
+    /* "perf" or "perf=..." anywhere on the command line (any case) */
+    for (const char *c = cmdline; *c; c++)
+        if ((c == cmdline || c[-1] == ' ' || c[-1] == '\t') && (c[0] | 32) == 'p' && (c[1] | 32) == 'e' &&
+            (c[2] | 32) == 'r' && (c[3] | 32) == 'f' && (!c[4] || c[4] == ' ' || c[4] == '=' || c[4] == '\t'))
+            perf_on = 1;
+    if (!perf_on) return;
+    kprintf("perf: on, a report every 5 s\n");
+    io_probe();
+}
