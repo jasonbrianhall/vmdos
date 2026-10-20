@@ -242,8 +242,12 @@ The framebuffer is mapped write-combining (`nowc` turns that off).
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
-neither takes time from the game (the log says `smp: ...`). `nosmp` keeps
-everything on one core.
+neither takes time from the game (the log says `smp: ...`). Between frames
+it halts, so a still screen costs next to nothing. With more cores, up to
+three more share the drawing of each frame's changed rows with it (scaling,
+xBRZ, writing the framebuffer), for high resolutions or slow CPUs where one
+core can't keep up; `render=N` uses at most N of them, `render=0` none.
+`nosmp` keeps everything on one core.
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
 the display, at the screen's size, in memory until the next one; after

@@ -318,7 +318,11 @@ extern struct rlock video_lock;               /* video.c's state: the helper's r
 extern struct rlock sound_lock;               /* the Sound Blaster core, the CD audio ring */
 extern struct rlock log_lock;                 /* kprintf */
 extern volatile int smp_active;               /* the helper CPU redraws and renders (not the timer tick) */
-int smp_on_ap(void);                          /* running on the helper */
+int smp_on_ap(void);                          /* running on the helper (or a render helper) */
+int smp_cpu(void);                            /* 0 boot CPU, 1 helper, 2.. render helpers */
+#define SMP_SLOTS 4                           /* the helper and up to three render helpers */
+int smp_slot(void);                           /* 0..SMP_SLOTS-1: whose per-CPU scratch to use */
+int par_for(u32 n, u32 chunk, void (*fn)(u32 i, void *arg), void *arg);   /* the helper's rows, shared; 0: some undrawn */
 void smp_start(u32 tramp);                    /* tramp: a free physical page below 1 MiB */
 void smp_go(void);
 void smp_park(void);                          /* VMHV: everything back on the boot CPU, for good */
