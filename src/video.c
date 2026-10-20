@@ -465,7 +465,6 @@ static void smooth_setup(u32 w, u32 h)
 {
     smooth = 0;
     xbrz_k = 0;
-    if (g_w == w && g_h == h) return;              /* pixel for pixel: nothing to smooth */
     if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
     if (xbrz_opt && !is_text(video_mode) && w <= 640 && h <= 480 && w >= 2 && h >= 2) {
         u32 k = (g_w + w - 1) / w, kh = (g_h + h - 1) / h;
@@ -478,6 +477,7 @@ static void smooth_setup(u32 w, u32 h)
         xbrz_k = k; x_w = w; x_h = h;
         w *= k; h *= k;
     }
+    if (!xbrz_k && g_w == w && g_h == h) return;   /* pixel for pixel: nothing to smooth (xBRZ, asked for, still runs) */
     if (h > sizeof sdirty || g_h > 4096 || w > 4096 || w < 2 || h < 2) { xbrz_k = 0; return; }
     u32 need = g_w * h * 4;
     if (need > hs_cap) {
