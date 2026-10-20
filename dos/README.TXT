@@ -48,9 +48,10 @@ NETWORK: TCP/IP, IPv4 AND IPv6 (in C:\VMDOS\NET; STARTNET loads it all)
   VMTCP IPADDR 1.2.3.4  Set one by hand (IPV6ADDR 2001:db8::5/64, ...)
   PING [-4 | -6] host   Ping a name or address
   NSLOOKUP name         Look up a name (-type=MX, AAAA, ...; or an address)
-  VMIPXBOX SERVER       Bridge for DOSBox IPX players (they IPXNET CONNECT
-                          to this PC); VMIPXBOX CONNECT host joins a DOSBox
-                          server. Not with VMIPX loaded on the same PC.
+  VMIPXBOX SERVER       Play IPX games with DOSBox players: they IPXNET
+                          CONNECT to this PC; VMIPXBOX CONNECT host joins a
+                          DOSBox server. vmdos keeps it running: then load
+                          VMIPX and start the game. VMIPXBOX STOP ends it.
 
 SCREEN RESOLUTION AND SCALING
 
