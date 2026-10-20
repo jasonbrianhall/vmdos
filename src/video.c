@@ -553,7 +553,16 @@ static void smooth_row(u32 y, const u32 *src)
     xdirty[y] = 1;
 }
 
-static volatile int xbrz_late;                 /* the helper's xBRZ pass, still to do */
+/* The helper draws a frame's changed rows after video_lock is let go
+   (video_refresh_late): the scan copied them into the shadows, and the
+   drawing reads only those, the palette and the layout, which change only
+   in a redraw. So DOS's VGA register writes (a page flip every frame in
+   DOOM), mode sets and INT 10h wait for the scan alone, not for the
+   scaling, xBRZ and framebuffer writes. A redraw on the boot CPU waits for
+   the helper's drawing first. */
+static volatile int draw_late;                 /* the helper's drawing, still to do */
+static u32 late_n;
+static void (*late_fn)(u32, void *);
 static void smooth_finish(void);
 
 static int xdirty_near(u32 y, int above, int below)
@@ -563,10 +572,19 @@ static int xdirty_near(u32 y, int above, int below)
     return 0;
 }
 
-static void smooth_out(void)
+/* After a scan: draw its n rows (fn), and the smooth scaler's output. */
+static void draw_rows(void)
 {
-    if (xbrz_k && smp_on_ap()) { xbrz_late = 1; return; }
-    smooth_finish();
+    par(late_n, 8, late_fn);
+    if (smooth) smooth_finish();
+}
+
+static void draw_out(u32 n, void (*fn)(u32, void *))
+{
+    if (!n) return;                                /* nothing changed: nothing to draw */
+    late_n = n; late_fn = fn;
+    if (smp_on_ap()) { draw_late = 1; return; }    /* the helper: once video_lock is let go */
+    draw_rows();
 }
 
 static void xb_corner(u32 i, void *unused)
@@ -710,7 +728,7 @@ static void refresh_text(const u16 *cells, int cursor_off)
     }
     for (int r = 0; r < text_rows; r++)
         if (dirty[r]) text_row(cells, r, cursor_off, mcell, m_and, m_xor);
-    if (smooth) smooth_out();
+    if (smooth) smooth_finish();
     sh_cursor = cursor_off;
     sh_mouse = mcell;
     sh_blink = blink_phase;
@@ -1025,7 +1043,7 @@ static void fetch_row(int y, u8 *out)
 /* The rows refresh_gfx and refresh_vbe found changed, for par_for to draw
    from their shadows: source columns [todo_x0, todo_x1) of row todo_y. */
 static u16 todo_y[4096], todo_x0[4096], todo_x1[4096];
-static struct { u32 w, h, B, rowb; int px, py; u32 black, white; } fr;   /* this frame's */
+static struct { u32 w, h, B, bpp, rowb; int px, py; u32 black, white; } fr;   /* this frame's: a mode set may come meanwhile */
 
 static void gfx_draw(u32 i, void *unused)
 {
@@ -1094,8 +1112,7 @@ static void refresh_gfx(void)
     }
     fr.w = (u32)w; fr.h = (u32)h; fr.px = px; fr.py = py;
     fr.black = pack(0, 0, 0); fr.white = pack(63, 63, 63);
-    par(n, 8, gfx_draw);
-    if (smooth) smooth_out();
+    draw_out(n, gfx_draw);
     sh_ptr_x = px; sh_ptr_y = py;
 }
 static void refresh_fallback(void)
@@ -1594,7 +1611,7 @@ static void vbe_draw(u32 i, void *unused)
         if (B == 1) c = pal[src[x]];
         else if (B == 2) {
             u32 v = ((const u16 *)src)[x];
-            if (vbe_bpp == 15) c = pack8((v >> 7) & 0xF8, (v >> 2) & 0xF8, (v << 3) & 0xF8);
+            if (fr.bpp == 15) c = pack8((v >> 7) & 0xF8, (v >> 2) & 0xF8, (v << 3) & 0xF8);
             else c = pack8((v >> 8) & 0xF8, (v >> 3) & 0xFC, (v << 3) & 0xF8);
         } else {
             u32 v = ((const u32 *)src)[x];
@@ -1652,10 +1669,9 @@ static void refresh_vbe(void)
         if (g_y + y * g_h / h == g_y + (y + 1) * g_h / h && !smooth) continue;   /* no screen row of its own */
         todo_y[n] = (u16)y; todo_x0[n] = (u16)x0; todo_x1[n] = (u16)x1; n++;
     }
-    fr.w = w; fr.h = h; fr.B = B; fr.rowb = rowb; fr.px = px; fr.py = py;
+    fr.w = w; fr.h = h; fr.B = B; fr.bpp = vbe_bpp; fr.rowb = rowb; fr.px = px; fr.py = py;
     fr.black = pack(0, 0, 0); fr.white = pack(63, 63, 63);
-    par(n, 8, vbe_draw);
-    if (smooth) smooth_out();
+    draw_out(n, vbe_draw);
     sh_ptr_x = px; sh_ptr_y = py;
 }
 /* ---------------- on-screen note (speed changes, audio output) ---------------- */
@@ -1721,7 +1737,7 @@ static void take_shot(void)
     shot_req = 0;
     u32 row = (fb_w * 3 + 3) & ~3u, len = 54 + row * fb_h;
     if (!shot) shot = phys_try_alloc(len);
-    if (!shot) { video_osd("Screenshot: no memory"); return; }
+    if (!shot) { video_osd_("Screenshot: no memory"); return; }   /* not video_osd: video_refresh_late has no video_lock, and must not wait for it */
     memset(shot, 0, 54);
     shot[0] = 'B'; shot[1] = 'M';
     *(u32 *)(shot + 2) = len; *(u32 *)(shot + 10) = 54; *(u32 *)(shot + 14) = 40;
@@ -1739,7 +1755,7 @@ static void take_shot(void)
     }
     shot_len = len;
     kprintf("video: screenshot %ux%u kept (VMSHOT saves it)\n", fb_w, fb_h);
-    video_osd("Screenshot kept: VMSHOT saves it");
+    video_osd_("Screenshot kept: VMSHOT saves it");
 }
 
 /* BL=0: DX:CX = the BMP's size (0: none yet). BL=1: copy CX bytes from
@@ -1762,23 +1778,25 @@ static void video_shot_api_(struct regs *r)
 
 static void video_refresh_(void);
 void video_refresh(void) { rlock_take(&video_lock); video_refresh_(); rlock_drop(&video_lock); }
-/* The helper CPU, after video_refresh with video_lock let go: the xBRZ
-   pass and the scaling of its output, then the note again on top. */
+/* The helper CPU, after video_refresh with video_lock let go: the frame's
+   drawing (draw_late), a screenshot asked for meanwhile, then the note
+   again on top. */
 void video_refresh_late(void)
 {
-    if (!xbrz_late) return;
-    smooth_finish();
+    if (!draw_late) return;
+    draw_rows();
+    if (shot_req) take_shot();
     if (osd_msg[0] && (int32_t)(ticks - osd_until) < 0) draw_osd_text();
-    xbrz_late = 0;
+    draw_late = 0;
 }
 
 static void video_refresh_(void)
 {
     static int busy;
     if (busy) return;
-    if (xbrz_late && !smp_on_ap()) {               /* the helper is at it: wait (unless it's gone) */
-        while (xbrz_late && smp_active) __asm__ volatile("pause");
-        if (xbrz_late) { xbrz_late = 0; full_redraw = 1; }
+    if (draw_late && !smp_on_ap()) {               /* the helper is drawing: wait (unless it's gone) */
+        while (draw_late && smp_active) __asm__ volatile("pause");
+        if (draw_late) { draw_late = 0; full_redraw = 1; }
     }
     busy = 1;
     frame_no++;
@@ -1828,7 +1846,7 @@ static void video_refresh_(void)
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
     pal_changed = 0;
-    if (shot_req) take_shot();                     /* before the note goes on top */
+    if (shot_req && !draw_late) take_shot();       /* before the note goes on top (drawn later: then) */
     draw_osd();
     tick_poll_end();
     busy = 0;
