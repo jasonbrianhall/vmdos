@@ -100,6 +100,15 @@ static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 static int dac8;
 static u8 dac_in(u8 v) { return dac8 ? v : v & 63; }
 static u32 pal[256];
+/* A DAC change redraws only the rows that show a changed color: pal_hit
+   marks the indices whose color moved since the last refresh. */
+static u8 pal_hit[256];
+static int pal_changed;
+static int row_pal_hit(const u8 *row, u32 n)
+{
+    for (u32 i = 0; i < n; i++) if (pal_hit[row[i]]) return 1;
+    return 0;
+}
 
 /* VESA BIOS state (see the VBE section) */
 static int vbe_on;
@@ -957,7 +966,7 @@ static void refresh_gfx(void)
     if (is_ega(video_mode)) {                      /* nothing new in the planes or registers */
         static u8 last_regs[32 + 21];
         int regs_changed = memcmp(last_regs, crtc, 32) || memcmp(last_regs + 32, atc, 21);
-        if (!ega_dirty && !full_redraw && !moved && !regs_changed) return;
+        if (!ega_dirty && !full_redraw && !moved && !regs_changed && !pal_changed) return;
         memcpy(last_regs, crtc, 32); memcpy(last_regs + 32, atc, 21);
         ega_dirty = 0;
     }
@@ -966,7 +975,8 @@ static void refresh_gfx(void)
         fetch_row(y, rowbuf);
         u8 *sh = shadow_gfx + y * w;
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w)) continue;
+        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w) &&
+            !(pal_changed && row_pal_hit(sh, (u32)w))) continue;
         memcpy(sh, rowbuf, w);
         if (smooth) {
             for (int x = 0; x < w; x++) srow[x] = pal[rowbuf[x]];
@@ -1432,7 +1442,8 @@ static void refresh_vbe(void)
         const u8 *src = vram + off;
         u8 *sh = vshadow + y * rowb;
         int in_new = (int)y >= py && (int)y < py + 16, in_old = (int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb)) continue;
+        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb) &&
+            !(B == 1 && pal_changed && row_pal_hit(sh, w))) continue;
         memcpy(sh, src, rowb);
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0 && !smooth) continue;
@@ -1608,11 +1619,19 @@ static void video_refresh_(void)
     if (palette_dirty) {
         palette_dirty = 0;                       /* first: the DAC is written without video_lock */
         __asm__ volatile("" ::: "memory");
+        int changed = 0;
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
             const u8 *d = vga_dac[i & dac_mask];
-            pal[i] = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+            u32 c = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+            pal_hit[i] = c != pal[i];
+            changed |= pal_hit[i];
+            pal[i] = c;
         }
-        full_redraw = 1;
+        /* Graphics rows hold DAC indices: redraw just the rows using a changed
+           one (none at all for the direct-color VESA modes). Text colors also go
+           through the attribute registers, which set palette_dirty too: all of it. */
+        if (console_on || is_text(video_mode)) full_redraw = 1;
+        else if (changed && (!vbe_on || vbe_bytespp(vbe_bpp) == 1)) pal_changed = 1;
     }
     if (console_on) { refresh_text(console_cells, -1); }
     else if (is_text(video_mode)) {
@@ -1622,6 +1641,7 @@ static void video_refresh_(void)
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
+    pal_changed = 0;
     if (shot_req) take_shot();                     /* before the note goes on top */
     draw_osd();
     tick_poll_end();
