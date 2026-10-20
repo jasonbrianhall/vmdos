@@ -667,6 +667,11 @@ static struct regs *isr_dispatch_inner(struct regs *r)
         goto out;
     }
 
+    if (vec == 1 && !from_pm) {                       /* DPMI's breakpoint (dpmi.c step_arm) hit outside the client */
+        u32 dr6;
+        __asm__ volatile("mov %%dr6,%0" : "=r"(dr6));
+        if (dr6 & 1) { void dpmi_bp_off(void); dpmi_bp_off(); goto out; }
+    }
     if (from_pm) {
         r = dpmi_exception(r);
         goto out;

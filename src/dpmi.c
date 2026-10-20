@@ -56,9 +56,23 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg);
 
 /* After a client's CLI it runs single-stepped (TF), so a POPF or IRET that
    turns interrupts back on is seen: at IOPL 0 those can't change IF
-   themselves, and PUSHF/CLI/.../POPF is common. */
+   themselves, and PUSHF/CLI/.../POPF is common. Not every instruction,
+   though: step_arm decodes ahead through straight-line code to the next
+   one that could matter (a POPF, an IRET, any jump, call or return, or
+   one it doesn't know) and puts a hardware breakpoint (DR0) there; only
+   that one is single-stepped. DOOM's sound code runs long stretches with
+   interrupts off: one trap an instruction was a third of the CPU. */
 static int stepping;
 static u32 step_cs, step_eip, step_ss, step_esp;
+static int step_arm(struct ctx *k);             /* 1: single-step this one (TF); 0: DR0 set further on */
+static u32 dr7_now;
+static void dr7_set(u32 v)
+{
+    if (v == dr7_now) return;
+    dr7_now = v;
+    __asm__ volatile("mov %0,%%dr7" :: "r"(v | 0x400));
+}
+void dpmi_bp_off(void) { dr7_set(0); u32 z = 0xFFFF0FF0; __asm__ volatile("mov %0,%%dr6" :: "r"(z)); }
 
 /* Build the frame for c at the top of the ring-0 stack and resume it. */
 static struct regs *resume(struct ctx *c)
@@ -72,18 +86,22 @@ static struct regs *resume(struct ctx *c)
     r->eip = k.eip; r->cs = k.cs; r->esp = k.esp; r->ss = k.ss;
     if (k.pm) {
         if (stepping && !k.vif) {
-            k.eflags |= EFL_TF;
-            step_cs = k.cs; step_eip = k.eip; step_ss = k.ss; step_esp = k.esp;
+            if (step_arm(&k)) {
+                k.eflags |= EFL_TF;
+                step_cs = k.cs; step_eip = k.eip; step_ss = k.ss; step_esp = k.esp;
+            } else k.eflags &= ~EFL_TF;
         } else if (stepping) {
             stepping = 0;
             k.eflags &= ~EFL_TF;
-        }
+            dr7_set(0);
+        } else dr7_set(0);
         r->eflags = (k.eflags & 0x0DD5) | EFL_IF | 2;
         r->ds = sel_valid_data(k.ds) ? k.ds : 0;
         r->es = sel_valid_data(k.es) ? k.es : 0;
         r->fs = sel_valid_data(k.fs) ? k.fs : 0;
         r->gs = sel_valid_data(k.gs) ? k.gs : 0;
     } else {
+        dr7_set(0);                            /* the breakpoint is for protected-mode client code */
         r->eflags = (k.eflags & 0x0DD5 & ~EFL_TF) | EFL_VM | EFL_IF | 2;
         r->eip &= 0xFFFF; r->esp &= 0xFFFF;
         r->v86_ds = k.ds; r->v86_es = k.es; r->v86_fs = k.fs; r->v86_gs = k.gs;
@@ -1034,6 +1052,114 @@ static struct regs *pm_fault(struct ctx *c, int n, u32 errc)
 
 static int code32(struct ctx *c) { return sel_big(c->cs); }
 
+/* The length of the instruction at p (up to 15 bytes readable), or 0 if
+   it may change the flow or IF, or isn't one this knows: step there. */
+static int modrm_len(const u8 *p, int a32)
+{
+    u8 m = p[0], mod = m >> 6, rm = m & 7;
+    if (mod == 3) return 1;
+    if (a32) {
+        int n = 1;
+        if (rm == 4) { n++; if (mod == 0 && (p[1] & 7) == 5) n += 4; }
+        else if (mod == 0 && rm == 5) n += 4;
+        return n + (mod == 1 ? 1 : mod == 2 ? 4 : 0);
+    }
+    if (mod == 0 && rm == 6) return 3;
+    return 1 + (mod == 1 ? 1 : mod == 2 ? 2 : 0);
+}
+
+static int insn_len(const u8 *p, int big)
+{
+    int o32 = big, a32 = big, i = 0;
+    for (;; i++) {
+        if (i >= 4) return 0;
+        u8 b = p[i];
+        if (b == 0x66) o32 ^= 1;
+        else if (b == 0x67) a32 ^= 1;
+        else if (b == 0x26 || b == 0x2E || b == 0x36 || b == 0x3E || b == 0x64 || b == 0x65 ||
+                 b == 0xF0 || b == 0xF2 || b == 0xF3) ;
+        else break;
+    }
+    u8 op = p[i++];
+    int iv = o32 ? 4 : 2;                       /* an operand-size immediate */
+    if (op < 0x40 && (op & 7) < 4) return i + modrm_len(p + i, a32);               /* ALU r/m */
+    if (op < 0x40 && (op & 7) == 4) return i + 1;                                   /* ALU AL,imm8 */
+    if (op < 0x40 && (op & 7) == 5) return i + iv;                                  /* ALU eAX,imm */
+    if (op == 0x17) return 0;                   /* POP SS: the next instruction can't be broken on */
+    if (op < 0x40) return op == 0x0F ? 0 : i;   /* push/pop sreg, DAA etc.; 0F: below */
+    if (op <= 0x61) return i;                   /* inc, dec, push, pop, pusha, popa */
+    switch (op) {
+    case 0x68: return i + iv;
+    case 0x6A: return i + 1;
+    case 0x69: return i + modrm_len(p + i, a32) + iv;
+    case 0x6B: return i + modrm_len(p + i, a32) + 1;
+    case 0x80: case 0x82: case 0x83: case 0xC0: case 0xC1:
+        return i + modrm_len(p + i, a32) + 1;
+    case 0x81: return i + modrm_len(p + i, a32) + iv;
+    case 0xC6: return (p[i] & 0x38) ? 0 : i + modrm_len(p + i, a32) + 1;      /* only MOV r/m,imm */
+    case 0xC7: return (p[i] & 0x38) ? 0 : i + modrm_len(p + i, a32) + iv;
+    case 0x8D: return (p[i] >> 6) == 3 ? 0 : i + modrm_len(p + i, a32);        /* LEA reg,reg: #UD */
+    case 0x8E: return ((p[i] >> 3) & 7) == 2 ? 0 : i + modrm_len(p + i, a32);    /* not MOV SS (as POP SS) */
+    case 0x84: case 0x85: case 0x86: case 0x87: case 0x88: case 0x89: case 0x8A: case 0x8B:
+    case 0x8C: case 0x8F: case 0xD0: case 0xD1: case 0xD2: case 0xD3:
+    case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+        return i + modrm_len(p + i, a32);
+    case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+    case 0x98: case 0x99: case 0x9B: case 0x9C: case 0x9E: case 0x9F:
+    case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
+    case 0xAE: case 0xAF: case 0xC9: case 0xF5: case 0xF8: case 0xF9: case 0xFC: case 0xFD:
+    case 0xEC: case 0xED: case 0xEE: case 0xEF:  /* IN/OUT DX: they trap, and their emulation re-arms */
+        return i;
+    case 0xE4: case 0xE5: case 0xE6: case 0xE7: case 0xA8: case 0xD4: case 0xD5:
+    case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+        return i + 1;
+    case 0xA9: case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+        return i + iv;
+    case 0xA0: case 0xA1: case 0xA2: case 0xA3: return i + (a32 ? 4 : 2);
+    case 0xF6: case 0xF7: {
+        int reg = (p[i] >> 3) & 7;
+        return i + modrm_len(p + i, a32) + (reg < 2 ? (op == 0xF6 ? 1 : iv) : 0); }
+    case 0xFE: return ((p[i] >> 3) & 7) < 2 ? i + modrm_len(p + i, a32) : 0;
+    case 0xFF: { int reg = (p[i] >> 3) & 7;     /* inc, dec, push; not call or jmp */
+        return reg == 0 || reg == 1 || reg == 6 ? i + modrm_len(p + i, a32) : 0; }
+    case 0x0F: {
+        u8 o2 = p[i++];
+        if (o2 >= 0x90 && o2 <= 0x9F) return i + modrm_len(p + i, a32);          /* SETcc */
+        if (o2 >= 0xC8 && o2 <= 0xCF) return i;                                     /* BSWAP */
+        switch (o2) {
+        case 0xA3: case 0xAB: case 0xAF: case 0xB3: case 0xB6: case 0xB7: case 0xBB: case 0xBC:
+        case 0xBD: case 0xBE: case 0xBF: case 0xA5: case 0xAD:
+            return i + modrm_len(p + i, a32);
+        case 0xA4: case 0xAC: case 0xBA: return i + modrm_len(p + i, a32) + 1;
+        }
+        return 0; }
+    }
+    return 0;                                   /* POPF, IRET, jumps, calls, INT, ... */
+}
+
+static int step_arm(struct ctx *k)
+{
+    u32 base = sel_base(k->cs), a = base + k->eip;
+    int big = sel_big(k->cs);
+    u32 win = 256;
+    if (a < 0xA0000 && a + win > 0xA0000) win = 0xA0000 - a;   /* never read into the VGA window */
+    while (win >= 32 && !lin_ok(a, win)) win /= 2;
+    if (win < 32) { dr7_set(0); return 1; }
+    u32 off = 0;
+    for (int n = 0; n < 64; n++) {
+        if (off + 15 > win) break;
+        int len = insn_len((const u8 *)(uintptr_t)(a + off), big);
+        if (!len) break;
+        off += (u32)len;
+    }
+    if (!off) { dr7_set(0); return 1; }         /* this one: single-step it */
+    u32 at = a + off;
+    __asm__ volatile("mov %0,%%dr0" :: "r"(at));
+    dr7_now = 0;                                /* DR0 changed: write DR7 again */
+    dr7_set(1);                                 /* L0, execute */
+    return 0;
+}
+
 static struct regs *pm_gp(struct ctx *c, u32 errc)
 {
     u32 base = sel_base(c->cs), eip = c->eip;
@@ -1168,6 +1294,10 @@ struct regs *dpmi_exception(struct regs *r)
     case 1: {
         u32 dr6;
         __asm__ volatile("mov %%dr6,%0" : "=r"(dr6));
+        if (dr6 & 1) {                                 /* step_arm's breakpoint: step that instruction */
+            dpmi_bp_off();
+            return resume(&c);
+        }
         if (!(dr6 & 0x4000) || !stepping) {            /* not our single step */
             if (!stepping) { c.eflags &= ~EFL_TF; return resume(&c); }
             return pm_fault(&c, 1, 0);
