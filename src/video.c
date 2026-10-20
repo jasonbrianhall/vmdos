@@ -465,6 +465,7 @@ static void smooth_setup(u32 w, u32 h)
 {
     smooth = 0;
     xbrz_k = 0;
+    if (g_w == w && g_h == h) return;              /* pixel for pixel: nothing to smooth */
     if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
     if (xbrz_opt && !is_text(video_mode) && w <= 640 && h <= 480 && w >= 2 && h >= 2) {
         u32 k = (g_w + w - 1) / w, kh = (g_h + h - 1) / h;
@@ -590,6 +591,7 @@ static void layout(void)
         u32 s = fb_w / ow < fb_h / oh ? fb_w / ow : fb_h / oh;
         if (s && ow * s <= 4096) { g_w = ow * s; g_h = oh * s; }
     }
+    if (w == fb_w && h == fb_h) { g_w = w; g_h = h; }   /* the screen's own size: as is, whatever its shape */
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
     u32 xw = vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
@@ -700,8 +702,10 @@ static int sh_ptr_y = -100, sh_ptr_x;
    the 16-color modes. */
 static int planar_on, mapped_plane = -1, mapped_ro, modex_trap, readmap_last;
 
+static void vram_window_dirty(void);
 static void map_window_flags(u32 phys, u32 flags)
 {
+    vram_window_dirty();                           /* the dirty bits of what it shows now, first */
     for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, flags);
     tlb_flush();
 }
@@ -1085,6 +1089,62 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
 #define N_VMODES (int)(sizeof vmodes / sizeof vmodes[0])
 
 static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
+
+/* Which pages of vram were written since the last redraw, from the page
+   tables' dirty bits, so refresh_vbe compares only the rows on those with
+   vshadow (a 1024x768x32 screen is 3 MB to compare 60 times a second). The
+   guest writes through vram's own pages (the LFB) and the A0000h window.
+   A cleared bit counts only once the boot CPU, the guest's, has flushed its
+   TLB (video_tlb_tick): before that a write can go through a TLB entry that
+   has the bit set already and not set it again. Until it has, everything is
+   compared, and the pages cleared before the flush are compared once more
+   after it. Off under VMHV: the VM's writes set its own tables' bits. */
+#define VPAGES (VRAM_SIZE / 4096)
+static u8 vwin[VPAGES];                    /* written through the window, taken before it moved */
+static u8 vchk[VPAGES];                    /* compare this round */
+static u8 vsus[VPAGES];                    /* cleared since the last flush: TLB entries may still skip the bit */
+static volatile u32 vram_flush_req, vram_flush_done;
+
+void video_tlb_tick(void)
+{
+    u32 r = vram_flush_req;
+    if (r == vram_flush_done) return;
+    tlb_flush();
+    vram_flush_done = r;
+}
+
+static int in_vram(u32 p) { return vram && p >= (u32)(uintptr_t)vram && p < (u32)(uintptr_t)vram + VRAM_SIZE; }
+
+/* The window's dirty bits go to the vram pages behind it (under video_lock,
+   as every remap of the window is). */
+static int vwin_cleared;
+static void vram_window_dirty(void)
+{
+    if (!vram || hv_active) return;
+    for (u32 i = 0; i < 16; i++) {
+        u32 lin = 0xA0000 + i * 4096, p = page_phys(lin);
+        if (in_vram(p) && page_dirty(lin, 1)) { vwin[(p - (u32)(uintptr_t)vram) >> 12] = 1; vwin_cleared = 1; }
+    }
+}
+
+/* Fills vchk for vram pages [p0, p1). 0: compare every row this round. */
+static int vram_harvest(u32 p0, u32 p1)
+{
+    if (hv_active) return 0;
+    int flushed = vram_flush_done == vram_flush_req;
+    vwin_cleared = 0;
+    vram_window_dirty();
+    int cleared = vwin_cleared;
+    for (u32 i = p0; i < p1; i++) {
+        u8 d = (u8)(page_dirty((u32)(uintptr_t)vram + i * 4096, 1) | vwin[i]);
+        cleared |= d;
+        vwin[i] = 0;
+        if (flushed) { vchk[i] = d | vsus[i]; vsus[i] = d; }
+        else vsus[i] |= d;
+    }
+    if (cleared) vram_flush_req++;                 /* the boot CPU's TLB, at its next tick */
+    return flushed;
+}
 
 static void vbe_init(void)
 {
@@ -1476,9 +1536,23 @@ static void refresh_vbe(void)
     if (!mouse_pointer(&px, &py, &ma, &mxr)) py = -100;
     int moved = px != sh_ptr_x || py != sh_ptr_y;
     u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
+    static u32 last_start = ~0u, last_pitch, last_rowb, last_h;      /* where the screen is in vram */
+    u32 p0 = vbe_start >> 12, p1 = h ? (vbe_start + (h - 1) * vbe_pitch + rowb + 4095) >> 12 : p0;
+    if (p0 > VPAGES) p0 = VPAGES;
+    if (p1 > VPAGES) p1 = VPAGES;
+    int track = vram_harvest(p0, p1) && !full_redraw &&                  /* every round: it clears the bits */
+                vbe_start == last_start && vbe_pitch == last_pitch && rowb == last_rowb && h == last_h;
+    last_start = vbe_start; last_pitch = vbe_pitch; last_rowb = rowb; last_h = h;
+    const u32 *out = !smooth && g_w == w ? cvt : line;                  /* the screen's own size: no scaling */
     for (u32 y = 0; y < h; y++) {
         u32 off = vbe_start + y * vbe_pitch;
         if (off + rowb > VRAM_SIZE) break;
+        int in_ptr = moved && (((int)y >= py && (int)y < py + 16) || ((int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16));
+        if (track && !in_ptr && !(B == 1 && pal_changed)) {             /* no page under the row written */
+            u32 a = off >> 12, b = (off + rowb - 1) >> 12, any = 0;
+            for (u32 q = a; q <= b && !any; q++) any = vchk[q];
+            if (!any) continue;
+        }
         const u8 *src = vram + off;
         u8 *sh = vshadow + y * rowb;
         int in_new = (int)y >= py && (int)y < py + 16, in_old = (int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16;
@@ -1518,8 +1592,8 @@ static void refresh_vbe(void)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
         if (smooth) { smooth_row(y, cvt); continue; }
-        for (u32 x = X0; x < X1; x++) line[x] = cvt[xmap[x]];
-        for (u32 yy = y0; yy < y1; yy++) put_row(line + X0, X1 - X0, g_x + X0, yy);
+        if (out == line) for (u32 x = X0; x < X1; x++) line[x] = cvt[xmap[x]];
+        for (u32 yy = y0; yy < y1; yy++) put_row(out + X0, X1 - X0, g_x + X0, yy);
     }
     if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
