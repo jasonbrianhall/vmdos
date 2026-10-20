@@ -9,10 +9,16 @@
    helper is parked for good (smp_park): VMHV runs on the boot CPU alone,
    as without one (DOOM crashed in VMHV with the helper running).
 
+   Between ticks the helper halts, and the boot CPU's timer tick wakes it
+   with an IPI (vector 30h, smp_tick) when it is halted: MONITOR/MWAIT on
+   the tick counter is often missing (VMs hide it) and a PAUSE loop keeps
+   the core at 100% even when there is nothing to draw. Without a local
+   APIC it can take that on, it waits as before.
+
    The helper is found in the ACPI MADT (the RSDP from vmdos.efi, rsdp= on
    the command line, or the BIOS areas) and started with INIT-SIPI-SIPI
-   through a page below 1 MiB (its contents put back afterwards). It never
-   takes interrupts. A fault on it stops it, and the boot CPU takes the
+   through a page below 1 MiB (its contents put back afterwards). It takes
+   no interrupts but its wake-up IPI. A fault on it stops it, and the boot CPU takes the
    work back. nosmp: don't.
 
    What both CPUs touch is locked: video_lock (the video state against mode
@@ -38,6 +44,17 @@ volatile int smp_active;                       /* the helper does the screen and
 static volatile int ap_alive;
 static volatile int ap_busy, ap_park;         /* in a round of work; told to stop for good */
 static int has_mwait, has_pat;
+#define AP_WAKE_VEC 0x30                       /* cpu.c's IDT: ap_wake_isr */
+#define AP_SPURIOUS_VEC 0x3F                   /* low four bits set: older APICs force them */
+static u32 ap_id;                              /* the helper's APIC ID */
+static int ap_x2apic;
+static volatile int ap_apic_ready, ap_hlt_ok;  /* its APIC is set for the wake-up IPI; one has come */
+static volatile u32 ap_wakes;
+static volatile int ap_probe_done;
+static volatile int ap_sleeping;               /* halted till the next tick's IPI */
+static void ap_wake_setup(void);
+static void ap_wait(u32 last);
+static void udelay(u32 us);
 static u64 ap_pat;                            /* PAT: the boot CPU's (write-combining framebuffer) */
 
 struct rlock video_lock, sound_lock, log_lock;
@@ -109,6 +126,8 @@ static void force_drop(struct rlock *l)
 
 void smp_ap_fault(struct regs *r)
 {
+    ap_hlt_ok = 0;
+    ap_sleeping = 0;
     smp_active = 0;
     ap_alive = 0;
     ap_busy = 0;
@@ -125,17 +144,20 @@ void ap_main(void)
 {
     if (has_pat) __asm__ volatile("wbinvd; wrmsr; wbinvd" :: "a"((u32)ap_pat), "d"((u32)(ap_pat >> 32)), "c"(0x277) : "memory");
     idt_load();
+    ap_wake_setup();
     ap_alive = 1;
+    if (ap_apic_ready) {                       /* the boot CPU's test IPI (smp_start): HLT only once one got here */
+        __asm__ volatile("sti" ::: "memory");
+        for (int i = 0; i < 50000 && !ap_wakes; i++) udelay(1);
+        __asm__ volatile("cli" ::: "memory");
+        ap_hlt_ok = ap_wakes != 0;
+    }
+    ap_probe_done = 1;
 
     u32 last = ticks, frame = 0;
     for (;;) {
         u32 t;
-        while ((t = ticks) == last) {
-            if (has_mwait) {
-                __asm__ volatile("monitor" :: "a"(&ticks), "c"(0), "d"(0));
-                if (ticks == last) __asm__ volatile("mwait" :: "a"(0), "c"(0));
-            } else __asm__ volatile("pause");
-        }
+        while ((t = ticks) == last) ap_wait(last);
         frame += t - last;
         last = t;
         __atomic_store_n(&ap_busy, 1, __ATOMIC_SEQ_CST);                         /* then look: smp_park's other half */
@@ -168,6 +190,61 @@ static void apic_ipi(u32 dest, u32 cmd)
     lapic[0x310 / 4] = dest << 24;
     lapic[0x300 / 4] = cmd;
     for (int i = 0; i < 100000 && (lapic[0x300 / 4] & (1u << 12)); i++) inb(0x80);   /* delivery pending */
+}
+
+static void wrmsr(u32 m, u64 v) { __asm__ volatile("wrmsr" :: "c"(m), "a"((u32)v), "d"((u32)(v >> 32)) : "memory"); }
+static u32 lapic_pa;                          /* where the boot CPU's xAPIC registers are */
+
+/* On the helper: software-enable its local APIC (INIT leaves it off, and
+   off it takes no fixed IPIs), let every priority through, and have the
+   wake-up IPI's vector. Its LINT pins and timer stay masked from INIT. */
+static void ap_wake_setup(void)
+{
+    u64 base = rdmsr(0x1B);
+    if (!(base & (1u << 11))) return;          /* globally off */
+    ap_x2apic = (base >> 10) & 1;
+    if (ap_x2apic) {
+        wrmsr(0x808, 0);                       /* TPR */
+        wrmsr(0x80F, 0x100 | AP_SPURIOUS_VEC); /* SVR: on */
+    } else {
+        if (!lapic || ((u32)base & 0xFFFFF000u) != lapic_pa) return;   /* not where it's mapped */
+        lapic[0x80 / 4] = 0;
+        lapic[0xF0 / 4] = 0x100 | AP_SPURIOUS_VEC;
+    }
+    ap_apic_ready = 1;
+}
+
+/* boot.S's ap_wake_isr. */
+void ap_wake_eoi(void)
+{
+    ap_wakes++;
+    if (ap_x2apic) wrmsr(0x80B, 0);
+    else lapic[0xB0 / 4] = 0;
+}
+
+/* On the helper: till ticks moves on from last. Halted, the boot CPU's
+   tick wakes it: one of the two always sees the other's write (ap_sleeping
+   here, ticks there, each fenced before the read), and an IPI that comes
+   between the check and the HLT waits for the STI's one-instruction shadow
+   to end, so it wakes the HLT rather than going before it. */
+static void ap_wait(u32 last)
+{
+    if (ap_hlt_ok) {
+        __atomic_exchange_n(&ap_sleeping, 1, __ATOMIC_SEQ_CST);         /* XCHG: a full fence */
+        if (ticks == last) __asm__ volatile("sti; hlt; cli" ::: "memory");
+        ap_sleeping = 0;
+    } else if (has_mwait) {
+        __asm__ volatile("monitor" :: "a"(&ticks), "c"(0), "d"(0));
+        if (ticks == last) __asm__ volatile("mwait" :: "a"(0), "c"(0));
+    } else __asm__ volatile("pause");
+}
+
+/* Boot CPU, its timer tick, after ticks++. */
+void smp_tick(void)
+{
+    if (!ap_hlt_ok) return;
+    __asm__ volatile("lock orl $0,(%%esp)" ::: "memory");             /* ticks++ out before ap_sleeping is read */
+    if (ap_sleeping) apic_ipi(ap_id, 0x00004000 | AP_WAKE_VEC);       /* fixed, edge, assert */
 }
 
 static void udelay(u32 us) { while (us--) inb(0x80); }   /* ~1 us each, interrupts off or on */
@@ -270,6 +347,7 @@ void smp_start(u32 tramp)
     x2apic = (base >> 10) & 1;
     if (!x2apic) {
         u32 pa = (u32)base & 0xFFFFF000u;
+        lapic_pa = pa;
         lapic = map_mmio64(pa, 4096);
         if (!lapic) { kprintf("smp: can't map the local APIC at %x\n", pa); return; }
     }
@@ -280,6 +358,7 @@ void smp_start(u32 tramp)
     int64_t id = pick_cpu(madt, self, &ncpu);
     if (id < 0) { kprintf("smp: one CPU\n"); return; }
     if (!tramp) { kprintf("smp: no free page below 1 MiB to start a CPU from\n"); return; }
+    ap_id = (u32)id;
 
     /* The trampoline: real mode at tramp, into protected mode on our GDT,
        then ap_entry32 (paging on with this CPU's CR0/3/4, the stack). */
@@ -311,8 +390,10 @@ void smp_start(u32 tramp)
     for (int i = 0; i < 100000 && !ap_alive; i++) udelay(1);
     memcpy(page, saved, 4096);
     if (!ap_alive) { kprintf("smp: CPU %u (APIC ID) didn't start: one CPU\n", (u32)id); return; }
-    kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s\n", ncpu, (u32)id,
-            x2apic ? " (x2APIC)" : "");
+    if (ap_apic_ready) apic_ipi((u32)id, 0x00004000 | AP_WAKE_VEC);   /* the test: does a wake-up get there? */
+    for (int i = 0; i < 100000 && !ap_probe_done; i++) udelay(1);
+    kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s%s\n", ncpu, (u32)id,
+            x2apic ? " (x2APIC)" : "", ap_hlt_ok ? "" : has_mwait ? ", waits with MWAIT" : ", waits by polling");
 }
 
 /* VMHV (hv.c) is starting: the screen and the sound back on the boot CPU,

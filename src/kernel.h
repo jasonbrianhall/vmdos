@@ -119,6 +119,7 @@ void *map_mmio64_user(u64 phys, u32 len);
 u32 guest_phys(u32 lin);                      /* physical page behind guest linear lin */
 void tlb_flush(void);
 int page_dirty(u32 lin, int clear);           /* PTE dirty bit (cleared if clear) */
+void smp_tick(void);                          /* boot CPU, each timer tick: wake the helper if it's halted */
 void video_tlb_tick(void);                    /* boot CPU, each timer tick: the TLB flush the VESA redraw asked for */
 void map_page(u32 lin, u32 phys, u32 flags);
 u32 page_phys(u32 lin);                       /* physical page behind lin, 0: not mapped */

@@ -525,6 +525,7 @@ struct regs *isr_dispatch(struct regs *r)
         }
         if (irq == 0) {
             ticks++;
+            smp_tick();
             vdev_tick();
             if (usb_ready) { if (smp_active) sound_irq_poll(); else sound_tick(); }
             if (usb_ready) disk_tick();

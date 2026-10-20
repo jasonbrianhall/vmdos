@@ -171,6 +171,19 @@ isr_table:
 .endr
 .section .text
 
+# The helper CPU's own vectors (smp.c), not through isr_common: it shares
+# nothing with the boot CPU's interrupt return (espfix). Wake-up IPI: EOI,
+# then back after its HLT. Spurious: nothing to do, no EOI.
+.global ap_wake_isr, ap_spurious_isr
+ap_wake_isr:
+    pusha
+    cld
+    call ap_wake_eoi
+    popa
+    iret
+ap_spurious_isr:
+    iret
+
 isr_common:
     pusha
     push %ds
