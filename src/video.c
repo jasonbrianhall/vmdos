@@ -100,6 +100,32 @@ static u8 dac_widx, dac_wc, dac_ridx, dac_rc, dac_mask = 0xFF;
 static int dac8;
 static u8 dac_in(u8 v) { return dac8 ? v : v & 63; }
 static u32 pal[256];
+/* A DAC change redraws only the rows that show a changed color: pal_hit
+   marks the indices whose color moved since the last refresh. */
+static u8 pal_hit[256];
+static int pal_changed;
+
+/* The columns [*x0, *x1) of a source row that differ from its shadow, or
+   (pal8: a row of DAC indices) show a changed palette entry. None: x0 == x1. */
+static void row_span(const u8 *a, const u8 *sh, u32 n, int pal8, u32 *x0, u32 *x1)
+{
+    u32 i = 0, j = n;
+    while (i < n && a[i] == sh[i] && !(pal8 && pal_hit[sh[i]])) i++;
+    if (i == n) { *x0 = *x1 = 0; return; }
+    while (j > i + 1 && a[j - 1] == sh[j - 1] && !(pal8 && pal_hit[sh[j - 1]])) j--;
+    *x0 = i; *x1 = j;
+}
+
+/* Widen [*x0, *x1) to take in the mouse pointer drawn at column p. */
+static void span_ptr(u32 *x0, u32 *x1, int p, u32 n)
+{
+    u32 a = p < 0 ? 0 : (u32)p, b = p + 10 < 0 ? 0 : (u32)(p + 10);   /* the arrow: 10 wide */
+    if (b > n) b = n;
+    if (a >= b) return;
+    if (*x0 >= *x1) { *x0 = a; *x1 = b; return; }
+    if (a < *x0) *x0 = a;
+    if (b > *x1) *x1 = b;
+}
 
 /* VESA BIOS state (see the VBE section) */
 static int vbe_on;
@@ -367,6 +393,21 @@ static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
 static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
 static u16 xmap[4096], txmap[4096];
+
+/* The screen columns [*X0, *X1) (from g_x) that show source columns [x0, x1),
+   out to 16-pixel boundaries on the framebuffer: whole write-combining lines. */
+static void dest_span(u32 x0, u32 x1, u32 *X0, u32 *X1)
+{
+    u32 lo = 0, hi = g_w;
+    while (lo < hi) { u32 m = (lo + hi) / 2; if (xmap[m] < x0) lo = m + 1; else hi = m; }
+    u32 a = lo;
+    hi = g_w;
+    while (lo < hi) { u32 m = (lo + hi) / 2; if (xmap[m] < x1) lo = m + 1; else hi = m; }
+    u32 b = lo;
+    a = (g_x + a) & ~15u; a = a < g_x ? 0 : a - g_x;
+    b = ((g_x + b + 15) & ~15u) - g_x; if (b > g_w) b = g_w;
+    *X0 = a; *X1 = b;
+}
 static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
@@ -396,8 +437,8 @@ static u8 hxf[4096], vyf[4096], sdirty[4096];
 static u32 s_w, s_h;                           /* the source size the tables are for (xBRZ's output with it on) */
 static int xbrz_opt = -1;
 static u32 xbrz_k, x_w, x_h;                   /* xBRZ on: its factor and the source size */
-static u32 xs[640 * 480];
-static u8 xcor[640 * 480], xdirty[480];
+static u32 *xs, xs_cap;                         /* the source (x_w * x_h), kept for the next frame */
+static u8 *xcor, xdirty[4096];                  /* its corner flags, x_w * x_h */
 void xbrz_format(u8 rpos, u8 gpos, u8 bpos);
 void xbrz_corners(const u32 *src, u32 w, u32 h, u32 y, u8 *out);
 void xbrz_row(const u32 *src, const u8 *cor, u32 w, u32 h, u32 y, u32 k, u32 *dst);
@@ -425,10 +466,20 @@ static void smooth_setup(u32 w, u32 h)
     smooth = 0;
     xbrz_k = 0;
     if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
-    if (xbrz_opt && !is_text(video_mode) && w <= 640 && h <= 480 && w >= 2 && h >= 2) {
+    if (xbrz_opt && !is_text(video_mode) && w >= 2 && h >= 2 && w * 2 <= 4096 && h * 2 <= 4096) {
+        if (w * h > xs_cap) {                   /* any size: the buffers follow the mode */
+            if (xs) { phys_release(xs, xs_cap * 4); phys_release(xcor, xs_cap); xs = 0; xcor = 0; xs_cap = 0; }
+            xs = phys_try_alloc(w * h * 4);
+            xcor = xs ? phys_try_alloc(w * h) : 0;
+            if (xs && !xcor) { phys_release(xs, w * h * 4); xs = 0; }
+            if (xs) xs_cap = w * h;
+            else kprintf("video: no memory for scale=xbrz at %ux%u: smooth\n", w, h);
+        }
+    }
+    if (xbrz_opt && xs && !is_text(video_mode) && w >= 2 && h >= 2 && w * h <= xs_cap) {
         u32 k = (g_w + w - 1) / w, kh = (g_h + h - 1) / h;
         if (kh > k) k = kh;
-        if (k < 2) k = 2;
+        if (k < 2) k = 2;                       /* at the screen's size or bigger: 2x, then down */
         if (k > 6) k = 6;
         while (k > 2 && (w * k > 4096 || h * k > 4096)) k--;
         static int formatted;
@@ -436,6 +487,7 @@ static void smooth_setup(u32 w, u32 h)
         xbrz_k = k; x_w = w; x_h = h;
         w *= k; h *= k;
     }
+    if (!xbrz_k && g_w == w && g_h == h) return;   /* pixel for pixel: nothing to smooth (xBRZ, asked for, still runs) */
     if (h > sizeof sdirty || g_h > 4096 || w > 4096 || w < 2 || h < 2) { xbrz_k = 0; return; }
     u32 need = g_w * h * 4;
     if (need > hs_cap) {
@@ -549,6 +601,7 @@ static void layout(void)
         u32 s = fb_w / ow < fb_h / oh ? fb_w / ow : fb_h / oh;
         if (s && ow * s <= 4096) { g_w = ow * s; g_h = oh * s; }
     }
+    if (w == fb_w && h == fb_h) { g_w = w; g_h = h; }   /* the screen's own size: as is, whatever its shape */
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
     u32 xw = vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
@@ -659,8 +712,10 @@ static int sh_ptr_y = -100, sh_ptr_x;
    the 16-color modes. */
 static int planar_on, mapped_plane = -1, mapped_ro, modex_trap, readmap_last;
 
+static void vram_window_dirty(void);
 static void map_window_flags(u32 phys, u32 flags)
 {
+    vram_window_dirty();                           /* the dirty bits of what it shows now, first */
     for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, flags);
     tlb_flush();
 }
@@ -957,7 +1012,7 @@ static void refresh_gfx(void)
     if (is_ega(video_mode)) {                      /* nothing new in the planes or registers */
         static u8 last_regs[32 + 21];
         int regs_changed = memcmp(last_regs, crtc, 32) || memcmp(last_regs + 32, atc, 21);
-        if (!ega_dirty && !full_redraw && !moved && !regs_changed) return;
+        if (!ega_dirty && !full_redraw && !moved && !regs_changed && !pal_changed) return;
         memcpy(last_regs, crtc, 32); memcpy(last_regs + 32, atc, 21);
         ega_dirty = 0;
     }
@@ -966,7 +1021,13 @@ static void refresh_gfx(void)
         fetch_row(y, rowbuf);
         u8 *sh = shadow_gfx + y * w;
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w)) continue;
+        u32 x0 = 0, x1 = (u32)w;                   /* the source columns that changed */
+        if (!full_redraw) {
+            row_span(rowbuf, sh, (u32)w, pal_changed, &x0, &x1);
+            if (moved && in_new) span_ptr(&x0, &x1, px, (u32)w);
+            if (moved && in_old) span_ptr(&x0, &x1, sh_ptr_x, (u32)w);
+            if (x0 >= x1) continue;
+        }
         memcpy(sh, rowbuf, w);
         if (smooth) {
             for (int x = 0; x < w; x++) srow[x] = pal[rowbuf[x]];
@@ -978,17 +1039,20 @@ static void refresh_gfx(void)
             smooth_row((u32)y, srow);
             continue;
         }
-        for (u32 x = 0; x < g_w; x++) line[x] = pal[rowbuf[xmap[x]]];
+        u32 X0, X1;                                /* only the screen columns showing them */
+        dest_span(x0, x1, &X0, &X1);
+        if (X0 >= X1) continue;
+        for (u32 x = X0; x < X1; x++) line[x] = pal[rowbuf[xmap[x]]];
         if (in_new) {
             memset(ovr, 0, sizeof ovr);
             const char *a = arrow[y - py];
             for (int i = 0; a[i] && px + i < w; i++) ovr[px + i] = a[i] == '1' ? 1 : a[i] == '2' ? 2 : 0;
-            for (u32 x = 0; x < g_w; x++)
+            for (u32 x = X0; x < X1; x++)
                 if (ovr[xmap[x]]) line[x] = ovr[xmap[x]] == 1 ? black : white;
         }
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0) continue;
-        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);   /* from RAM: never read the framebuffer */
+        for (u32 yy = y0; yy < y1; yy++) put_row(line + X0, X1 - X0, g_x + X0, yy);   /* from RAM: never read the framebuffer */
     }
     if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
@@ -1035,6 +1099,62 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
 #define N_VMODES (int)(sizeof vmodes / sizeof vmodes[0])
 
 static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
+
+/* Which pages of vram were written since the last redraw, from the page
+   tables' dirty bits, so refresh_vbe compares only the rows on those with
+   vshadow (a 1024x768x32 screen is 3 MB to compare 60 times a second). The
+   guest writes through vram's own pages (the LFB) and the A0000h window.
+   A cleared bit counts only once the boot CPU, the guest's, has flushed its
+   TLB (video_tlb_tick): before that a write can go through a TLB entry that
+   has the bit set already and not set it again. Until it has, everything is
+   compared, and the pages cleared before the flush are compared once more
+   after it. Off under VMHV: the VM's writes set its own tables' bits. */
+#define VPAGES (VRAM_SIZE / 4096)
+static u8 vwin[VPAGES];                    /* written through the window, taken before it moved */
+static u8 vchk[VPAGES];                    /* compare this round */
+static u8 vsus[VPAGES];                    /* cleared since the last flush: TLB entries may still skip the bit */
+static volatile u32 vram_flush_req, vram_flush_done;
+
+void video_tlb_tick(void)
+{
+    u32 r = vram_flush_req;
+    if (r == vram_flush_done) return;
+    tlb_flush();
+    vram_flush_done = r;
+}
+
+static int in_vram(u32 p) { return vram && p >= (u32)(uintptr_t)vram && p < (u32)(uintptr_t)vram + VRAM_SIZE; }
+
+/* The window's dirty bits go to the vram pages behind it (under video_lock,
+   as every remap of the window is). */
+static int vwin_cleared;
+static void vram_window_dirty(void)
+{
+    if (!vram || hv_active) return;
+    for (u32 i = 0; i < 16; i++) {
+        u32 lin = 0xA0000 + i * 4096, p = page_phys(lin);
+        if (in_vram(p) && page_dirty(lin, 1)) { vwin[(p - (u32)(uintptr_t)vram) >> 12] = 1; vwin_cleared = 1; }
+    }
+}
+
+/* Fills vchk for vram pages [p0, p1). 0: compare every row this round. */
+static int vram_harvest(u32 p0, u32 p1)
+{
+    if (hv_active) return 0;
+    int flushed = vram_flush_done == vram_flush_req;
+    vwin_cleared = 0;
+    vram_window_dirty();
+    int cleared = vwin_cleared;
+    for (u32 i = p0; i < p1; i++) {
+        u8 d = (u8)(page_dirty((u32)(uintptr_t)vram + i * 4096, 1) | vwin[i]);
+        cleared |= d;
+        vwin[i] = 0;
+        if (flushed) { vchk[i] = d | vsus[i]; vsus[i] = d; }
+        else vsus[i] |= d;
+    }
+    if (cleared) vram_flush_req++;                 /* the boot CPU's TLB, at its next tick */
+    return flushed;
+}
 
 static void vbe_init(void)
 {
@@ -1426,17 +1546,44 @@ static void refresh_vbe(void)
     if (!mouse_pointer(&px, &py, &ma, &mxr)) py = -100;
     int moved = px != sh_ptr_x || py != sh_ptr_y;
     u32 black = pack(0, 0, 0), white = pack(63, 63, 63);
+    static u32 last_start = ~0u, last_pitch, last_rowb, last_h;      /* where the screen is in vram */
+    u32 p0 = vbe_start >> 12, p1 = h ? (vbe_start + (h - 1) * vbe_pitch + rowb + 4095) >> 12 : p0;
+    if (p0 > VPAGES) p0 = VPAGES;
+    if (p1 > VPAGES) p1 = VPAGES;
+    int track = vram_harvest(p0, p1) && !full_redraw &&                  /* every round: it clears the bits */
+                vbe_start == last_start && vbe_pitch == last_pitch && rowb == last_rowb && h == last_h;
+    last_start = vbe_start; last_pitch = vbe_pitch; last_rowb = rowb; last_h = h;
+    const u32 *out = !smooth && g_w == w ? cvt : line;                  /* the screen's own size: no scaling */
     for (u32 y = 0; y < h; y++) {
         u32 off = vbe_start + y * vbe_pitch;
         if (off + rowb > VRAM_SIZE) break;
+        int in_ptr = moved && (((int)y >= py && (int)y < py + 16) || ((int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16));
+        if (track && !in_ptr && !(B == 1 && pal_changed)) {             /* no page under the row written */
+            u32 a = off >> 12, b = (off + rowb - 1) >> 12, any = 0;
+            for (u32 q = a; q <= b && !any; q++) any = vchk[q];
+            if (!any) continue;
+        }
         const u8 *src = vram + off;
         u8 *sh = vshadow + y * rowb;
         int in_new = (int)y >= py && (int)y < py + 16, in_old = (int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb)) continue;
+        u32 x0 = 0, x1 = w;                        /* the source columns that changed */
+        if (!full_redraw) {
+            row_span(src, sh, rowb, B == 1 && pal_changed, &x0, &x1);
+            x0 /= B; x1 = (x1 + B - 1) / B;
+            if (moved && in_new) span_ptr(&x0, &x1, px, w);
+            if (moved && in_old) span_ptr(&x0, &x1, sh_ptr_x, w);
+            if (x0 >= x1) continue;
+        }
         memcpy(sh, src, rowb);
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0 && !smooth) continue;
-        for (u32 x = 0; x < w; x++) {
+        u32 X0 = 0, X1 = g_w, cx0 = 0, cx1 = w;   /* sharp: only the screen columns showing them */
+        if (!smooth) {
+            dest_span(x0, x1, &X0, &X1);
+            if (X0 >= X1) continue;
+            cx0 = xmap[X0]; cx1 = xmap[X1 - 1] + 1u;
+        }
+        for (u32 x = cx0; x < cx1; x++) {
             u32 c;
             if (B == 1) c = pal[src[x]];
             else if (B == 2) {
@@ -1455,8 +1602,8 @@ static void refresh_vbe(void)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
         if (smooth) { smooth_row(y, cvt); continue; }
-        for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
-        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);
+        if (out == line) for (u32 x = X0; x < X1; x++) line[x] = cvt[xmap[x]];
+        for (u32 yy = y0; yy < y1; yy++) put_row(out + X0, X1 - X0, g_x + X0, yy);
     }
     if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
@@ -1608,11 +1755,19 @@ static void video_refresh_(void)
     if (palette_dirty) {
         palette_dirty = 0;                       /* first: the DAC is written without video_lock */
         __asm__ volatile("" ::: "memory");
+        int changed = 0;
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
             const u8 *d = vga_dac[i & dac_mask];
-            pal[i] = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+            u32 c = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+            pal_hit[i] = c != pal[i];
+            changed |= pal_hit[i];
+            pal[i] = c;
         }
-        full_redraw = 1;
+        /* Graphics rows hold DAC indices: redraw just the rows using a changed
+           one (none at all for the direct-color VESA modes). Text colors also go
+           through the attribute registers, which set palette_dirty too: all of it. */
+        if (console_on || is_text(video_mode)) full_redraw = 1;
+        else if (changed && (!vbe_on || vbe_bytespp(vbe_bpp) == 1)) pal_changed = 1;
     }
     if (console_on) { refresh_text(console_cells, -1); }
     else if (is_text(video_mode)) {
@@ -1622,6 +1777,7 @@ static void video_refresh_(void)
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
+    pal_changed = 0;
     if (shot_req) take_shot();                     /* before the note goes on top */
     draw_osd();
     tick_poll_end();

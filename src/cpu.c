@@ -214,9 +214,12 @@ u32 ap_tables(void)
 /* The page table's dirty bit for lin; cleared if clear. */
 int page_dirty(u32 lin, int clear)
 {
-    int d;
-    if (pae) { u64 *e = &((u64 *)pt_for(lin))[(lin >> 12) & 511]; d = (*e >> 6) & 1; if (clear) *e &= ~0x40ull; }
-    else { u32 *e = &((u32 *)pt_for(lin))[(lin >> 12) & 1023]; d = (*e >> 6) & 1; if (clear) *e &= ~0x40u; }
+    /* the low 32 bits hold the flags with PAE too */
+    u32 *e = pae ? (u32 *)&((u64 *)pt_for(lin))[(lin >> 12) & 511] : &((u32 *)pt_for(lin))[(lin >> 12) & 1023];
+    if (!(*(volatile u32 *)e & 0x40)) return 0;
+    if (!clear) return 1;
+    u8 d;                                         /* locked: another CPU's write may be setting bits in it */
+    __asm__ volatile("lock btrl $6,%0; setc %1" : "+m"(*e), "=q"(d) :: "memory");
     return d;
 }
 

@@ -574,6 +574,7 @@ struct regs *isr_dispatch(struct regs *r)
                     r->cs, r->eip, b1, b2);
             if (from_pm) { void dpmi_dump_code(u32, u32, int); dpmi_dump_code(r->cs, r->eip - 0x30, 0x60); }
         }
+        if (irq == 0) video_tlb_tick();
         if (irq == 0 && ++refresh_div >= TICK_HZ / 60) {
             refresh_div = 0;
             if (!smp_active) video_refresh();         /* else the helper CPU's */
