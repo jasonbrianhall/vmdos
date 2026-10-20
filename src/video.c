@@ -437,8 +437,8 @@ static u8 hxf[4096], vyf[4096], sdirty[4096];
 static u32 s_w, s_h;                           /* the source size the tables are for (xBRZ's output with it on) */
 static int xbrz_opt = -1;
 static u32 xbrz_k, x_w, x_h;                   /* xBRZ on: its factor and the source size */
-static u32 xs[640 * 480];
-static u8 xcor[640 * 480], xdirty[480];
+static u32 *xs, xs_cap;                         /* the source (x_w * x_h), kept for the next frame */
+static u8 *xcor, xdirty[4096];                  /* its corner flags, x_w * x_h */
 void xbrz_format(u8 rpos, u8 gpos, u8 bpos);
 void xbrz_corners(const u32 *src, u32 w, u32 h, u32 y, u8 *out);
 void xbrz_row(const u32 *src, const u8 *cor, u32 w, u32 h, u32 y, u32 k, u32 *dst);
@@ -466,10 +466,20 @@ static void smooth_setup(u32 w, u32 h)
     smooth = 0;
     xbrz_k = 0;
     if (!smooth_opt || fb_bpp < 24 || rsz != 8 || gsz != 8 || bsz != 8 || rpos > 16 || gpos > 16 || bpos > 16) return;
-    if (xbrz_opt && !is_text(video_mode) && w <= 640 && h <= 480 && w >= 2 && h >= 2) {
+    if (xbrz_opt && !is_text(video_mode) && w >= 2 && h >= 2 && w * 2 <= 4096 && h * 2 <= 4096) {
+        if (w * h > xs_cap) {                   /* any size: the buffers follow the mode */
+            if (xs) { phys_release(xs, xs_cap * 4); phys_release(xcor, xs_cap); xs = 0; xcor = 0; xs_cap = 0; }
+            xs = phys_try_alloc(w * h * 4);
+            xcor = xs ? phys_try_alloc(w * h) : 0;
+            if (xs && !xcor) { phys_release(xs, w * h * 4); xs = 0; }
+            if (xs) xs_cap = w * h;
+            else kprintf("video: no memory for scale=xbrz at %ux%u: smooth\n", w, h);
+        }
+    }
+    if (xbrz_opt && xs && !is_text(video_mode) && w >= 2 && h >= 2 && w * h <= xs_cap) {
         u32 k = (g_w + w - 1) / w, kh = (g_h + h - 1) / h;
         if (kh > k) k = kh;
-        if (k < 2) k = 2;
+        if (k < 2) k = 2;                       /* at the screen's size or bigger: 2x, then down */
         if (k > 6) k = 6;
         while (k > 2 && (w * k > 4096 || h * k > 4096)) k--;
         static int formatted;
