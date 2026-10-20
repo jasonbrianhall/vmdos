@@ -399,7 +399,9 @@ struct __attribute__((packed)) tss {
     u8 iobitmap[8192 + 1];
 };
 static struct tss tss __attribute__((aligned(16)));
-static u64 idt[48];
+static u64 idt[64];                    /* 0-47: isr_table; 30h and 3Fh: the helper CPU's (smp.c) */
+extern u8 ap_wake_isr[], ap_spurious_isr[];
+static u64 gate(u32 h) { return (h & 0xFFFF) | ((u64)0x08 << 16) | ((u64)0x8E << 40) | ((u64)(h >> 16) << 48); }
 
 void idt_load(void)                   /* smp.c: the helper CPU uses the same IDT */
 {
@@ -419,10 +421,9 @@ static void tables_init(void)
     reload_gdt();
     __asm__ volatile("ltr %w0" ::"r"(0x18));
 
-    for (int i = 0; i < 48; i++) {
-        u32 h = isr_table[i];
-        idt[i] = (h & 0xFFFF) | ((u64)0x08 << 16) | ((u64)0x8E << 40) | ((u64)(h >> 16) << 48);
-    }
+    for (int i = 0; i < 48; i++) idt[i] = gate(isr_table[i]);
+    idt[0x30] = gate((u32)(uintptr_t)ap_wake_isr);
+    idt[0x3F] = gate((u32)(uintptr_t)ap_spurious_isr);
     idt_load();
 }
 
@@ -496,7 +497,7 @@ void tick_poll(void)
     if (!tp_on || smp_on_ap()) return;
     u32 c = pit_count0();
     if (c > tp_count) {                               /* reloaded: a tick went by */
-        if (tp_pending) ticks++;                      /* one already waits: the PIC drops this one */
+        if (tp_pending) { ticks++; smp_tick(); }      /* one already waits: the PIC drops this one */
         else tp_pending = 1;
     }
     tp_count = c;
