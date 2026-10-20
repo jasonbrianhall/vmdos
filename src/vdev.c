@@ -634,9 +634,12 @@ static void out8(u16 port, u8 v)
     dbg(2, "guest out %04x <- %02x\n", port, v);
 }
 
+u32 perf_ports[1024];
+
 u32 port_in(u16 port, int size)
 {
     u32 v = 0;
+    if (perf_on) perf_ports[port & 1023]++;
     if (ne2k_port(port, size, 0, &v)) return v;
     for (int i = 0; i < size; i++) v |= (u32)in8(port + i) << (8 * i);
     return v;
@@ -644,6 +647,7 @@ u32 port_in(u16 port, int size)
 
 void port_out(u16 port, u32 val, int size)
 {
+    if (perf_on) perf_ports[port & 1023]++;
     if (ne2k_port(port, size, 1, &val)) return;
     for (int i = 0; i < size; i++) out8(port + i, val >> (8 * i));
 }
