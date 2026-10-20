@@ -42,6 +42,9 @@
 //      function, vendor (word), device ID (word), its own MAC (6), the
 //      address it sends with (6), name (10 bytes at 22, NUL-terminated).
 //   7  use card CL (0-based; FFh: auto): AX = 0, 1 no such card, 2 it didn't start
+//   8  IPXNET (DOSBox's IPX over UDP, ipxnet.cpp): set up from ES:DI, or stop
+//   9  IPXNET status into ES:DI
+//  10  the IPX node DOS should use into ES:DI (IPXNET's in CONNECT, else the MAC)
 #include "net.hpp"
 
 extern "C" {
@@ -61,9 +64,21 @@ Stats st;
 int rx_mode = 3;
 bool log_on;
 
+static bool promisc;                            // IPXNET has the card take everything
+
+static void enqueue_dos(const uint8_t* f, unsigned len);
+
 void enqueue(const uint8_t* f, unsigned len)
 {
     if (len < 14 || len > FRAME_MAX) { st.rx_err++; return; }
+    if (ipxnet_active() && ipxnet_rx(f, len)) return;
+    if (promisc && rx_mode < 6 && !(f[0] & 1) && memcmp(f, net_cur_mac(), 6)) return;   // not for DOS
+    if (promisc && rx_mode < 4 && (f[0] & 1) && memcmp(f, "\xff\xff\xff\xff\xff\xff", 6)) return;
+    enqueue_dos(f, len);
+}
+
+static void enqueue_dos(const uint8_t* f, unsigned len)
+{
     if (rx_mode == 1) return;
     if (q_count == QLEN) { st.dropped++; return; }
     int i = (q_head + q_count) % QLEN;
@@ -166,7 +181,7 @@ bool card_link(Card& c)
     }
     return c.link_up;
 }
-void card_mode(Card& c, int m) { c.drv->set_mode(c, m); }   // 1: receiving nothing
+void card_mode(Card& c, int m) { c.drv->set_mode(c, m > 1 && promisc ? 6 : m); }   // 1: receiving nothing
 void card_mac(Card& c, const uint8_t* a) { c.drv->set_mac(c, a); }
 bool card_start(Card& c) { c.kind = c.drv->kind; c.link_known = false; return c.running = c.drv->init(c); }
 
@@ -265,7 +280,7 @@ extern "C" int net_take(uint8_t* buf, int max)
 }
 extern "C" int net_send(const uint8_t* f, unsigned len)
 {
-    bool ok = len >= 14 && len <= 1514 && send_frame(f, len);
+    bool ok = len >= 14 && len <= 1514 && ((ipxnet_active() && !ipxnet_tx(f, len)) || send_frame(f, len));
     if (ok) { st.tx++; st.tx_bytes += len; } else st.tx_err++;
     if (log_on) kprintf("net: NE2000 out %u bytes, type %02x%02x%s\n", len, f[12], f[13], ok ? "" : " FAILED");
     return ok;
@@ -277,6 +292,21 @@ extern "C" int net_dos_mac(uint8_t* mac, int fix)          // the address DOS se
     memcpy(mac, cur_mac(), 6);
     return 1;
 }
+// ---- for IPXNET (ipxnet.cpp) ----
+const uint8_t* net_cur_mac() { return cur_mac(); }
+bool net_wire_send(const uint8_t* f, unsigned len)
+{
+    bool ok = len >= 14 && len <= 1514 && send_frame(f, len);
+    if (ok) { st.tx++; st.tx_bytes += len; } else st.tx_err++;
+    return ok;
+}
+void net_dos_inject(const uint8_t* f, unsigned len) { enqueue_dos(f, len); }
+void net_promisc(bool on)
+{
+    promisc = on;
+    if (active >= 0) card_mode(cards[active], rx_mode);
+}
+
 extern "C" void net_rx_mode(int m)
 {
     if (m == rx_mode) return;
@@ -380,6 +410,7 @@ extern "C" void net_tick(void)
     link_watch();
     auto_check();
     if (ne2k_running()) ne2k_tick();
+    ipxnet_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 
@@ -406,7 +437,7 @@ extern "C" void net_api(struct regs* r)
     case 2: {
         unsigned len = CX(r);
         const uint8_t* f = gptr(LIN(r->v86_ds, SI(r)));
-        bool ok = len >= 14 && len <= 1514 && send_frame(f, len);
+        bool ok = len >= 14 && len <= 1514 && ((ipxnet_active() && !ipxnet_tx(f, len)) || send_frame(f, len));
         if (ok) { st.tx++; st.tx_bytes += len; } else st.tx_err++;
         if (log_on) kprintf("net: out %u bytes, type %02x%02x, to %02x:%02x:%02x:%02x:%02x:%02x%s\n", len, f[12], f[13],
                             f[0], f[1], f[2], f[3], f[4], f[5], ok ? "" : " FAILED");
@@ -454,6 +485,9 @@ extern "C" void net_api(struct regs* r)
         CX(r) = (uint16_t)(active >= 0 ? active : 0xFFFF);
         DX(r) = auto_pick ? 1 : 0;
         return; }
+    case 8: case 9: case 10:
+        ipxnet_api(r, fn);
+        return;
     case 7: {
         if (CL(r) == 0xFF) { auto_pick = true; AX(r) = 0; kprintf("net: auto\n"); return; }
         int e = use_card(CL(r), "VMNIC");

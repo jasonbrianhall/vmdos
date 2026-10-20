@@ -116,7 +116,7 @@ def bios_boot(out, boot_img, core_img):
         f.seek(512); f.write(core)
 
 
-KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG"}
+KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG", "VMTCP.CFG"}
 
 
 def copy_files(out, files, update):
@@ -146,7 +146,8 @@ def copy_files(out, files, update):
                     subprocess.run(["mmd", "-i", img, "::/" + d], env=env,
                                    stderr=subprocess.DEVNULL)
                     made.add(d)
-            subprocess.run(["mcopy", "-o", "-i", img, src, "::/" + "/".join(parts)], check=True, env=env)
+            mode = keep if parts[-1].upper() in KEEP else ["-o"]
+            subprocess.run(["mcopy"] + mode + ["-i", img, src, "::/" + "/".join(parts)], check=mode == ["-o"], env=env)
         elif os.path.isdir(p):
             subprocess.run(["mcopy", "-s"] + keep + ["-i", img, p, "::/"], check=not update, env=env)
         else:

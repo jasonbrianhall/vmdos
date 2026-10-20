@@ -1,0 +1,13 @@
+mTCP by Michael B. Brutman (GPL-3.0-or-later; LICENSE here), from
+https://github.com/mbbrutman/mTCP at a6170bc7f4c9 (2026-10-10 release):
+src/TCPINC and src/TCPLIB, the TCP/IP library that net/ (VMTCP, DHCP, PING,
+NSLOOKUP, VMIPXBOX) is built on. net/dhcp/dhcp.cpp and net/ping/ping.cpp
+are mTCP's APPS/DHCP and APPS/PING with IPv6 added.
+
+Changes for vmdos:
+  - file names in lower case, and the #include names to match (Linux build)
+  - types.h: Ipv6Addr_t is 16 bytes (was 8)
+  - utils.cpp: with VMDOS_IPV6, no IPADDR is not an error (IPv6-only
+    networks), and the startup ARP check is skipped without an IPv4 address
+
+The programs that link it (net/bin/*.EXE) are GPL-3.0-or-later.

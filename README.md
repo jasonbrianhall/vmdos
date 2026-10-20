@@ -495,6 +495,32 @@ PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
 `NIC=usb` for a USB adapter) puts QEMU machines on one virtual LAN for trying
 it out.
 
+### TCP/IP (IPv4 and IPv6) and the DOSBox IPX bridge
+
+C:\VMDOS\NET has TCP/IP tools on the packet driver, built on
+[mTCP](https://github.com/mbbrutman/mTCP) with IPv6 added (SLAAC, DHCPv6,
+neighbor discovery, ICMPv6, UDP over IPv6). STARTNET.BAT runs DHCP; the
+settings are mTCP's config file (`MTCPCFG`, C:\VMDOS\NET\VMTCP.CFG), so
+mTCP's own FTP, TELNET, etc. work with it too.
+
+    DHCP [-4 | -6]              DHCPv4, then router discovery, SLAAC, DHCPv6
+    VMTCP                       show the settings (VMTCP KEY value sets one)
+    PING [-4 | -6] host
+    NSLOOKUP [-type=T] name [server]
+    VMIPXBOX SERVER [port]      DOSBox players: IPXNET CONNECT <this PC>
+    VMIPXBOX CONNECT host [port]   join a DOSBox IPXNET server (IPv4 or IPv6)
+    VMIPXBOX [STOP]             how it's doing / stop it
+
+VMIPXBOX sets up IPXNET, DOSBox's IPX over UDP (port 213), which vmdos then
+runs itself underneath DOS (`src/ipxnet.cpp`): load VMIPX and play, and this
+PC's games reach the DOSBox players; the LAN's IPX machines are bridged too.
+In CONNECT mode vmdos checks the link every 5 s and registers again if the
+server stops answering (it restarted, a NAT mapping changed). It logs nothing
+unless the kernel command line has `ipxlog`, which logs its events and
+every packet (DMESG).
+The programs are prebuilt in net/bin;
+`make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
+
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
 Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
@@ -581,6 +607,8 @@ untested.
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
+| `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
+| `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |
 | `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |
