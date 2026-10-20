@@ -487,7 +487,7 @@ void vkbd_real_scancode(u8 sc)
         if (!up) sound_volume_key(k == 0x3D ? -1 : k == 0x3E ? 1 : 0);
         return;
     }
-    if (hot && k == 0x42) {                                   /* Ctrl+Shift+F8: sharp, smooth, xBRZ scaling (video.c) */
+    if (hot && k == 0x42) {                                   /* Ctrl+Shift+F8: sharp, smooth, xBRZ, no scaling (video.c) */
         extern volatile int smooth_toggle_req;
         if (!up) smooth_toggle_req = 1;
         return;
