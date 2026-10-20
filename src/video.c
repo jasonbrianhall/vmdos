@@ -104,10 +104,27 @@ static u32 pal[256];
    marks the indices whose color moved since the last refresh. */
 static u8 pal_hit[256];
 static int pal_changed;
-static int row_pal_hit(const u8 *row, u32 n)
+
+/* The columns [*x0, *x1) of a source row that differ from its shadow, or
+   (pal8: a row of DAC indices) show a changed palette entry. None: x0 == x1. */
+static void row_span(const u8 *a, const u8 *sh, u32 n, int pal8, u32 *x0, u32 *x1)
 {
-    for (u32 i = 0; i < n; i++) if (pal_hit[row[i]]) return 1;
-    return 0;
+    u32 i = 0, j = n;
+    while (i < n && a[i] == sh[i] && !(pal8 && pal_hit[sh[i]])) i++;
+    if (i == n) { *x0 = *x1 = 0; return; }
+    while (j > i + 1 && a[j - 1] == sh[j - 1] && !(pal8 && pal_hit[sh[j - 1]])) j--;
+    *x0 = i; *x1 = j;
+}
+
+/* Widen [*x0, *x1) to take in the mouse pointer drawn at column p. */
+static void span_ptr(u32 *x0, u32 *x1, int p, u32 n)
+{
+    u32 a = p < 0 ? 0 : (u32)p, b = p + 10 < 0 ? 0 : (u32)(p + 10);   /* the arrow: 10 wide */
+    if (b > n) b = n;
+    if (a >= b) return;
+    if (*x0 >= *x1) { *x0 = a; *x1 = b; return; }
+    if (a < *x0) *x0 = a;
+    if (b > *x1) *x1 = b;
 }
 
 /* VESA BIOS state (see the VBE section) */
@@ -376,6 +393,21 @@ static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
 static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
 static u16 xmap[4096], txmap[4096];
+
+/* The screen columns [*X0, *X1) (from g_x) that show source columns [x0, x1),
+   out to 16-pixel boundaries on the framebuffer: whole write-combining lines. */
+static void dest_span(u32 x0, u32 x1, u32 *X0, u32 *X1)
+{
+    u32 lo = 0, hi = g_w;
+    while (lo < hi) { u32 m = (lo + hi) / 2; if (xmap[m] < x0) lo = m + 1; else hi = m; }
+    u32 a = lo;
+    hi = g_w;
+    while (lo < hi) { u32 m = (lo + hi) / 2; if (xmap[m] < x1) lo = m + 1; else hi = m; }
+    u32 b = lo;
+    a = (g_x + a) & ~15u; a = a < g_x ? 0 : a - g_x;
+    b = ((g_x + b + 15) & ~15u) - g_x; if (b > g_w) b = g_w;
+    *X0 = a; *X1 = b;
+}
 static int aspect_fill = -1, no_scale = -1;
 static u16 console_cells[80 * 25];
 static int console_on;
@@ -975,8 +1007,13 @@ static void refresh_gfx(void)
         fetch_row(y, rowbuf);
         u8 *sh = shadow_gfx + y * w;
         int in_new = y >= py && y < py + 16, in_old = y >= sh_ptr_y && y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(rowbuf, sh, w) &&
-            !(pal_changed && row_pal_hit(sh, (u32)w))) continue;
+        u32 x0 = 0, x1 = (u32)w;                   /* the source columns that changed */
+        if (!full_redraw) {
+            row_span(rowbuf, sh, (u32)w, pal_changed, &x0, &x1);
+            if (moved && in_new) span_ptr(&x0, &x1, px, (u32)w);
+            if (moved && in_old) span_ptr(&x0, &x1, sh_ptr_x, (u32)w);
+            if (x0 >= x1) continue;
+        }
         memcpy(sh, rowbuf, w);
         if (smooth) {
             for (int x = 0; x < w; x++) srow[x] = pal[rowbuf[x]];
@@ -988,17 +1025,20 @@ static void refresh_gfx(void)
             smooth_row((u32)y, srow);
             continue;
         }
-        for (u32 x = 0; x < g_w; x++) line[x] = pal[rowbuf[xmap[x]]];
+        u32 X0, X1;                                /* only the screen columns showing them */
+        dest_span(x0, x1, &X0, &X1);
+        if (X0 >= X1) continue;
+        for (u32 x = X0; x < X1; x++) line[x] = pal[rowbuf[xmap[x]]];
         if (in_new) {
             memset(ovr, 0, sizeof ovr);
             const char *a = arrow[y - py];
             for (int i = 0; a[i] && px + i < w; i++) ovr[px + i] = a[i] == '1' ? 1 : a[i] == '2' ? 2 : 0;
-            for (u32 x = 0; x < g_w; x++)
+            for (u32 x = X0; x < X1; x++)
                 if (ovr[xmap[x]]) line[x] = ovr[xmap[x]] == 1 ? black : white;
         }
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0) continue;
-        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);   /* from RAM: never read the framebuffer */
+        for (u32 yy = y0; yy < y1; yy++) put_row(line + X0, X1 - X0, g_x + X0, yy);   /* from RAM: never read the framebuffer */
     }
     if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
@@ -1442,12 +1482,24 @@ static void refresh_vbe(void)
         const u8 *src = vram + off;
         u8 *sh = vshadow + y * rowb;
         int in_new = (int)y >= py && (int)y < py + 16, in_old = (int)y >= sh_ptr_y && (int)y < sh_ptr_y + 16;
-        if (!full_redraw && !(moved && (in_new || in_old)) && !memcmp(src, sh, rowb) &&
-            !(B == 1 && pal_changed && row_pal_hit(sh, w))) continue;
+        u32 x0 = 0, x1 = w;                        /* the source columns that changed */
+        if (!full_redraw) {
+            row_span(src, sh, rowb, B == 1 && pal_changed, &x0, &x1);
+            x0 /= B; x1 = (x1 + B - 1) / B;
+            if (moved && in_new) span_ptr(&x0, &x1, px, w);
+            if (moved && in_old) span_ptr(&x0, &x1, sh_ptr_x, w);
+            if (x0 >= x1) continue;
+        }
         memcpy(sh, src, rowb);
         u32 y0 = g_y + y * g_h / h, y1 = g_y + (y + 1) * g_h / h;
         if (y1 == y0 && !smooth) continue;
-        for (u32 x = 0; x < w; x++) {
+        u32 X0 = 0, X1 = g_w, cx0 = 0, cx1 = w;   /* sharp: only the screen columns showing them */
+        if (!smooth) {
+            dest_span(x0, x1, &X0, &X1);
+            if (X0 >= X1) continue;
+            cx0 = xmap[X0]; cx1 = xmap[X1 - 1] + 1u;
+        }
+        for (u32 x = cx0; x < cx1; x++) {
             u32 c;
             if (B == 1) c = pal[src[x]];
             else if (B == 2) {
@@ -1466,8 +1518,8 @@ static void refresh_vbe(void)
                 if (a[i] == '1') cvt[px + i] = black; else if (a[i] == '2') cvt[px + i] = white;
         }
         if (smooth) { smooth_row(y, cvt); continue; }
-        for (u32 x = 0; x < g_w; x++) line[x] = cvt[xmap[x]];
-        for (u32 yy = y0; yy < y1; yy++) put_row(line, g_w, g_x, yy);
+        for (u32 x = X0; x < X1; x++) line[x] = cvt[xmap[x]];
+        for (u32 yy = y0; yy < y1; yy++) put_row(line + X0, X1 - X0, g_x + X0, yy);
     }
     if (smooth) smooth_out();
     sh_ptr_x = px; sh_ptr_y = py;
