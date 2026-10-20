@@ -164,6 +164,7 @@ struct Hc {
     volatile uint64_t* dcbaa;
     int max_slots, num_ports;
     bool port_dirty[256];
+    int legsup;                            // BIOS handoff register: xHCI cap offset / EHCI PCI offset (0: none)
 };
 #define MAX_HC 8
 static Hc hcs[MAX_HC];
@@ -2157,6 +2158,7 @@ static bool bios_handoff() {
         uint32_t v = rd(H->cap, xecp);
         if ((v & 0xFF) == 1) {                          // USB legacy support
             wr(H->cap, xecp, v | (1u << 24));              // OS owned
+            H->legsup = (int)xecp;
             for (int i = 0; i < 1000 && (rd(H->cap, xecp) & (1u << 16)); i++) delay_ms(1);
             if (rd(H->cap, xecp) & (1u << 16)) { printf("USB: BIOS won't release the controller\n"); return false; }
             wr(H->cap, xecp + 4, 0xE0000000);              // disable SMIs, clear their status
@@ -2409,6 +2411,55 @@ extern "C" void usb_settle(int max_ms) {
 
 // C entry points for the kernel.
 extern "C" void usb_start(const char* cmdline) { usb_init(cmdline); }
+
+// Before a reboot: drop every device off the bus and hand the controllers back
+// in the state the firmware found them (stopped, reset, BIOS owned). Some
+// boards' Ctrl+Alt+Del is only a warm reset, which leaves the controllers
+// powered and their PCI configuration as vmdos left it; the BIOS then finds
+// the sticks already addressed and configured, or the controller still "OS
+// owned", and doesn't see them until a cold boot.
+extern "C" void usb_shutdown(void) {
+    for (int c = 0; c < num_hc; c++) {
+        H = &hcs[c];
+        if (H->type == HC_XHCI) {
+            bool ppc = rd(H->cap, 0x10) & (1 << 3);
+            for (int p = 1; p <= H->num_ports; p++) {
+                uint32_t sc = portsc(p);
+                set_portsc(p, (sc & PORT_KEEP) | PORT_PED);                // disable the port
+                if (ppc) set_portsc(p, portsc(p) & PORT_KEEP & ~PORT_PP);  // and switch its power off
+            }
+            wr(H->op, 0x00, rd(H->op, 0x00) & ~1u);                         // stop
+            for (int i = 0; i < 20 && !(rd(H->op, 0x04) & 1); i++) delay_ms(1);
+            wr(H->op, 0x00, 1 << 1);                                        // reset
+            for (int i = 0; i < 250 && (rd(H->op, 0x00) & (1 << 1)); i++) delay_ms(1);
+            if (H->legsup) {
+                wr(H->cap, (uint32_t)H->legsup + 4, 0xE0000000);           // clear SMI status
+                wr(H->cap, (uint32_t)H->legsup, rd(H->cap, (uint32_t)H->legsup) & ~(1u << 24));   // not OS owned
+            }
+        } else if (H->type == HC_EHCI) {
+            for (int p = 1; p <= H->num_ports; p++)
+                eport_w(p, eport(p) & ~(E_WC | 0x1004u));                   // port disabled, power off (if switchable)
+            ewr(0, erd(0) & ~1u);
+            for (int i = 0; i < 20 && !(erd(4) & 0x1000); i++) delay_ms(1);
+            ewr(0, 2);                                                      // reset (CONFIGFLAG back to 0)
+            for (int i = 0; i < 250 && (erd(0) & 2); i++) delay_ms(1);
+            if (H->legsup) pci_write(H->pci, H->legsup, pci_read(H->pci, H->legsup) & ~(1u << 24));
+        } else if (H->type == HC_UHCI) {
+            uout(0, 0);
+            for (int i = 0; i < 20 && !(uin(2) & 0x20); i++) delay_ms(1);
+            uout(0, 4); delay_ms(20); uout(0, 0);                           // global reset: devices see it
+            uout(0, 2);
+            for (int i = 0; i < 100 && (uin(0) & 2); i++) delay_ms(1);
+            pci_write(H->pci, 0xC0, (pci_read(H->pci, 0xC0) & 0xFFFF0000u) | 0x2000);   // as Linux leaves it
+        } else if (H->type == HC_OHCI) {
+            owr(0x04, 0);                                                   // USBRESET: the bus sees it
+            delay_ms(20);
+            owr(0x08, 1);                                                   // controller reset
+            for (int i = 0; i < 100 && (ord(0x08) & 1); i++) io_delay(10);
+        }
+    }
+    if (num_hc) delay_ms(200);                          // let the devices notice they're gone
+}
 extern "C" void usb_tick(void) { usb_poll(); }
 extern "C" int usb_controllers(void) { int n = 0; for (int c = 0; c < num_hc; c++) n += hcs[c].type == HC_XHCI; return n; }
 extern "C" int usb_quiet(void) { return !usb_busy && !in_poll; }       // no USB transfer under way

@@ -369,6 +369,7 @@ static bool e_init(const PciDevice& d) {
         uint32_t v = pci_read(d, eecp);
         if ((v & 0xFF) == 1) {
             pci_write(d, eecp, v | 1u << 24);
+            H->legsup = eecp;
             for (int i = 0; i < 1000 && (pci_read(d, eecp) & 1u << 16); i++) delay_ms(1);
             if (pci_read(d, eecp) & 1u << 16) printf("USB: EHCI: BIOS won't let go, taking it anyway\n");
             pci_write(d, eecp + 4, 0);                  // no SMIs

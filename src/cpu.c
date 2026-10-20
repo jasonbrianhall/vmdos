@@ -516,17 +516,23 @@ void reboot(void)
 {
     disk_flush();
     cli();
+    usb_shutdown();                   /* hand USB back to the firmware, devices off the bus */
 
-    /* 1. Keyboard-controller pulse reset (classic AT) */
+    /* 1. CF9 full reset first: the keyboard controller's reset (below) is
+       only a warm CPU reset on many boards, which works, so nothing after it
+       ran and USB/AHCI were never re-initialised. FULL_RST (bit 3) is set
+       before RST_CPU (bit 2) goes 0 -> 1, as the chipset samples it then. */
+    u8 cf9 = inb(0xCF9) & ~0x0E;
+    outb(0xCF9, cf9 | 0x0A);          /* full + system reset requested */
+    for (volatile int d = 0; d < 10000; d++) ;
+    outb(0xCF9, cf9 | 0x0E);          /* go */
+    for (volatile int d = 0; d < 1000000; d++) ;
+
+    /* 2. Keyboard-controller pulse reset (classic AT; no CF9 here) */
     for (int i = 0; i < 10000 && (inb(0x64) & 2); i++)
         ;
     outb(0x64, 0xFE);
-
-    /* 2. CF9 – prefer a cold/full reset so USB/AHCI are re-initialised */
-    u8 cf9 = inb(0xCF9) & ~0x0E;
-    outb(cf9 | 0x02, 0xCF9);          /* “reset requested” */
-    for (volatile int d = 0; d < 10000; d++) ;   /* short delay */
-    outb(cf9 | 0x0E, 0xCF9);          /* full system reset (cold) */
+    for (volatile int d = 0; d < 1000000; d++) ;
 
     /* 3. Triple-fault as last resort */
     struct __attribute__((packed)) { u16 lim; u32 base; } z = { 0, 0 };
