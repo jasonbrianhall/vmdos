@@ -85,6 +85,7 @@ char *strstr(const char *h, const char *n);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
 void serial_init(const char *cmd);            /* the log on COM1 (or not: serial=off / serial=dos) */
+void tlb_flush_range(u32 lin, u32 len);       /* INVLPG those pages (a full flush on a 386) */
 void kdelay_us(u32 us);                       /* busy-wait, TSC-timed (any CPU, interrupts on or off) */
 u64 tsc_read(void);
 u32 tsc_khz(void);                            /* 0: no TSC */
