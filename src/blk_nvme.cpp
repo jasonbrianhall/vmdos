@@ -10,7 +10,7 @@
 
 namespace {
 
-void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
+void io_delay(int n) { kdelay_us((uint32_t)n); }   // microseconds
 
 const int MAX_CTRL = 4, MAX_DISKS = 8, QD = 16;   // queue depth (entries), admin and I/O
 

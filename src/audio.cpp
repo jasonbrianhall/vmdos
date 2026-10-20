@@ -22,7 +22,7 @@ static int16_t ring[RING_FRAMES * 2] __attribute__((aligned(4096)));
 static uint32_t write_pos;        // next frame we will write
 static uint32_t target_ahead;     // desired latency in frames
 
-static void io_delay(int n) { while (n--) inb(0x80); }   // ~1 us each
+static void io_delay(int n) { kdelay_us((uint32_t)n); }   // microseconds
 
 // Some HD Audio controllers (older Intel ones among them) can read memory
 // without snooping the CPU's caches: sound still sitting in the cache never

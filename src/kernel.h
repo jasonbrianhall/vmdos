@@ -85,6 +85,7 @@ char *strstr(const char *h, const char *n);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
 void serial_init(const char *cmd);            /* the log on COM1 (or not: serial=off / serial=dos) */
+void kdelay_us(u32 us);                       /* busy-wait, TSC-timed (any CPU, interrupts on or off) */
 int serial_mode_dos(void);
 void serial_dos_init(void);                   /* serial.c: serial=dos, COM1/COM2 for DOS */
 u16 serial_dos_port(int n);                   /* DOS's n-th serial port's base, or 0 */

@@ -109,7 +109,10 @@ static int serial_mode;                          /* 0: the log, 1: off, 2: DOS's
    (the TSC), so the first line also shows how long the firmware and the
    loader took. The TSC is timed against PIT channel 2 for 10 ms in
    serial_init. logtime=off leaves them out. */
-static u32 tsc_per_ms;                           /* 0: no time stamps */
+static u32 tsc_per_ms;                           /* 0: no TSC (or no PIT channel 2 to time it) */
+static int log_times;                            /* time stamps on (logtime=off: off) */
+static u32 tsc_per_us_q10;                       /* kdelay_us: TSC counts a microsecond, times 1024 */
+static u32 p80_per_ms = 1000;                    /* kdelay_us without a TSC: port 80h/61h read pairs a ms */
 static int at_bol = 1;
 
 static u64 tsc_now(void)
@@ -137,6 +140,36 @@ static void tsc_calibrate(void)
     u32 dlo = (u32)(t1 - t0), dhi = (u32)((t1 - t0) >> 32);
     if (dhi) return;
     tsc_per_ms = dlo / 10;
+    tsc_per_us_q10 = tsc_per_ms / 1000 * 1024 + tsc_per_ms % 1000 * 1024 / 1000;
+}
+
+/* Without a TSC (a 386 or 486): time the same read pair kdelay_us loops on
+   against 10 ms of PIT channel 2. A port 80h read is ~1 us on old boards
+   but can be 15 us on new ones, so it's measured, never assumed. */
+static void p80_calibrate(void)
+{
+    u8 p61 = inb(0x61);
+    outb(0x61, (p61 & ~0x02) | 0x01);
+    outb(0x43, 0xB0);
+    outb(0x42, 11932 & 0xFF); outb(0x42, 11932 >> 8);
+    u32 n = 0;
+    while (!(inb(0x61) & 0x20) && ++n < 50000000) inb(0x80);
+    outb(0x61, p61);
+    if (n < 50000000 && n >= 10) p80_per_ms = n / 10;
+}
+
+void kdelay_us(u32 us)
+{
+    if (tsc_per_us_q10) {
+        u64 end = tsc_now() + (((u64)us * tsc_per_us_q10) >> 10);
+        while (tsc_now() < end) __asm__ volatile("rep; nop");      /* PAUSE */
+        return;
+    }
+    while (us) {                                 /* 1 ms at a time: no overflow */
+        u32 step = us > 1000 ? 1000 : us;
+        us -= step;
+        for (u32 n = step * p80_per_ms / 1000 + 1; n; n--) { (void)inb(0x61); inb(0x80); }
+    }
 }
 
 static u32 ms_since_reset(void)
@@ -157,7 +190,9 @@ void serial_init(const char *cmd)
         if (!strncmp(s + 7, "dos", 3)) serial_mode = 2;
         else if (!strncmp(s + 7, "off", 3)) serial_mode = 1;
     }
-    if (!(cmd && strstr(cmd, "logtime=off"))) tsc_calibrate();
+    tsc_calibrate();                             /* kdelay_us needs it even with logtime=off */
+    if (!tsc_per_ms) p80_calibrate();
+    log_times = !(cmd && strstr(cmd, "logtime=off"));
     if (serial_mode) return;                     /* serial_ok stays 0: the port untouched */
     outb(COM1 + 1, 0);
     outb(COM1 + 3, 0x80);
@@ -189,7 +224,7 @@ void kprintf(const char *fmt, ...)
     va_end(ap);
     rlock_take(&log_lock);                        /* the helper CPU logs too */
     for (char *p = buf; *p; p++) {
-        if (at_bol && tsc_per_ms && *p != '\n') {
+        if (at_bol && tsc_per_ms && log_times && *p != '\n') {
             u32 ms = ms_since_reset();
             snprintf(ts, sizeof ts, "[%4u.%03u] ", ms / 1000, ms % 1000);
             for (char *t = ts; *t; t++) { serial_putc(*t); bootcon_putc(*t); logbuf[logpos++ % sizeof logbuf] = *t; }
@@ -352,7 +387,7 @@ static void log_screen(const char *msg, int closable)
             last = top;
         }
         int k = stop_key();
-        if (k < 0) { for (int i = 0; i < 2000; i++) inb(0x80); continue; }
+        if (k < 0) { kdelay_us(2000); continue; }
         int max = n_lines > rows ? n_lines - rows : 0;
         switch (k) {
         case 0x48: top--; break;                                     /* up */

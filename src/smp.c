@@ -226,7 +226,7 @@ static void apic_ipi(u32 dest, u32 cmd)
     if (x2apic) { __asm__ volatile("wrmsr" :: "c"(0x830), "a"(cmd), "d"(dest) : "memory"); return; }
     lapic[0x310 / 4] = dest << 24;
     lapic[0x300 / 4] = cmd;
-    for (int i = 0; i < 100000 && (lapic[0x300 / 4] & (1u << 12)); i++) inb(0x80);   /* delivery pending */
+    for (int i = 0; i < 100000 && (lapic[0x300 / 4] & (1u << 12)); i++) kdelay_us(1);   /* delivery pending */
 }
 
 static void wrmsr(u32 m, u64 v) { __asm__ volatile("wrmsr" :: "c"(m), "a"((u32)v), "d"((u32)(v >> 32)) : "memory"); }
@@ -375,7 +375,7 @@ static void render_main(int i)
     }
 }
 
-static void udelay(u32 us) { while (us--) inb(0x80); }   /* ~1 us each, interrupts off or on */
+static void udelay(u32 us) { kdelay_us(us); }   /* TSC-timed, interrupts off or on */
 
 /* ---------------- ACPI: the RSDP, then the MADT's CPUs ---------------- */
 static int sum_ok(const u8 *p, u32 n) { u8 s = 0; while (n--) s += *p++; return s == 0; }

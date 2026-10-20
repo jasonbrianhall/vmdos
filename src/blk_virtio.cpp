@@ -24,7 +24,7 @@ Disk disks[MAX_DISKS];
 int n_disks;
 bool started;
 
-inline void delay_us(uint32_t us) { while (us--) inb(0x80); }
+inline void delay_us(uint32_t us) { kdelay_us(us); }
 
 // One request: data (identity-mapped) of len bytes in (device -> memory) or out. 0: done.
 int request(Disk& d, uint32_t type, uint64_t sector, void* data, uint32_t len, bool in)
