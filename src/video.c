@@ -409,6 +409,7 @@ static void dest_span(u32 x0, u32 x1, u32 *X0, u32 *X1)
     *X0 = a; *X1 = b;
 }
 static int aspect_fill = -1, no_scale = -1;
+static int unscaled = -1;                       /* scale=none / Ctrl+Shift+F8: the VGA's own size, black around it */
 static u16 console_cells[80 * 25];
 static int console_on;
 
@@ -624,7 +625,8 @@ static void layout(void)
     if (aspect_fill < 0) aspect_fill = strstr(cmdline, "aspect=fill") != 0;
     if (no_scale < 0) no_scale = strstr(cmdline, "scale=off") != 0;
     if (xbrz_opt < 0) xbrz_opt = strstr(cmdline, "scale=xbrz") != 0;
-    if (smooth_opt < 0) smooth_opt = (strstr(cmdline, "scale=smooth") || xbrz_opt) && !no_scale;
+    if (unscaled < 0) unscaled = strstr(cmdline, "scale=none") != 0;
+    if (smooth_opt < 0) smooth_opt = (strstr(cmdline, "scale=smooth") || xbrz_opt) && !no_scale && !unscaled;
     int text = is_text(video_mode);
     u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
     u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
@@ -642,6 +644,14 @@ static void layout(void)
         u32 ow = w < 400 ? w * 2 : w, oh = h < 300 ? h * 2 : h;
         u32 s = fb_w / ow < fb_h / oh ? fb_w / ow : fb_h / oh;
         if (s && ow * s <= 4096) { g_w = ow * s; g_h = oh * s; }
+    }
+    if (unscaled) {
+        /* scale=none: exactly what a VGA card puts out (320x200 doubled to
+           640x400, 640x480 as is), in the middle of the screen with black
+           around it. Far fewer pixels to write on a big screen. Larger than
+           the screen: scaled down as without the option. */
+        u32 ow = w < 400 ? w * 2 : w, oh = h < 300 ? h * 2 : h;
+        if (ow <= fb_w && oh <= fb_h) { g_w = ow; g_h = oh; }
     }
     if (w == fb_w && h == fb_h) { g_w = w; g_h = h; }   /* the screen's own size: as is, whatever its shape */
     if (g_w > 4096) g_w = 4096;
@@ -1808,12 +1818,14 @@ static void video_refresh_(void)
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
-        if (!smooth_opt) smooth_opt = 1, xbrz_opt = 0;             /* sharp -> smooth -> xBRZ -> sharp */
+        if (unscaled) unscaled = 0, smooth_opt = 0, xbrz_opt = 0;  /* sharp -> smooth -> xBRZ -> none -> sharp */
+        else if (!smooth_opt) smooth_opt = 1, xbrz_opt = 0;
         else if (!xbrz_opt) xbrz_opt = 1;
-        else smooth_opt = 0, xbrz_opt = 0;
+        else smooth_opt = 0, xbrz_opt = 0, unscaled = 1;
         last_layout_mode = -1;
         layout();
-        const char *m = !smooth_opt ? "Sharp scaling (whole pixels)" :
+        const char *m = unscaled ? "No scaling (VGA size, black border)" :
+                        !smooth_opt ? "Sharp scaling (whole pixels)" :
                         !smooth ? (xbrz_opt ? "xBRZ scaling: not on this screen" : "Smooth scaling: not on this screen") :
                         xbrz_k ? "xBRZ scaling" : xbrz_opt ? "xBRZ scaling (smooth in text modes)" : "Smooth scaling";
         video_osd(m);
