@@ -85,6 +85,11 @@ char *strstr(const char *h, const char *n);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
 void serial_init(const char *cmd);            /* the log on COM1 (or not: serial=off / serial=dos) */
+extern volatile int log_save_req;             /* Ctrl+Shift+S with the log open: log_save at the next tick */
+int log_tail(char *out, int rows, int scroll);   /* the log's last lines, for the overlay (lib.c) */
+void video_log_toggle(void);                  /* Ctrl+Shift+F10: the log over the running game (video.c) */
+int video_log_on(void);
+void video_log_scroll(int lines);             /* + up (older), - down; big numbers: to the top / the end */
 void tlb_flush_range(u32 lin, u32 len);       /* INVLPG those pages (a full flush on a 386) */
 void kdelay_us(u32 us);                       /* busy-wait, TSC-timed (any CPU, interrupts on or off) */
 u64 tsc_read(void);
@@ -363,7 +368,6 @@ void bootcon_remap(u32 lin);
 void bootcon_stop(void);
 void bootcon_putc(char c);
 int video_fb_ready(void);                      /* video.c has a framebuffer to draw on */
-void log_view(void);                           /* Ctrl+Shift+F10: the log, until Esc */
 extern volatile int log_view_req;
 extern int video_mode;
 extern u8 vga_dac[256][3];
