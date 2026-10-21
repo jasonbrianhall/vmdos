@@ -5,6 +5,8 @@ SET MTCPCFG=A:\VMDOS\NET\VMTCP.CFG
 SET BLASTER=A220 I5 D1 T4 P330
 SET DIRCMD=/O:GN
 LH A:\VMDOS\SHSUCDX /Q /D:?VMCD0001 >NUL
+REM A folder QEMU shares (make run SHARE=dir) as drive V:, with long names:
+REM VMDOSNET V: share /LFN
 LH A:\VMDOS\CTMOUSE.COM >NUL
 ECHO.
 ECHO FreeDOS on vmdos, from the built-in floppy (A:)

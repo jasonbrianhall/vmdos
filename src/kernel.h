@@ -315,6 +315,14 @@ int hv_emu_check(u32 lin, int write);          /* 0 unmapped, 1 memory, 2 the tr
 u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
 void hv_emu_wr8(u32 lin, u8 v);
 
+/* ---- fs9p.cpp: host folders over virtio-9p as DOS drives (VMDOSNET.COM) ---- */
+void fs9p_api(struct regs *r);                /* INT 2Fh AX=5652h */
+int fs9p_redir(struct regs *r);               /* INT 2Fh AH=11h: 1 handled (ours) */
+int fs9p_lfn(struct regs *r);                 /* INT 21h AH=71h: 1 handled */
+void fs9p_lfn_done(struct regs *r);           /* BIOS trap 5Ah: after DOS's 6C00h for a 716Ch */
+void fs9p_flush_all(void);                    /* gathered writes out */
+void fs9p_idle(void);                         /* DOS idle: gathered writes out */
+
 /* ---- net.cpp: the PC's Ethernet card for VMPKT.COM (INT 2Fh AX=564Eh) ---- */
 extern int net_ready;
 void net_init(void);

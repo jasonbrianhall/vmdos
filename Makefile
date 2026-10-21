@@ -47,7 +47,7 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin 
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_nvme.o blk_usb.o virtio.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_usb.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_nvme.o blk_usb.o virtio.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o fs9p.o nic_usb.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o)
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -162,6 +162,9 @@ $(BUILD)/VMIPX.COM: dos/vmipx.asm | $(BUILD)
 $(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/VMDOSNET.COM: dos/vmdosnet.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
+
 $(BUILD)/VMHD.SYS: dos/vmhd.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -184,6 +187,7 @@ VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \
+             $(BUILD)/VMDOSNET.COM \
              dos/net/VMTCP.CFG     # the default settings (kept when esp.img is updated)
 DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT \
@@ -403,7 +407,9 @@ QNETMAC  := $(if $(filter lan,$(NET)),$(comma)mac=52:54:00$(shell od -An -N3 -tx
 QNET     := -nic none $(QNETDEV_$(or $(NET),user)) $(if $(filter usb,$(NIC)),-device qemu-xhci$(comma)id=netxhci -device usb-net$(comma)netdev=vmnet$(comma)bus=netxhci.0,-device $(NIC)$(comma)netdev=vmnet)$(QNETMAC)
 # KVM when /dev/kvm is usable, else plain emulation (ACCEL= to override)
 ACCEL ?= -accel kvm -accel tcg
-QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QNET) $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY)
+# SHARE=dir: that folder as virtio-9p tag "share" (SHARE_TAG=...): VMDOSNET V: share
+QSHARE   := $(if $(SHARE),-virtfs local$(comma)path=$(SHARE)$(comma)mount_tag=$(or $(SHARE_TAG),share)$(comma)security_model=none)
+QEMU_ARGS ?= $(ACCEL) -m $(QEMU_MEM) -serial stdio $(QNET) $(QSOUND_$(SOUND)) $(QUSB) $(QUSBHOST) $(QDISPLAY) $(QSHARE)
 # C=disk: esp.img on an AHCI controller (C:), after the CD in the boot order.
 BOOTDISK ?= 1
 # DISK=virtio: on a virtio-blk disk instead (DISK=ide: IDE, DISK=nvme: NVMe).

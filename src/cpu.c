@@ -534,6 +534,7 @@ void idle_wait(void) { __asm__ volatile("sti; hlt; cli" ::: "memory"); }
 
 void reboot(void)
 {
+    fs9p_flush_all();
     disk_flush();
     cli();
     usb_shutdown();                   /* hand USB back to the firmware, devices off the bus */

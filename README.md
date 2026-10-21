@@ -538,6 +538,25 @@ every packet (DMESG).
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
+### Host folders: VMDOSNET (virtio-9p)
+
+A folder on the host as a DOS drive, over QEMU's virtio-9p (9P2000.L):
+
+    make run SHARE=~/dosfiles            # or: -virtfs local,path=DIR,mount_tag=share,security_model=none
+    VMDOSNET V: share /LFN               # in DOS (C:\VMDOS\NET)
+
+`VMDOSNET V: [tag] [/LFN] [/WT] [/RO] [/C:kb] [/T:ms]`, `VMDOSNET V: /D`,
+`VMDOSNET` lists. vmdos answers DOS's redirector calls (INT 2Fh AH=11h) for
+the drive itself (`src/fs9p.cpp`); nothing stays resident. Host names that
+aren't 8.3 get a stable short name (`LONG~K3Q.TXT`); with `/LFN` the
+long-name API (INT 21h 71xxh) works on the drive too (FreeCOM: `DIR /LFN`,
+quoted long names in COPY/CD/MD/DEL/REN). Listings and file data are cached
+(4 MiB of 32 KiB blocks, checked against the file's time and size when
+opened; listings trusted for /T ms); writes are gathered and sent on close,
+commit or after 0.5 s (`/WT`: straight through). Files' times are taken as
+the PC clock's time (QEMU's RTC is UTC by default). Not in VMHV's virtual
+machine, and not the long-name API for DPMI programs.
+
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
 Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
@@ -625,6 +644,7 @@ untested.
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
+| `src/fs9p.cpp`, `dos/vmdosnet.asm` | host folders as DOS drives: virtio-9p client, DOS redirector, long-name API, caches; VMDOSNET.COM |
 | `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |

@@ -106,7 +106,7 @@ static void raw_pm(struct regs *r, const char *insn)
 void guest_idle_poll(void)
 {
     static u32 last, polls;
-    if (ticks != last) { last = ticks; polls = 0; }
+    if (ticks != last) { last = ticks; polls = 0; fs9p_idle(); }
     if (++polls > 4) { idle_wait(); polls = 0; }
 }
 
@@ -222,6 +222,9 @@ static void do_int(struct regs *r, int n, u16 ip0)
     }
     if (n == 0x28) guest_idle_poll();                                    /* DOS idle (then the vector, for TSRs) */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
+    if (n == 0x2F && AH(r) == 0x11 && fs9p_redir(r)) return;           /* DOS's redirector call for a 9p drive */
+    if (n == 0x21 && AH(r) == 0x71 && fs9p_lfn(r)) return;             /* long names on a 9p drive */
+    if (n == 0x2F && AX(r) == 0x5652) { fs9p_api(r); return; }         /* VMDOSNET.COM */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
     if (n == 0x2F && AX(r) == 0x5646) { fd_api(r); return; }            /* VMFD.COM */
     if (n == 0x2F && AX(r) == 0x5647) { hd_api(r); return; }            /* VMHD.SYS / VMHD.COM */

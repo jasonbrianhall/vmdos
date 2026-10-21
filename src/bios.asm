@@ -67,6 +67,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw ps2_handler                   ; 022C  INT 15h C207h handler (far pointer)
         dw int67                         ; 022E  EMS (VMEMS.SYS points INT 67h here)
         dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
+        dw lfn_open                      ; 0232  long-name open on a 9p drive (fs9p.cpp)
 
 ; ---- stubs ----
 dummy:  iret
@@ -169,6 +170,14 @@ vbe_pmi_end:
 vbe_bank:                        ; VESA WinFuncPtr: BH=0 set / 1 get, DX = bank
         TRAP 0x46
         retf
+
+; INT 21h AX=716Ch on a 9p drive (fs9p.cpp): the monitor turns it into DOS's
+; own 6C00h with the short name, made from here; then the caller's DS:SI go
+; back and DOS's CF and ZF are the caller's.
+lfn_open:
+        int 21h
+        TRAP 0x5A
+        iret
 
 int33:  TRAP 0x33                ; mouse driver (in the monitor)
         iret
