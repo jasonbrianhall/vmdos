@@ -543,6 +543,7 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x5644) cd_api(r);                    /* VMCD.SYS / VMCD.COM: likewise */
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
+        else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
         else if (xms_hidden) ;                                  /* noxms: none here */
         else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
@@ -555,6 +556,7 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x35: mouse_cb_done(); return BIOS_CONT;
     case 0x74: ps2_irq(r); return BIOS_CONT;
     case 0x67: ems_int67(r); return BIOS_DONE;
+    case 0x5A: fs9p_lfn_done(r); return BIOS_DONEF;           /* after a long-name open (fs9p.cpp) */
     }
     if (id >= 0x60 && id < 0x70) return dpmi_rm_trap(r, id);   /* DPMI real-mode callbacks */
     return BIOS_DONE;

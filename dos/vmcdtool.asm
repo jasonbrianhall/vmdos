@@ -1,6 +1,7 @@
 ; VMCD.COM: change the disc in a vmdos CD-ROM drive.
 ;   VMCD                        list the drives and images
-;   VMCD D: C:\ISOS\WAR2.ISO    put an ISO file (or a CUE sheet) from C: in drive D:
+;   VMCD D: C:\ISOS\WAR2.ISO    put an ISO file (or a CUE sheet) from C: (or a
+;                               VMDOSNET drive: VMCD D: V:\GAME.ISO) in drive D:
 ;   VMCD 1 WAR2.ISO             the same by drive number (relative paths work)
 ;   VMCD WAR2.ISO               drive 1
 ;   VMCD 1 2                    image 2 of the list (ISOs loaded at boot)
@@ -184,17 +185,17 @@ number:                                 ; decimal at SI -> AL (SI past it)
 unit    db 1
 letter  db 0
 errs    dw msg_bad, msg_bad, msg_e2, msg_e3, msg_e4, msg_e5, msg_e6, msg_e7, msg_e8
-msg_use  db 'Usage: VMCD [drive] [image number | ISO or CUE file on C:]', 13, 10
+msg_use  db 'Usage: VMCD [drive] [image number | ISO or CUE file on C: or a VMDOSNET drive]', 13, 10
          db '  e.g. VMCD 1 C:\ISOS\WAR2.ISO or VMCD F: WAR2.ISO   (no arguments: list)', 13, 10, '$'
 msg_bad  db 'VMCD: no such drive or image', 13, 10, '$'
 msg_novm db 'VMCD: not running under vmdos', 13, 10, '$'
 msg_nocd db 'VMCD: that is not a vmdos CD-ROM drive', 13, 10, '$'
-msg_e2   db 'VMCD: file not found on C:', 13, 10, '$'
+msg_e2   db 'VMCD: file not found', 13, 10, '$'
 msg_e3   db 'VMCD: not an ISO 9660 CD image', 13, 10, '$'
-msg_e4   db 'VMCD: the image has to be on drive C:', 13, 10, '$'
+msg_e4   db 'VMCD: the image has to be on C: or a VMDOSNET drive', 13, 10, '$'
 msg_e5   db 'VMCD: no such CD-ROM drive (more with cdrives=N on the kernel command line)', 13, 10, '$'
 msg_e6   db 'VMCD: out of memory for the image', 13, 10, '$'
-msg_e7   db 'VMCD: disk error reading C:', 13, 10, '$'
+msg_e7   db 'VMCD: error reading the image', 13, 10, '$'
 msg_e8   db 'VMCD: unusable CUE sheet (BIN missing or unsupported track mode; see the log)', 13, 10, '$'
 %include "vmapi.inc"
 letters: times 26 db 0FFh
