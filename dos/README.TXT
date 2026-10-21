@@ -9,8 +9,9 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F5    Mute / unmute
   Ctrl+Shift+F8    Smooth scaling on / off (games like Warcraft 2 look much better but games like DOOM do not)
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
-  Ctrl+Shift+F10   vmdos log (game pauses; arrows/PgUp/PgDn scroll,
-                     Esc goes back)
+  Ctrl+Shift+F10   vmdos log over the game, on / off (the game keeps
+                     running; Ctrl+Shift+arrows/PgUp/PgDn scroll it,
+                     Ctrl+Shift+S saves it to C:\VMDOS\VMDOS.LOG)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
   Ctrl+Alt+Del     Restart
@@ -24,7 +25,7 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 0.05, VMSPEED 100)
   DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
   DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
-                          when it stops, or on S in the Ctrl+Shift+F10 log
+                          when it stops, or on Ctrl+Shift+S in the log
                           (for a crash or hang: read it after restarting)
   LSPCI [/V] [/X]       The PCI devices (/V details, /X config space in hex)
   LSUSB [/V]            The USB controllers and devices (/V classes)

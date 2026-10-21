@@ -287,9 +287,13 @@ C:\README.TXT lists the shortcuts, vmdos's DOS commands and the main boot
 options (`dos/README.TXT`).
 
 Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
-with no serial port, when a game misbehaves): the game pauses, the arrow
-keys, PgUp/PgDn and Home/End scroll, and Esc goes back to the game. The
-"vmdos stopped" screen shows the same log.
+with no serial port, when a game misbehaves), at the bottom of the screen,
+following new lines as they come; Ctrl+Shift+F10 again hides it. Nothing
+pauses: the game keeps running and gets every other key (pause it with
+its own controls if you want). With the log showing, Ctrl+Shift with the
+arrow keys, PgUp/PgDn or Home/End scrolls it, and Ctrl+Shift+S saves it
+to C:\VMDOS\VMDOS.LOG (made by `DMESG /K`). The "vmdos stopped" screen
+shows the same log.
 
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3

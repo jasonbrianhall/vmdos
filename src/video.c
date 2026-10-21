@@ -1699,6 +1699,69 @@ static void video_osd_(const char *msg)
     osd_until = ticks + 2000;
 }
 
+/* ---------------- the log, over the running game (Ctrl+Shift+F10) ----------------
+   Nothing pauses: the game goes on under it, and pausing is the game's own
+   business. The newest lines at the bottom of the screen, following the
+   log as it grows; Ctrl+Shift+Up/Down/PgUp/PgDn/Home/End scroll back. */
+#define LOGOV_W 76                              /* lib.c's LOG_W */
+static volatile int logov_on, logov_scroll;
+static int logov_rows;
+void video_log_toggle(void) { logov_on = !logov_on; logov_scroll = 0; }
+int video_log_on(void) { return logov_on; }
+void video_log_scroll(int lines)
+{
+    long s = (long)logov_scroll + lines;
+    logov_scroll = s < 0 ? 0 : s > 100000 ? 100000 : (int)s;
+}
+int video_log_page(void) { return logov_rows > 2 ? logov_rows - 2 : 1; }
+
+static void draw_log_box(void);
+static void draw_log_overlay(void)             /* in video_refresh_, under video_lock */
+{
+    static int was_on;
+    if (!logov_on) {
+        if (was_on) { was_on = 0; full_redraw = 1; last_layout_mode = -1; }   /* what it covered, next frame */
+        return;
+    }
+    was_on = 1;
+    if (!draw_late) draw_log_box();             /* else after the helper's rows (video_refresh_late) */
+}
+static void draw_log_box(void)
+{
+    static char text[64][LOGOV_W + 1];
+    static u32 line[4096];
+    int s = fb_w >= 1280 && fb_h >= 800 ? 2 : 1;
+    int cols = LOGOV_W + 2;
+    while (cols > 10 && (u32)(cols * 8 * s) > fb_w) cols--;
+    int rows = (int)(fb_h * 2 / 5) / (16 * s);
+    if (rows > 64) rows = 64;
+    if (rows < 3) return;
+    logov_rows = rows;
+    int body = rows - 1;                                             /* row 0: the title */
+    logov_scroll = log_tail(&text[0][0], body, logov_scroll);
+    u32 w = (u32)(cols * 8 * s), h = (u32)(rows * 16 * s);
+    u32 x0 = (fb_w - w) / 2, y0 = fb_h > h + 8 ? fb_h - h - 8 : 0;
+    u32 fg = pack(55, 55, 55), bg = pack(0, 0, 16), tfg = pack(63, 63, 63), tbg = pack(0, 0, 42);
+    static const char title_live[] = "vmdos log - Ctrl+Shift+F10 closes, Ctrl+Shift+PgUp/PgDn scrolls";
+    static const char title_back[] = "vmdos log (scrolled back: Ctrl+Shift+End for the newest)";
+    for (int r = 0; r < rows; r++) {
+        const char *t = r == 0 ? (logov_scroll ? title_back : title_live) : text[r - 1];
+        u32 f = r == 0 ? tfg : fg, b = r == 0 ? tbg : bg;
+        for (int gy = 0; gy < 16 * s; gy++) {
+            int fy = gy / s;
+            int ended = 0;
+            for (u32 x = 0; x < w; x++) {
+                int c = (int)(x / (8 * s)) - 1, bit = (int)(x / s) & 7;
+                char ch = ' ';
+                if (c >= 0 && !ended) { ch = t[c]; if (!ch) { ended = 1; ch = ' '; } }
+                if (c < 0 || c >= LOGOV_W) ch = ' ';
+                line[x] = (font8x16[(u8)ch * 16 + fy] & (0x80 >> bit)) ? f : b;
+            }
+            put_row(line, w, x0, y0 + (u32)(r * 16 * s + gy));
+        }
+    }
+}
+
 static void draw_osd_text(void);
 static void draw_osd(void)
 {
@@ -1796,6 +1859,7 @@ void video_refresh_late(void)
     if (!draw_late) return;
     draw_rows();
     if (shot_req) take_shot();
+    if (logov_on) draw_log_box();
     if (osd_msg[0] && (int32_t)(ticks - osd_until) < 0) draw_osd_text();
     draw_late = 0;
 }
@@ -1859,6 +1923,7 @@ static void video_refresh_(void)
     full_redraw = 0;
     pal_changed = 0;
     if (shot_req && !draw_late) take_shot();       /* before the note goes on top (drawn later: then) */
+    draw_log_overlay();
     draw_osd();
     tick_poll_end();
     busy = 0;

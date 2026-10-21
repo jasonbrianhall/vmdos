@@ -378,6 +378,35 @@ const char *log_save(void)
     return err;
 }
 
+/* For the log overlay (video.c, often on the helper CPU): the log's
+   lines (as the stop screen wraps them, LOG_W wide), the last rows of them
+   scroll lines up from the end, into out (rows lines of LOG_W + 1).
+   Returns the scroll actually used (clamped). Rebuilt only when the log
+   has grown since the last call. */
+int log_tail(char *out, int rows, int scroll)
+{
+    static u32 built_at = ~0u;
+    rlock_take(&log_lock);
+    if (built_at != logpos) { log_lines(); built_at = logpos; }
+    int n = n_lines;
+    while (n > 0 && !loglin[line_at[n - 1]]) n--;                   /* not the empty line after the last \n */
+    int max = n > rows ? n - rows : 0;
+    if (scroll > max) scroll = max;
+    if (scroll < 0) scroll = 0;
+    int first = n - rows - scroll;
+    for (int r = 0; r < rows; r++) {
+        char *d = out + r * (LOG_W + 1);
+        int l = first + r;
+        if (l < 0 || l >= n) { d[0] = 0; continue; }
+        const char *src = loglin + line_at[l];
+        int c = 0;
+        for (; c < LOG_W && src[c]; c++) d[c] = src[c];
+        d[c] = 0;
+    }
+    rlock_drop(&log_lock);
+    return scroll;
+}
+
 void usb_tick(void);
 static int stop_key(void)
 {
@@ -436,20 +465,9 @@ static void log_screen(const char *msg, int closable)
 
 /* Ctrl+Shift+F10 (vdev.c asks, the timer tick calls this when USB isn't
    busy): the log over the game, which waits until Esc. */
-volatile int log_view_req;
+volatile int log_view_req, log_save_req;
 int vkbd_mods(void);
 void vkbd_release_mods(int m);
-void log_view(void)
-{
-    int mods = vkbd_mods();                                         /* what the guest saw held: Ctrl, Shift */
-    log_view_req = 0;
-    while (stop_key() >= 0) ;                                       /* the hotkey's own bytes */
-    video_console_save();
-    log_screen("The log so far (the game is paused).", 1);
-    video_console_restore();
-    vkbd_release_mods(mods);                                         /* Ctrl/Shift went up while we had the keyboard */
-}
-
 void panic(const char *fmt, ...)
 {
     char buf[1024];

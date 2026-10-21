@@ -478,8 +478,21 @@ void vkbd_real_scancode(u8 sc)
         if (!up) speed_step(k == 0x58 ? 1 : -1);
         return;
     }
-    if (hot && k == 0x44) {                                   /* Ctrl+Shift+F10: the log */
+    if (hot && k == 0x44) {                                   /* Ctrl+Shift+F10: the log, over the game */
         if (!up) log_view_req = 1;
+        return;
+    }
+    if (hot && video_log_on() && k == 0x1F) {                /* Ctrl+Shift+S: the log into C:\VMDOS\VMDOS.LOG */
+        extern volatile int log_save_req;
+        if (!up) log_save_req = 1;
+        return;
+    }
+    if (hot && video_log_on() && (k == 0x48 || k == 0x50 || k == 0x49 || k == 0x51 || k == 0x47 || k == 0x4F)) {
+        if (!up) {                                            /* Ctrl+Shift+arrows/PgUp/PgDn/Home/End: scroll it */
+            int video_log_page(void);
+            int pg = video_log_page();
+            video_log_scroll(k == 0x48 ? 1 : k == 0x50 ? -1 : k == 0x49 ? pg : k == 0x51 ? -pg : k == 0x47 ? 100000 : -100000);
+        }
         return;
     }
     if (hot && k >= 0x3D && k <= 0x3F) {                     /* Ctrl+Shift+F3/F4: volume down/up, F5: mute */
