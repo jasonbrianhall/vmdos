@@ -26,6 +26,9 @@ extern "C" {
 void fs9p_api(struct regs* r);
 int fs9p_redir(struct regs* r);
 int fs9p_lfn(struct regs* r);
+int fs9p_kopen(const char* path, u32* size);
+int fs9p_kread(int h, u32 off, u32 len, void* buf);
+void fs9p_kclose(int h);
 void fs9p_lfn_done(struct regs* r);
 void fs9p_flush_all(void);
 void fs9p_idle(void);
@@ -900,35 +903,34 @@ u8* wb_get()
     return 0;
 }
 
-// n bytes at pos from the host into guest memory at lin: bytes read
-long file_read(OFile& f, u32 pos, u32 n, u32 lin)
+// n bytes at pos of an open file (fid) into dst, through the block cache:
+// bytes read, or -errno. *last_end: where the previous read ended (read-ahead).
+long cread(u8 dv, u32 fid, u64 qpath, u32 ver, u32* last_end, u32 pos, u32 n, u8* dst)
 {
-    Mount& m = mnts[f.drive];
-    Dev& d = devs[m.dev];
-    if (f.wb_len) wb_flush(f);
+    Dev& d = devs[dv];
     u32 done = 0;
     while (done < n) {
         u32 p = pos + done, no = p / BLK, in = p % BLK;
-        Blk* b = nblk ? blk_find(m.dev, f.qpath, f.ver, no) : 0;
+        Blk* b = nblk ? blk_find(dv, qpath, ver, no) : 0;
         if (!b && nblk < 8) {                  // no cache: straight in
-            long r = p_read(d, f.fid, p, n - done);
+            long r = p_read(d, fid, p, n - done);
             if (r < 0) return done ? (long)done : r;
-            memcpy(gptr(lin + done), d.brx + 11, (u32)r);
+            memcpy(dst + done, d.brx + 11, (u32)r);
             done += (u32)r;
             if (!r) break;
             continue;
         }
         if (!b) {
-            u32 ra = p == f.last_end || in ? 4 : 1;   // straight through: read ahead
+            u32 ra = p == *last_end || in ? 4 : 1;     // straight through: read ahead
             if (ra * BLK > d.msize - 11) ra = (d.msize - 11) / BLK;
             if (!ra) ra = 1;
-            long r = p_read(d, f.fid, (u64)no * BLK, ra * BLK);
+            long r = p_read(d, fid, (u64)no * BLK, ra * BLK);
             if (r < 0) return done ? (long)done : r;
             for (u32 k = 0; k < ra; k++) {
                 long c = r - (long)(k * BLK);
                 if (c <= 0 && k) break;
                 Blk* nb = blk_new();
-                nb->dev = m.dev; nb->qpath = f.qpath; nb->ver = f.ver; nb->no = no + k;
+                nb->dev = dv; nb->qpath = qpath; nb->ver = ver; nb->no = no + k;
                 nb->len = c <= 0 ? 0 : c > (long)BLK ? BLK : (u32)c;
                 memcpy(blk_data(nb), d.brx + 11 + k * BLK, nb->len);
                 if (!k) b = nb;
@@ -937,12 +939,19 @@ long file_read(OFile& f, u32 pos, u32 n, u32 lin)
         if (in >= b->len) break;               // the end of the file
         u32 c = b->len - in;
         if (c > n - done) c = n - done;
-        memcpy(gptr(lin + done), blk_data(b) + in, c);
+        memcpy(dst + done, blk_data(b) + in, c);
         done += c;
         if (b->len < BLK) break;
     }
-    f.last_end = pos + done;
+    *last_end = pos + done;
     return done;
+}
+
+// n bytes at pos from the host into guest memory at lin: bytes read
+long file_read(OFile& f, u32 pos, u32 n, u32 lin)
+{
+    if (f.wb_len) wb_flush(f);
+    return cread(mnts[f.drive].dev, f.fid, f.qpath, f.ver, &f.last_end, pos, n, gptr(lin));
 }
 
 // n bytes from guest memory at lin to pos: bytes written, or -errno
@@ -2149,13 +2158,78 @@ int unmount(int dr)
     return 0;
 }
 
+// ---- files for the monitor itself (VMCD's images on a share)
+const int NKF = 32;
+struct KFile { bool used; u8 dev; u32 fid, ver, size, last_end; u64 qpath; };
+KFile kfs[NKF];
+int in9p;                                      // a call is under way (CD audio's timer reads wait)
+
 } // namespace
+
+// "X:\PATH\FILE" on a share opened for reading: a handle (0...), or -2 not
+// found, -3 path not found, -4 not a share, -6 no room, -7 the host failed
+int fs9p_kopen(const char* path, u32* size)
+{
+    Mount* m = path[0] && path[1] == ':' ? mount_of(up(path[0]) - 'A') : 0;
+    if (!m) return -4;
+    if (in9p) return -7;
+    in9p++;
+    tick_poll_begin();
+    Res R;
+    int e = resolve(*m, path + 2, R), h = -6;
+    Dev& d = devs[m->dev];
+    u32 fid;
+    Attr a;
+    if (e) h = e == E_FNF ? -2 : -3;
+    else if (R.root || (R.e.attr & 0x10)) h = -2;
+    else if (p_path_fid(d, R.hp, &fid)) h = -2;
+    else if (p_lopen(d, fid, L_RDONLY) || p_getattr(d, fid, a)) { p_clunk(d, fid); h = -7; }
+    else {
+        for (int i = 0; i < NKF; i++) if (!kfs[i].used) { h = i; break; }
+        if (h < 0) p_clunk(d, fid);
+        else {
+            KFile& k = kfs[h];
+            k.used = true; k.dev = m->dev; k.fid = fid; k.qpath = a.qpath; k.ver = ver_of(a);
+            k.size = a.size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)a.size;
+            k.last_end = 0xFFFFFFFFu;
+            *size = k.size;
+        }
+    }
+    tick_poll_end();
+    in9p--;
+    return h;
+}
+
+// len bytes at off: 0, or -1 (short, or the host failed, or busy)
+int fs9p_kread(int h, u32 off, u32 len, void* buf)
+{
+    if (h < 0 || h >= NKF || !kfs[h].used || in9p) return -1;
+    KFile& k = kfs[h];
+    in9p++;
+    tick_poll_begin();
+    long n = cread(k.dev, k.fid, k.qpath, k.ver, &k.last_end, off, len, (u8*)buf);
+    tick_poll_end();
+    in9p--;
+    return n == (long)len ? 0 : -1;
+}
+
+void fs9p_kclose(int h)
+{
+    if (h < 0 || h >= NKF || !kfs[h].used) return;
+    in9p++;
+    tick_poll_begin();
+    p_clunk(devs[kfs[h].dev], kfs[h].fid);
+    tick_poll_end();
+    in9p--;
+    kfs[h].used = false;
+}
 
 // INT 2Fh AX=5652h (VMDOSNET.COM). BX=0: the shares to ES:DI ($-terminated);
 // 1: mount (above); 2: drive DL out; 3: write out what is gathered.
 // AX = 0 or an error; BX = 564Dh.
 void fs9p_api(struct regs* r)
 {
+    in9p++;
     tick_poll_begin();
     switch (BX(r)) {
     case 0: list(LIN(r->v86_es, DI(r))); AX(r) = 0; break;
@@ -2165,6 +2239,7 @@ void fs9p_api(struct regs* r)
     default: AX(r) = 1;
     }
     tick_poll_end();
+    in9p--;
     BX(r) = 0x564D;
 }
 
@@ -2174,6 +2249,7 @@ int fs9p_redir(struct regs* r)
     if (!nmnt) return 0;
     u8 fn = AL(r);
     int e = -1;
+    in9p++;
     tick_poll_begin();
     switch (fn) {
     case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x21: {
@@ -2210,6 +2286,7 @@ int fs9p_redir(struct regs* r)
     }
     if (fn != 0x07 && fn != 0x06) flush_due(500);
     tick_poll_end();
+    in9p--;
     if (debug_level >= (fn == 0x08 || fn == 0x09 || fn == 0x1C ? 3 : 2) && e != -1) {
         char p[128];
         u32 sda = lfn_sda();
@@ -2225,10 +2302,12 @@ int fs9p_redir(struct regs* r)
 int fs9p_lfn(struct regs* r)
 {
     if (!nmnt) return 0;
+    in9p++;
     tick_poll_begin();
     u8 fn = AL(r);
     int e = lfn(r);
     tick_poll_end();
+    in9p--;
     if (debug_level >= (fn == 0x4F || fn == 0x60 ? 3 : 2) && (e != -1 || debug_level >= 4)) {
         char p[128];
         gstr(LIN(r->v86_ds, (fn == 0x60 || fn == 0x6C) ? SI(r) : DX(r)), p, 80);
@@ -2267,8 +2346,10 @@ void fs9p_idle(void)
     if (!nmnt) return;
     bool any = false;
     for (int i = 0; i < NOF; i++) if (ofs[i].used && ofs[i].wb_len) any = true;
-    if (!any) return;
+    if (!any || in9p) return;
+    in9p++;
     tick_poll_begin();
     flush_due(200);
     tick_poll_end();
+    in9p--;
 }
