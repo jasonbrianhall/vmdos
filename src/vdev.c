@@ -143,7 +143,7 @@ static void pit_write(int n, u8 v)
         c->start = pit_clock();
         if (n == 0) {
             next_irq0 = c->start + reload_of(c);
-            dbg(1, "guest PIT ch0: reload %u (%u Hz)\n", reload_of(c), PIT_HZ / reload_of(c));
+            //dbg(1, "guest PIT ch0: reload %u (%u Hz)\n", reload_of(c), PIT_HZ / reload_of(c));
             if (reload_of(c) == 65536) video_vgalog_giveup();          /* vgalog: Windows putting the timer back as it quits */
         }
     }
