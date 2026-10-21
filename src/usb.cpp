@@ -23,8 +23,11 @@ static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mo
 
 // Delays: kdelay_us (lib.c), timed by the TSC, or by port 80h reads
 // measured against the PIT where there's no TSC.
-static void io_delay(int us) { kdelay_us((uint32_t)us); }
-static void delay_ms(int ms) { while (ms--) kdelay_us(1000); }
+// usbdelay=N stretches every USB wait and timeout N times (1-50), for a
+// device that needs more time than the code allows.
+static uint32_t delay_mul = 1;
+static void io_delay(int us) { kdelay_us((uint32_t)us * delay_mul); }
+static void delay_ms(int ms) { while (ms--) kdelay_us(1000 * delay_mul); }
 #define barrier() __asm__ volatile("" ::: "memory")
 
 // ---------------------------------------------------------------- memory
@@ -2047,6 +2050,24 @@ static void hub_port_change(int h, int port) {
     }
 }
 
+// Turn the port's power off and on again (when the controller can: its
+// HCCPARAMS1 PPC bit), so the device starts from scratch, as if unplugged
+// and plugged in again: what a stick that won't take its address after a
+// reset needs (plugged in again by hand it's fine). Then a port reset.
+// false: no port power switching here, or nothing came back.
+static bool power_cycle_port(int port) {
+    if (!(rd(H->cap, 0x10) & (1 << 3))) return false;
+    uint32_t sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PED);             // disable it first
+    set_portsc(port, portsc(port) & PORT_KEEP & ~PORT_PP);     // power off
+    delay_ms(500);                                             // long enough for it to lose power
+    set_portsc(port, (portsc(port) & PORT_KEEP) | PORT_PP);    // and on
+    for (int i = 0; i < 1000 && !(portsc(port) & PORT_CCS); i++) delay_ms(1);
+    if (!(portsc(port) & PORT_CCS)) return false;
+    delay_ms(100);                                             // connect debounce (TATTDB)
+    return reset_port(port);
+}
+
 static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
     if (!reset_port(port)) return;
@@ -2055,15 +2076,34 @@ static void setup_port(int port) {
     addr_cc = 0;
     setup_device(port, -1, 0, speed);
     bool no_addr = addr_failed && addr_cc == -1;          // Address Device never completed
-    if (no_addr && speed < 4) {
-        // A USB 2 port has no warm reset (that's USB 3 only): the nearest
-        // thing is another port reset, then one more try.
-        printf("USB: port %d: no answer to Address Device (cc=-1); warm reset is USB 3 only, "
-               "doing a port reset and trying again\n", port);
-        addr_failed = false;
-        addr_cc = 0;
-        if (reset_port(port)) setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
-        if (addr_failed) printf("USB: port %d: still no address after the port reset\n", port);
+    if (addr_failed && speed < 4) {
+        // A USB 2 device that didn't take its address: no answer at all
+        // (cc=-1), or a transaction error (cc=4) from one not ready yet so
+        // soon after its reset (some sticks at boot: plugged in again later,
+        // they're fine). As Linux does: reset the port again and retry,
+        // giving it longer to recover each time. (A USB 2 port has no warm
+        // reset; that's USB 3 only.)
+        // First the port's power off and on (a fresh start, as unplugging
+        // it does), where the controller can switch it; else, and then,
+        // port resets with longer to recover.
+        if (rd(H->cap, 0x10) & (1 << 3)) {
+            printf("USB: port %d: no address (cc=%d): power off and on, trying again\n", port, addr_cc);
+            addr_failed = false;
+            addr_cc = 0;
+            if (power_cycle_port(port)) setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
+            else { addr_failed = true; printf("USB: port %d: nothing there after the power cycle\n", port); }
+        }
+        static const int settle_ms[] = { 200, 500 };
+        for (int t = 0; t < 2 && addr_failed; t++) {
+            printf("USB: port %d: no address (cc=%d): port reset, %d ms to recover, trying again\n",
+                   port, addr_cc, 100 + settle_ms[t]);
+            addr_failed = false;
+            addr_cc = 0;
+            if (!reset_port(port)) break;
+            delay_ms(settle_ms[t]);                           // on top of reset_port's 100 ms
+            setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
+        }
+        if (addr_failed) printf("USB: port %d: still no address\n", port);
         return;
     }
     if (speed >= 4 && ((msd_stuck && !addr_failed) || no_addr)) {
@@ -2282,6 +2322,12 @@ bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
     pad_keys_option(cmdline);
+    if (const char* d = cmdline ? strstr(cmdline, "usbdelay=") : nullptr) {
+        uint32_t n = 0;
+        for (d += 9; *d >= '0' && *d <= '9'; d++) n = n * 10 + (uint32_t)(*d - '0');
+        delay_mul = n < 1 ? 1 : n > 50 ? 50 : n;
+        printf("USB: waits and timeouts %u times as long (usbdelay)\n", delay_mul);
+    }
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
     PciDevice d;
