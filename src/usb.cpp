@@ -23,8 +23,11 @@ static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mo
 
 // Delays: kdelay_us (lib.c), timed by the TSC, or by port 80h reads
 // measured against the PIT where there's no TSC.
-static void io_delay(int us) { kdelay_us((uint32_t)us); }
-static void delay_ms(int ms) { while (ms--) kdelay_us(1000); }
+// usbdelay=N stretches every USB wait and timeout N times (1-50), for a
+// device that needs more time than the code allows.
+static uint32_t delay_mul = 1;
+static void io_delay(int us) { kdelay_us((uint32_t)us * delay_mul); }
+static void delay_ms(int ms) { while (ms--) kdelay_us(1000 * delay_mul); }
 #define barrier() __asm__ volatile("" ::: "memory")
 
 // ---------------------------------------------------------------- memory
@@ -2291,6 +2294,12 @@ bool usb_init(const char* cmdline) {
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
     pad_keys_option(cmdline);
+    if (const char* d = cmdline ? strstr(cmdline, "usbdelay=") : nullptr) {
+        uint32_t n = 0;
+        for (d += 9; *d >= '0' && *d <= '9'; d++) n = n * 10 + (uint32_t)(*d - '0');
+        delay_mul = n < 1 ? 1 : n > 50 ? 50 : n;
+        printf("USB: waits and timeouts %u times as long (usbdelay)\n", delay_mul);
+    }
     // Every xHCI controller, not just the first: keyboards and mice may be
     // on an add-in card, or on the second of a board's two controllers.
     PciDevice d;
