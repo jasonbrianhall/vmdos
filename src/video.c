@@ -789,13 +789,15 @@ static void apply_map_mask(void)
     }
 }
 
+static int planes_live;                   /* the planes hold the screen already (a 16-colour mode went 256-colour) */
 static void planar_check(void)
 {
     int want = video_mode == 0x13 && !(seq[4] & 8);
     if (want && !planar_on) {
         if (!planes) planes = phys_alloc(4 * 65536);
         /* what the chained screen showed: byte a went to plane a & 3, offset a >> 2 */
-        for (u32 a = 0; a < 64000; a++) planes[(a & 3) * 65536 + (a >> 2)] = rd8(0xA0000 + a);
+        if (!planes_live)
+            for (u32 a = 0; a < 64000; a++) planes[(a & 3) * 65536 + (a >> 2)] = rd8(0xA0000 + a);
         planar_on = 1;
         mapped_plane = -1;
         apply_map_mask();
@@ -2063,21 +2065,33 @@ static u32 video_port_in_(u16 port)
    no INT 10h (or from text mode with one): graphics on in both the graphics
    controller and the attribute controller. 256-colour (attribute mode bit 6)
    is drawn as mode 13h, else as 16-colour planar; its size then comes from
-   the CRTC (ega_geom, m13_geom). Turned back off: text mode 3. */
+   the CRTC (ega_geom, m13_geom). Turned back off: text mode 3. A BIOS
+   16-colour mode (12h, 0Dh ...) switched to 256 colours by the attribute
+   controller is unchained 256-colour too (Ultrabots: mode 12h, then
+   Mode X style 320-wide): its planes, already unchained, carry over. */
 static void reg_mode_check(void)
 {
     if (console_on || vbe_on) return;
     int gfx = (gc[6] & 1) && (atc[0x10] & 1), c256 = atc[0x10] & 0x40;
     int want = !gfx ? (reg_mode ? 3 : -1) :
                is_text(video_mode) || reg_mode ? (c256 ? 0x13 : 0x12) :
-               video_mode == 0x13 && !c256 ? 0x12 : -1;
+               video_mode == 0x13 && !c256 ? 0x12 :
+               is_ega(video_mode) && c256 ? 0x13 : -1;
     if (want < 0 || want == video_mode) return;
     kprintf("video: mode set through the registers: %s\n", want == 3 ? "back to text" : want == 0x13 ? "256-colour" : "16-colour planar");
+    int from_ega = ega_on;
     video_mode = want;
     reg_mode = want != 3;
     if (want == 3) { text_cols = 80; text_base = 0xB8000; }
-    planar_check();
-    ega_check();
+    if (want == 0x13) {                            /* the 16-colour window off first, then the planar one on */
+        ega_check();
+        planes_live = from_ega;
+        planar_check();
+        planes_live = 0;
+    } else {
+        planar_check();
+        ega_check();
+    }
     last_layout_mode = -1;
     full_redraw = 1;
 }
