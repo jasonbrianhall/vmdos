@@ -159,6 +159,26 @@ u32 guest_phys(u32 lin) { return (u32)(uintptr_t)guest_ram + lin; }
 
 void tlb_flush(void) { flush_tlb(); }
 
+/* Just the pages [lin, lin + len) out of this CPU's TLB: INVLPG (a 486 or
+   later; CPUID is the test) instead of reloading CR3, which throws away
+   every entry, the kernel's too (no global pages), and costs the misses to
+   fill them again. DOOM remaps the 64 KiB VGA window for every column it
+   draws. */
+void tlb_flush_range(u32 lin, u32 len)
+{
+    static int invlpg_ok = -1;
+    if (invlpg_ok < 0) {
+        u32 a, b;
+        __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                         : "=&r"(a), "=&r"(b));
+        invlpg_ok = ((a ^ b) & 0x200000) != 0;
+    }
+    if (!invlpg_ok || len > 64 * 4096) { flush_tlb(); return; }
+    hv_tlb_dirty = 1;
+    if (!paging_on) return;
+    for (u32 a = lin & ~4095u; a < lin + len; a += 4096) __asm__ volatile("invlpg (%0)" :: "r"(a) : "memory");
+}
+
 /* ---- for hv.c (VMHV): its nested page tables share the host's page
    tables for linear 0-10 MiB, which hold the VM's memory ---- */
 int hv_host_pae(void) { return pae; }

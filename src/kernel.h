@@ -90,6 +90,7 @@ int log_tail(char *out, int rows, int scroll);   /* the log's last lines, for th
 void video_log_toggle(void);                  /* Ctrl+Shift+F10: the log over the running game (video.c) */
 int video_log_on(void);
 void video_log_scroll(int lines);             /* + up (older), - down; big numbers: to the top / the end */
+void tlb_flush_range(u32 lin, u32 len);       /* INVLPG those pages (a full flush on a 386) */
 void kdelay_us(u32 us);                       /* busy-wait, TSC-timed (any CPU, interrupts on or off) */
 u64 tsc_read(void);
 u32 tsc_khz(void);                            /* 0: no TSC */

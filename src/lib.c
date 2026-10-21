@@ -482,6 +482,8 @@ void panic(const char *fmt, ...)
     kprintf(se ? "log not saved: %s\n" : "log saved to C:\\VMDOS\\VMDOS.LOG\n", se);
     if (bootcon_on && !video_fb_ready()) for (;;) __asm__ volatile("cli; hlt");   /* the boot console shows it */
     bootcon_stop();
+    void audio_silence(void);
+    audio_silence();                              /* not the last bit of sound on a loop */
     log_screen(buf, 0);
     for (;;) __asm__ volatile("cli; hlt");
 }

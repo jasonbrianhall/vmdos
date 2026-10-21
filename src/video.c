@@ -769,7 +769,7 @@ static void map_window_flags(u32 phys, u32 flags)
 {
     vram_window_dirty();                           /* the dirty bits of what it shows now, first */
     for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, phys + i * 4096, flags);
-    tlb_flush();
+    tlb_flush_range(0xA0000, 0x10000);
 }
 static void map_window(u32 phys) { map_window_flags(phys, 7); }
 
@@ -915,7 +915,7 @@ static void modex_check(void)
                              gc[8] != 0xFF);
     if (want && !modex_trap) {
         for (u32 i = 0; i < 16; i++) map_page(0xA0000 + i * 4096, 0, 0);
-        tlb_flush();
+        tlb_flush_range(0xA0000, 0x10000);
         modex_trap = 1;
         mapped_plane = -1;
         mapped_ro = 0;

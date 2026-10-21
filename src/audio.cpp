@@ -1561,6 +1561,15 @@ extern "C" int audio_is_muted(void) { return audio_muted(); }
 extern "C" void audio_vol_set(int v) { audio_set_volume(v); }
 extern "C" void audio_mute_set(int m) { audio_set_muted(m != 0); }
 
+// The "vmdos stopped" screen: everything stops, nothing refills the ring,
+// and the card would play the last lap of it over and over. Silence instead.
+extern "C" void audio_silence(void) {
+    if (driver == AUDIO_NONE) return;
+    if (driver == AUDIO_SB) { if (sb_ring) memset(sb_ring, 0x80, SB_RING); return; }
+    memset(ring, 0, sizeof ring);
+    if (driver == AUDIO_HDA) flush_lines(ring, sizeof ring);
+}
+
 uint32_t audio_delay_ms() {
     if (driver == AUDIO_NONE) return 0;
     if (driver == AUDIO_SB) return (sb_write + SB_RING - sb_play_pos()) % SB_RING * 1000 / sb_rate;
