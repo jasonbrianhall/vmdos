@@ -221,6 +221,7 @@ int joy_bios(struct regs *r);
 
 /* ---- hd.c: VMHD, other disks' partitions as DOS drives ---- */
 void hd_api(struct regs *r);
+int hd_drive_part(int drive, int *dev, u32 *start);   /* a VMHD drive's disk and partition start: 0, or -1 */
 int hd_bios_disks(void);                       /* BIOS hard disks: C:'s, then the others (once DOS is up) */
 void hd_dos_up(void);
 int usb_quiet(void);                           /* usb.cpp: no transfer or poll under way */

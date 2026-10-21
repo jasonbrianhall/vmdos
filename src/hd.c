@@ -359,6 +359,19 @@ static void list(u32 o)
 /* ---- BIOS disks 81h ..., for FDISK ----
    Every disk but C:'s, in disk order, whole, through INT 13h (bios.c sends
    DL=81h on here): CHS (255 heads, 63 sectors) and the LBA extensions. */
+/* For VMCD (cd.c): DOS drive `drive` (0 = A:) as a VMHD drive with a
+   partition in it: its disk (disk_dev_*) and the partition's first sector.
+   0, or -1 when it isn't one. */
+int hd_drive_part(int drive, int *dev, u32 *start)
+{
+    drop_gone();
+    int u = drive - first_drive;
+    if (!n_units || u < 0 || u >= n_units || !units[u].in) return -1;
+    *dev = units[u].p.dev;
+    *start = units[u].p.start;
+    return 0;
+}
+
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 #define BIOS_MAX 15
 
