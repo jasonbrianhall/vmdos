@@ -3,11 +3,11 @@
    drive a letter.
 
    Image drives come first. Each holds one image at a time:
-   - an ISO file on C:, read straight from the disk (no RAM copy), or on
-     a host folder VMDOSNET put in a drive (fs9p.cpp). VMCD.COM
+   - an ISO file on C: or a VMHD drive, read straight from the disk (no RAM
+     copy), or on a host folder VMDOSNET put in a drive (fs9p.cpp). VMCD.COM
      puts one in a drive at any time ("VMCD D: C:\ISOS\WAR2.ISO"); cd=PATH
      on the kernel command line fills drive 1 at boot;
-   - a CUE sheet (on C: or a share) with its BIN file(s) next to it: data
+   - a CUE sheet (on any of those) with its BIN file(s) next to it: data
      and CD audio tracks (MODE1/2048, MODE1/2352, MODE2/2352, MODE2/2336,
      AUDIO; one BIN or one per track);
    - an ISO loaded as a boot module after dos.img (GRUB "module", QEMU
@@ -60,7 +60,8 @@ struct toc {
 };
 
 /* ---------------- CUE / BIN images ---------------- */
-struct bfile { struct extent *ext; int n_ext; u32 size; int net; };   /* net: a share's file (fs9p), handle + 1 */
+struct bfile { struct extent *ext; int n_ext; u32 size; int net, dev; };   /* net: a share's file (fs9p), handle + 1;
+                                                                             dev: runs on that disk + 1 (a VMHD drive), else C:'s */
 struct ctrack {
     u8 num, file, audio, hdr;            /* hdr: bytes before the 2048 of user data */
     u16 bsize;                           /* 2048, 2336 or 2352 bytes a sector in the file */
@@ -76,7 +77,8 @@ struct cue {
 
 static struct {
     u8 *data;                            /* RAM image, or */
-    struct extent *ext; int n_ext;       /* the ISO file's runs of disk sectors, or */
+    struct extent *ext; int n_ext;       /* the ISO file's runs of disk sectors (on C:, or disk dev - 1), or */
+    int dev;
     int net;                             /* an ISO file on a share (VMDOSNET), handle + 1, or */
     struct cue *cue;                     /* a CUE sheet's tracks */
     u32 sectors;
@@ -119,7 +121,7 @@ void cd_add(u8 *data, u32 size, const char *name)
 }
 
 /* count 512-byte sectors from sector s of a file (its runs on C:). */
-static int ext_read(struct extent *ext, int n_ext, u32 s, u32 count, u8 *buf)
+static int ext_read(struct extent *ext, int n_ext, u32 s, u32 count, u8 *buf, int dev)
 {
     u32 base = 0;
     for (int e = 0; e < n_ext && count; e++) {
@@ -127,7 +129,7 @@ static int ext_read(struct extent *ext, int n_ext, u32 s, u32 count, u8 *buf)
         if (s < base + x->count) {
             u32 off = s - base, k = x->count - off;
             if (k > count) k = count;
-            if (disk_read(x->lba + off, k, buf)) return -1;
+            if (dev ? disk_dev_rw(dev - 1, x->lba + off, k, buf, 0) : disk_read(x->lba + off, k, buf)) return -1;
             buf += k * 512; s += k; count -= k;
         }
         base += x->count;
@@ -145,7 +147,7 @@ static int file_read(struct bfile *f, u32 off, u32 len, u8 *out)
     while (len) {
         u32 s = off / 512, w = off % 512, k = (w + len + 511) / 512;
         if (k > 16) k = 16;
-        if (ext_read(f->ext, f->n_ext, s, k, sec)) return -1;
+        if (ext_read(f->ext, f->n_ext, s, k, sec, f->dev)) return -1;
         u32 c = k * 512 - w;
         if (c > len) c = len;
         memcpy(out, sec + w, c);
@@ -202,7 +204,7 @@ static int img_read(int im, u32 start, u32 n, u8 *buf)
     if (img[im].data) { memcpy(buf, img[im].data + start * 2048, n * 2048); return 0; }
     if (img[im].cue) return cue_read(img[im].cue, start, n, buf, 0);
     if (img[im].net) return fs9p_kread(img[im].net - 1, start * 2048, n * 2048, buf);
-    return ext_read(img[im].ext, img[im].n_ext, start * 4, n * 4, buf);
+    return ext_read(img[im].ext, img[im].n_ext, start * 4, n * 4, buf, img[im].dev);
 }
 
 static int msf_frames(const char *p, u32 *f)                /* "mm:ss:ff" */
@@ -226,20 +228,34 @@ static int word_is(const char *p, const char *w)
 static const char *skip_ws(const char *p) { while (*p == ' ' || *p == '\t') p++; return p; }
 static const char *next_word(const char *p) { while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++; return skip_ws(p); }
 
-/* Look a file on C: up and get its runs, or open it on a share (VMDOSNET's
-   drives). 0, or an error as mount_file's. */
+/* The FAT volume a path is on: C:, or a VMHD drive (its disk + 1 in *dev).
+   0, or 4 neither (a share's paths go to fs9p), 7 unreadable. */
+static int vol_disk;
+static int vol_rd(u32 lba, u32 n, void *buf) { return disk_dev_rw(vol_disk, lba, n, buf, 0); }
+static int path_volume(const char *path, struct fatvol *v, int *dev)
+{
+    *dev = 0;
+    if (!(path[0] && path[1] == ':') || (path[0] | 32) == 'c') return disk_volume(v) ? 7 : 0;
+    u32 start;
+    if (hd_drive_part((path[0] | 32) - 'a', &vol_disk, &start)) return 4;
+    *dev = vol_disk + 1;
+    return fat_mount(v, vol_rd, start) ? 7 : 0;
+}
+
+/* Look a file up on its FAT volume (C: or a VMHD drive) and get its runs,
+   or open it on a share (VMDOSNET's drives). 0, or an error as mount_file's. */
 static int open_file(struct fatvol *v, const char *path, struct bfile *f)
 {
     u32 clus;
-    f->net = 0; f->ext = 0; f->n_ext = 0;
-    if (path[0] && path[1] == ':' && (path[0] | 32) != 'c') {
+    f->net = 0; f->dev = 0; f->ext = 0; f->n_ext = 0;
+    if (path[0] && path[1] == ':') {
         int h = fs9p_kopen(path, &f->size);
-        if (h == -4) return 4;
-        if (h < 0) return h == -6 ? 6 : h == -7 ? 7 : 2;
-        f->net = h + 1;
-        return 0;
+        if (h >= 0) { f->net = h + 1; return 0; }
+        if (h != -4) return h == -6 ? 6 : h == -7 ? 7 : 2;
     }
     if (!v) return 4;
+    int r = path_volume(path, v, &f->dev);           /* the path's own volume: C:'s or a VMHD drive's */
+    if (r) return r;
     if (fat_lookup(v, path, &clus, &f->size)) return 2;
     int n = fat_extents(v, clus, f->size, 0, 1 << 20);
     if (n <= 0) return 7;
@@ -360,11 +376,9 @@ static void img_release(int i)
    6 out of memory, 7 disk error, 8 a CUE sheet vmdos can't use. */
 static int mount_file(int u, const char *path)
 {
-    static struct fatvol v;
-    int on_c = !(path[0] && path[1] == ':' && (path[0] | 32) != 'c');
-    if (on_c && disk_volume(&v)) return 7;
+    static struct fatvol v;                          /* (open_file finds each path's own volume) */
     struct bfile f;
-    int r = open_file(on_c ? &v : 0, path, &f);
+    int r = open_file(&v, path, &f);
     if (r) return r;
     int slot = -1;
     for (int i = n_mod; i < n_img; i++) {                 /* a file slot no drive uses */
@@ -377,10 +391,10 @@ static int mount_file(int u, const char *path)
     int pl = 0;
     while (path[pl]) pl++;
     int is_cue = pl > 4 && path[pl - 4] == '.' && (path[pl - 3] | 32) == 'c' && (path[pl - 2] | 32) == 'u' && (path[pl - 1] | 32) == 'e';
-    img[slot].data = 0; img[slot].ext = 0; img[slot].n_ext = 0; img[slot].cue = 0; img[slot].net = 0;
+    img[slot].data = 0; img[slot].ext = 0; img[slot].n_ext = 0; img[slot].cue = 0; img[slot].net = 0; img[slot].dev = 0;
     if (is_cue) {
         struct cue *c = 0;
-        r = cue_open(on_c ? &v : 0, path, &f, &c);
+        r = cue_open(&v, path, &f, &c);
         close_bfile(&f);                                  /* the sheet itself: read */
         if (r) {
             if (c) for (int k = 0; k <= c->n_files && k < MAX_TRACKS; k++) close_bfile(&c->f[k]);
@@ -394,7 +408,7 @@ static int mount_file(int u, const char *path)
         t->start[t->last + 1] = c->leadout;
     } else {
         if (f.size < 0x8800) { close_bfile(&f); return 3; }
-        img[slot].ext = f.ext; img[slot].n_ext = f.n_ext; img[slot].net = f.net;
+        img[slot].ext = f.ext; img[slot].n_ext = f.n_ext; img[slot].net = f.net; img[slot].dev = f.dev;
         img[slot].sectors = f.size / 2048;
         toc_one_data_track(&img[slot].toc, img[slot].sectors);
     }
