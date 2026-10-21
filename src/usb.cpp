@@ -2050,6 +2050,24 @@ static void hub_port_change(int h, int port) {
     }
 }
 
+// Turn the port's power off and on again (when the controller can: its
+// HCCPARAMS1 PPC bit), so the device starts from scratch, as if unplugged
+// and plugged in again: what a stick that won't take its address after a
+// reset needs (plugged in again by hand it's fine). Then a port reset.
+// false: no port power switching here, or nothing came back.
+static bool power_cycle_port(int port) {
+    if (!(rd(H->cap, 0x10) & (1 << 3))) return false;
+    uint32_t sc = portsc(port);
+    set_portsc(port, (sc & PORT_KEEP) | PORT_PED);             // disable it first
+    set_portsc(port, portsc(port) & PORT_KEEP & ~PORT_PP);     // power off
+    delay_ms(500);                                             // long enough for it to lose power
+    set_portsc(port, (portsc(port) & PORT_KEEP) | PORT_PP);    // and on
+    for (int i = 0; i < 1000 && !(portsc(port) & PORT_CCS); i++) delay_ms(1);
+    if (!(portsc(port) & PORT_CCS)) return false;
+    delay_ms(100);                                             // connect debounce (TATTDB)
+    return reset_port(port);
+}
+
 static void setup_port(int port) {
     for (auto& k : kbds) if (k.active && k.hc == H && k.port == port && k.parent < 0) return;
     if (!reset_port(port)) return;
@@ -2065,6 +2083,16 @@ static void setup_port(int port) {
         // they're fine). As Linux does: reset the port again and retry,
         // giving it longer to recover each time. (A USB 2 port has no warm
         // reset; that's USB 3 only.)
+        // First the port's power off and on (a fresh start, as unplugging
+        // it does), where the controller can switch it; else, and then,
+        // port resets with longer to recover.
+        if (rd(H->cap, 0x10) & (1 << 3)) {
+            printf("USB: port %d: no address (cc=%d): power off and on, trying again\n", port, addr_cc);
+            addr_failed = false;
+            addr_cc = 0;
+            if (power_cycle_port(port)) setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
+            else { addr_failed = true; printf("USB: port %d: nothing there after the power cycle\n", port); }
+        }
         static const int settle_ms[] = { 200, 500 };
         for (int t = 0; t < 2 && addr_failed; t++) {
             printf("USB: port %d: no address (cc=%d): port reset, %d ms to recover, trying again\n",
@@ -2075,7 +2103,7 @@ static void setup_port(int port) {
             delay_ms(settle_ms[t]);                           // on top of reset_port's 100 ms
             setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
         }
-        if (addr_failed) printf("USB: port %d: still no address after the port resets\n", port);
+        if (addr_failed) printf("USB: port %d: still no address\n", port);
         return;
     }
     if (speed >= 4 && ((msd_stuck && !addr_failed) || no_addr)) {
