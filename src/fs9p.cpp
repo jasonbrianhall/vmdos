@@ -21,6 +21,7 @@
 // gathered per file and sent on close, commit, a seek elsewhere, after
 // 500 ms or when DOS is idle (/WT: written straight through).
 #include "virtio.hpp"
+#include "tcp9p.hpp"
 
 extern "C" {
 void fs9p_api(struct regs* r);
@@ -58,7 +59,8 @@ int dos_err(int e, int nf)
 enum { Rlerror = 7, Tstatfs = 8, Rstatfs, Tlopen = 12, Rlopen, Tlcreate = 14, Rlcreate, Tgetattr = 24, Rgetattr,
        Tsetattr = 26, Rsetattr, Treaddir = 40, Rreaddir, Tfsync = 50, Rfsync, Tmkdir = 72, Rmkdir, Trenameat = 74,
        Rrenameat, Tunlinkat = 76, Runlinkat, Tversion = 100, Rversion, Tattach = 104, Rattach, Twalk = 110, Rwalk,
-       Tread = 116, Rread, Twrite = 118, Rwrite, Tclunk = 120, Rclunk };
+       Tread = 116, Rread, Twrite = 118, Rwrite, Tclunk = 120, Rclunk, Tremove = 122, Rremove,
+       Trename = 20, Rrename };
 enum { L_RDONLY = 0, L_WRONLY = 1, L_RDWR = 2, L_CREAT = 0x40, L_EXCL = 0x80, L_TRUNC = 0x200, L_DIRECTORY = 0x10000 };
 enum { SA_MODE = 1, SA_SIZE = 8, SA_ATIME = 0x10, SA_MTIME = 0x20, SA_ATIME_SET = 0x80, SA_MTIME_SET = 0x100 };
 const u16 NOTAG = 0xFFFF;
@@ -84,14 +86,14 @@ struct W {                                     // a message being built
 
 // ---- the devices: one virtqueue, a big request slot (reads, writes,
 // listings) and NSLOT small ones sent together (attributes of a listing)
-const int MAXDEV = 4, NSLOT = 16, NFIDFREE = 128;
+const int MAXDEV = 8, NSLOT = 16, NFIDFREE = 128;
 const u32 SLOT = 8192;
 const u32 MSIZE = 135168;                      // 128 KiB of data per read or write, and headers
 
 struct Dev {
     VirtioDev v;
     Virtq q;
-    char tag[64];
+    char tag[64];                              // virtio: the mount tag; TCP: host:port, as shown
     u32 msize;
     u8 *btx, *brx, *stx, *srx;
     u32 root, fid_next;
@@ -99,6 +101,16 @@ struct Dev {
     int nfids;
     bool up, broken;
     PciDevice pci;
+    u32 gen;                                   // attaches so far: fids of an older one are gone
+    // TCP (VMDOSNET V: host[:port]): the connection, what to attach to, the requests sent
+    bool tcp, gone, reviving;
+    int conn;
+    Tcp9pCfg net;
+    char aname[128];
+    u32 uid, last_try;
+    int npend;
+    u16 pend_tag[NSLOT + 1];
+    int pend_slot[NSLOT + 1];
 };
 Dev devs[MAXDEV];
 int ndev;
@@ -107,11 +119,19 @@ bool probed;
 inline u8* txp(Dev& d, int s) { return s < 0 ? d.btx : d.stx + s * SLOT; }
 inline u8* rxp(Dev& d, int s) { return s < 0 ? d.brx : d.srx + s * SLOT; }
 
+bool dev_revive(Dev& d);
+
 void post(Dev& d, int s)
 {
     int di = s < 0 ? 2 * NSLOT : 2 * s;
     u8 *tx = txp(d, s), *rx = rxp(d, s);
     rx[4] = 0;
+    if (d.tcp) {
+        if (d.broken) return;
+        if (d.npend <= NSLOT) { d.pend_tag[d.npend] = g16(tx + 5); d.pend_slot[d.npend++] = s; }
+        if (!tcp9p_send(d.conn, tx, g32(tx))) d.broken = true;
+        return;
+    }
     volatile VirtqDesc* ds = d.q.desc();
     ds[di].addr = (u32)(uintptr_t)tx; ds[di].len = g32(tx); ds[di].flags = VQ_NEXT; ds[di].next = (u16)(di + 1);
     ds[di + 1].addr = (u32)(uintptr_t)rx; ds[di + 1].len = s < 0 ? d.msize : SLOT;
@@ -119,8 +139,53 @@ void post(Dev& d, int s)
     d.q.push((u16)di);
 }
 
+// TCP: the answers to what was posted come in on the stream, matched by tag
+bool run_tcp(Dev& d, int n)
+{
+    int got = 0;
+    u32 last = ticks;
+    while (got < n && !d.broken) {
+        if (!tcp9p_pump(d.conn)) {
+            kprintf("9p: %s: the connection is gone\n", d.tag);
+            d.broken = true;
+            break;
+        }
+        u32 have;
+        u8* p = tcp9p_data(d.conn, &have);
+        while (have >= 7) {
+            u32 size = g32(p);
+            if (size < 7 || size > MSIZE + 4096) { kprintf("9p: %s: a bad message\n", d.tag); d.broken = true; break; }
+            if (have < size) break;
+            u16 tag = g16(p + 5);
+            for (int i = 0; i < d.npend; i++) {
+                if (d.pend_tag[i] != tag) continue;
+                int s = d.pend_slot[i];
+                u32 cap = s < 0 ? d.msize : SLOT;
+                if (size <= cap) memcpy(rxp(d, s), p, size);
+                d.pend_tag[i] = 0xFFFE;
+                got++;
+                break;
+            }
+            tcp9p_consume(d.conn, size);
+            p = tcp9p_data(d.conn, &have);
+            last = ticks;
+        }
+        if ((u32)(ticks - last) > 30000) {
+            kprintf("9p: %s: no answer from the server in 30 s\n", d.tag);
+            d.broken = true;
+        }
+        kdelay_us(2);
+    }
+    d.npend = 0;
+    return got == n;
+}
+
 bool run(Dev& d, int n)                       // the n requests posted: send, wait for all
 {
+    if (d.tcp) {
+        if (d.broken) { d.npend = 0; return false; }
+        return run_tcp(d, n);
+    }
     if (d.broken) return false;
     virtio_notify(d.v, 0, d.q);
     int got = 0;
@@ -147,6 +212,7 @@ int reply(Dev& d, int s, u8 want)              // 0, or the errno of the answer 
 
 int rpc(Dev& d, u8 want)                       // the big slot
 {
+    if (d.broken && d.tcp && !d.reviving) dev_revive(d);
     if (d.broken) return 5;
     post(d, -1);
     if (!run(d, 1)) return 5;
@@ -222,7 +288,7 @@ int p_setattr(Dev& d, u32 fid, u32 valid, u32 mode, u64 size, u64 mtime)
 // bytes read (data at d.brx + 11), or -errno
 long p_read(Dev& d, u32 fid, u64 off, u32 n)
 {
-    if (n > d.msize - 11) n = d.msize - 11;
+    if (n > d.msize - 24) n = d.msize - 24;
     W w(d.btx, Tread, 1); w.w32(fid).w64(off).w32(n).end();
     int e = rpc(d, Rread);
     if (e) return -e;
@@ -256,11 +322,34 @@ bool dev_attach(Dev& d)
     d.root = 1;
     d.fid_next = 2;
     d.nfids = 0;
-    W a(d.btx, Tattach, 1); a.w32(d.root).w32(NOFID).ws("root").ws("").w32(0).end();
+    d.gen++;                                   // the fids open files had are gone
+    W a(d.btx, Tattach, 1); a.w32(d.root).w32(NOFID).ws("root").ws(d.aname).w32(d.uid).end();
     e = rpc(d, Rattach);
     if (e) { kprintf("9p: %s: Tattach failed (%d)\n", d.tag, e); return false; }
     d.up = true;
     return true;
+}
+
+// TCP: the connection again (the server restarted, the network went away
+// for a while); at most every 2 s. Open files are lost; paths work again.
+bool dev_revive(Dev& d)
+{
+    if (!d.tcp || d.gone || (u32)(ticks - d.last_try) < 2000) return !d.broken;
+    d.last_try = ticks;
+    d.reviving = true;
+    tcp9p_close(d.conn);
+    d.net.local_port = (u16)(0xC000 | ((d.net.local_port + 1) & 0x3FFF));
+    d.conn = tcp9p_open(d.net);
+    bool ok = d.conn >= 0;
+    if (ok) {
+        d.broken = false;
+        ok = dev_attach(d);
+        if (!ok) { tcp9p_close(d.conn); d.conn = -1; }
+    }
+    d.broken = !ok;
+    d.reviving = false;
+    kprintf("9p: %s: %s\n", d.tag, ok ? "connected again (open files are lost)" : "still no connection");
+    return ok;
 }
 
 void dev_probe(const PciDevice& pd)
@@ -582,7 +671,7 @@ int dir_fetch(Mount& m, const char* hp, Dir* D)
     u64 off = 0;
     bool over = false;
     for (;;) {
-        W w(d.btx, Treaddir, 1); w.w32(ofid).w64(off).w32(d.msize - 11).end();
+        W w(d.btx, Treaddir, 1); w.w32(ofid).w64(off).w32(d.msize - 24).end();
         if ((e = rpc(d, Rreaddir))) break;
         u32 cnt = g32(d.brx + 7);
         if (!cnt) break;
@@ -849,7 +938,7 @@ const u32 WBSZ = 65536, MAGIC = 0x50394D56u;  // "VM9P"
 struct OFile {
     bool used, wrote;
     u8 drive, acc;
-    u32 fid, ver, size, last_end;
+    u32 fid, ver, size, last_end, gen;         // gen: the device's attach it was opened in
     u64 qpath;
     char hp[HPMAX];
     u8* wb;                                    // writes gathered: wb_len bytes for wb_off
@@ -868,9 +957,12 @@ int sft_file(u32 sft)                          // index of an SFT's open file, -
     return h & 0xFF;
 }
 
+bool stale(const OFile& f) { return f.gen != devs[mnts[f.drive].dev].gen; }   // opened before a reconnect
+
 int wb_flush(OFile& f)
 {
     if (!f.wb_len) return 0;
+    if (stale(f)) { kprintf("9p: %u bytes for %s lost (the connection was lost)\n", f.wb_len, f.hp); f.wb_len = 0; return 5; }
     Dev& d = devs[mnts[f.drive].dev];
     u32 done = 0;
     int err = 0;
@@ -922,7 +1014,7 @@ long cread(u8 dv, u32 fid, u64 qpath, u32 ver, u32* last_end, u32 pos, u32 n, u8
         }
         if (!b) {
             u32 ra = p == *last_end || in ? 4 : 1;     // straight through: read ahead
-            if (ra * BLK > d.msize - 11) ra = (d.msize - 11) / BLK;
+            if (ra * BLK > d.msize - 24) ra = (d.msize - 24) / BLK;
             if (!ra) ra = 1;
             long r = p_read(d, fid, (u64)no * BLK, ra * BLK);
             if (r < 0) return done ? (long)done : r;
@@ -1224,6 +1316,7 @@ int do_open(Mount& m, int drive, u32 sft, const char* path, u16 mode, u16 attr, 
     if (i < 0) { p_clunk(d, fid); return E_TOOMANY; }
     OFile& f = ofs[i];
     f.used = true;
+    f.gen = devs[m.dev].gen;
     f.drive = (u8)drive;
     f.acc = acc;
     f.fid = fid;
@@ -1249,6 +1342,17 @@ int do_unlink(Mount& m, const char* parent, const char* name, bool dir)
     if (e) return e;
     W w(d.btx, Tunlinkat, 1); w.w32(fid).ws(name).w32(dir ? 0x200 : 0).end();
     e = rpc(d, Runlinkat);
+    if (e == 95) {                             // EOPNOTSUPP (diod): Tremove of the file's own fid
+        u32 f;
+        char nm[256];
+        size_t l = strlen(name);
+        memcpy(nm, name, l + 1);
+        if (!(e = p_walk(d, fid, nm, &f))) {
+            W x(d.btx, Tremove, 1); x.w32(f).end();
+            e = rpc(d, Rremove);               // (the fid is gone either way)
+            fid_put(d, f);
+        }
+    }
     p_clunk(d, fid);
     dir_forget(m.dev, parent);
     return e;
@@ -1262,6 +1366,14 @@ int do_rename(Mount& m, const char* p1, const char* n1, const char* p2, const ch
     if ((e = p_path_fid(d, p2, &f2))) { p_clunk(d, f1); return e; }
     W w(d.btx, Trenameat, 1); w.w32(f1).ws(n1).w32(f2).ws(n2).end();
     e = rpc(d, Rrenameat);
+    if (e == 95) {                             // EOPNOTSUPP (diod): Trename of the file's own fid
+        u32 f;
+        if (!(e = p_walk(d, f1, n1, &f))) {
+            W x(d.btx, Trename, 1); x.w32(f).w32(f2).ws(n2).end();
+            e = rpc(d, Rrename);
+            p_clunk(d, f);
+        }
+    }
     p_clunk(d, f1);
     p_clunk(d, f2);
     dir_forget(m.dev, p1);
@@ -1478,8 +1590,14 @@ int redir(struct regs* r, Mount& m, int drive, u8 fn)
             S->used = false;
             memset(&F, 0, sizeof F);
             memset(F.sn, ' ', 11);
-            const char* t = devs[m.dev].tag;
-            for (int i = 0; i < 11 && t[i]; i++) F.sn[i] = up(t[i]);
+            Dev& dv = devs[m.dev];
+            const char* t = dv.tag;                     // TCP: the export's last name ("9P" for none)
+            if (dv.tcp) {
+                t = "9P";
+                for (const char* q = dv.aname; *q; q++) if (*q == '/' && q[1]) t = q + 1;
+            }
+            for (int i = 0, k = 0; k < 11 && t[i] && t[i] != '/'; i++)
+                if (ok83(t[i]) || t[i] == ' ') F.sn[k++] = up(t[i]);
             F.e.attr = 0x08;
             F.e.dtime = P.dtime; F.e.ddate = P.ddate;
         } else if (srch_next(*S, F, nb)) return E_FNF;
@@ -1548,6 +1666,13 @@ int redir_sft(struct regs* r, int idx, u8 fn)
     OFile& f = ofs[idx];
     Mount& m = mnts[f.drive];
     u32 sft = LIN(r->v86_es, DI(r));
+    if (stale(f)) {                            // its connection was lost: only closing works
+        if (fn != 0x06) return fn == 0x0A || fn == 0x0B ? 0 : E_ACCESS;
+        u16 c = rd16(sft);
+        if (c) wr16(sft, --c);
+        if (!c) { wb_flush(f); wb_release(f); f.used = false; }
+        return 0;
+    }
     switch (fn) {
     case 0x06: {                               // close
         u16 c = rd16(sft);
@@ -1811,6 +1936,7 @@ int lfn(struct regs* r)
         if (idx < 0) return -1;
         OFile& f = ofs[idx];
         if (!(mnts[f.drive].flags & MF_LFN)) return -1;
+        if (stale(f)) return E_HANDLE;
         wb_flush(f);
         Attr a;
         if ((e = p_getattr(devs[mnts[f.drive].dev], f.fid, a))) return dos_err(e, E_HANDLE);
@@ -2041,12 +2167,17 @@ int lfn(struct regs* r)
 
 void list(u32 out)
 {
-    char b[600];
+    char b[1100];
     int n = 0;
     probe_all();
-    if (!ndev) n += snprintf(b + n, sizeof b - n, "No 9p shares (QEMU: -virtfs local,path=DIR,mount_tag=share,security_model=none)\r\n");
+    int shown = 0;
+    for (int i = 0; i < ndev; i++) if (!devs[i].gone) shown++;
+    if (!shown) n += snprintf(b + n, sizeof b - n, "None (QEMU: -virtfs local,path=DIR,mount_tag=share,security_model=none;\r\n"
+                                                    "  or a 9P server on the network: VMDOSNET V: host[:port][/export])\r\n");
     for (int i = 0; i < ndev; i++) {
+        if (devs[i].gone) continue;
         n += snprintf(b + n, sizeof b - n, "  %-12s", devs[i].tag);
+        if (devs[i].tcp && devs[i].aname[0]) n += snprintf(b + n, sizeof b - n, " %s", devs[i].aname);
         int k = 0;
         for (int dr = 0; dr < 26; dr++)
             if (mnts[dr].used && mnts[dr].dev == i) {
@@ -2058,7 +2189,7 @@ void list(u32 out)
         if (!k) n += snprintf(b + n, sizeof b - n, " (not in a drive)");
         if (!devs[i].up || devs[i].broken) n += snprintf(b + n, sizeof b - n, " - not working");
         n += snprintf(b + n, sizeof b - n, "\r\n");
-        if (n > 500) break;
+        if (n > 900) break;
     }
     if (nblk) n += snprintf(b + n, sizeof b - n, "File cache %u KiB\r\n", nblk * BLK / 1024);
     b[n++] = '$';
@@ -2092,9 +2223,57 @@ bool alloc_caches(u32 kb)
     return true;
 }
 
-// INT 2Fh AX=5652h BX=1, ES:DI: dw SDA off, seg; dw list of lists off, seg;
-// db drive (0 = A:), flags (1 long names, 2 write-through, 4 read-only);
-// dw cache KiB (0: 4096), ttl ms (0: 1000); db tag (ASCIIZ, "": the first)
+// A host share over TCP (kind 1): an existing connection to the same place,
+// or a new one. The device, or -(an error as mount's).
+int tcp_dev(const Tcp9pCfg& net, const char* name, const char* aname, u32 uid)
+{
+    for (int i = 0; i < ndev; i++) {
+        Dev& d = devs[i];
+        if (d.tcp && !d.gone && d.net.family == net.family && d.net.port == net.port &&
+            !memcmp(d.net.server, net.server, 16) && !strncmp(d.aname, aname, 128) && d.uid == uid) return i;
+    }
+    int dv = -1;
+    for (int i = 0; i < ndev; i++) if (devs[i].tcp && devs[i].gone) { dv = i; break; }
+    if (dv < 0) { if (ndev == MAXDEV) return -12; dv = ndev; }
+    Dev& d = devs[dv];
+    u8 *btx = d.btx, *brx = d.brx, *stx = d.stx, *srx = d.srx;
+    memset(&d, 0, sizeof d);
+    d.btx = btx ? btx : (u8*)phys_try_alloc(MSIZE); d.brx = brx ? brx : (u8*)phys_try_alloc(MSIZE);
+    d.stx = stx ? stx : (u8*)phys_try_alloc(NSLOT * SLOT); d.srx = srx ? srx : (u8*)phys_try_alloc(NSLOT * SLOT);
+    if (!d.btx || !d.brx || !d.stx || !d.srx) return -5;
+    d.tcp = true;
+    d.net = net;
+    d.uid = uid;
+    memcpy(d.aname, aname, 128);
+    d.aname[127] = 0;
+    memcpy(d.tag, name, 32);
+    d.tag[31] = 0;
+    d.conn = tcp9p_open(net);
+    if (d.conn < 0) { d.gone = true; if (dv == ndev) ndev++; return d.conn == -3 ? -11 : d.conn == -2 ? -10 : -5; }
+    if (dv == ndev) ndev++;
+    if (!dev_attach(d)) {
+        tcp9p_close(d.conn);
+        d.gone = true;
+        return -4;
+    }
+    kprintf("9p: connected to %s%s%s, msize %u\n", d.tag, aname[0] ? " " : "", aname, d.msize);
+    return dv;
+}
+
+bool dev_in_use(int dv)
+{
+    for (int i = 0; i < 26; i++) if (mnts[i].used && mnts[i].dev == dv) return true;
+    return false;
+}
+
+// INT 2Fh AX=5652h BX=1, ES:DI:
+//   00 dw SDA off, seg; 04 dw list of lists off, seg;
+//   08 db drive (0 = A:), flags (1 long names, 2 write-through, 4 read-only);
+//   0A dw cache KiB (0: 4096), ttl ms (0: 1000);
+//   0E db kind: 0 a virtio-9p share, 1 a 9P server over TCP; 0F dd uid to attach as
+//   13 db tag (32, ASCIIZ: virtio: the mount tag, "": the first; TCP: the name shown)
+//   33 Tcp9pCfg (TCP: the addresses VMDOSNET.EXE found); then db aname (128: the export)
+const u32 MB_KIND = 0x0E, MB_UID = 0x0F, MB_TAG = 0x13, MB_NET = 0x33, MB_ANAME = MB_NET + sizeof(Tcp9pCfg);
 int mount(struct regs* r)
 {
     u32 pb = LIN(r->v86_es, DI(r));
@@ -2103,18 +2282,32 @@ int mount(struct regs* r)
     u8 flags = rd8(pb + 9);
     u32 kb = rd16(pb + 10), ttl = rd16(pb + 12);
     char tag[64];
-    gstr(pb + 14, tag, 32);
+    gstr(pb + MB_TAG, tag, 32);
     if (hv_active) return 9;                   // VMHV: DOS's INT 2Fh calls don't come here
-    probe_all();
-    if (!ndev) return 1;
-    int dv = -1;
-    for (int i = 0; i < ndev; i++)
-        if (!tag[0] || ieq(tag, (int)strlen(tag), devs[i].tag, (int)strlen(devs[i].tag))) { dv = i; break; }
-    if (dv < 0) return 2;
     if (dr < 2 || dr >= 26 || dr >= rd8(lol + 0x21)) return 3;
     u32 cds = LIN(rd16(lol + 0x18), rd16(lol + 0x16)) + dr * 0x58;
     u16 cf = rd16(cds + 0x43);
     if ((cf & 0xC000) && !mnts[dr].used) return 3;     // a drive already
+    if (mnts[dr].used) for (int i = 0; i < NOF; i++) if (ofs[i].used && ofs[i].drive == dr) return 8;
+    if (!alloc_caches(kb ? kb : 4096)) return 5;
+    int dv = -1;
+    if (rd8(pb + MB_KIND) == 1) {
+        Tcp9pCfg net;
+        memcpy(&net, gptr(pb + MB_NET), sizeof net);
+        char aname[128];
+        gstr(pb + MB_ANAME, aname, 128);
+        dv = tcp_dev(net, tag, aname, rd32(pb + MB_UID));
+        if (dv < 0) return -dv;
+    } else {
+        probe_all();
+        for (int i = 0; i < ndev; i++)
+            if (!devs[i].tcp && (!tag[0] || ieq(tag, (int)strlen(tag), devs[i].tag, (int)strlen(devs[i].tag)))) { dv = i; break; }
+        if (dv < 0) {
+            for (int i = 0; i < ndev; i++) if (!devs[i].tcp) return 2;
+            return 1;
+        }
+    }
+    int old = mnts[dr].used ? mnts[dr].dev : -1;
     Dev& d = devs[dv];
     if (!d.up || d.broken) {
         tick_poll_begin();
@@ -2123,8 +2316,6 @@ int mount(struct regs* r)
         tick_poll_end();
         if (!ok_) return 4;
     }
-    if (!alloc_caches(kb ? kb : 4096)) return 5;
-    if (mnts[dr].used) for (int i = 0; i < NOF; i++) if (ofs[i].used && ofs[i].drive == dr) return 8;
     Mount& m = mnts[dr];
     if (!m.used) nmnt++;
     m.used = true;
@@ -2142,10 +2333,17 @@ int mount(struct regs* r)
     wr16(cds + 0x4D, 0xFFFF);
     wr16(cds + 0x4F, 2);
     for (int i = 0; i < NDIR; i++) if (dirs[i].used && dirs[i].dev == dv) dir_drop(&dirs[i]);
+    if (old >= 0 && old != dv && devs[old].tcp && !dev_in_use(old)) { tcp9p_close(devs[old].conn); devs[old].gone = true; }
     kprintf("9p: \"%s\" in %c:%s%s%s, cache %u KiB\n", d.tag, 'A' + dr, flags & MF_LFN ? ", long names" : "",
             flags & MF_WT ? ", write-through" : "", flags & MF_RO ? ", read-only" : "", nblk * BLK / 1024);
     return 0;
 }
+
+// ---- files for the monitor itself (VMCD's images on a share)
+const int NKF = 32;
+struct KFile { bool used; u8 dev; u32 fid, ver, size, last_end, gen; u64 qpath; };
+KFile kfs[NKF];
+int in9p;                                      // a call is under way (CD audio's timer reads wait)
 
 int unmount(int dr)
 {
@@ -2155,14 +2353,15 @@ int unmount(int dr)
     wr16(m->cds + 0x43, 0);
     m->used = false;
     nmnt--;
+    int dv = m->dev;
+    if (devs[dv].tcp && !dev_in_use(dv)) {     // the last drive on that connection
+        for (int i = 0; i < NKF; i++) if (kfs[i].used && kfs[i].dev == dv) return 0;   // VMCD still reads from it
+        tcp9p_close(devs[dv].conn);
+        devs[dv].gone = true;
+    }
     return 0;
 }
 
-// ---- files for the monitor itself (VMCD's images on a share)
-const int NKF = 32;
-struct KFile { bool used; u8 dev; u32 fid, ver, size, last_end; u64 qpath; };
-KFile kfs[NKF];
-int in9p;                                      // a call is under way (CD audio's timer reads wait)
 
 } // namespace
 
@@ -2189,7 +2388,7 @@ int fs9p_kopen(const char* path, u32* size)
         if (h < 0) p_clunk(d, fid);
         else {
             KFile& k = kfs[h];
-            k.used = true; k.dev = m->dev; k.fid = fid; k.qpath = a.qpath; k.ver = ver_of(a);
+            k.used = true; k.dev = m->dev; k.fid = fid; k.gen = d.gen; k.qpath = a.qpath; k.ver = ver_of(a);
             k.size = a.size > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)a.size;
             k.last_end = 0xFFFFFFFFu;
             *size = k.size;
@@ -2205,6 +2404,7 @@ int fs9p_kread(int h, u32 off, u32 len, void* buf)
 {
     if (h < 0 || h >= NKF || !kfs[h].used || in9p) return -1;
     KFile& k = kfs[h];
+    if (k.gen != devs[k.dev].gen) return -1;
     in9p++;
     tick_poll_begin();
     long n = cread(k.dev, k.fid, k.qpath, k.ver, &k.last_end, off, len, (u8*)buf);
@@ -2218,7 +2418,7 @@ void fs9p_kclose(int h)
     if (h < 0 || h >= NKF || !kfs[h].used) return;
     in9p++;
     tick_poll_begin();
-    p_clunk(devs[kfs[h].dev], kfs[h].fid);
+    if (kfs[h].gen == devs[kfs[h].dev].gen) p_clunk(devs[kfs[h].dev], kfs[h].fid);
     tick_poll_end();
     in9p--;
     kfs[h].used = false;

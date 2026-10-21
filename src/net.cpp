@@ -46,6 +46,7 @@
 //   9  IPXNET status into ES:DI
 //  10  the IPX node DOS should use into ES:DI (IPXNET's in CONNECT, else the MAC)
 #include "net.hpp"
+#include "tcp9p.hpp"
 
 extern "C" {
 int usb_net_present(void);
@@ -65,12 +66,14 @@ int rx_mode = 3;
 bool log_on;
 
 static bool promisc;                            // IPXNET has the card take everything
+static bool keep_rx;                            // VMDOSNET's TCP: the card receives whatever DOS asked
 
 static void enqueue_dos(const uint8_t* f, unsigned len);
 
 void enqueue(const uint8_t* f, unsigned len)
 {
     if (len < 14 || len > FRAME_MAX) { st.rx_err++; return; }
+    if (tcp9p_active() && tcp9p_rx(f, len)) return;
     if (ipxnet_active() && ipxnet_rx(f, len)) return;
     if (promisc && rx_mode < 6 && !(f[0] & 1) && memcmp(f, net_cur_mac(), 6)) return;   // not for DOS
     if (promisc && rx_mode < 4 && (f[0] & 1) && memcmp(f, "\xff\xff\xff\xff\xff\xff", 6)) return;
@@ -92,7 +95,7 @@ static void enqueue_dos(const uint8_t* f, unsigned len)
 
 // Room for another frame? While the queue is full, frames stay in the
 // card's own ring (more buffering; under QEMU the sender waits too).
-bool room() { return q_count < QLEN || rx_mode == 1; }
+bool room() { return q_count < QLEN || rx_mode == 1 || keep_rx; }   // (keep_rx: a full queue drops DOS's frames, not ours)
 
 // PCI power state D0 (full power), as pci_enable_device does: the firmware
 // may have left the card in D3. Returns the state it was in.
@@ -181,7 +184,7 @@ bool card_link(Card& c)
     }
     return c.link_up;
 }
-void card_mode(Card& c, int m) { c.drv->set_mode(c, m > 1 && promisc ? 6 : m); }   // 1: receiving nothing
+void card_mode(Card& c, int m) { if (m == 1 && keep_rx && &c == &cards[active]) m = 3; c.drv->set_mode(c, m > 1 && promisc ? 6 : m); }   // 1: receiving nothing
 void card_mac(Card& c, const uint8_t* a) { c.drv->set_mac(c, a); }
 bool card_start(Card& c) { c.kind = c.drv->kind; c.link_known = false; return c.running = c.drv->init(c); }
 
@@ -301,6 +304,12 @@ bool net_wire_send(const uint8_t* f, unsigned len)
     return ok;
 }
 void net_dos_inject(const uint8_t* f, unsigned len) { enqueue_dos(f, len); }
+void net_poll() { poll_card(); }
+void net_keep_rx(bool on)
+{
+    keep_rx = on;
+    if (active >= 0) card_mode(cards[active], rx_mode);
+}
 void net_promisc(bool on)
 {
     promisc = on;
@@ -411,6 +420,7 @@ extern "C" void net_tick(void)
     auto_check();
     if (ne2k_running()) ne2k_tick();
     ipxnet_tick();
+    tcp9p_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 

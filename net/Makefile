@@ -1,4 +1,4 @@
-# vmdos network tools for DOS: VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX.
+# vmdos network tools for DOS: VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX, VMDOSNET.
 # Built with Open Watcom (16-bit, small model) on top of mTCP
 # (third_party/mtcp). The results are committed in net/bin/, so building
 # vmdos doesn't need Open Watcom; this rebuilds them:
@@ -18,7 +18,7 @@ export PATH := $(WBIN):$(PATH)
 
 MTCP    := ../third_party/mtcp
 OUT     := ../build/net
-PROGS   := VMTCP DHCP PING NSLOOKUP VMIPXBOX
+PROGS   := VMTCP DHCP PING NSLOOKUP VMIPXBOX VMDOSNET
 
 # mTCP's options (its MAKEFILEs): 8088 code, small model, small and warning-free.
 COPTS   := -0 -ms -s -oh -ok -os -oa -ei -zp2 -zpw -we -zq -wcd=7 \
@@ -70,6 +70,8 @@ $(N)/nslookup.obj: nslookup/nslookup.cpp lib/vmnet.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
 $(N)/vmipxbox.obj: vmipxbox/vmipxbox.cpp lib/vmnet.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
+$(N)/vmdosnet.obj: vmdosnet/vmdosnet.cpp lib/vmnet.h | $(N)
+	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
 $(D)/dhcp.obj: dhcp/dhcp.cpp dhcp/dhcp.h lib/vmnet.h dhcp/dhcp.cfg | $(D)
 	$(WPP) $(COPTS) $(DHCPCFG) -fo=$@ $<
 $(D)/dhcp6.obj: dhcp/dhcp6.cpp lib/vmnet.h dhcp/dhcp.cfg | $(D)
@@ -79,6 +81,7 @@ $(eval $(call prog,VMTCP,n/vmtcp,$(NOBJS),4096))
 $(eval $(call prog,PING,n/ping,$(NOBJS),4096))
 $(eval $(call prog,NSLOOKUP,n/nslookup,$(NOBJS),4096))
 $(eval $(call prog,VMIPXBOX,n/vmipxbox,$(NOBJS),4096))
+$(eval $(call prog,VMDOSNET,n/vmdosnet,$(NOBJS),4096))
 $(eval $(call prog,DHCP,d/dhcp,$(D)/dhcp6.obj $(DOBJS),4096))
 
 clean:

@@ -539,24 +539,37 @@ every packet (DMESG).
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
-### Host folders: VMDOSNET (virtio-9p)
+### Host folders: VMDOSNET (9P: QEMU's virtio-9p, or a server on the network)
 
-A folder on the host as a DOS drive, over QEMU's virtio-9p (9P2000.L):
+A folder as a DOS drive, over 9P2000.L: one QEMU shares (virtio-9p), or a
+9P server on the network (diod), over TCP on IPv4 or IPv6:
 
     make run SHARE=~/dosfiles            # or: -virtfs local,path=DIR,mount_tag=share,security_model=none
     VMDOSNET V: share /LFN               # in DOS (C:\VMDOS\NET)
 
-`VMDOSNET V: [tag] [/LFN] [/WT] [/RO] [/C:kb] [/T:ms]`, `VMDOSNET V: /D`,
-`VMDOSNET` lists. vmdos answers DOS's redirector calls (INT 2Fh AH=11h) for
-the drive itself (`src/fs9p.cpp`); nothing stays resident. Host names that
-aren't 8.3 get a stable short name (`LONG~K3Q.TXT`); with `/LFN` the
-long-name API (INT 21h 71xxh) works on the drive too (FreeCOM: `DIR /LFN`,
-quoted long names in COPY/CD/MD/DEL/REN). Listings and file data are cached
-(4 MiB of 32 KiB blocks, checked against the file's time and size when
-opened; listings trusted for /T ms); writes are gathered and sent on close,
-commit or after 0.5 s (`/WT`: straight through). Files' times are taken as
-the PC clock's time (QEMU's RTC is UTC by default). Not in VMHV's virtual
-machine, and not the long-name API for DPMI programs.
+    diod -f -n -S -U $USER -l 0.0.0.0:564 -e /home/me/dos      # on the server (-l IP:port for another port)
+    VMDOSNET V: 192.168.1.10/home/me/dos /LFN                  # after STARTNET (DHCP)
+    VMDOSNET V: fileserver:5640/home/me/dos                    # a name, another port
+    VMDOSNET V: [2001:db8::10]:5640/home/me/dos                # IPv6
+
+`VMDOSNET V: target [/LFN] [/WT] [/RO] [/C:kb] [/T:ms] [/UID:n]`,
+`VMDOSNET V: /D`, `VMDOSNET` lists. vmdos answers DOS's redirector calls
+(INT 2Fh AH=11h) for the drive itself (`src/fs9p.cpp`); nothing stays
+resident. For a network server VMDOSNET.EXE uses the TCP/IP settings (DHCP's)
+to look the server up and find the next hop, then vmdos runs the TCP
+connection itself (`src/tcp9p.cpp`), as IPXNET does with UDP: DOS's own
+TCP/IP keeps working beside it with the same address, and if the connection
+drops (the server restarted) vmdos connects again on the next access (open
+files are lost). Host names that aren't 8.3 get a stable short name
+(`LONG~K3Q.TXT`); with `/LFN` the long-name API (INT 21h 71xxh) works on the
+drive too (FreeCOM: `DIR /LFN`, quoted long names in COPY/CD/MD/DEL/REN).
+Listings and file data are cached (4 MiB of 32 KiB blocks, checked against
+the file's time and size when opened; listings trusted for /T ms); writes
+are gathered and sent on close, commit or after 0.5 s (`/WT`: straight
+through). Files' times are taken as the PC clock's time (QEMU's RTC is UTC
+by default). VMCD takes CD images from these drives too. Not in VMHV's
+virtual machine, and not the long-name API for DPMI programs. `tcplog` on
+the kernel command line logs the connection.
 
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
@@ -645,7 +658,7 @@ untested.
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
-| `src/fs9p.cpp`, `dos/vmdosnet.asm` | host folders as DOS drives: virtio-9p client, DOS redirector, long-name API, caches; VMDOSNET.COM |
+| `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP) |
 | `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |
