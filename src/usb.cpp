@@ -2055,15 +2055,24 @@ static void setup_port(int port) {
     addr_cc = 0;
     setup_device(port, -1, 0, speed);
     bool no_addr = addr_failed && addr_cc == -1;          // Address Device never completed
-    if (no_addr && speed < 4) {
-        // A USB 2 port has no warm reset (that's USB 3 only): the nearest
-        // thing is another port reset, then one more try.
-        printf("USB: port %d: no answer to Address Device (cc=-1); warm reset is USB 3 only, "
-               "doing a port reset and trying again\n", port);
-        addr_failed = false;
-        addr_cc = 0;
-        if (reset_port(port)) setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
-        if (addr_failed) printf("USB: port %d: still no address after the port reset\n", port);
+    if (addr_failed && speed < 4) {
+        // A USB 2 device that didn't take its address: no answer at all
+        // (cc=-1), or a transaction error (cc=4) from one not ready yet so
+        // soon after its reset (some sticks at boot: plugged in again later,
+        // they're fine). As Linux does: reset the port again and retry,
+        // giving it longer to recover each time. (A USB 2 port has no warm
+        // reset; that's USB 3 only.)
+        static const int settle_ms[] = { 200, 500 };
+        for (int t = 0; t < 2 && addr_failed; t++) {
+            printf("USB: port %d: no address (cc=%d): port reset, %d ms to recover, trying again\n",
+                   port, addr_cc, 100 + settle_ms[t]);
+            addr_failed = false;
+            addr_cc = 0;
+            if (!reset_port(port)) break;
+            delay_ms(settle_ms[t]);                           // on top of reset_port's 100 ms
+            setup_device(port, -1, 0, (portsc(port) >> 10) & 0xF);
+        }
+        if (addr_failed) printf("USB: port %d: still no address after the port resets\n", port);
         return;
     }
     if (speed >= 4 && ((msd_stuck && !addr_failed) || no_addr)) {
