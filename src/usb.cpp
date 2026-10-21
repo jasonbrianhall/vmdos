@@ -20,6 +20,7 @@
 
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
 static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
+extern "C" void mouse_absolute(int x, int y, int buttons);
 
 // Delays: kdelay_us (lib.c), timed by the TSC, or by port 80h reads
 // measured against the PIT where there's no TSC.
@@ -190,6 +191,7 @@ struct PadLayout {
     HidField x, y, hat;
     int btn_bit, btn_count;                // buttons 1..n, one bit each from btn_bit
     bool dragonrise;                       // 0079:0011 SNES clones: fixed layout
+    bool tablet;                           // a pointer with absolute X/Y (QEMU's usb-tablet): the mouse
 };
 struct Keyboard {
     bool active;
@@ -390,11 +392,11 @@ static int hid_axis(const volatile uint8_t* r, int len, const HidField& f) {
 // X, Y, hat switch and buttons (and their report ID). True if it is a
 // joystick or gamepad with something to steer by.
 static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
-    L.report_id = 0; L.x.bit = L.y.bit = L.hat.bit = -1; L.btn_bit = -1; L.btn_count = 0;
+    L.report_id = 0; L.x.bit = L.y.bit = L.hat.bit = -1; L.btn_bit = -1; L.btn_count = 0; L.tablet = false;
     int page = 0, size = 0, count = 0, rid = 0, ids_used = 0;
     int32_t lmin = 0, lmax = 0;
     int usages[16], nu = 0, umin = 0, umax = -1;
-    bool app = false;
+    bool app = false, ptr = false, xabs = false;
     int bitpos[16] = { 0 };                 // the next bit in each report ID's report
     for (int i = 0; i < n; ) {
         uint8_t h = d[i];
@@ -418,6 +420,7 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
         case 0x28: umax = (int)u; break;
         case 0xA0:                                                               // collection
             if (nu && (usages[0] == (1 << 16 | 4) || usages[0] == (1 << 16 | 5))) app = true;   // joystick, gamepad
+            if (nu && (usages[0] == (1 << 16 | 1) || usages[0] == (1 << 16 | 2))) ptr = true;   // pointer, mouse
             nu = 0; umin = 0; umax = -1;
             break;
         case 0x80: {                                                             // input
@@ -430,7 +433,7 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
                 if (!(u & 2)) usage = 0;                                         // an array: not ours
                 HidField f = { bit, size, lmin, mx };
                 bool take = !L.report_id || L.report_id == rid;
-                if (usage == (1 << 16 | 0x30) && L.x.bit < 0 && take) { L.x = f; L.report_id = rid; }
+                if (usage == (1 << 16 | 0x30) && L.x.bit < 0 && take) { L.x = f; L.report_id = rid; xabs = !(u & 4); }
                 else if (usage == (1 << 16 | 0x31) && L.y.bit < 0 && take) { L.y = f; L.report_id = rid; }
                 else if (usage == (1 << 16 | 0x39) && L.hat.bit < 0 && take) { L.hat = f; L.report_id = rid; }
                 else if (page == 9 && size == 1 && take && umax >= umin) {
@@ -449,6 +452,7 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
     }
     if (!ids_used) L.report_id = 0;
     else if (!L.report_id) L.report_id = -1;                                     // IDs, but ours had none?
+    L.tablet = !app && ptr && xabs && L.x.bit >= 0 && L.y.bit >= 0 && L.x.lmax > L.x.lmin && L.y.lmax > L.y.lmin;
     return app && ((L.x.bit >= 0 && L.y.bit >= 0) || L.hat.bit >= 0);
 }
 
@@ -477,8 +481,32 @@ static void pad_keys(Keyboard& k, int keys) {           // keys: bit 0 L, 1 R, 2
     k.prev[0] = (uint8_t)keys;
 }
 
+// A field as 0..32767 (a tablet's position).
+static int hid_abs(const volatile uint8_t* r, int len, const HidField& f) {
+    int32_t v = hid_bits(r, len, f.bit, f.size, f.lmin < 0);
+    if (v < f.lmin) v = f.lmin;
+    if (v > f.lmax) v = f.lmax;
+    uint32_t off = (uint32_t)(v - f.lmin), span = (uint32_t)(f.lmax - f.lmin);
+    while (span > 0xFFFF) { span >>= 1; off >>= 1; }         // 32-bit math
+    return (int)(off * 32767 / span);
+}
+
+// A tablet (absolute pointer, QEMU's usb-tablet): the mouse, at the host pointer's place.
+static void tablet_report(Keyboard& k, const volatile uint8_t* r, int len) {
+    const PadLayout& L = k.lay;
+    int off = 0;
+    if (L.report_id > 0) { if (len < 1 || r[0] != L.report_id) return; off = 1; }
+    const volatile uint8_t* p = r + off;
+    int n = len - off, b = 0;
+    for (int i = 0; i < 3 && i < L.btn_count; i++)
+        if (hid_bits(p, n, L.btn_bit + i, 1, false)) b |= 1 << i;
+    dbg(3, "USB: tablet %d %d %x (raw %02x %02x %02x %02x %02x %02x)\n", hid_abs(p, n, L.x), hid_abs(p, n, L.y), b, p[0], p[1], p[2], p[3], p[4], p[5]);
+    mouse_absolute(hid_abs(p, n, L.x), hid_abs(p, n, L.y), b);
+}
+
 static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
     const PadLayout& L = k.lay;
+    if (L.tablet) { tablet_report(k, r, len); return; }
     int x, y, b = 0, keys = 0;
     if (L.dragonrise) {
         // 01 7F 7F xx yy bb cc 00: D-pad X in byte 3, Y in byte 4; byte 5
@@ -527,6 +555,7 @@ static void queue_report(Keyboard& k) {
 }
 
 static void release_all(Keyboard& k) {
+    if (k.kind == JOY && k.lay.tablet) { mouse_push(0, 0, 0, 0); return; }
     if (k.kind == JOY) { joy_set(k.pad, 0, 128, 128, 0); pad_keys(k, 0); return; }
     if (k.mouse) { mouse_push(0, 0, 0, 0); return; }
     uint8_t empty[8] = {0};
@@ -561,7 +590,7 @@ static void dispatch(const Trb& e) {
         else {
             if (k.kind != HUB) release_all(k);
             k.active = false;
-            printf("USB: %s on %s stopped (code %d)\n", k.kind == HUB ? "hub" : k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where, cc);
+            printf("USB: %s on %s stopped (code %d)\n", k.kind == HUB ? "hub" : k.kind == JOY ? (k.lay.tablet ? "tablet" : "gamepad") : k.mouse ? "mouse" : "keyboard", k.where, cc);
         }
         H->db[slot] = k.dci;
     }
@@ -1871,14 +1900,27 @@ static bool setup_slot(Keyboard& k, int ki) {
         if (!control(k, 0x81, 6, 0x2200, hid_iface, n, rd)) { printf("USB: %s: no HID report descriptor\n", k.where); return false; }
         bool pad = hid_parse(rd, n, k.lay);
         k.lay.dragonrise = vid == 0x0079 && pid == 0x0011;
-        if (!pad && !k.lay.dragonrise) {
+        if (!pad && !k.lay.dragonrise && !k.lay.tablet) {
             printf("USB: %s: HID device %04x:%04x, not a keyboard, mouse or gamepad\n", k.where, vid, pid);
             return false;
+        }
+        if (k.lay.tablet) {                                                 // a tablet: the mouse
+            control(k, 0x21, 0x0A, 0, hid_iface, 0, nullptr);              // SET_IDLE 0 (may stall)
+            k.rsize = hid_mps < 8 ? 8 : hid_mps > REPORT_MAX ? REPORT_MAX : hid_mps;
+            if (!configure_intr(k, hid_ep, hid_mps, hid_interval)) return false;
+            k.kind = JOY;
+            k.pad = -1;
+            k.active = true;
+            mouse_usb_attached();
+            for (int i = 0; i < 8; i++) queue_report(k);
+            if (H->type == HC_XHCI) H->db[k.slot] = k.dci;
+            printf("USB: tablet %04x:%04x on %s: the mouse (slot %d, %s speed)\n", vid, pid, k.where, k.slot, speed_name(k.speed));
+            return true;
         }
         int slot = -1;
         for (int s2 = 0; s2 < 2 && slot < 0; s2++) {
             bool used = false;
-            for (auto& o : kbds) used |= o.active && o.kind == JOY && o.pad == s2;
+            for (auto& o : kbds) used |= o.active && o.kind == JOY && !o.lay.tablet && o.pad == s2;
             if (!used) slot = s2;
         }
         if (slot < 0) { printf("USB: %s: a third gamepad (the game port has two)\n", k.where); return false; }
@@ -1962,7 +2004,7 @@ static void forget(int i) {
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
     else hc2_release(k);
     printf("USB: %s on %s unplugged\n", k.kind == HUB ? "hub" : k.kind == NET ? "Ethernet adapter" : k.kind == AUDIO ? "audio device" : k.kind == MSD ? (k.bsize == 2048 ? "CD/DVD drive" : "disk") :
-           k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
+           k.kind == JOY ? (k.lay.tablet ? "tablet" : "gamepad") : k.mouse ? "mouse" : "keyboard", k.where);
 }
 
 // Port `port` of hub h: something plugged in or out (or the first look).
@@ -2624,7 +2666,7 @@ extern "C" int usb_list(char* buf, int max, int verbose)
                 case MOUSE: o.add(", mouse"); break;
                 case HUB: o.add(", hub, %d ports", k.nports); break;
                 case MSD: o.add(", %s: %s", k.bsize == 2048 ? "CD/DVD drive" : "disk", k.model); break;
-                case JOY: o.add(", gamepad: joystick %c", 'A' + k.pad); break;
+                case JOY: if (k.lay.tablet) o.add(", tablet: the mouse"); else o.add(", gamepad: joystick %c", 'A' + k.pad); break;
                 case AUDIO: o.add(", audio (vmdos's sound output)"); break;
                 case NET: o.add(", Ethernet adapter"); break;
                 }

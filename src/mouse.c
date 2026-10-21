@@ -26,6 +26,23 @@ static int present;
 
 int mouse_present(void) { return present; }
 
+/* A tablet (absolute pointer: QEMU's usb-tablet, virt-manager's default):
+   where the host's pointer is, 0..32767 across the screen. vmdos's INT 33h
+   pointer goes there; a driver or game on the PS/2 port (CuteMouse) gets
+   the motion, as counts that take its default 640x200 pointer (8 and 16
+   mickeys per 8 pixels) as far as the host's moved. */
+static volatile int abs_x = -1, abs_y;
+static int abs_px = -1, abs_py;
+void mouse_absolute(int x, int y, int b)
+{
+    abs_x = x; abs_y = y;
+    raw_buttons = b & 7;
+    have_input = 1;
+    int px = x * 640 / 32768, py = y * 400 / 32768;
+    vaux_motion(abs_px < 0 ? 0 : px - abs_px, abs_px < 0 ? 0 : py - abs_py, b);
+    abs_px = px; abs_py = py;
+}
+
 /* Called from interrupt handlers: motion in counts (dy positive = down). */
 void mouse_input(int dx, int dy, int b)
 {
@@ -106,6 +123,18 @@ void mouse_update(void)
     raw_dx = raw_dy = 0;
     have_input = 0;
     u16 cond = 0;
+    if (abs_x >= 0) {                                 /* a tablet: straight to the place */
+        int tx = xmin + abs_x * (xmax - xmin + 1) / 32768, ty = ymin + abs_y * (ymax - ymin + 1) / 32768;
+        abs_x = -1;
+        tx &= ~(granular_x() - 1);
+        if (tx != mx || ty != my) {
+            mick_x += (tx - mx) * ratio_x / 8 / granular_x();
+            mick_y += (ty - my) * ratio_y / 8;
+            mx = tx; my = ty;
+            clamp();
+            cond |= 1;
+        }
+    }
     if (dx || dy) {
         mick_x += dx; mick_y += dy;
         fx += dx * 8; fy += dy * 8;                     /* pixels = mickeys * 8 / ratio */

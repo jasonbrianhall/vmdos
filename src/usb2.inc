@@ -851,7 +851,7 @@ static void hc2_poll() {
         if (err) {                                     // goes quiet; unplugging it forgets it
             if (k.kind != HUB) release_all(k);
             hc2_unlink(k);
-            dbg(1, "USB: %s on %s: transfer error, stopped\n", k.kind == HUB ? "hub" : k.kind == JOY ? "gamepad" : k.mouse ? "mouse" : "keyboard", k.where);
+            dbg(1, "USB: %s on %s: transfer error, stopped\n", k.kind == HUB ? "hub" : k.kind == JOY ? (k.lay.tablet ? "tablet" : "gamepad") : k.mouse ? "mouse" : "keyboard", k.where);
             continue;
         }
         const volatile uint8_t* r = k.reports;

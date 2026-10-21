@@ -120,6 +120,30 @@ void wait_for_irq(void)
     }
 }
 
+/* The real 8042: a byte its interrupt never came for (lost while the
+   interrupt was masked, a click that landed as the guest started, the
+   host's window not focused) sits in the output buffer, and the 8042 sends
+   nothing else until it is read: the keyboard seems dead. Every 32 ms: a
+   byte waiting since the last look with no IRQ 1 or 12 between is read and
+   handed on as the interrupt would have. */
+static u32 kbc_irqs;
+static void kbc_unstick(void)
+{
+    static u32 seen;
+    static int waiting, logged;
+    u8 st = inb(0x64);
+    if (st == 0xFF || !(st & 1)) { waiting = 0; return; }
+    if (waiting && kbc_irqs == seen) {
+        u8 b = inb(0x60);
+        if (logged++ < 4) kprintf("kbd: a %s byte (%02x) waited with no interrupt: taken\n", st & 0x20 ? "mouse" : "keyboard", b);
+        if (st & 0x20) mouse_ps2_byte(b); else vkbd_real_scancode(b);
+        waiting = 0;
+        return;
+    }
+    waiting = 1;
+    seen = kbc_irqs;
+}
+
 /* Deliver a pending virtual IRQ; returns the frame to resume (a DPMI
    client's protected-mode handler may mean a mode switch). */
 u32 stat_pmirq, stat_rmirq, stat_reflirq;
@@ -617,6 +641,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             if (usb_ready) PERF_PART(PT_DISK, disk_tick());
             if (net_ready) PERF_PART(PT_NET, net_tick());
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
+            if ((ticks & 31) == 16) kbc_unstick();
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
                been off for a few ms with an interrupt waiting, take that as
@@ -628,10 +653,12 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                 if (++vif_off >= 4) { vif = 1; vif_off = 0; }
             } else vif_off = 0;
         } else if (irq == 1) {
+            kbc_irqs++;
             vkbd_real_scancode(inb(0x60));
         } else if (irq == 3 || irq == 4) {
             serial_irq(irq);                         /* serial=dos: the UART's, for the guest */
         } else if (irq == 12) {
+            kbc_irqs++;
             mouse_ps2_byte(inb(0x60));
         }
         if (irq >= 8) outb(0xA0, 0x20);

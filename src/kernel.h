@@ -269,6 +269,7 @@ void xms_exec_a20_off(void);                  /* A20 off for a program DOS just 
 void mouse_ps2_init(void);
 void mouse_ps2_byte(u8 b);
 void mouse_input(int dx, int dy, int buttons);
+void mouse_absolute(int x, int y, int buttons);  /* a tablet: 0..32767 across the screen */
 void mouse_usb_attached(void);
 void mouse_update(void);
 void mouse_int33(struct regs *r);
