@@ -1,3 +1,6 @@
+/* Emulates a virtual floppy */
+
+
 /* Floppy drives A: and B:, backed by disk image files on C: (there is no
    floppy controller; nothing here touches one). VMFD.COM puts an image in
    a drive at any time ("VMFD A: C:\DISKS\INSTALL1.IMG", INT 2Fh AX=5646h);
