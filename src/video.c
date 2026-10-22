@@ -135,6 +135,9 @@ static int et_on;                                    /* an ET4000 mode: line pit
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int vbe_crtc_follow;                 /* a VBE 3 mode set with CRTC timings: the display-end registers set the size */
 static u32 vbe_mode_w, vbe_mode_h;          /* the VESA mode's own size */
+#define GFX_MAXW 800                        /* the largest VGA-drawn graphics screen: VESA 102h */
+#define GFX_MAXH 600
+static u16 planar_vbe;                      /* VESA 102h (800x600x16, planar) while set: its number, else 0 */
 static int vbe_interlace;                   /* VBE 3 timings interlaced: the CRTC counts one field, half the lines */
 static int vbe_flip_pending;                /* 4F07h BL=02h: a display start scheduled, its retrace not yet past */
 static u32 vbe_flip_at;                     /* when (PIT ticks) */
@@ -253,7 +256,7 @@ static void ega_geom(int *w, int *h)
     int ww = (crtc[0x01] + 1) * 8;
     int lines = (crtc[0x12] | (crtc[0x07] & 0x02) << 7 | (crtc[0x07] & 0x40) << 3) + 1;
     int hh = lines / scan_per_row();
-    if (!crtc[0x01] || ww < 160 || ww > 640 || hh < 100 || hh > 480 || !crtc[0x13]) {
+    if (!crtc[0x01] || ww < 160 || ww > GFX_MAXW || hh < 100 || hh > GFX_MAXH || !crtc[0x13]) {
         ww = video_mode == 0x0D ? 320 : 640;
         hh = video_mode == 0x10 ? 350 : video_mode == 0x12 ? 480 : 200;
     }
@@ -313,6 +316,7 @@ static void video_set_mode_(int mode, int clear)
     vbe_off();
     vr_period = VR_PERIOD_VGA; vr_len = VR_LEN_VGA;   /* a BIOS mode's own timing: 70 Hz */
     vbe_interlace = 0;
+    planar_vbe = 0;
     video_mode = mode;
     text_cols = (mode == 0 || mode == 1 || mode == 4 || mode == 5 || mode == 0x0D || mode == 0x13) ? 40 : 80;
     text_rows = 25;
@@ -399,7 +403,7 @@ static void video_set_mode_(int mode, int clear)
 
 /* ---------------- drawing ---------------- */
 static u16 shadow_text[132 * 60];
-static u8 shadow_gfx[640 * 480];
+static u8 shadow_gfx[GFX_MAXW * GFX_MAXH];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
 static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
@@ -529,7 +533,7 @@ static void bl_row(u32 y, const u32 *src)
 /* Per-CPU scratch for the rows par_for shares out (smp.c), and the
    lists of rows it works through. */
 static u32 sc_line[SMP_SLOTS][4096], sc_cvt[SMP_SLOTS][4096], sc_big[SMP_SLOTS][6 * 4096];
-static u8 sc_ovr[SMP_SLOTS][640];
+static u8 sc_ovr[SMP_SLOTS][GFX_MAXW];
 static u16 sm_list[4096];
 static u32 sm_bw;
 static int par_lost;                           /* a render helper died mid-frame: all of the next one */
@@ -1094,7 +1098,7 @@ static void gfx_draw(u32 i, void *unused)
     for (u32 x = X0; x < X1; x++) line[x] = pal[row[xmap[x]]];
     if (in_new) {
         u8 *ovr = sc_ovr[slot];
-        memset(ovr, 0, 640);
+        memset(ovr, 0, GFX_MAXW);
         const char *a = arrow[y - py];
         for (int k = 0; a[k] && px + k < (int)w; k++) ovr[px + k] = a[k] == '1' ? 1 : a[k] == '2' ? 2 : 0;
         for (u32 x = X0; x < X1; x++)
@@ -1105,7 +1109,7 @@ static void gfx_draw(u32 i, void *unused)
 
 static void refresh_gfx(void)
 {
-    static u8 rowbuf[640];
+    static u8 rowbuf[GFX_MAXW];
     int w = gfx_w(), h = gfx_h();
     int px = 0, py = -100;
     u16 ma, mxr;
@@ -1180,6 +1184,13 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
     { 0x126, 400, 300, 8 }, { 0x127, 400, 300, 15 }, { 0x128, 400, 300, 16 }, { 0x129, 400, 300, 32 },
     { 0x12A, 512, 384, 8 }, { 0x12B, 512, 384, 15 }, { 0x12C, 512, 384, 16 }, { 0x12D, 512, 384, 32 },
     { 0x12E, 640, 400, 15 }, { 0x12F, 640, 400, 16 }, { 0x130, 640, 400, 32 },
+    /* 24 bits a pixel, packed (3 bytes, blue first), for programs that
+       want true colour that way rather than as 32 (GTA): 10Fh is VBE 1.2's
+       own 320x200x24, the rest numbered on past the ones above */
+    { 0x10F, 320, 200, 24 }, { 0x131, 320, 240, 24 }, { 0x132, 400, 300, 24 }, { 0x133, 512, 384, 24 },
+    { 0x134, 640, 400, 24 }, { 0x135, 640, 480, 24 }, { 0x136, 800, 600, 24 }, { 0x137, 1024, 768, 24 },
+    /* VBE 1.2's 800x600 in 16 colours: four planes, as mode 12h (see vbe_planar) */
+    { 0x102, 800, 600, 4 },
 };
 #define N_VMODES (int)(sizeof vmodes / sizeof vmodes[0])
 
@@ -1291,24 +1302,36 @@ static void vbe_mode_info(int m, u32 a)
 {
     memset(gptr(a), 0, 256);
     u32 bpp = vmodes[m].bpp, B = vbe_bytespp(bpp), pitch = vmodes[m].w * B;
-    /* supported, TTY, colour, graphics, LFB; VBE 3: doublescan, interlace
-       (both through a CRTCInfoBlock) and triple buffering (4F07h BL=02h/04h) */
-    wr16(a + 0x00, 0x79F);
+    if (bpp == 4) {                             /* planar: bytes a line in each plane */
+        pitch = vmodes[m].w / 8;
+        wr16(a + 0x00, 0x11F);                  /* supported, TTY, colour, graphics; doublescan; no LFB */
+    } else
+        /* supported, TTY, colour, graphics, LFB; VBE 3: doublescan, interlace
+           (both through a CRTCInfoBlock) and triple buffering (4F07h BL=02h/04h) */
+        wr16(a + 0x00, 0x79F);
     wr8(a + 0x02, 7);                           /* window A: exists, readable, writable */
     wr16(a + 0x04, 64); wr16(a + 0x06, 64);     /* granularity, size (KB) */
     wr16(a + 0x08, 0xA000);
     wr16(a + 0x0C, rd16(0xF0226)); wr16(a + 0x0E, 0xF000);   /* WinFuncPtr */
     wr16(a + 0x10, (u16)pitch);
     wr16(a + 0x12, vmodes[m].w); wr16(a + 0x14, vmodes[m].h);
-    wr8(a + 0x16, 8); wr8(a + 0x17, 16); wr8(a + 0x18, 1);
+    wr8(a + 0x16, 8); wr8(a + 0x17, 16);
+    wr8(a + 0x18, bpp == 4 ? 4 : 1);            /* planes */
     wr8(a + 0x19, (u8)bpp); wr8(a + 0x1A, 1);
-    wr8(a + 0x1B, bpp == 8 ? 4 : 6);            /* packed pixel / direct colour */
-    u32 pages = VRAM_SIZE / (pitch * vmodes[m].h);
+    wr8(a + 0x1B, bpp == 4 ? 3 : bpp == 8 ? 4 : 6);   /* EGA planar / packed pixel / direct colour */
+    u32 mem = bpp == 4 ? 65536 : VRAM_SIZE;     /* planar: one 64 KB plane holds the screen's bytes */
+    u32 pages = mem / (pitch * vmodes[m].h);
     u8 last = (u8)(pages > 256 ? 255 : pages - 1);   /* image pages, less one */
     wr8(a + 0x1D, last);
     wr8(a + 0x1E, 1);
-    static const u8 masks[3][8] = { { 5, 10, 5, 5, 5, 0, 1, 15 }, { 5, 11, 6, 5, 5, 0, 0, 0 }, { 8, 16, 8, 8, 8, 0, 8, 24 } };
-    const u8 *mk = masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2];
+    if (bpp == 4) return;                       /* no direct colour, no linear framebuffer */
+    static const u8 masks[4][8] = {
+        { 5, 10, 5, 5, 5, 0, 1, 15 },           /* 15: x:1 r:5 g:5 b:5 */
+        { 5, 11, 6, 5, 5, 0, 0, 0 },            /* 16: r:5 g:6 b:5 */
+        { 8, 16, 8, 8, 8, 0, 0, 0 },            /* 24: r:8 g:8 b:8 */
+        { 8, 16, 8, 8, 8, 0, 8, 24 },           /* 32: x:8 r:8 g:8 b:8 */
+    };
+    const u8 *mk = masks[bpp == 15 ? 0 : bpp == 16 ? 1 : bpp == 24 ? 2 : 3];
     if (bpp != 8) memcpy(gptr(a + 0x1F), mk, 8);
     wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
     /* VBE 3: the linear framebuffer's own layout. The same as the banked
@@ -1483,6 +1506,76 @@ static int et_mode(int mode, int clear)
    48h set display start (BL=00h/80h: CX:DX = byte offset / 4; VBE 3's
    BL=02h/82h: ECX = byte offset, a scheduled flip), 49h set palette. */
 static void vbe_flip(u32 st);
+/* ---------------- VESA 102h: 800x600 in 16 colours ----------------
+   VBE 1.2's planar mode: mode 12h's four planes and VGA write logic with
+   an 800x600 CRTC. 100 bytes a line in each plane, 60000 of its 64 KB, so
+   the A000h window holds the whole screen and banking stays at 0. The
+   16-colour renderer (ega_row) draws it from the CRTC as it draws any
+   reprogrammed planar mode: line pitch from the offset register (13h),
+   start from 0Ch/0Dh, pel panning from the attribute controller, so the
+   logical line length (4F06h) and display start (4F07h) are those. */
+static void planar_set(int m, int clear)
+{
+    video_set_mode(0x12, clear);            /* planes, sequencer, graphics and attribute controllers */
+    static const u8 c800[25] = {            /* the CRTC for 800x600 at 56 Hz (VESA's first timing) */
+        0x7B, 0x63, 0x64, 0x9E, 0x69, 0x92, 0x6F, 0xF0, 0x00, 0x60, 0x00, 0x00, 0, 0, 0, 0,
+        0x58, 0x8A, 0x57, 0x32, 0x00, 0x58, 0x6F, 0xE3, 0xFF };
+    memcpy(crtc, c800, sizeof c800);
+    planar_vbe = vmodes[m].no;
+    text_cols = vmodes[m].w / 8; text_rows = vmodes[m].h / 16;
+    wr8(BDA + 0x49, 0x6A);                  /* 800x600x16's mode number on SVGA BIOSes */
+    wr16(BDA + 0x4A, (u16)text_cols);
+    wr16(BDA + 0x4C, (u16)(text_cols * vmodes[m].h));   /* the page: one screen of a plane */
+    wr8(BDA + 0x84, (u8)(text_rows - 1));
+    full_redraw = 1; last_layout_mode = -1;
+    kprintf("video: VESA mode %x, %ux%u, 16 colours (planar)\n", planar_vbe, vmodes[m].w, vmodes[m].h);
+}
+
+/* Its line length in bytes a plane: the offset register counts words. */
+static u32 planar_pitch(void) { return crtc[0x13] * 2u; }
+
+/* Display start: off is a byte offset in a plane (the planes wrap at
+   64 KB, as on a VGA), pan the pixel (0-7) within that byte. */
+static void planar_start(u32 off, int pan)
+{
+    crtc[0x0C] = (u8)(off >> 8); crtc[0x0D] = (u8)off;
+    atc[0x13] = (u8)(pan & 7);
+    full_redraw = 1;
+}
+
+/* 4F06h and 4F07h in the planar mode. 0: a subfunction it doesn't have. */
+static int planar_scanline(struct regs *r)
+{
+    u32 pitch = planar_pitch();
+    if (BL(r) == 0 || BL(r) == 2) {
+        u32 p = BL(r) == 0 ? ((u32)CX(r) + 15) / 16 * 2 : ((u32)CX(r) + 1) / 2 * 2;   /* whole words */
+        if (p < 100 || p > 510) { AX(r) = 0x024F; return 1; }   /* the screen's width .. the offset register's reach */
+        crtc[0x13] = (u8)(p / 2);
+        pitch = p;
+        full_redraw = 1;
+    } else if (BL(r) == 3) {
+        pitch = 510;
+    } else if (BL(r) != 1) return 0;
+    BX(r) = (u16)pitch; CX(r) = (u16)(pitch * 8);
+    DX(r) = (u16)(65536 / pitch);
+    AX(r) = 0x004F;
+    return 1;
+}
+static int planar_display_start(struct regs *r)
+{
+    u32 pitch = planar_pitch();
+    if ((BL(r) & 0x7F) == 0) {
+        u32 off = DX(r) * pitch + CX(r) / 8;
+        if (off >= 65536) { AX(r) = 0x014F; return 1; }
+        planar_start(off, CX(r) & 7);
+    } else if (BL(r) == 1) {
+        u32 off = (u32)crtc[0x0C] << 8 | crtc[0x0D];
+        BH(r) = 0; CX(r) = (u16)(off % pitch * 8 + (atc[0x13] & 7)); DX(r) = (u16)(off / pitch);
+    } else return 0;
+    AX(r) = 0x004F;
+    return 1;
+}
+
 static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin);
 void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin) { rlock_take(&video_lock); video_vbe_pm_(id, ebx, ecx, edx, pal_lin); rlock_drop(&video_lock); }
 static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
@@ -1495,8 +1588,13 @@ static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
             if (vbe_on && ecx <= VRAM_SIZE - vbe_pitch * vbe_h) vbe_flip(ecx);
             return;
         }
-        u32 st = ((edx & 0xFFFF) << 16 | (ecx & 0xFFFF)) << 2;
-        if (vbe_on && st + vbe_pitch * vbe_h <= VRAM_SIZE) vbe_start = st;
+        /* CX:DX = byte offset / 4; VBE 3 callers (AdvanceMAME) put the
+           offset's low two bits in DX bits 14-15, which a 16 or 24-bit mode
+           scrolled by an odd pixel needs (4 MB: the dword address never
+           reaches those bits itself). */
+        if (planar_vbe) { planar_start((edx & 0xFFFF) << 16 | (ecx & 0xFFFF), 0); return; }   /* planar: the plane offset itself */
+        u32 st = ((edx & 0x3FFF) << 16 | (ecx & 0xFFFF)) << 2 | ((edx >> 14) & 3);
+        if (vbe_on && st <= VRAM_SIZE - vbe_pitch * vbe_h) vbe_start = st;
     } else if (id == 0x49 && pal_lin) {
         u32 n = ecx & 0xFFFF, first = edx & 0xFFFF;
         for (u32 i = 0; i < n && first + i < 256; i++) {
@@ -1653,7 +1751,7 @@ static void vbe_state(struct regs *r)
             s[0] = VBE_STATE_MAGIC; s[1] = (u32)vbe_on; s[2] = (u32)video_mode; s[3] = vbe_cur;
             s[4] = vbe_w; s[5] = vbe_h; s[6] = vbe_pitch; s[7] = vbe_start; s[8] = vbe_bank;
             s[9] = (u32)dac8; s[10] = (u32)vbe_crtc_follow; s[11] = (u32)vbe_interlace;
-            s[12] = vr_period; s[13] = vr_len; s[14] = (u32)et_on | (u32)et_seg << 8;
+            s[12] = vr_period; s[13] = vr_len; s[14] = (u32)et_on | (u32)et_seg << 8 | (u32)planar_vbe << 16;
             s[15] = misc_out;
             for (int i = 0; i < 16; i++) wr32(a + i * 4, s[i]);
             for (int i = 0; i < 64 - 32; i++) wr8(a + 64 + i, crtc[32 + i]);
@@ -1678,7 +1776,9 @@ static void vbe_state(struct regs *r)
                 if (s[12] >= 1000 && s[13] < s[12]) { vr_period = s[12]; vr_len = s[13]; }
                 if (et_on) { et_seg = (u8)(s[14] >> 8); et_remap(); }
                 misc_out = (u8)s[15];
-            } else if (vbe_on || video_mode != (int)s[2]) {
+            } else if (s[14] >> 16) {          /* the planar VESA mode */
+                if (planar_vbe != (u16)(s[14] >> 16)) planar_set(vbe_find(s[14] >> 16), 0);
+            } else if (vbe_on || planar_vbe || video_mode != (int)s[2]) {
                 video_set_mode((int)s[2], 0);   /* back to a VGA mode, memory kept */
             }
             for (int i = 0; i < 64 - 32; i++) crtc[32 + i] = rd8(a + 64 + i);
@@ -1720,6 +1820,10 @@ static void vbe_call(struct regs *r)
         if ((bx & 0x1FF) < 0x100) { video_set_mode(bx & 0x7F, !(bx & 0x8000)); AX(r) = 0x004F; return; }
         int m = vbe_find(bx);
         if (m < 0) { AX(r) = 0x014F; return; }
+        if (vmodes[m].bpp == 4) {               /* planar: the VGA's own timings, a CRTCInfoBlock or not */
+            planar_set(m, !(bx & 0x8000));
+            AX(r) = 0x004F; return;
+        }
         struct vbe_timing t;                    /* VBE 3: bit 11, a CRTCInfoBlock at ES:DI */
         if ((bx & 0x0800) && !vbe_timing_read(es_di, &t)) {
             kprintf("video: VESA mode %x: CRTC timings refused (%u/%u/%u %u/%u/%u, %u Hz, flags %x)\n",
@@ -1729,9 +1833,10 @@ static void vbe_call(struct regs *r)
         vbe_set(m, !(bx & 0x8000));
         if (bx & 0x0800) vbe_timing_set(&t);
         AX(r) = 0x004F; return; }
-    case 0x03: BX(r) = vbe_on ? vbe_cur : (u16)video_mode; AX(r) = 0x004F; return;
+    case 0x03: BX(r) = vbe_on ? vbe_cur : planar_vbe ? planar_vbe : (u16)video_mode; AX(r) = 0x004F; return;
     case 0x05: video_vbe_window(r); return;
     case 0x06: {
+        if (planar_vbe && planar_scanline(r)) return;
         if (!vbe_on) { AX(r) = 0x014F; return; }
         u32 B = vbe_bytespp(vbe_bpp);
         if (BL(r) == 0 || BL(r) == 2) {
@@ -1746,6 +1851,7 @@ static void vbe_call(struct regs *r)
         DX(r) = (u16)(VRAM_SIZE / pitch > 0xFFFF ? 0xFFFF : VRAM_SIZE / pitch);
         AX(r) = 0x004F; return; }
     case 0x07: {
+        if (planar_vbe && planar_display_start(r)) return;
         if (!vbe_on) { AX(r) = 0x014F; return; }
         u32 B = vbe_bytespp(vbe_bpp);
         if ((BL(r) & 0x7F) == 0) {
@@ -1834,6 +1940,9 @@ static void vbe_draw(u32 i, void *unused)
             u32 v = ((const u16 *)src)[x];
             if (fr.bpp == 15) c = pack8((v >> 7) & 0xF8, (v >> 2) & 0xF8, (v << 3) & 0xF8);
             else c = pack8((v >> 8) & 0xF8, (v >> 3) & 0xFC, (v << 3) & 0xF8);
+        } else if (B == 3) {
+            const u8 *p = src + x * 3;              /* blue, green, red */
+            c = pack8(p[2], p[1], p[0]);
         } else {
             u32 v = ((const u32 *)src)[x];
             c = pack8((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
@@ -2655,7 +2764,8 @@ static int video_int10_(struct regs *r)
     int page = BH(r) & 7;
     switch (AH(r)) {
     case 0x00:
-        if (!et_mode(AL(r) & 0x7F, !(AL(r) & 0x80))) video_set_mode(AL(r), !(AL(r) & 0x80));
+        if ((AL(r) & 0x7F) == 0x6A) planar_set(vbe_find(0x102), !(AL(r) & 0x80));   /* SVGA BIOSes' 800x600x16 */
+        else if (!et_mode(AL(r) & 0x7F, !(AL(r) & 0x80))) video_set_mode(AL(r), !(AL(r) & 0x80));
         if (video_mode != 0x13) AL(r) = 0x30; else AL(r) = 0x20;
         if (hv_active) cont = mode_replay();
         break;
