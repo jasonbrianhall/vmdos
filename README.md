@@ -429,11 +429,16 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
   3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
   segment select register (3CDh, separate read and write segments), 1 MB.
-- VESA BIOS 2.0: 640x400 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
+- VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16 and 32 bits per pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
   switchable to 8 bits a colour (4F08h, as most SVGA cards; test:
-  `tests/dac8.asm`), and the protected-mode interface (4F00h-4F0Ah). The
+  `tests/dac8.asm`), state save/restore (4F04h), and the protected-mode
+  interface (4F00h-4F0Bh). VBE 3: CRTC timings on mode set (a
+  CRTCInfoBlock, doublescan and interlace included) program the CRTC and
+  set the vertical retrace rate, so AdvanceMAME's vbeline/vbe3 driver can
+  set a game's own modeline; scheduled display start (triple buffering),
+  pixel clocks (4F0Bh) and the linear-framebuffer mode info fields. The
   VGA pixel mask (3C6h) applies too.
 - Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
   or port 3D9h), mode 13h, unchained 256-color (Mode X/Y, as DOOM uses:
@@ -637,7 +642,7 @@ untested.
 
 ## Not yet
 
-- Mode X's 240-line timing, VBE 3.0, EMS, SB16 (16-bit)
+- Mode X's 240-line timing, EMS, SB16 (16-bit)
   sound, saving C: to a real disk.
 
 ## Layout
