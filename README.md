@@ -429,6 +429,10 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
   3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
   segment select register (3CDh, separate read and write segments), 1 MB.
+  `et4000=off` hides it (a plain VGA with the VESA BIOS) for games that
+  carry SciTech's UniVBE library and would drive the ET4000 directly rather
+  than use the VESA BIOS: GTA's 24-bit version stops with error 211.3
+  otherwise (or run it with `-nounivbe`).
 - VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 and 32 bits per pixel,
   800x600 in 16 colours (102h / 6Ah, planar),
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI

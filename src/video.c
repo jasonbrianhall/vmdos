@@ -1407,6 +1407,16 @@ static void video_vbe_window_(struct regs *r)
    written, bits 4-7 the one read. With the two different (screen-to-screen
    copies) the window shows the read segment read-only and writes are
    emulated into the write segment. 1 MB, as on most ET4000 cards. */
+/* et4000=off on the command line: no ET4000 at all, a plain VGA with the
+   VESA BIOS. Games that carry SciTech's UniVBE library (UVBELib: GTA) probe
+   for known chips (3CDh written and read back, CRTC 33h) and, finding the
+   ET4000, drive it themselves instead of using the VESA BIOS, with what an
+   ET4000 has: no 24-bit modes (GTA24: error 211.3; it runs with -nounivbe).
+   Then 3CDh reads FFh and ignores writes, CRTC 19h-3Fh (the extended
+   registers) read 0 and ignore writes, and modes 2Eh/30h/38h aren't there. */
+static int et_hidden = -1;
+static int et_off(void) { if (et_hidden < 0) et_hidden = strstr(cmdline, "et4000=off") != 0; return et_hidden; }
+
 int video_et_split(u32 lin) { return et_split && vbe_on && lin >= 0xA0000 && lin < 0xB0000; }
 
 /* The window as the segments and the map mask want it: straight onto the
@@ -1474,6 +1484,7 @@ void video_et_write(u32 lin, u8 v)
 
 static int et_mode(int mode, int clear)
 {
+    if (et_off()) return 0;
     static const struct { u8 no; u16 vbe; u8 c1, c12, c7, c13; } t[] = {
         { 0x2E, 0x101, 0x4F, 0xDF, 0x3E, 0x50 },        /* 640x480: vertical display end 1DFh */
         { 0x30, 0x103, 0x63, 0x57, 0xF0, 0x64 },        /* 800x600: 257h */
@@ -2362,11 +2373,11 @@ static u32 video_port_in_(u16 port)
         return v; }
     case 0x3CA: return 0;
     case 0x3CC: return misc_out;
-    case 0x3CD: return et_seg;                     /* ET4000 segment select */
+    case 0x3CD: return et_off() ? 0xFF : et_seg;   /* ET4000 segment select */
     case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
-    case 0x3B5: case 0x3D5: return crtc_idx < 64 ? crtc[crtc_idx] : 0;   /* past the ET4000's: none
+    case 0x3B5: case 0x3D5: return crtc_idx < (et_off() ? 0x19 : 64) ? crtc[crtc_idx] : 0;   /* past the ET4000's: none
                                                     (wrapped, 50h read as 10h: an ARK chip ID to svgalib) */
     case 0x3BA: case 0x3DA: {
         atc_flip = 0;
@@ -2444,7 +2455,7 @@ static void video_port_out_(u16 port, u8 v)
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
-    case 0x3CD: et_segment(v); return;               /* ET4000 segment select */
+    case 0x3CD: if (!et_off()) et_segment(v); return;   /* ET4000 segment select */
     case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
@@ -2470,7 +2481,7 @@ static void video_port_out_(u16 port, u8 v)
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
-        if (crtc_idx >= 64) return;
+        if (crtc_idx >= (et_off() ? 0x19 : 64)) return;
         crtc[crtc_idx] = v;
         et_crtc();
         if (vbe_on && vbe_crtc_follow && (crtc_idx == 0x01 || crtc_idx == 0x07 || crtc_idx == 0x09 || crtc_idx == 0x12))
