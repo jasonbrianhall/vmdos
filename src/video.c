@@ -1196,6 +1196,19 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
 
 static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
 
+/* A mode's bytes a line as it is set. 24-bit ones get the next power of
+   two up (640: 2048, 800 and 1024: 4096), as SVGA BIOSes give them: then
+   no line, and so no 3-byte pixel, ever crosses a 64 KB bank, which banked
+   24-bit code relies on (it writes a pixel's three bytes with no bank
+   check between, and counts window space as if pixels were 2 bytes:
+   with 1920 bytes a line the colours shift at every bank). */
+static u32 vbe_mode_pitch(int m)
+{
+    u32 p = vmodes[m].w * vbe_bytespp(vmodes[m].bpp);
+    if (vmodes[m].bpp == 24) { u32 q = 1; while (q < p) q <<= 1; p = q; }
+    return p;
+}
+
 /* Which pages of vram were written since the last redraw, from the page
    tables' dirty bits, so refresh_vbe compares only the rows on those with
    vshadow (a 1024x768x32 screen is 3 MB to compare 60 times a second). The
@@ -1301,7 +1314,7 @@ static int vbe_find(u32 no)
 static void vbe_mode_info(int m, u32 a)
 {
     memset(gptr(a), 0, 256);
-    u32 bpp = vmodes[m].bpp, B = vbe_bytespp(bpp), pitch = vmodes[m].w * B;
+    u32 bpp = vmodes[m].bpp, pitch = vbe_mode_pitch(m);
     if (bpp == 4) {                             /* planar: bytes a line in each plane */
         pitch = vmodes[m].w / 8;
         wr16(a + 0x00, 0x11F);                  /* supported, TTY, colour, graphics; doublescan; no LFB */
@@ -1361,7 +1374,7 @@ static void vbe_set(int m, int clear)
     video_mode = vmodes[m].no;
     vbe_cur = vmodes[m].no;
     vbe_w = vmodes[m].w; vbe_h = vmodes[m].h; vbe_bpp = vmodes[m].bpp;
-    vbe_pitch = vbe_w * vbe_bytespp(vbe_bpp);
+    vbe_pitch = vbe_mode_pitch(m);
     vbe_start = 0;
     et_on = 0;
     vbe_mode_w = vbe_w; vbe_mode_h = vbe_h;
