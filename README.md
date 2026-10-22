@@ -429,7 +429,8 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
 - Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
   3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
   segment select register (3CDh, separate read and write segments), 1 MB.
-- VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 and 32 bits per pixel,
+- VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 (power-of-two line
+  pitch, so no pixel crosses a bank) and 32 bits per pixel,
   800x600 in 16 colours (102h / 6Ah, planar),
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
