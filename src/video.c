@@ -135,6 +135,15 @@ static int et_on;                                    /* an ET4000 mode: line pit
 static u32 vbe_w, vbe_h, vbe_bpp, vbe_pitch, vbe_start;
 static int vbe_crtc_follow;                 /* a VBE 3 mode set with CRTC timings: the display-end registers set the size */
 static u32 vbe_mode_w, vbe_mode_h;          /* the VESA mode's own size */
+static int vbe_interlace;                   /* VBE 3 timings interlaced: the CRTC counts one field, half the lines */
+static int vbe_flip_pending;                /* 4F07h BL=02h: a display start scheduled, its retrace not yet past */
+static u32 vbe_flip_at;                     /* when (PIT ticks) */
+/* Vertical retrace as 3DAh shows it, in PIT ticks: period and how long the
+   retrace bit stays on. 70 Hz for the BIOS modes; after a VBE 3 mode set
+   with a CRTCInfoBlock, the refresh its pixel clock and totals give. */
+#define VR_PERIOD_VGA 17045u
+#define VR_LEN_VGA    1100u
+static u32 vr_period = VR_PERIOD_VGA, vr_len = VR_LEN_VGA;
 static int full_redraw = 1, last_layout_mode = -1;
 
 static const u8 ega_atc[16] = { 0, 1, 2, 3, 4, 5, 0x14, 7, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F };
@@ -302,6 +311,8 @@ static void video_set_mode_(int mode, int clear)
 {
     mode &= 0x7F;
     vbe_off();
+    vr_period = VR_PERIOD_VGA; vr_len = VR_LEN_VGA;   /* a BIOS mode's own timing: 70 Hz */
+    vbe_interlace = 0;
     video_mode = mode;
     text_cols = (mode == 0 || mode == 1 || mode == 4 || mode == 5 || mode == 0x0D || mode == 0x13) ? 40 : 80;
     text_rows = 25;
@@ -1139,7 +1150,10 @@ static void refresh_fallback(void)
 }
 
 
-/* ---------------- VESA BIOS (VBE 2.0) ----------------
+/* ---------------- VESA BIOS (VBE 3.0) ----------------
+   Core functions 00h-0Bh: 2.0's set, plus 3.0's CRTC timings on mode set
+   (02h, below), scheduled display start (07h BL=02h/04h), pixel clocks
+   (0Bh), the linear-framebuffer mode info fields, and state save (04h).
    4 MB of video memory in kernel RAM, identity-mapped and open to the
    guest: protected-mode programs use it as the linear framebuffer at its
    real address (DPMI 0800h hands that back), real-mode ones through the
@@ -1148,6 +1162,8 @@ static void refresh_fallback(void)
    colour. Tables live in the BIOS segment at F000:C000. */
 #define VRAM_SIZE (4u << 20)
 #define VBE_DATA 0xFC000u
+#define VBE_MIN_CLOCK 1000000u                  /* VBE 3 pixel clocks taken (4F02h, 4F0Bh), Hz */
+#define VBE_MAX_CLOCK 400000000u
 static u8 *vram, *vshadow;
 static u32 vbe_bank;
 static u16 vbe_cur;
@@ -1275,7 +1291,9 @@ static void vbe_mode_info(int m, u32 a)
 {
     memset(gptr(a), 0, 256);
     u32 bpp = vmodes[m].bpp, B = vbe_bytespp(bpp), pitch = vmodes[m].w * B;
-    wr16(a + 0x00, 0x19F);                      /* supported, TTY, colour, graphics, LFB; doublescan (VBE 3) */
+    /* supported, TTY, colour, graphics, LFB; VBE 3: doublescan, interlace
+       (both through a CRTCInfoBlock) and triple buffering (4F07h BL=02h/04h) */
+    wr16(a + 0x00, 0x79F);
     wr8(a + 0x02, 7);                           /* window A: exists, readable, writable */
     wr16(a + 0x04, 64); wr16(a + 0x06, 64);     /* granularity, size (KB) */
     wr16(a + 0x08, 0xA000);
@@ -1286,13 +1304,21 @@ static void vbe_mode_info(int m, u32 a)
     wr8(a + 0x19, (u8)bpp); wr8(a + 0x1A, 1);
     wr8(a + 0x1B, bpp == 8 ? 4 : 6);            /* packed pixel / direct colour */
     u32 pages = VRAM_SIZE / (pitch * vmodes[m].h);
-    wr8(a + 0x1D, (u8)(pages > 256 ? 255 : pages - 1));
+    u8 last = (u8)(pages > 256 ? 255 : pages - 1);   /* image pages, less one */
+    wr8(a + 0x1D, last);
     wr8(a + 0x1E, 1);
     static const u8 masks[3][8] = { { 5, 10, 5, 5, 5, 0, 1, 15 }, { 5, 11, 6, 5, 5, 0, 0, 0 }, { 8, 16, 8, 8, 8, 0, 8, 24 } };
-    if (bpp != 8) memcpy(gptr(a + 0x1F), masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2], 8);
+    const u8 *mk = masks[bpp == 15 ? 0 : bpp == 16 ? 1 : 2];
+    if (bpp != 8) memcpy(gptr(a + 0x1F), mk, 8);
     wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
-    wr16(a + 0x32, (u16)pitch);                 /* VBE 3: linear bytes per line */
-    wr32(a + 0x3E, 400000000u);                 /* VBE 3: maximum pixel clock (timings are only followed for the size) */
+    /* VBE 3: the linear framebuffer's own layout. The same as the banked
+       one here, but VBE 3 clients read these fields (AdvanceMAME takes its
+       colour masks from them), so left zero they'd see no colour at all. */
+    wr16(a + 0x32, (u16)pitch);                 /* LinBytesPerScanLine */
+    wr8(a + 0x34, last);                        /* BnkNumberOfImagePages */
+    wr8(a + 0x35, last);                        /* LinNumberOfImagePages */
+    if (bpp != 8) memcpy(gptr(a + 0x36), mk, 8);   /* LinRedMaskSize .. LinRsvdFieldPosition */
+    wr32(a + 0x3E, VBE_MAX_CLOCK);              /* MaxPixelClock */
 }
 
 static void vbe_set(int m, int clear)
@@ -1317,6 +1343,7 @@ static void vbe_set(int m, int clear)
     et_on = 0;
     vbe_mode_w = vbe_w; vbe_mode_h = vbe_h;
     vbe_crtc_follow = 0;
+    vbe_flip_pending = 0;
     /* the CRTC as an SVGA has it in this mode: display end in 8-pixel
        character clocks and in lines, no doublescan (AdvanceMAME's VBE 3
        driver reads them back, then retunes them for the size it wants) */
@@ -1453,7 +1480,9 @@ static int et_mode(int mode, int clear)
 }
 
 /* The protected-mode interface's routines (4F0Ah): 47h set window,
-   48h set display start (CX:DX = byte offset / 4), 49h set palette. */
+   48h set display start (BL=00h/80h: CX:DX = byte offset / 4; VBE 3's
+   BL=02h/82h: ECX = byte offset, a scheduled flip), 49h set palette. */
+static void vbe_flip(u32 st);
 static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin);
 void video_vbe_pm(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin) { rlock_take(&video_lock); video_vbe_pm_(id, ebx, ecx, edx, pal_lin); rlock_drop(&video_lock); }
 static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
@@ -1462,6 +1491,10 @@ static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
         u32 b = edx & 0xFFFF;
         if ((ebx & 0xFF) == 0 && b * 65536 < VRAM_SIZE) { if (vbe_on) vbe_map_bank(b); else vbe_bank = b; }
     } else if (id == 0x48) {
+        if ((ebx & 0x7F) == 2) {
+            if (vbe_on && ecx <= VRAM_SIZE - vbe_pitch * vbe_h) vbe_flip(ecx);
+            return;
+        }
         u32 st = ((edx & 0xFFFF) << 16 | (ecx & 0xFFFF)) << 2;
         if (vbe_on && st + vbe_pitch * vbe_h <= VRAM_SIZE) vbe_start = st;
     } else if (id == 0x49 && pal_lin) {
@@ -1475,15 +1508,111 @@ static void video_vbe_pm_(int id, u32 ebx, u32 ecx, u32 edx, u32 pal_lin)
     }
 }
 
+/* ---------------- VBE 3.0 CRTC timings ----------------
+   4F02h with BX bit 11 set passes a CRTCInfoBlock at ES:DI:
+     00h HorizontalTotal  02h HorizontalSyncStart  04h HorizontalSyncEnd   (pixels)
+     06h VerticalTotal    08h VerticalSyncStart    0Ah VerticalSyncEnd     (lines)
+     0Ch Flags (0 doublescan, 1 interlaced, 2 -hsync, 3 -vsync)
+     0Dh PixelClock (Hz)  11h RefreshRate (0.01 Hz)
+   The vertical values count scan lines, so a doublescanned mode's are twice
+   its height; an interlaced one's are the whole frame's (both fields).
+   The BIOS programs the CRTC from them as an SVGA BIOS would: AdvanceMAME's
+   vbeline/vbe3 then reads the display-end registers back, checks they are
+   the mode's size (or twice it, doublescanned), and rewrites the CRTC for
+   the game's own modeline at the same scale, which vbe_crtc_size follows.
+   The refresh they give paces the vertical retrace 3DAh reports, so
+   programs that sync to it (AdvanceMAME's vsync, its clock calibration)
+   run at the modeline's rate. */
+struct vbe_timing { u32 ht, hss, hse, vt, vss, vse, flags, clock, refresh; };
+
+/* Reads and checks a CRTCInfoBlock. 0: one no CRTC could show; the mode set
+   then fails and leaves the current mode as it was. */
+static int vbe_timing_read(u32 a, struct vbe_timing *t)
+{
+    t->ht = rd16(a + 0x00); t->hss = rd16(a + 0x02); t->hse = rd16(a + 0x04);
+    t->vt = rd16(a + 0x06); t->vss = rd16(a + 0x08); t->vse = rd16(a + 0x0A);
+    t->flags = rd8(a + 0x0C); t->clock = rd32(a + 0x0D); t->refresh = rd16(a + 0x11);
+    if ((t->flags & 3) == 3) return 0;                  /* doublescan and interlace at once */
+    if (t->clock < VBE_MIN_CLOCK || t->clock > VBE_MAX_CLOCK) return 0;
+    if (t->hss >= t->hse || t->hse > t->ht || t->vss >= t->vse || t->vse > t->vt) return 0;
+    if (t->ht < 64 || t->vt < 64) return 0;
+    return 1;
+}
+
+/* Programs the CRTC from the timings, for the mode vbe_set just set: the
+   standard VGA layout (character clocks of 8 pixels, the vertical overflow
+   bits in 07h/09h), blanking from the end of the display to the end of sync
+   as AdvanceMAME's own CRTC code puts it, sync polarity in the misc output.
+   Interlaced: the CRTC counts one field, half the frame's lines. */
+static void vbe_timing_set(const struct vbe_timing *t)
+{
+    int ds = t->flags & 1, il = (t->flags & 2) != 0;
+    u32 vt = il ? t->vt / 2 : t->vt, vss = il ? t->vss / 2 : t->vss, vse = il ? t->vse / 2 : t->vse;
+    u32 vde = ds ? vbe_h * 2 : il ? vbe_h / 2 : vbe_h;  /* display end, in the CRTC's lines */
+    u32 hbs = vbe_w < t->hss ? vbe_w : t->hss, hbe = t->hse;
+    u32 vbs = vde < vss ? vde : vss, vbe = vse;
+    u32 v6 = vt - 2, v12 = vde - 1;
+    crtc[0x11] &= 0x7F;                                 /* registers 0-7 writable */
+    crtc[0x00] = (u8)(t->ht / 8 - 5);
+    crtc[0x01] = (u8)(vbe_w / 8 - 1);
+    crtc[0x02] = (u8)(hbs / 8);
+    crtc[0x03] = (u8)(0x80 | ((hbe / 8) & 0x1F));
+    crtc[0x04] = (u8)(t->hss / 8);
+    crtc[0x05] = (u8)(((hbe / 8) & 0x20) << 2 | ((t->hse / 8) & 0x1F));
+    crtc[0x06] = (u8)v6;
+    crtc[0x07] = (u8)(((v6 >> 8) & 1) | ((v12 >> 8) & 1) << 1 | ((vss >> 8) & 1) << 2 | ((vbs >> 8) & 1) << 3 |
+                      0x10 | ((v6 >> 9) & 1) << 5 | ((v12 >> 9) & 1) << 6 | ((vss >> 9) & 1) << 7);
+    crtc[0x09] = (u8)((ds ? 0x80 : 0) | 0x40 | ((vbs >> 9) & 1) << 5);   /* line compare bit 9 set: off */
+    crtc[0x10] = (u8)vss;
+    crtc[0x11] = (u8)((crtc[0x11] & 0x70) | (vse & 0x0F));
+    crtc[0x12] = (u8)v12;
+    crtc[0x15] = (u8)vbs;
+    crtc[0x16] = (u8)vbe;
+    crtc[0x18] = 0xFF;
+    misc_out = (u8)((misc_out & 0x3F) | ((t->flags & 4) ? 0x40 : 0) | ((t->flags & 8) ? 0x80 : 0));
+    vbe_interlace = il;
+
+    /* the retrace 3DAh shows: once a field, the blanking part of it on */
+    u32 hz100 = t->clock / t->ht * 100 / t->vt;         /* frames a second, x100 */
+    if (il) hz100 *= 2;                                 /* two fields a frame */
+    if (hz100 < 2000 || hz100 > 30000) hz100 = t->refresh >= 2000 && t->refresh <= 30000 ? t->refresh : 7000;
+    vr_period = 119318200u / hz100;                     /* PIT ticks (1193182 Hz) a field */
+    vr_len = vr_period * (vt > vde ? vt - vde : 1) / vt;
+    if (vr_len < vr_period / 64) vr_len = vr_period / 64;
+    if (vr_len > vr_period / 4) vr_len = vr_period / 4;
+
+    vbe_crtc_follow = 1;
+    kprintf("video: VESA mode %x, VBE 3 timings %u/%u/%u %u/%u/%u %u Hz clock%s%s: %u.%02u Hz\n",
+            vbe_cur, t->hss, t->hse, t->ht, t->vss, t->vse, t->vt, t->clock,
+            ds ? " doublescan" : "", il ? " interlaced" : "", hz100 / 100, hz100 % 100);
+}
+
+/* 4F07h BL=02h (and the PM interface's): a display start that takes effect
+   at the next retrace. vmdos shows it at once (the screen is redrawn from
+   vbe_start); BL=04h reports it done once a retrace has begun since. */
+static void vbe_flip(u32 st)
+{
+    vbe_start = st;
+    vbe_flip_at = vpit_clock();
+    vbe_flip_pending = 1;
+}
+static int vbe_flip_done(void)
+{
+    if (vbe_flip_pending && vpit_clock() / vr_period != vbe_flip_at / vr_period) vbe_flip_pending = 0;
+    return !vbe_flip_pending;
+}
+
 /* After a VBE 3 mode set with CRTC timings: the size the display-end
    registers give (AdvanceMAME's vbeline/vbe3 tunes them to the game's own
-   size, 224x288 and so on), within what the pitch and memory hold. */
+   size, 224x288 and so on), within what the pitch and memory hold. A
+   doublescanned CRTC counts each line twice, an interlaced one each field. */
 static void vbe_crtc_size(void)
 {
     u32 B = vbe_bytespp(vbe_bpp);
     u32 w = ((u32)crtc[0x01] + 1) * 8;
     u32 de = (crtc[0x12] | (crtc[0x07] & 0x02) << 7 | (crtc[0x07] & 0x40) << 3) + 1u;
-    u32 h = (crtc[0x09] & 0x80) || (crtc[0x09] & 0x1F) ? de / (((crtc[0x09] & 0x1F) + 1) * ((crtc[0x09] & 0x80) ? 2 : 1)) : de;
+    u32 h = de / scan_per_row();
+    if (vbe_interlace) h *= 2;
     if (w < 64 || h < 64 || w * B > vbe_pitch || h * vbe_pitch > VRAM_SIZE) return;   /* mid-change */
     if (w == vbe_w && h == vbe_h) return;
     vbe_w = w; vbe_h = h;
@@ -1492,10 +1621,78 @@ static void vbe_crtc_size(void)
     kprintf("video: VESA mode %x shown as %ux%u (CRTC)\n", vbe_cur, vbe_w, vbe_h);
 }
 
+/* 4F04h: save / restore the video state. DL: 00h buffer size (BX, in
+   64-byte blocks), 01h save, 02h restore, to / from ES:BX. CX says what:
+   bits 0-2 as INT 10h AH=1Ch (registers, BIOS data, DAC: video_state does
+   those), bit 3 the SVGA state, the VESA side of it: which mode, its size,
+   pitch, display start, bank, DAC width and any VBE 3 timings. That block
+   comes first in the buffer, the AH=1Ch state after it, so a restore puts
+   the mode back before the registers that go with it. */
+#define VBE_SVGA_STATE 128
+#define VBE_STATE_MAGIC 0x53454256u             /* "VBES" */
+static void video_state(struct regs *r);
+static void vbe_state(struct regs *r)
+{
+    u16 what = CX(r) & 0x0F;
+    u8 fn = DL(r);
+    if (fn > 2) { AX(r) = 0x014F; return; }
+    struct regs t = *r;                         /* the AH=1Ch part, past the SVGA block */
+    AL(&t) = fn; CX(&t) = what & 7;
+    if (what & 8) t.v86_es += VBE_SVGA_STATE / 16;
+    if (fn == 0) {
+        u32 n = 0;
+        if (what & 7) { video_state(&t); n = BX(&t); }
+        BX(r) = (u16)(n + (what & 8 ? VBE_SVGA_STATE / 64 : 0));
+        AX(r) = 0x004F; return;
+    }
+    if (what & 8) {
+        u32 a = LIN(r->v86_es, BX(r));
+        u32 s[16];                              /* 64 bytes of these, then CRTC 20h-3Fh (the ET4000's) */
+        if (fn == 1) {
+            memset(gptr(a), 0, VBE_SVGA_STATE);
+            s[0] = VBE_STATE_MAGIC; s[1] = (u32)vbe_on; s[2] = (u32)video_mode; s[3] = vbe_cur;
+            s[4] = vbe_w; s[5] = vbe_h; s[6] = vbe_pitch; s[7] = vbe_start; s[8] = vbe_bank;
+            s[9] = (u32)dac8; s[10] = (u32)vbe_crtc_follow; s[11] = (u32)vbe_interlace;
+            s[12] = vr_period; s[13] = vr_len; s[14] = (u32)et_on | (u32)et_seg << 8;
+            s[15] = misc_out;
+            for (int i = 0; i < 16; i++) wr32(a + i * 4, s[i]);
+            for (int i = 0; i < 64 - 32; i++) wr8(a + 64 + i, crtc[32 + i]);
+        } else {
+            for (int i = 0; i < 16; i++) s[i] = rd32(a + i * 4);
+            if (s[0] != VBE_STATE_MAGIC) { AX(r) = 0x014F; return; }
+            if (s[1]) {
+                int m = vbe_find(s[3]);
+                if (m < 0) { AX(r) = 0x014F; return; }
+                if (!vbe_on || vbe_cur != s[3] || video_mode != (int)s[2])   /* memory kept */
+                    if (s[2] == s[3] || !et_mode((int)s[2], 0)) vbe_set(m, 0);   /* else an ET4000 BIOS mode */
+                if (s[4] * vbe_bytespp(vbe_bpp) <= s[6] && s[5] * s[6] <= VRAM_SIZE && s[7] <= VRAM_SIZE - s[5] * s[6]) {
+                    vbe_w = s[4]; vbe_h = s[5]; vbe_pitch = s[6]; vbe_start = s[7];
+                }
+                if (s[8] * 65536 < VRAM_SIZE) vbe_map_bank(s[8]);
+                if ((int)s[9] != dac8) {
+                    for (int i = 0; i < 256; i++)
+                        for (int c = 0; c < 3; c++) { u8 v = vga_dac[i][c]; vga_dac[i][c] = s[9] ? (u8)(v << 2 | v >> 4) : v >> 2; }
+                    dac8 = (int)s[9];
+                }
+                vbe_crtc_follow = (int)s[10]; vbe_interlace = (int)s[11];
+                if (s[12] >= 1000 && s[13] < s[12]) { vr_period = s[12]; vr_len = s[13]; }
+                if (et_on) { et_seg = (u8)(s[14] >> 8); et_remap(); }
+                misc_out = (u8)s[15];
+            } else if (vbe_on || video_mode != (int)s[2]) {
+                video_set_mode((int)s[2], 0);   /* back to a VGA mode, memory kept */
+            }
+            for (int i = 0; i < 64 - 32; i++) crtc[32 + i] = rd8(a + 64 + i);
+            full_redraw = 1; last_layout_mode = -1; palette_dirty = 1;
+        }
+    }
+    if (what & 7) video_state(&t);
+    AX(r) = 0x004F;
+}
+
 static void vbe_call(struct regs *r)
 {
     u32 es_di = LIN(r->v86_es, DI(r));
-    if ((AL(r) <= 1 || AL(r) == 9) && dpmi_reflected_buffer(r, &es_di))
+    if ((AL(r) <= 1 || AL(r) == 9 || (AL(r) == 2 && (BX(r) & 0x0800))) && dpmi_reflected_buffer(r, &es_di))
         dbg(1, "VESA %02x from protected mode: buffer at %x\n", AL(r), es_di);
     vbe_tables();
     switch (AL(r)) {
@@ -1503,7 +1700,7 @@ static void vbe_call(struct regs *r)
         int v2 = rd32(es_di) == 0x32454256u;     /* "VBE2" */
         memset(gptr(es_di + 4), 0, v2 ? 508 : 252);
         wr32(es_di, 0x41534556u);                /* "VESA" */
-        wr16(es_di + 4, 0x0300);                 /* VBE 3.0: CRTC timings on mode set (AdvanceMAME's vbeline) */
+        wr16(es_di + 4, 0x0300);                 /* VBE 3.0 */
         wr32(es_di + 6, 0xF0000000u | (VBE_DATA & 0xFFFF));
         wr32(es_di + 0x0A, 1);                   /* capabilities: DAC switchable to 8 bits */
         wr32(es_di + 0x0E, 0xF0000000u | ((VBE_DATA + 0x80) & 0xFFFF));
@@ -1523,11 +1720,14 @@ static void vbe_call(struct regs *r)
         if ((bx & 0x1FF) < 0x100) { video_set_mode(bx & 0x7F, !(bx & 0x8000)); AX(r) = 0x004F; return; }
         int m = vbe_find(bx);
         if (m < 0) { AX(r) = 0x014F; return; }
-        vbe_set(m, !(bx & 0x8000));
-        if (bx & 0x0800) {                      /* VBE 3: with a CRTCInfoBlock; its timings are a monitor's business */
-            vbe_crtc_follow = 1;
-            dbg(1, "video: VESA mode %x with CRTC timings (%u Hz pixel clock)\n", vbe_cur, rd32(es_di + 0x0D));
+        struct vbe_timing t;                    /* VBE 3: bit 11, a CRTCInfoBlock at ES:DI */
+        if ((bx & 0x0800) && !vbe_timing_read(es_di, &t)) {
+            kprintf("video: VESA mode %x: CRTC timings refused (%u/%u/%u %u/%u/%u, %u Hz, flags %x)\n",
+                    bx & 0x1FF, t.hss, t.hse, t.ht, t.vss, t.vse, t.vt, t.clock, t.flags);
+            AX(r) = 0x014F; return;
         }
+        vbe_set(m, !(bx & 0x8000));
+        if (bx & 0x0800) vbe_timing_set(&t);
         AX(r) = 0x004F; return; }
     case 0x03: BX(r) = vbe_on ? vbe_cur : (u16)video_mode; AX(r) = 0x004F; return;
     case 0x05: video_vbe_window(r); return;
@@ -1554,7 +1754,12 @@ static void vbe_call(struct regs *r)
             vbe_start = st;
         } else if (BL(r) == 1) {
             BH(r) = 0; CX(r) = (u16)(vbe_start % vbe_pitch / B); DX(r) = (u16)(vbe_start / vbe_pitch);
-        }
+        } else if ((BL(r) & 0x7F) == 2) {       /* VBE 3: schedule a display start, ECX = byte offset */
+            if (r->ecx > VRAM_SIZE - vbe_pitch * vbe_h) { AX(r) = 0x014F; return; }
+            vbe_flip(r->ecx);
+        } else if (BL(r) == 4) {                /* VBE 3: has the scheduled one been shown? */
+            CX(r) = (u16)vbe_flip_done();
+        } else { AX(r) = 0x014F; return; }      /* 03h/83h: stereo, not offered */
         AX(r) = 0x004F; return; }
     case 0x08:
         /* BL=0: set the width (BH: 8 for 8 bits, anything less: 6), BL=1: get it.
@@ -1571,9 +1776,13 @@ static void vbe_call(struct regs *r)
         }
         if (BL(r) <= 1) { BH(r) = dac8 ? 8 : 6; AX(r) = 0x004F; } else AX(r) = 0x014F;
         return;
-    case 0x0B:                                   /* VBE 3: the closest pixel clock (BL=0): any */
-        if (BL(r) != 0) { AX(r) = 0x014F; return; }
-        AX(r) = 0x004F; return;                  /* ECX stays: the clock asked for */
+    case 0x0B:                                   /* VBE 3: the closest pixel clock (BL=0, ECX Hz, DX mode) */
+        if (BL(r) != 0 || ((DX(r) & 0x1FF) >= 0x100 && vbe_find(DX(r)) < 0)) { AX(r) = 0x014F; return; }
+        /* any clock in range is exact: ECX stays, or the nearest end of the range */
+        if (r->ecx < VBE_MIN_CLOCK) r->ecx = VBE_MIN_CLOCK;
+        if (r->ecx > VBE_MAX_CLOCK) r->ecx = VBE_MAX_CLOCK;
+        AX(r) = 0x004F; return;
+    case 0x04: vbe_state(r); return;
     case 0x0A:                                   /* protected-mode interface (bios.asm vbe_pmi) */
         if (BL(r) != 0) { AX(r) = 0x014F; return; }
         r->v86_es = 0xF000; DI(r) = rd16(0xF0228); CX(r) = rd16(0xF022A);
@@ -2054,7 +2263,7 @@ static u32 video_port_in_(u16 port)
         atc_flip = 0;
         u32 t = vpit_clock();
         u8 v = 0;
-        if (t % 17045 < 1100) v |= 0x09;          /* vertical retrace (70 Hz) */
+        if (t % vr_period < vr_len) v |= 0x09;    /* vertical retrace (70 Hz, or the VBE 3 timings' refresh) */
         else if (t % 38 < 8) v |= 0x01;           /* horizontal blanking */
         return v; }
     }
