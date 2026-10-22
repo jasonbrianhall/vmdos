@@ -227,8 +227,21 @@ int disk_write(u32 lba, u32 n, const void *buf)
 {
     if (lba >= disk_sectors || n > disk_sectors - lba) return 0x04;
     if (!on_dev) { memcpy(disk_image + lba * 512, buf, n * 512); return 0; }
-    if (lba < pstart) return 0x03;                             /* only the partition is writable */
-    return part_write(lba, n, buf) ? 0x20 : 0;
+    /* The made-up MBR and the gap before the partition: a write is taken
+       (Windows 9x Setup writes its MBR code and stops with SU0409, "virus
+       detection", when that fails). The MBR's code lands in vmbr, so reading
+       it back matches; its partition table stays vmdos's. Nothing reaches
+       the real disk, and the gap's sectors still read as zeros. */
+    const u8 *s = buf;
+    if (lba < pstart) {
+        static int logged;
+        u32 k = pstart - lba < n ? pstart - lba : n;
+        if (lba == 0) memcpy(vmbr, s, 446);
+        if (!logged++) kprintf("disk: a write to the MBR or before C:'s partition (LBA %u): kept in memory only\n", lba);
+        lba += k; n -= k; s += k * 512;
+        if (!n) return 0;
+    }
+    return part_write(lba, n, s) ? 0x20 : 0;
 }
 
 /* The FAT partition DOS boots from, through the same view (for cd.c / bios.c). */
