@@ -16,6 +16,7 @@ enum {
     RDBAL = 0x2800, RDBAH = 0x2804, RDLEN = 0x2808, RDH = 0x2810, RDT = 0x2818, RDTR = 0x2820,
     TDBAL = 0x3800, TDBAH = 0x3804, TDLEN = 0x3808, TDH = 0x3810, TDT = 0x3818, TIDV = 0x3820,
     TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, RXDCTL0 = 0x2828, TARC0 = 0x3840, TARC1 = 0x3940,
+    TDFH = 0x3410, TDFT = 0x3418, TDFHS = 0x3420, TDFTS = 0x3428, TDFPC = 0x3430,   // transmit FIFO
     RFCTL = 0x5008, KMRNCTRLSTA = 0x34, FEXTNVM4 = 0x24, FFLT_DBG = 0x5F04, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404, PBA = 0x1000, MANC = 0x5820,
     // statistics (clear on read)
     CRCERRS = 0x4000, RXERRC = 0x400C, MPC = 0x4010, GPRC = 0x4074, BPRC = 0x4078, GPTC = 0x4080,
@@ -430,6 +431,12 @@ void stats(Card& c, bool force)
                 c.name, pci_read(c.pci, 4) & 0xFFFF, r32(c, TDBAL), r32(c, TDLEN), r32(c, RDBAL), r32(c, TXDCTL0),
                 r32(c, TARC0), r32(c, PBA), r32(c, CTRL_EXT), r32(c, FWSM), r32(c, MANC), r32(c, PHY_CTRL),
                 r32(c, EXTCNF_CTRL), (uint32_t)tx[0].addr, tx[0].len, tx[0].cmd);
+    // Which side of transmit stopped: the FIFO tail moves (and its packet
+    // count goes up) when DMA has fetched a frame into the card; the head
+    // moves when the MAC sends it on to the PHY. Neither: DMA never started.
+    kprintf("net: %s: tx FIFO head %x tail %x (saved %x/%x), %u frames in it; TXDCTL1 %x\n",
+            c.name, r32(c, TDFH), r32(c, TDFT), r32(c, TDFHS), r32(c, TDFTS), r32(c, TDFPC) & 0x1FFF,
+            r32(c, TXDCTL1));
 }
 
 void poll(Card& c)
