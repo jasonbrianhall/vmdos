@@ -188,7 +188,7 @@ static const u8 exepack_code[] = { 0x8C, 0xC0, 0x05, 0x10, 0x00, 0x0E, 0x1F, 0xA
 
 static void exepack_find(u16 seg)
 {
-    for (u32 p = seg; p < 0xA000; p++) {
+    for (u32 p = seg; p < 0x9FFF; p++) {
         u32 a = p << 4, code;
         if (rd16(a + 0x0E) == 0x4252) code = a + 0x10;           /* "RB": 16-byte header */
         else if (rd16(a + 0x10) == 0x4252) code = a + 0x12;      /* 18-byte header (skip_len) */

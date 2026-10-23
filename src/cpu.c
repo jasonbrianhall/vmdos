@@ -119,7 +119,11 @@ static void map_page64(u32 lin, u64 phys, u32 flags)
     if (hv_map_hook && lin < (10u << 20)) hv_map_hook(lin);
 }
 
-void map_page(u32 lin, u32 phys, u32 flags) { map_page64(lin, phys, flags); }
+void map_page(u32 lin, u32 phys, u32 flags)
+{
+    if (v3_on && lin - 0xA0000u < 0x20000u) phys = flags = 0;   /* voodoo3: the VGA's memory is the card's, every access trapped */
+    map_page64(lin, phys, flags);
+}
 
 /* Ring 3 can read (write: and write) linear lin without a fault. Makes no
    page tables. */

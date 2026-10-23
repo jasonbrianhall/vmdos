@@ -69,9 +69,24 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
         dw lfn_open                      ; 0232  long-name open on a 9p drive (fs9p.cpp)
         dw bios32_dir                    ; 0234  BIOS32 service directory (vpci.c turns it on)
+        dw rom_post                      ; 0236  voodoo3: the card's BIOS initialised, then the boot sector
 
 ; ---- stubs ----
 dummy:  iret
+
+; voodoo3: as a PC's BIOS before booting, the video card's own BIOS is run
+; (its init entry, C000:0003, AX = its bus and device/function: 00h, 08h);
+; it takes INT 10h. Then the boot sector, with the registers it was given.
+rom_post:
+        pushad
+        push ds
+        push es
+        mov ax, 0x0008
+        call 0xC000:0x0003
+        pop es
+        pop ds
+        popad
+        jmp 0x0000:0x7C00
 
 ; INT 10h: the monitor does the work; after a mode set in VMHV it returns
 ; here (instead of IRETing for us) with a list of the register writes the

@@ -896,6 +896,10 @@ int hv_start(int key)
     /* A video BIOS ROM at C000h (32 KB), as on any PC with a VGA card: the
        55AAh signature, a checksum, and INT 10h entering it (a far jump to
        vmdos's INT 10h stub). Windows' display code expects one there. */
+    u32 v3len;
+    if (v3_rom(&v3len)) {                                         /* voodoo3: the card's own BIOS there (bios_init copied it) */
+        for (u32 a = 0; a < v3len; a += 4096) map_page(HOLE_LO + a, (u32)(uintptr_t)gptr(HOLE_LO + a), 5);
+    } else {
     if (!vrom) {
         vrom = phys_alloc(VROM_SIZE);
         memset(vrom, 0xFF, VROM_SIZE);
@@ -909,8 +913,9 @@ int hv_start(int key)
         vrom[VROM_SIZE - 1] = (u8)-sum;
     }
     for (u32 a = 0; a < VROM_SIZE; a += 4096) map_page(HOLE_LO + a, (u32)(uintptr_t)vrom + a, 5);
-    tlb_flush();
     wr16(0x10 * 4, 0x0004); wr16(0x10 * 4 + 2, 0xC000);     /* INT 10h into the ROM */
+    }
+    tlb_flush();
     menu_wait = !key;
     menu_t0 = 0;
     if (!key) key = menu_choice();

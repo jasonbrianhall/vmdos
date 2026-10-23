@@ -1,28 +1,24 @@
-/* A 3dfx Voodoo 3 for the DOS guest: 86Box's Voodoo 3D and 2D engines
-   (vid_voodoo_*.c, as upstream) behind the Voodoo 3's own registers, which
-   come from 86Box's vid_voodoo_banshee.c (Sarah Walker, the 86Box team;
-   GPL v2) with its SVGA side taken out: vmdos's VGA (video.c) is the VGA,
-   and the card's VGA registers in its I/O space lead there.
+/* The Voodoo 3 in vmdos: 86Box's card as 86Box runs it (the Voodoo 3 3000
+   of vid_voodoo_banshee.c on 86Box's SVGA core, vid_svga.c, with its own
+   BIOS ROM, built in), and under it what 86Box's machine gives it: memory
+   and I/O mappings, PCI configuration, the ROM, timers, the monitor it
+   draws into. With voodoo3 on the command line the card is the PC's VGA:
+   ports 3B0h-3DFh, A0000h-BFFFFh and INT 10h (its BIOS, copied to C0000h)
+   are the card's, vmdos's own VGA steps aside, and the screen shows what
+   the card draws (monitors[0]'s bitmap, as 86Box's window would).
 
-   The card: PCI 121Ah:0005h, 16 MB. BAR0 (32 MB) holds the registers (I/O
-   remap, command FIFO, 2D, 3D, texture download, 3D LFB), BAR1 (32 MB) the
-   linear frame buffer (where Glide writes its command FIFO), BAR2 256 I/O
-   ports. Both memory BARs sit at linear addresses with nothing mapped, so
-   every access faults and the instruction is emulated (mememu.c) into
-   v3_mmio_read / v3_mmio_write. The engines run on green threads
-   (v3sched.c); everything here runs on the boot CPU with the guest's x87
-   state put aside (v3_enter). The screen: v3_display / v3_row, called by
-   video.c's redraw, show the desktop surface and the overlay (where Glide
-   puts the 3D picture) once the video processor is on. */
+   Guest accesses to the card's memory fault and are emulated (mememu.c)
+   into v3_mmio_read / v3_mmio_write, which find the mapping 86Box's code
+   registered; port accesses come through v3_io. The frame buffer (BAR1) is
+   mapped straight onto the card's memory where the card needn't see the
+   writes. The card's code runs with the guest's x87 state put aside
+   (v3_enter); its threads are green threads (v3sched.c), its timers
+   86Box's timer.c counting PIT clocks. */
 #include <voodoo_shim.h>
+#include <86box/vid_svga.h>
 #include <86box/vid_voodoo_common.h>
-#include <86box/vid_voodoo_banshee_blitter.h>
-#include <86box/vid_voodoo_display.h>
-#include <86box/vid_voodoo_fb.h>
-#include <86box/vid_voodoo_fifo.h>
-#include <86box/vid_voodoo_regs.h>
-#include <86box/vid_voodoo_render.h>
-#include <86box/vid_voodoo_texture.h>
+#include <86box/machine.h>
+#include <86box/pit.h>
 #include "../voodoo3.h"
 
 typedef uint8_t u8;
@@ -34,28 +30,40 @@ extern char cmdline[512];
 void *phys_alloc(u32 bytes);
 void *phys_try_alloc(u32 bytes);
 u32 linear_hole(u32 len, u32 align);
-u32 video_port_in(u16 port);
-void video_port_out(u16 port, u8 v);
-int video_vretrace(void);
-u32 video_frame_no(void);
-extern u8 vga_dac[256][3];
-extern u8 crtc[64];
-void v3_run(void);
 void map_page(u32 lin, u32 phys, u32 flags);
 void tlb_flush_range(u32 lin, u32 len);
 void hv_map_gpa(u32 gpa, u32 host);
+void v3_run(void);
 void v3_poll_timers(void);
 void v3_sched_init(void);
 
-/* ---------------- what the Voodoo code expects of 86Box ---------------- */
+/* v3card.c */
+const device_t *v3_device(void);
+voodoo_t *v3_card_voodoo(void *p);
+svga_t *v3_card_svga(void *p);
+uint32_t v3_card_bar(void *p, int n);
+int v3_card_mem_on(void *p);
+
+/* v3rom.S: roms/voodoo3/3k12sd.rom, when the build had it */
+extern const u8 v3_rom_start[], v3_rom_end[];
+
+/* ---------------- what 86Box's code expects of 86Box ---------------- */
 int v3_log_on;
 int cycles;
-int pci_burst_time = 1, pci_nonburst_time = 1;
-uint32_t mem_size;
-double cpuclock = 33333333.0;
+int pci_burst_time = 1, pci_nonburst_time = 1, agp_burst_time = 1, agp_nonburst_time = 1;
+double cpuclock = 1193182.0;                   /* timers count PIT clocks */
+uint64_t VGACONST1, VGACONST2;
 cpu_state_t cpu_state;
-monitor_t monitors[1];
-int changeframecount = 2;
+machine_t machines[1];
+int machine;
+double isa_timing = 1.0;
+int suppress_overscan, enable_overscan;
+int xga_active, ibm8514_active;
+monitor_t monitors[MONITORS_NUM];
+int monitor_index_global;
+uint32_t *video_6to8, *video_8togs, *video_8to32, *video_15to32, *video_16to32;
+uint8_t edatlookup[4][4];
+dbcs_font_t *fontdatksc5601, *fontdatksc5601_user;
 
 static u8 *arena;                              /* small allocations: one block, never given back */
 static u32 arena_left;
@@ -65,11 +73,13 @@ void *v3_calloc(size_t n, size_t sz)
     if (len >= 32768) {
         void *p = phys_try_alloc((len + 4095) & ~4095u);
         if (!p) panic("voodoo3: out of memory (%u bytes)", len);
-        return p;                              /* zeroed */
+        memset(p, 0, len);
+        return p;
     }
     len = (len + 15) & ~15u;
     if (len > arena_left) {
         arena = phys_alloc(256 * 1024);
+        memset(arena, 0, 256 * 1024);
         arena_left = 256 * 1024;
     }
     void *p = arena;
@@ -88,13 +98,9 @@ void v3_fatal(const char *fmt, ...)
     kprintf("voodoo3: %s", b);                /* 86Box stops; vmdos goes on */
 }
 
-uint32_t mem_readl_phys(uint32_t addr)        /* AGP: none, it's a PCI card */
-{
-    (void)addr;
-    return 0xFFFFFFFFu;
-}
+double round(double x) { return x < 0 ? -floor(-x + 0.5) : floor(x + 0.5); }
 
-static int config_int(const char *n)
+int device_get_config_int(const char *n)
 {
     if (!strcmp(n, "bilinear")) return 1;
     if (!strcmp(n, "dithersub")) return 1;
@@ -105,211 +111,263 @@ static int config_int(const char *n)
     if (!strcmp(n, "memory")) return 16;
     return 0;
 }
-int device_get_config_int(const char *name) { return config_int(name); }
+const char *device_get_config_bios(const char *n) { (void)n; return ""; }
+const char *device_get_bios_file(const device_t *d, const char *n, unsigned int i) { (void)d; (void)n; (void)i; return ""; }
+uint32_t device_get_bios_local(const device_t *d, const char *n) { (void)d; (void)n; return 0; }
+uint64_t device_get_bios_flags(const device_t *d, const char *n) { (void)d; (void)n; return 0; }
+void video_clamp_vram(uint64_t f, int *s) { (void)f; (void)s; }
 
-/* ---------------- the card ---------------- */
-#define VRAM_MB 16
-/* Its 256 I/O ports at D100h, not the usual D000h: Windows 9x without a
-   PnP BIOS takes the board's own devices (DMA, PIC, PIT, keyboard: 00h-FFh)
-   as ISA with 10-bit decoding, so their aliases cover every xx00h-xxFFh
-   with xx & 3 == 0, and a card there gets Code 12 with nothing in the
-   conflict list. D100h-D1FFh aliases 100h-1FFh, where nothing is. */
-#define V3_IO_BASE 0xD100
+uint32_t mem_readl_phys(uint32_t addr) { (void)addr; return 0xFFFFFFFFu; }   /* AGP only; this is the PCI card */
+void dma_bm_read(uint32_t a, uint8_t *d, int n, int s) { (void)a; (void)s; memset(d, 0xFF, n); }
 
-typedef struct banshee_t {
-    u8 *vram;
-    u32 vram_size, vram_mask;
-    u8 *changedvram;
+/* no monitor on the DDC lines, nothing on the I2C bus */
+void *i2c_gpio_init(char *n) { (void)n; return 0; }
+void i2c_gpio_close(void *p) { (void)p; }
+void i2c_gpio_set(void *p, uint8_t scl, uint8_t sda) { (void)p; (void)scl; (void)sda; }
+uint8_t i2c_gpio_get_scl(void *p) { (void)p; return 1; }
+uint8_t i2c_gpio_get_sda(void *p) { (void)p; return 1; }
+void *i2c_gpio_get_bus(void *p) { (void)p; return 0; }
+void *ddc_init(void *i2c) { (void)i2c; return 0; }
+void ddc_close(void *e) { (void)e; }
 
-    uint8_t pci_regs[256];
+/* XGA and 8514/A: not on this card */
+uint8_t xga_read_test(uint32_t a, void *p) { (void)a; (void)p; return 0xFF; }
+void xga_write_test(uint32_t a, uint8_t v, void *p) { (void)a; (void)v; (void)p; }
+void xga_recalctimings(svga_t *s) { (void)s; }
+void xga_set_poll(svga_t *s) { (void)s; }
+void rivatimer_init(void) { }
+void ibm8514_recalctimings(svga_t *s) { (void)s; }
+void ibm8514_set_poll(svga_t *s) { (void)s; }
 
-    uint32_t memBaseAddr0;
-    uint32_t memBaseAddr1;
-    uint32_t ioBaseAddr;
+/* ---------------- the monitor ----------------
+   86Box's window: the card draws scan lines into monitors[0].target_buffer
+   and, once a frame, names the part of it that is the picture. */
+static volatile int blit_x, blit_y, blit_w, blit_h;
+void video_inform_monitor(int type, const video_timings_t *t, int m) { (void)type; (void)t; (void)m; }
+void video_wait_for_buffer_monitor(int m) { (void)m; }
+void set_screen_size_monitor(int x, int y, int m) { (void)x; (void)y; (void)m; }
+uint8_t video_force_resize_get_monitor(int m) { (void)m; return 0; }
+void video_force_resize_set_monitor(uint8_t r, int m) { (void)r; (void)m; }
+void video_blit_memtoscreen_monitor(int x, int y, int w, int h, int m)
+{
+    (void)m;
+    blit_x = x; blit_y = y; blit_w = w; blit_h = h;
+}
+void video_lightpen_check_trigger_strobe(int a, int b, int c, int d, double e, int m) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)m; }
+void video_lightpen_hsync(void) { }
+void video_lightpen_vsync(void) { }
 
-    uint32_t agpInit0;
-    uint32_t dramInit0, dramInit1;
-    uint32_t lfbMemoryConfig;
-    uint32_t miscInit0, miscInit1;
-    uint32_t pciInit0;
-    uint32_t vgaInit0, vgaInit1;
+static u32 calc_6to8(int c) { int ic = c == 64 ? 63 : c & 0x3f; return (u32)(ic * 255 / 63) & 0xff; }
+static u32 rgb(int r, int g, int b) { return 0xff000000u | (u32)r << 16 | (u32)g << 8 | (u32)b; }
+static u32 calc_15to32(int c) { return rgb(((c >> 10) & 31) * 255 / 31, ((c >> 5) & 31) * 255 / 31, (c & 31) * 255 / 31); }
+static u32 calc_16to32(int c) { return rgb(((c >> 11) & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31); }
+static u32 calc_8to32(int c) { return rgb(((c >> 5) & 7) * 255 / 7, ((c >> 2) & 7) * 255 / 7, (c & 3) * 255 / 3); }
 
-    uint32_t command_2d;
-    uint32_t srcBaseAddr_2d;
+static void video_tables(void)                 /* 86Box's video_init and video_monitor_init, what of them the card uses */
+{
+    for (int c = 0; c < 4; c++)
+        for (int d = 0; d < 4; d++) {
+            edatlookup[c][d] = 0;
+            if (c & 1) edatlookup[c][d] |= 1;
+            if (d & 1) edatlookup[c][d] |= 2;
+            if (c & 2) edatlookup[c][d] |= 0x10;
+            if (d & 2) edatlookup[c][d] |= 0x20;
+        }
+    video_6to8 = calloc(4, 256);
+    video_8togs = calloc(4, 256);
+    video_8to32 = calloc(4, 256);
+    for (int c = 0; c < 256; c++) {
+        video_6to8[c] = calc_6to8(c);
+        video_8togs[c] = c | c << 16 | c << 24;
+        video_8to32[c] = calc_8to32(c);
+    }
+    video_15to32 = calloc(4, 65536);
+    video_16to32 = calloc(4, 65536);
+    for (int c = 0; c < 65536; c++) {
+        video_15to32[c] = calc_15to32(c & 0x7fff);
+        video_16to32[c] = calc_16to32(c);
+    }
+    monitor_t *m = &monitors[0];
+    m->mon_xsize = 640; m->mon_ysize = 480;
+    m->mon_res_x = 640; m->mon_res_y = 480;
+    m->mon_bpp = 8;
+    m->mon_changeframecount = 2;
+    bitmap_t *b = calloc(1, sizeof *b);
+    b->w = 2048; b->h = 2048;
+    b->dat = calloc(2048 * 2048, 4);
+    for (int i = 0; i < 2048; i++) b->line[i] = b->dat + i * 2048;
+    for (int i = 2048; i < 2112; i++) b->line[i] = b->dat + 2047 * 2048;
+    m->target_buffer = b;
+    m->mon_pal_lookup = calloc(4, 256);
+    m->mon_cga_palette = calloc(1, sizeof(int));
+    m->mon_force_resize = 1;
+}
 
-    uint32_t pllCtrl0, pllCtrl1, pllCtrl2;
+/* ---------------- memory mappings (86Box's mem.c, the part a card uses) ---------------- */
+static mem_mapping_t *maps;                    /* newest first */
 
-    uint32_t dacMode;
-    int      dacAddr;
-    uint32_t pallook[512];                     /* the video processor's CLUTs (gamma) */
-    int      pal_written;
+void mem_mapping_add(mem_mapping_t *map, uint32_t base, uint32_t size,
+                     uint8_t (*read_b)(uint32_t, void *), uint16_t (*read_w)(uint32_t, void *), uint32_t (*read_l)(uint32_t, void *),
+                     void (*write_b)(uint32_t, uint8_t, void *), void (*write_w)(uint32_t, uint16_t, void *), void (*write_l)(uint32_t, uint32_t, void *),
+                     uint8_t *exec, uint32_t fl, void *priv)
+{
+    map->base = base; map->size = size; map->mask = 0xffffffff;
+    map->read_b = read_b; map->read_w = read_w; map->read_l = read_l;
+    map->write_b = write_b; map->write_w = write_w; map->write_l = write_l;
+    map->exec = exec; map->flags = fl; map->priv = priv;
+    map->enable = size != 0;
+    map->prev = 0; map->next = maps;
+    maps = map;
+}
+void mem_mapping_set_handler(mem_mapping_t *map,
+                             uint8_t (*read_b)(uint32_t, void *), uint16_t (*read_w)(uint32_t, void *), uint32_t (*read_l)(uint32_t, void *),
+                             void (*write_b)(uint32_t, uint8_t, void *), void (*write_w)(uint32_t, uint16_t, void *), void (*write_l)(uint32_t, uint32_t, void *))
+{
+    map->read_b = read_b; map->read_w = read_w; map->read_l = read_l;
+    map->write_b = write_b; map->write_w = write_w; map->write_l = write_l;
+}
+void mem_mapping_set_addr(mem_mapping_t *map, uint32_t base, uint32_t size) { map->base = base; map->size = size; map->enable = 1; }
+void mem_mapping_set_p(mem_mapping_t *map, void *p) { map->priv = p; }
+void mem_mapping_enable(mem_mapping_t *map) { map->enable = 1; }
+void mem_mapping_disable(mem_mapping_t *map) { map->enable = 0; }
 
-    uint32_t vidDesktopOverlayStride;
-    uint32_t vidDesktopStartAddr;
-    uint32_t vidProcCfg;
-    uint32_t vidScreenSize;
-    uint32_t vidSerialParallelPort;
-    uint32_t vidChromaKeyMin;
-    uint32_t vidChromaKeyMax;
+static mem_mapping_t *map_at(u32 a)
+{
+    for (mem_mapping_t *m = maps; m; m = m->next)
+        if (m->enable && a - m->base < m->size) return m;
+    return 0;
+}
 
-    uint32_t agpReqSize;
-    uint32_t agpHostAddressHigh;
-    uint32_t agpHostAddressLow;
-    uint32_t agpGraphicsAddress;
-    uint32_t agpGraphicsStride;
-    uint32_t agpMoveCMD;
+/* One access the width it was made, or as narrower ones where the mapping
+   has no handler that wide (86Box's mem_read*). Nothing there: 0xFF's. */
+static u32 map_read(u32 a, int size)
+{
+    mem_mapping_t *m = map_at(a);
+    if (m && size == 4 && m->read_l) return m->read_l(a, m->priv);
+    if (m && size >= 2 && m->read_w)
+        return size == 2 ? m->read_w(a, m->priv) : m->read_w(a, m->priv) | map_read(a + 2, 2) << 16;
+    u32 v = 0;
+    for (int i = 0; i < size; i++) {
+        mem_mapping_t *n = map_at(a + i);
+        v |= (u32)(n && n->read_b ? n->read_b(a + i, n->priv) : 0xFF) << (8 * i);
+    }
+    return v;
+}
+static void map_write(u32 a, u32 v, int size)
+{
+    mem_mapping_t *m = map_at(a);
+    if (m && size == 4 && m->write_l) { m->write_l(a, v, m->priv); return; }
+    if (m && size >= 2 && m->write_w) {
+        m->write_w(a, (u16)v, m->priv);
+        if (size == 4) map_write(a + 2, v >> 16, 2);
+        return;
+    }
+    for (int i = 0; i < size; i++) {
+        mem_mapping_t *n = map_at(a + i);
+        if (n && n->write_b) n->write_b(a + i, (u8)(v >> (8 * i)), n->priv);
+    }
+}
 
-    int overlay_pix_fmt;
+/* ---------------- I/O ports (86Box's io.c, the part a card uses) ---------------- */
+#define MAX_IO 32
+static struct io_h {
+    u16 base, size;
+    uint8_t (*inb)(uint16_t, void *); uint16_t (*inw)(uint16_t, void *); uint32_t (*inl)(uint16_t, void *);
+    void (*outb)(uint16_t, uint8_t, void *); void (*outw)(uint16_t, uint16_t, void *); void (*outl)(uint16_t, uint32_t, void *);
+    void *priv;
+} ioh[MAX_IO];
+static int nio;
 
-    uint32_t hwCurPatAddr, hwCurLoc, hwCurC0, hwCurC1;
+void io_sethandler(uint16_t base, uint16_t size,
+                   uint8_t (*inb)(uint16_t, void *), uint16_t (*inw)(uint16_t, void *), uint32_t (*inl)(uint16_t, void *),
+                   void (*outb)(uint16_t, uint8_t, void *), void (*outw)(uint16_t, uint16_t, void *), void (*outl)(uint16_t, uint32_t, void *),
+                   void *priv)
+{
+    if (nio >= MAX_IO) { kprintf("voodoo3: too many I/O handlers\n"); return; }
+    struct io_h h = { base, size, inb, inw, inl, outb, outw, outl, priv };
+    ioh[nio++] = h;
+}
+void io_removehandler(uint16_t base, uint16_t size,
+                      uint8_t (*inb)(uint16_t, void *), uint16_t (*inw)(uint16_t, void *), uint32_t (*inl)(uint16_t, void *),
+                      void (*outb)(uint16_t, uint8_t, void *), void (*outw)(uint16_t, uint16_t, void *), void (*outl)(uint16_t, uint32_t, void *),
+                      void *priv)
+{
+    (void)inw; (void)inl; (void)outw; (void)outl;
+    for (int i = 0; i < nio; i++) {                /* 86Box's is per port: every handler of these inside the range */
+        struct io_h *h = &ioh[i];
+        if (h->base >= base && h->base + h->size <= base + size && h->inb == inb && h->outb == outb && h->priv == priv)
+            ioh[i--] = ioh[--nio];
+    }
+}
+static struct io_h *io_at(u16 p)
+{
+    for (int i = 0; i < nio; i++) if ((u16)(p - ioh[i].base) < ioh[i].size) return &ioh[i];
+    return 0;
+}
+static u32 io_read(u16 p, int size)
+{
+    struct io_h *h = io_at(p);
+    if (h && size == 4 && h->inl) return h->inl(p, h->priv);
+    if (h && size >= 2 && h->inw) return size == 2 ? h->inw(p, h->priv) : h->inw(p, h->priv) | io_read(p + 2, 2) << 16;
+    u32 v = 0;
+    for (int i = 0; i < size; i++) {
+        struct io_h *b = io_at(p + i);
+        v |= (u32)(b && b->inb ? b->inb(p + i, b->priv) : 0xFF) << (8 * i);
+    }
+    return v;
+}
+static void io_write(u16 p, u32 v, int size)
+{
+    struct io_h *h = io_at(p);
+    if (h && size == 4 && h->outl) { h->outl(p, v, h->priv); return; }
+    if (h && size >= 2 && h->outw) {
+        h->outw(p, (u16)v, h->priv);
+        if (size == 4) io_write(p + 2, v >> 16, 2);
+        return;
+    }
+    for (int i = 0; i < size; i++) {
+        struct io_h *b = io_at(p + i);
+        if (b && b->outb) b->outb(p + i, (u8)(v >> (8 * i)), b->priv);
+    }
+}
 
-    uint32_t intrCtrl;
+/* ---------------- PCI ---------------- */
+static uint8_t (*pci_rd)(int func, int addr, int len, void *priv);
+static void (*pci_wr)(int func, int addr, int len, uint8_t val, void *priv);
+static void *pci_priv;
+void pci_add_card(uint8_t type, uint8_t (*read)(int, int, int, void *), void (*write)(int, int, int, uint8_t, void *), void *priv, uint8_t *slot)
+{
+    (void)type;
+    pci_rd = read; pci_wr = write; pci_priv = priv;
+    if (slot) *slot = 1;
+}
+void pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state) { (void)slot; (void)pci_int; (void)level; (void)set; (void)irq_state; }
 
-    voodoo_t *voodoo;
-    voodoo_set_t set;
+/* ---------------- the BIOS ROM ---------------- */
+static rom_t *the_rom;
+int rom_present(const char *fn) { (void)fn; return v3_rom_end > v3_rom_start; }
+int rom_init(rom_t *rom, const char *fn, uint32_t addr, int sz, int mask, int off, uint32_t flags)
+{
+    (void)fn; (void)off;
+    u32 n = (u32)(v3_rom_end - v3_rom_start);
+    rom->rom = calloc(1, sz);
+    memset(rom->rom, 0xFF, sz);
+    memcpy(rom->rom, v3_rom_start, n < (u32)sz ? n : (u32)sz);
+    rom->sz = sz;
+    rom->mask = mask;
+    mem_mapping_add(&rom->mapping, addr, sz, rom_read, rom_readw, rom_readl, 0, 0, 0, rom->rom, flags, rom);
+    the_rom = rom;
+    return 1;
+}
+uint8_t rom_read(uint32_t addr, void *priv)
+{
+    const rom_t *rom = priv;
+    return rom->rom[addr & rom->mask];
+}
+uint16_t rom_readw(uint32_t addr, void *priv) { return rom_read(addr, priv) | rom_read(addr + 1, priv) << 8; }
+uint32_t rom_readl(uint32_t addr, void *priv) { return rom_readw(addr, priv) | (u32)rom_readw(addr + 2, priv) << 16; }
 
-    uint32_t overlay_addr;                     /* the overlay buffer shown (latched at the swap) */
-    u32 last_frame;
-} banshee_t;
-
-enum {
-    Init_status          = 0x00,
-    Init_pciInit0        = 0x04,
-    Init_lfbMemoryConfig = 0x0c,
-    Init_miscInit0       = 0x10,
-    Init_miscInit1       = 0x14,
-    Init_dramInit0       = 0x18,
-    Init_dramInit1       = 0x1c,
-    Init_agpInit0        = 0x20,
-    Init_vgaInit0        = 0x28,
-    Init_vgaInit1        = 0x2c,
-    Init_2dCommand       = 0x30,
-    Init_2dSrcBaseAddr   = 0x34,
-    Init_strapInfo       = 0x38,
-
-    PLL_pllCtrl0 = 0x40,
-    PLL_pllCtrl1 = 0x44,
-    PLL_pllCtrl2 = 0x48,
-
-    DAC_dacMode = 0x4c,
-    DAC_dacAddr = 0x50,
-    DAC_dacData = 0x54,
-
-    Video_vidProcCfg                   = 0x5c,
-    Video_maxRgbDelta                  = 0x58,
-    Video_hwCurPatAddr                 = 0x60,
-    Video_hwCurLoc                     = 0x64,
-    Video_hwCurC0                      = 0x68,
-    Video_hwCurC1                      = 0x6c,
-    Video_vidSerialParallelPort        = 0x78,
-    Video_vidChromaKeyMin              = 0x8c,
-    Video_vidChromaKeyMax              = 0x90,
-    Video_vidScreenSize                = 0x98,
-    Video_vidOverlayStartCoords        = 0x9c,
-    Video_vidOverlayEndScreenCoords    = 0xa0,
-    Video_vidOverlayDudx               = 0xa4,
-    Video_vidOverlayDudxOffsetSrcWidth = 0xa8,
-    Video_vidOverlayDvdy               = 0xac,
-    Video_vidOverlayDvdyOffset         = 0xe0,
-    Video_vidDesktopStartAddr          = 0xe4,
-    Video_vidDesktopOverlayStride      = 0xe8,
-};
-
-enum {
-    cmdBaseAddr0  = 0x20,
-    cmdBaseSize0  = 0x24,
-    cmdBump0      = 0x28,
-    cmdRdPtrL0    = 0x2c,
-    cmdRdPtrH0    = 0x30,
-    cmdAMin0      = 0x34,
-    cmdAMax0      = 0x3c,
-    cmdStatus0    = 0x40,
-    cmdFifoDepth0 = 0x44,
-    cmdHoleCnt0   = 0x48,
-
-    cmdBaseAddr1  = 0x50,
-    cmdBaseSize1  = 0x50 + 0x4,
-    cmdBump1      = 0x50 + 0x8,
-    cmdRdPtrL1    = 0x50 + 0xc,
-    cmdRdPtrH1    = 0x50 + 0x10,
-    cmdAMin1      = 0x50 + 0x14,
-    cmdAMax1      = 0x50 + 0x1c,
-    cmdStatus1    = 0x50 + 0x20,
-    cmdFifoDepth1 = 0x50 + 0x24,
-    cmdHoleCnt1   = 0x50 + 0x28,
-
-    Agp_agpReqSize         = 0x00,
-    Agp_agpHostAddressLow  = 0x04,
-    Agp_agpHostAddressHigh = 0x08,
-    Agp_agpGraphicsAddress = 0x0C,
-    Agp_agpGraphicsStride  = 0x10,
-    Agp_agpMoveCMD         = 0x14,
-};
-
-#define VGAINIT0_RAMDAC_8BIT                (1 << 2)
-#define VGAINIT0_EXTENDED_SHIFT_OUT         (1 << 12)
-
-#define VIDPROCCFG_VIDPROC_ENABLE           (1 << 0)
-#define VIDPROCCFG_CURSOR_MODE              (1 << 1)
-#define VIDPROCCFG_INTERLACE                (1 << 3)
-#define VIDPROCCFG_HALF_MODE                (1 << 4)
-#define VIDPROCCFG_OVERLAY_ENABLE           (1 << 8)
-#define VIDPROCCFG_DESKTOP_CLUT_BYPASS      (1 << 10)
-#define VIDPROCCFG_OVERLAY_CLUT_BYPASS      (1 << 11)
-#define VIDPROCCFG_DESKTOP_CLUT_SEL         (1 << 12)
-#define VIDPROCCFG_OVERLAY_CLUT_SEL         (1 << 13)
-#define VIDPROCCFG_H_SCALE_ENABLE           (1 << 14)
-#define VIDPROCCFG_V_SCALE_ENABLE           (1 << 15)
-#define VIDPROCCFG_DESKTOP_PIX_FORMAT       ((banshee->vidProcCfg >> 18) & 7)
-#define VIDPROCCFG_OVERLAY_PIX_FORMAT_SHIFT (21)
-#define VIDPROCCFG_OVERLAY_PIX_FORMAT_MASK  (7 << VIDPROCCFG_OVERLAY_PIX_FORMAT_SHIFT)
-#define VIDPROCCFG_DESKTOP_TILE             (1 << 24)
-#define VIDPROCCFG_OVERLAY_TILE             (1 << 25)
-#define VIDPROCCFG_2X_MODE                  (1 << 26)
-#define VIDPROCCFG_HWCURSOR_ENA             (1 << 27)
-
-#define OVERLAY_START_X_MASK                (0xfff)
-#define OVERLAY_START_Y_SHIFT               (12)
-#define OVERLAY_START_Y_MASK                (0xfff << OVERLAY_START_Y_SHIFT)
-#define OVERLAY_END_X_MASK                  (0xfff)
-#define OVERLAY_END_Y_SHIFT                 (12)
-#define OVERLAY_END_Y_MASK                  (0xfff << OVERLAY_END_Y_SHIFT)
-#define OVERLAY_SRC_WIDTH_SHIFT             (19)
-#define OVERLAY_SRC_WIDTH_MASK              (0x1fff << OVERLAY_SRC_WIDTH_SHIFT)
-#define VID_STRIDE_OVERLAY_SHIFT            (16)
-#define VID_STRIDE_OVERLAY_MASK             (0x7fff << VID_STRIDE_OVERLAY_SHIFT)
-#define VID_DUDX_MASK                       (0xffffff)
-#define VID_DVDY_MASK                       (0xffffff)
-
-#define PIX_FORMAT_8                        0
-#define PIX_FORMAT_RGB565                   1
-#define PIX_FORMAT_RGB24                    2
-#define PIX_FORMAT_RGB32                    3
-
-#define VIDSERIAL_DDC_DCK_W                 (1 << 19)
-#define VIDSERIAL_DDC_DDA_W                 (1 << 20)
-#define VIDSERIAL_DDC_DCK_R                 (1 << 21)
-#define VIDSERIAL_DDC_DDA_R                 (1 << 22)
-#define VIDSERIAL_I2C_SCK_R                 (1 << 26)
-#define VIDSERIAL_I2C_SDA_R                 (1 << 27)
-
-#define MISCINIT0_Y_ORIGIN_SWAP_SHIFT       (18)
-#define MISCINIT0_Y_ORIGIN_SWAP_MASK        (0xfff << MISCINIT0_Y_ORIGIN_SWAP_SHIFT)
-
-int v3_on;
-static banshee_t *card;
-static u32 bar0_lin, bar1_lin;                 /* where the BARs were put: unmapped linear space */
-
-/* BAR1 pages mapped straight onto vram (lfb_remap) */
-static u8 *lfb_mapped;
-static int lfb_direct, lfb_dirty;
-
-#define banshee_log(...) do { if (v3_log_on > 1) kprintf("voodoo3: " __VA_ARGS__); } while (0)
-
-/* ---------------- the guest's x87 state, around the card's code ----------------
-   The card's code uses the x87 (triangle setup, LOD); the guest's state is
-   in the registers (vmdos never switches it), so it is saved on the way in
-   and put back on the way out. */
+/* ---------------- the guest's x87 state, around the card's code ---------------- */
 static int depth;
 static u8 fpu_save[108] __attribute__((aligned(16)));
 static void v3_enter(void)
@@ -323,1163 +381,39 @@ static void v3_leave(void)
     __asm__ volatile("frstor %0" : : "m"(fpu_save));
 }
 
-/* ---------------- retrace and swaps ---------------- */
-static void banshee_vsync_callback(banshee_t *banshee)
-{
-    voodoo_t *voodoo = banshee->voodoo;
-
-    voodoo->retrace_count++;
-    thread_wait_mutex(voodoo->swap_mutex);
-    if (voodoo->swap_pending && (voodoo->retrace_count > voodoo->swap_interval)) {
-        if (voodoo->swap_count > 0)
-            voodoo->swap_count--;
-        voodoo->swap_pending = 0;
-        thread_release_mutex(voodoo->swap_mutex);
-
-        memset(voodoo->dirty_line, 1, sizeof(voodoo->dirty_line));
-        voodoo->retrace_count = 0;
-        banshee->overlay_addr = voodoo->leftOverlayBuf & 0xffffff;
-        thread_set_event(voodoo->wake_fifo_thread);
-        voodoo->frame_count++;
-    } else
-        thread_release_mutex(voodoo->swap_mutex);
-}
-
-/* A vertical retrace since the last look: what the card does at one. */
-static void check_vsync(void)
-{
-    u32 f = video_frame_no();
-    if (f != card->last_frame) {
-        card->last_frame = f;
-        banshee_vsync_callback(card);
-    }
-}
-
-/* Called by vid_voodoo_reg.c when a swap needs no retrace. */
-void banshee_set_overlay_addr(void *priv, UNUSED(uint32_t addr))
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    banshee->overlay_addr = banshee->voodoo->leftOverlayBuf & 0xffffff;
-    memset(banshee->voodoo->dirty_line, 1, sizeof(banshee->voodoo->dirty_line));
-}
-
-/* 86Box's Banshee generates these filter tables for its video output; the
-   output here doesn't filter, but vid_voodoo_display.c links to it. */
-void voodoo_generate_vb_filters(voodoo_t *voodoo, int fcr, int fcg) { (void)voodoo; (void)fcr; (void)fcg; }
-
-/* ---------------- I/O space (BAR2, and the I/O remap in BAR0) ---------------- */
-static uint32_t banshee_ext_inl(uint16_t addr, void *priv);
-static void     banshee_ext_outl(uint16_t addr, uint32_t val, void *priv);
-static void acc_log(const char *what, u32 a, u32 v);
-
-static void banshee_out(uint16_t addr, uint8_t val) { video_port_out(addr, val); }
-static uint8_t banshee_in(uint16_t addr) { return (uint8_t)video_port_in(addr); }
-
-static void
-banshee_ext_out(uint16_t addr, uint8_t val, void *priv)
-{
-    uint32_t reg;
-    uint32_t shift;
-
-    switch (addr & 0xff) {
-        case 0xb0 ... 0xdf:
-            acc_log("vga out", (addr & 0xff) + 0x300, val);
-            banshee_out((addr & 0xff) + 0x300, val);
-            break;
-
-        default:
-            shift = (addr & 3) << 3;
-            reg   = banshee_ext_inl(addr & 0xfc, priv);
-            banshee_ext_outl(addr & 0xfc, (reg & ~(0xff << shift)) | (val << shift), priv);
-            break;
-    }
-}
-
-static void
-banshee_ext_outw(uint16_t addr, uint16_t val, void *priv)
-{
-    uint32_t reg;
-    uint32_t shift;
-
-    switch (addr & 0xff) {
-        case 0xb0 ... 0xdf:
-            banshee_ext_out(addr, val & 0xff, priv);
-            banshee_ext_out(addr + 1, val >> 8, priv);
-            break;
-
-        default:
-            shift = (addr & 2) << 3;
-            reg   = banshee_ext_inl(addr & 0xfc, priv);
-            banshee_ext_outl(addr & 0xfc, (reg & ~(0xffff << shift)) | (val << shift), priv);
-            break;
-    }
-}
-
-/* v3log: the first accesses to the card's I/O registers and configuration
-   space in the log, to see what a driver asks of it (not the FIFO, the 3D
-   or the frame buffer). */
-static int acc_left = 4000;
-static void acc_log(const char *what, u32 a, u32 v)
-{
-    if (!v3_log_on || acc_left <= 0) return;
-    if (!--acc_left) kprintf("voodoo3: access log full\n");
-    else kprintf("voodoo3: %s %02x %08x\n", what, a, v);
-}
-
-static void
-banshee_ext_outl(uint16_t addr, uint32_t val, void *priv)
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    voodoo_t  *voodoo  = banshee->voodoo;
-
-    acc_log("io out", addr & 0xff, val);
-
-    switch (addr & 0xff) {
-        case Init_pciInit0:
-            banshee->pciInit0 = val;
-            break;
-
-        case Init_lfbMemoryConfig:
-            banshee->lfbMemoryConfig  = val;
-            voodoo->tile_base         = (val & 0x1fff) << 12;
-            voodoo->tile_stride       = 1024 << ((val >> 13) & 7);
-            voodoo->tile_stride_shift = 10 + ((val >> 13) & 7);
-            voodoo->tile_x            = ((val >> 16) & 0x7f) * 128;
-            voodoo->tile_x_real       = ((val >> 16) & 0x7f) * 128 * 32;
-            lfb_dirty = 1;
-            break;
-
-        case Init_miscInit0:
-            banshee->miscInit0    = val;
-            voodoo->y_origin_swap = (val & MISCINIT0_Y_ORIGIN_SWAP_MASK) >> MISCINIT0_Y_ORIGIN_SWAP_SHIFT;
-            break;
-        case Init_miscInit1:
-            banshee->miscInit1 = val;
-            break;
-        case Init_dramInit0:
-            banshee->dramInit0 = val;
-            break;
-        case Init_dramInit1:
-            banshee->dramInit1 = val;
-            break;
-        case Init_agpInit0:
-            banshee->agpInit0 = val;
-            break;
-
-        case Init_2dCommand:
-            banshee->command_2d = val;
-            break;
-        case Init_2dSrcBaseAddr:
-            banshee->srcBaseAddr_2d = val;
-            break;
-        case Init_vgaInit0:
-            if ((val ^ banshee->vgaInit0) & VGAINIT0_EXTENDED_SHIFT_OUT)
-                kprintf("voodoo3: extended shift out %s\n", (val & VGAINIT0_EXTENDED_SHIFT_OUT) ? "on" : "off");
-            banshee->vgaInit0 = val;
-            break;
-        case Init_vgaInit1:
-            banshee->vgaInit1 = val;
-            break;
-
-        case PLL_pllCtrl0:
-            banshee->pllCtrl0 = val;
-            break;
-        case PLL_pllCtrl1:
-            banshee->pllCtrl1 = val;
-            break;
-        case PLL_pllCtrl2:
-            banshee->pllCtrl2 = val;
-            break;
-
-        case DAC_dacMode:
-            banshee->dacMode = val;
-            break;
-        case DAC_dacAddr:
-            banshee->dacAddr = val & 0x1ff;
-            break;
-        case DAC_dacData:
-            banshee->pallook[banshee->dacAddr] = val & 0xffffff;
-            banshee->pal_written = 1;
-            break;
-
-        case Video_vidProcCfg:
-            if ((val ^ banshee->vidProcCfg) & (VIDPROCCFG_VIDPROC_ENABLE | VIDPROCCFG_OVERLAY_ENABLE))
-                kprintf("voodoo3: video processor %s, overlay %s (vidProcCfg %08x)\n",
-                        (val & VIDPROCCFG_VIDPROC_ENABLE) ? "on" : "off", (val & VIDPROCCFG_OVERLAY_ENABLE) ? "on" : "off", val);
-            banshee->vidProcCfg      = val;
-            banshee->overlay_pix_fmt = (val & VIDPROCCFG_OVERLAY_PIX_FORMAT_MASK) >> VIDPROCCFG_OVERLAY_PIX_FORMAT_SHIFT;
-            break;
-
-        case Video_maxRgbDelta:
-            banshee->voodoo->scrfilterThreshold = val;
-            banshee->voodoo->scrfilterEnabled   = val > 0;
-            voodoo_threshold_check(banshee->voodoo);
-            break;
-
-        case Video_hwCurPatAddr:
-            banshee->hwCurPatAddr = val;
-            break;
-        case Video_hwCurLoc:
-            banshee->hwCurLoc = val;
-            break;
-        case Video_hwCurC0:
-            banshee->hwCurC0 = val;
-            break;
-        case Video_hwCurC1:
-            banshee->hwCurC1 = val;
-            break;
-
-        case Video_vidSerialParallelPort:
-            banshee->vidSerialParallelPort = val;
-            break;
-
-        case Video_vidChromaKeyMin:
-            banshee->vidChromaKeyMin = val;
-            break;
-        case Video_vidChromaKeyMax:
-            banshee->vidChromaKeyMax = val;
-            break;
-
-        case Video_vidScreenSize:
-            banshee->vidScreenSize = val;
-            voodoo->h_disp         = (val & 0xfff) + 1;
-            voodoo->v_disp         = (val >> 12) & 0xfff;
-            break;
-        case Video_vidOverlayStartCoords:
-            voodoo->overlay.vidOverlayStartCoords = val;
-            voodoo->overlay.start_x               = val & OVERLAY_START_X_MASK;
-            voodoo->overlay.start_y               = (val & OVERLAY_START_Y_MASK) >> OVERLAY_START_Y_SHIFT;
-            voodoo->overlay.size_x                = voodoo->overlay.end_x - voodoo->overlay.start_x;
-            voodoo->overlay.size_y                = voodoo->overlay.end_y - voodoo->overlay.start_y;
-            break;
-        case Video_vidOverlayEndScreenCoords:
-            voodoo->overlay.vidOverlayEndScreenCoords = val;
-            voodoo->overlay.end_x                     = val & OVERLAY_END_X_MASK;
-            voodoo->overlay.end_y                     = (val & OVERLAY_END_Y_MASK) >> OVERLAY_END_Y_SHIFT;
-            voodoo->overlay.size_x                    = (voodoo->overlay.end_x - voodoo->overlay.start_x) + 1;
-            voodoo->overlay.size_y                    = (voodoo->overlay.end_y - voodoo->overlay.start_y) + 1;
-            break;
-        case Video_vidOverlayDudx:
-            voodoo->overlay.vidOverlayDudx = val & VID_DUDX_MASK;
-            break;
-        case Video_vidOverlayDudxOffsetSrcWidth:
-            voodoo->overlay.vidOverlayDudxOffsetSrcWidth = val;
-            voodoo->overlay.overlay_bytes                = (val & OVERLAY_SRC_WIDTH_MASK) >> OVERLAY_SRC_WIDTH_SHIFT;
-            break;
-        case Video_vidOverlayDvdy:
-            voodoo->overlay.vidOverlayDvdy = val & VID_DVDY_MASK;
-            break;
-        case Video_vidOverlayDvdyOffset:
-            voodoo->overlay.vidOverlayDvdyOffset = val;
-            break;
-
-        case Video_vidDesktopStartAddr:
-            banshee->vidDesktopStartAddr = val & 0xffffff;
-            break;
-        case Video_vidDesktopOverlayStride:
-            banshee->vidDesktopOverlayStride = val;
-            break;
-        default:
-            break;
-    }
-}
-
-static uint8_t
-banshee_ext_in(uint16_t addr, void *priv)
-{
-    switch (addr & 0xff) {
-        case 0xb0 ... 0xdf:
-            return banshee_in((addr & 0xff) + 0x300);
-        default:
-            return banshee_ext_inl(addr & 0xfc, priv) >> ((addr & 3) << 3);
-    }
-}
-
-static uint16_t
-banshee_ext_inw(uint16_t addr, void *priv)
-{
-    uint16_t ret;
-
-    switch (addr & 0xff) {
-        case 0xb0 ... 0xdf:
-            ret = banshee_ext_in(addr, priv);
-            ret |= banshee_ext_in(addr + 1, priv) << 8;
-            break;
-
-        default:
-            ret = banshee_ext_inl(addr & 0xfc, priv) >> ((addr & 2) << 3);
-            break;
-    }
-
-    return ret;
-}
-
-static uint32_t
-banshee_status(banshee_t *banshee)
-{
-    voodoo_t *voodoo       = banshee->voodoo;
-    int       fifo_entries = FIFO_ENTRIES;
-    int       swap_count   = voodoo->swap_count;
-    int       written      = voodoo->cmd_written + voodoo->cmd_written_fifo;
-    int       busy         = (written - voodoo->cmd_read) || (voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr) || (voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2) || RENDER_VOODOO_BUSY(voodoo, 0) || RENDER_VOODOO_BUSY(voodoo, 1) || RENDER_VOODOO_BUSY(voodoo, 2) || RENDER_VOODOO_BUSY(voodoo, 3) || voodoo->voodoo_busy;
-    uint32_t  ret          = 0;
-
-    if (fifo_entries < 0x20)
-        ret |= 0x1f - fifo_entries;
-    else
-        ret |= 0x1f;
-    if (fifo_entries)
-        ret |= 0x20;
-    if (swap_count < 7)
-        ret |= (swap_count << 28);
-    else
-        ret |= (7 << 28);
-    if (video_vretrace())
-        ret |= 0x40;
-
-    if (busy)
-        ret |= 0x780; /*Busy*/
-
-    if (voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr)
-        ret |= (1 << 11);
-
-    if (voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2)
-        ret |= (1 << 12);
-
-    if (!voodoo->voodoo_busy)
-        voodoo_wake_fifo_thread(voodoo);
-
-    return ret;
-}
-
-static uint32_t
-banshee_ext_inl(uint16_t addr, void *priv)
-{
-    banshee_t      *banshee = (banshee_t *) priv;
-    const voodoo_t *voodoo  = banshee->voodoo;
-    uint32_t        ret     = 0xffffffff;
-
-    switch (addr & 0xff) {
-        case Init_status:
-            ret = banshee_status(banshee);
-            break;
-        case Init_pciInit0:
-            ret = banshee->pciInit0;
-            break;
-        case Init_lfbMemoryConfig:
-            ret = banshee->lfbMemoryConfig;
-            break;
-
-        case Init_miscInit0:
-            ret = banshee->miscInit0;
-            break;
-        case Init_miscInit1:
-            ret = banshee->miscInit1;
-            break;
-        case Init_dramInit0:
-            ret = banshee->dramInit0;
-            break;
-        case Init_dramInit1:
-            ret = banshee->dramInit1;
-            break;
-        case Init_agpInit0:
-            ret = banshee->agpInit0;
-            break;
-
-        case Init_vgaInit0:
-            ret = banshee->vgaInit0;
-            break;
-        case Init_vgaInit1:
-            ret = banshee->vgaInit1;
-            break;
-
-        case Init_2dCommand:
-            ret = banshee->command_2d;
-            break;
-        case Init_2dSrcBaseAddr:
-            ret = banshee->srcBaseAddr_2d;
-            break;
-        case Init_strapInfo:
-            ret = 0x00000040; /*8 MB SGRAM, PCI, IRQ enabled, 32kB BIOS*/
-            break;
-
-        case PLL_pllCtrl0:
-            ret = banshee->pllCtrl0;
-            break;
-        case PLL_pllCtrl1:
-            ret = banshee->pllCtrl1;
-            break;
-        case PLL_pllCtrl2:
-            ret = banshee->pllCtrl2;
-            break;
-
-        case DAC_dacMode:
-            ret = banshee->dacMode;
-            break;
-        case DAC_dacAddr:
-            ret = banshee->dacAddr;
-            break;
-        case DAC_dacData:
-            ret = banshee->pallook[banshee->dacAddr];
-            break;
-
-        case Video_maxRgbDelta:
-            ret = voodoo->scrfilterThreshold;
-            break;
-
-        case Video_vidProcCfg:
-            ret = banshee->vidProcCfg;
-            break;
-
-        case Video_hwCurPatAddr:
-            ret = banshee->hwCurPatAddr;
-            break;
-        case Video_hwCurLoc:
-            ret = banshee->hwCurLoc;
-            break;
-        case Video_hwCurC0:
-            ret = banshee->hwCurC0;
-            break;
-        case Video_hwCurC1:
-            ret = banshee->hwCurC1;
-            break;
-
-        case Video_vidSerialParallelPort:
-            /* no monitor on the DDC lines, nothing on the I2C bus: both read high */
-            ret = (banshee->vidSerialParallelPort & ~(VIDSERIAL_DDC_DCK_R | VIDSERIAL_DDC_DDA_R | VIDSERIAL_I2C_SCK_R | VIDSERIAL_I2C_SDA_R))
-                | VIDSERIAL_DDC_DCK_R | VIDSERIAL_DDC_DDA_R | VIDSERIAL_I2C_SCK_R | VIDSERIAL_I2C_SDA_R;
-            break;
-
-        case Video_vidChromaKeyMin:
-            ret = banshee->vidChromaKeyMin;
-            break;
-        case Video_vidChromaKeyMax:
-            ret = banshee->vidChromaKeyMax;
-            break;
-        case Video_vidScreenSize:
-            ret = banshee->vidScreenSize;
-            break;
-        case Video_vidOverlayStartCoords:
-            ret = voodoo->overlay.vidOverlayStartCoords;
-            break;
-        case Video_vidOverlayEndScreenCoords:
-            ret = voodoo->overlay.vidOverlayEndScreenCoords;
-            break;
-        case Video_vidOverlayDudx:
-            ret = voodoo->overlay.vidOverlayDudx;
-            break;
-        case Video_vidOverlayDudxOffsetSrcWidth:
-            ret = voodoo->overlay.vidOverlayDudxOffsetSrcWidth;
-            break;
-        case Video_vidOverlayDvdy:
-            ret = voodoo->overlay.vidOverlayDvdy;
-            break;
-        case Video_vidOverlayDvdyOffset:
-            ret = voodoo->overlay.vidOverlayDvdyOffset;
-            break;
-
-        case Video_vidDesktopStartAddr:
-            ret = banshee->vidDesktopStartAddr;
-            break;
-        case Video_vidDesktopOverlayStride:
-            ret = banshee->vidDesktopOverlayStride;
-            break;
-
-        default:
-            break;
-    }
-
-    if ((addr & 0xff) != Init_status) acc_log("io in ", addr & 0xff, ret);
-    return ret;
-}
-
-/* ---------------- BAR0: registers ---------------- */
-static uint32_t banshee_reg_readl(uint32_t addr, void *priv);
-
-static uint32_t
-banshee_cmd_read(banshee_t *banshee, uint32_t addr)
-{
-    const voodoo_t *voodoo = banshee->voodoo;
-    uint32_t        ret    = 0xffffffff;
-
-    switch (addr & 0x1fc) {
-        case Agp_agpHostAddressLow:
-            ret = banshee->agpHostAddressLow;
-            break;
-        case Agp_agpHostAddressHigh:
-            ret = banshee->agpHostAddressHigh;
-            break;
-        case Agp_agpGraphicsAddress:
-            ret = banshee->agpGraphicsAddress;
-            break;
-        case Agp_agpGraphicsStride:
-            ret = banshee->agpGraphicsStride;
-            break;
-        case Agp_agpReqSize:
-            ret = banshee->agpReqSize;
-            break;
-        case Agp_agpMoveCMD:
-            ret = banshee->agpMoveCMD;
-            break;
-
-        case cmdBaseAddr0:
-            ret = voodoo->cmdfifo_base >> 12;
-            break;
-        case cmdRdPtrL0:
-            ret = voodoo->cmdfifo_rp;
-            break;
-        case cmdFifoDepth0:
-            ret = voodoo->cmdfifo_depth_wr - voodoo->cmdfifo_depth_rd;
-            break;
-        case cmdStatus0:
-            ret = voodoo->cmd_status;
-            break;
-        case cmdBaseSize0:
-            ret = voodoo->cmdfifo_size;
-            if (voodoo->cmdfifo_enabled)
-                ret |= 0x100;
-            if (voodoo->cmdfifo_in_agp)
-                ret |= 0x200;
-            break;
-
-        case cmdBaseAddr1:
-            ret = voodoo->cmdfifo_base_2 >> 12;
-            break;
-        case cmdRdPtrL1:
-            ret = voodoo->cmdfifo_rp_2;
-            break;
-        case cmdFifoDepth1:
-            ret = voodoo->cmdfifo_depth_wr_2 - voodoo->cmdfifo_depth_rd_2;
-            break;
-        case cmdStatus1:
-            ret = voodoo->cmd_status_2;
-            break;
-        case cmdBaseSize1:
-            ret = voodoo->cmdfifo_size_2;
-            if (voodoo->cmdfifo_enabled_2)
-                ret |= 0x100;
-            if (voodoo->cmdfifo_in_agp_2)
-                ret |= 0x200;
-            break;
-
-        case cmdRdPtrH0:
-        case cmdRdPtrH1:
-            ret = 0;
-            break;
-        case cmdAMin0:
-            ret = voodoo->cmdfifo_amin;
-            break;
-        case cmdAMax0:
-            ret = voodoo->cmdfifo_amax;
-            break;
-        case cmdHoleCnt0:
-            ret = voodoo->cmdfifo_holecount;
-            break;
-        case cmdAMin1:
-            ret = voodoo->cmdfifo_amin_2;
-            break;
-        case cmdAMax1:
-            ret = voodoo->cmdfifo_amax_2;
-            break;
-        case cmdHoleCnt1:
-            ret = voodoo->cmdfifo_holecount_2;
-            break;
-
-        case 0x108:
-            break;
-
-        default:
-            banshee_log("unknown cmd read 0x%08x\n", addr);
-            break;
-    }
-
-    return ret;
-}
-
-static uint32_t
-banshee_reg_readl(uint32_t addr, void *priv)
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    voodoo_t  *voodoo  = banshee->voodoo;
-    uint32_t   ret     = 0xffffffff;
-
-    switch (addr & 0x1f00000) {
-        case 0x0000000: /*IO remap*/
-            if (!(addr & 0x80000))
-                ret = banshee_ext_inl(addr & 0xff, banshee);
-            else
-                ret = banshee_cmd_read(banshee, addr);
-            break;
-
-        case 0x0100000: /*2D registers*/
-            voodoo_flush(voodoo);
-            switch (addr & 0x1fc) {
-                case SST_status:
-                    ret = banshee_status(banshee);
-                    break;
-                case SST_intrCtrl:
-                    ret = banshee->intrCtrl & 0x0030003f;
-                    break;
-                case 0x08:
-                    ret = voodoo->banshee_blt.clip0Min;
-                    break;
-                case 0x0c:
-                    ret = voodoo->banshee_blt.clip0Max;
-                    break;
-                case 0x10:
-                    ret = voodoo->banshee_blt.dstBaseAddr;
-                    break;
-                case 0x14:
-                    ret = voodoo->banshee_blt.dstFormat;
-                    break;
-                case 0x34:
-                    ret = voodoo->banshee_blt.srcBaseAddr;
-                    break;
-                case 0x38:
-                    ret = voodoo->banshee_blt.commandExtra;
-                    break;
-                case 0x5c:
-                    ret = voodoo->banshee_blt.srcXY;
-                    break;
-                case 0x60:
-                    ret = voodoo->banshee_blt.colorBack;
-                    break;
-                case 0x64:
-                    ret = voodoo->banshee_blt.colorFore;
-                    break;
-                case 0x68:
-                    ret = voodoo->banshee_blt.dstSize;
-                    break;
-                case 0x6c:
-                    ret = voodoo->banshee_blt.dstXY;
-                    break;
-                case 0x70:
-                    ret = voodoo->banshee_blt.command;
-                    break;
-                default:
-                    banshee_log("2D read %08x\n", addr);
-            }
-            break;
-
-        case 0x0200000:
-        case 0x0300000:
-        case 0x0400000:
-        case 0x0500000: /*3D registers*/
-            switch (addr & 0x3fc) {
-                case SST_status:
-                    ret = banshee_status(banshee);
-                    break;
-                case SST_intrCtrl:
-                    ret = banshee->intrCtrl & 0x0030003f;
-                    break;
-                case SST_fbzColorPath:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.fbzColorPath;
-                    break;
-                case SST_fogMode:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.fogMode;
-                    break;
-                case SST_alphaMode:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.alphaMode;
-                    break;
-                case SST_fbzMode:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.fbzMode;
-                    break;
-                case SST_lfbMode:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->lfbMode;
-                    break;
-                case SST_clipLeftRight:
-                    ret = voodoo->params.clipRight | (voodoo->params.clipLeft << 16);
-                    break;
-                case SST_clipLowYHighY:
-                    ret = voodoo->params.clipHighY | (voodoo->params.clipLowY << 16);
-                    break;
-                case SST_clipLeftRight1:
-                    ret = voodoo->params.clipRight1 | (voodoo->params.clipLeft1 << 16);
-                    break;
-                case SST_clipTopBottom1:
-                    ret = voodoo->params.clipHighY1 | (voodoo->params.clipLowY1 << 16);
-                    break;
-                case SST_stipple:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.stipple;
-                    break;
-                case SST_color0:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.color0;
-                    break;
-                case SST_color1:
-                    voodoo_flush(voodoo);
-                    ret = voodoo->params.color1;
-                    break;
-                case SST_fbiPixelsIn:
-                    ret = voodoo->fbiPixelsIn & 0xffffff;
-                    break;
-                case SST_fbiChromaFail:
-                    ret = voodoo->fbiChromaFail & 0xffffff;
-                    break;
-                case SST_fbiZFuncFail:
-                    ret = voodoo->fbiZFuncFail & 0xffffff;
-                    break;
-                case SST_fbiAFuncFail:
-                    ret = voodoo->fbiAFuncFail & 0xffffff;
-                    break;
-                case SST_fbiPixelsOut:
-                    ret = voodoo->fbiPixelsOut & 0xffffff;
-                    break;
-                default:
-                    banshee_log("3D read %08x\n", addr);
-                    break;
-            }
-            break;
-
-        case 0x1000000:
-        case 0x1100000:
-        case 0x1200000:
-        case 0x1300000:
-        case 0x1400000:
-        case 0x1500000:
-        case 0x1600000:
-        case 0x1700000:
-        case 0x1800000:
-        case 0x1900000:
-        case 0x1a00000:
-        case 0x1b00000:
-        case 0x1c00000:
-        case 0x1d00000:
-        case 0x1e00000:
-        case 0x1f00000: /*3D LFB*/
-            voodoo_flush(voodoo);
-            ret = voodoo_fb_readl(addr & 0xfffffc, voodoo);
-            break;
-
-        default:
-            break;
-    }
-
-    return ret;
-}
-
-void
-banshee_cmd_write(void *priv, uint32_t addr, uint32_t val)
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    voodoo_t  *voodoo  = banshee->voodoo;
-
-    switch (addr & 0x1fc) {
-        case Agp_agpHostAddressLow:
-            banshee->agpHostAddressLow = val;
-            break;
-        case Agp_agpHostAddressHigh:
-            banshee->agpHostAddressHigh = val;
-            break;
-        case Agp_agpGraphicsAddress:
-            banshee->agpGraphicsAddress = val;
-            break;
-        case Agp_agpGraphicsStride:
-            banshee->agpGraphicsStride = val;
-            break;
-        case Agp_agpReqSize:
-            banshee->agpReqSize = val;
-            break;
-        case Agp_agpMoveCMD:
-            banshee->agpMoveCMD = val;             /* a PCI card: no AGP to move from */
-            break;
-
-        case cmdBaseAddr0:
-            lfb_dirty = 1;
-            voodoo->cmdfifo_base = (val & 0xfff) << 12;
-            voodoo->cmdfifo_end  = voodoo->cmdfifo_base + (((voodoo->cmdfifo_size & 0xff) + 1) << 12);
-            break;
-
-        case cmdBaseSize0:
-            lfb_dirty = 1;
-            voodoo->cmdfifo_size    = val;
-            voodoo->cmdfifo_end     = voodoo->cmdfifo_base + (((voodoo->cmdfifo_size & 0xff) + 1) << 12);
-            voodoo->cmdfifo_enabled = val & 0x100;
-            if (!voodoo->cmdfifo_enabled)
-                voodoo->cmdfifo_in_sub = 0;
-            voodoo->cmdfifo_in_agp = val & 0x200;
-            kprintf("voodoo3: command FIFO 0 %s at %x, %u KB\n", voodoo->cmdfifo_enabled ? "on" : "off",
-                    voodoo->cmdfifo_base, (voodoo->cmdfifo_end - voodoo->cmdfifo_base) >> 10);
-            break;
-
-        case cmdBump0:                             /* hole counting off: the host says how many words */
-            voodoo->cmdfifo_depth_wr += val & 0xffff;
-            voodoo_wake_fifo_thread(voodoo);
-            break;
-        case cmdRdPtrL0:
-            voodoo->cmdfifo_rp = val;
-            break;
-        case cmdAMin0:
-            voodoo->cmdfifo_amin = val;
-            break;
-        case cmdAMax0:
-            voodoo->cmdfifo_amax = val;
-            break;
-        case cmdFifoDepth0:
-            voodoo->cmdfifo_depth_rd = 0;
-            voodoo->cmdfifo_depth_wr = val & 0xffff;
-            break;
-        case cmdHoleCnt0:
-            voodoo->cmdfifo_holecount = val;
-            break;
-
-        case cmdBaseAddr1:
-            lfb_dirty = 1;
-            voodoo->cmdfifo_base_2 = (val & 0xfff) << 12;
-            voodoo->cmdfifo_end_2  = voodoo->cmdfifo_base_2 + (((voodoo->cmdfifo_size_2 & 0xff) + 1) << 12);
-            break;
-
-        case cmdBaseSize1:
-            lfb_dirty = 1;
-            voodoo->cmdfifo_size_2    = val;
-            voodoo->cmdfifo_end_2     = voodoo->cmdfifo_base_2 + (((voodoo->cmdfifo_size_2 & 0xff) + 1) << 12);
-            voodoo->cmdfifo_enabled_2 = val & 0x100;
-            if (!voodoo->cmdfifo_enabled_2)
-                voodoo->cmdfifo_in_sub_2 = 0;
-            voodoo->cmdfifo_in_agp_2 = val & 0x200;
-            break;
-
-        case cmdBump1:
-            voodoo->cmdfifo_depth_wr_2 += val & 0xffff;
-            voodoo_wake_fifo_thread(voodoo);
-            break;
-        case cmdRdPtrL1:
-            voodoo->cmdfifo_rp_2 = val;
-            break;
-        case cmdAMin1:
-            voodoo->cmdfifo_amin_2 = val;
-            break;
-        case cmdAMax1:
-            voodoo->cmdfifo_amax_2 = val;
-            break;
-        case cmdFifoDepth1:
-            voodoo->cmdfifo_depth_rd_2 = 0;
-            voodoo->cmdfifo_depth_wr_2 = val & 0xffff;
-            break;
-        case cmdHoleCnt1:
-            voodoo->cmdfifo_holecount_2 = val;
-            break;
-
-        default:
-            banshee_log("unknown cmd write %08x <- %08x\n", addr, val);
-            break;
-    }
-}
-
-static void
-banshee_reg_writew(uint32_t addr, uint16_t val, void *priv)
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    voodoo_t  *voodoo  = banshee->voodoo;
-
-    switch (addr & 0x1f00000) {
-        case 0x0000000: /*IO remap*/
-            if (!(addr & 0x80000))
-                banshee_ext_outw(addr & 0xff, val, banshee);
-            break;
-
-        case 0x1000000:
-        case 0x1100000:
-        case 0x1200000:
-        case 0x1300000: /*3D LFB*/
-        case 0x1400000:
-        case 0x1500000:
-        case 0x1600000:
-        case 0x1700000:
-        case 0x1800000:
-        case 0x1900000:
-        case 0x1a00000:
-        case 0x1b00000:
-        case 0x1c00000:
-        case 0x1d00000:
-        case 0x1e00000:
-        case 0x1f00000:
-            voodoo_queue_command(voodoo, (addr & 0xffffff) | FIFO_WRITEW_FB, val);
-            break;
-
-        default:
-            break;
-    }
-}
-
-static void
-banshee_reg_writel(uint32_t addr, uint32_t val, void *priv)
-{
-    banshee_t *banshee = (banshee_t *) priv;
-    voodoo_t  *voodoo  = banshee->voodoo;
-
-    voodoo->last_write_addr = addr;
-
-    switch (addr & 0x1f00000) {
-        case 0x0000000: /*IO remap*/
-            if (!(addr & 0x80000))
-                banshee_ext_outl(addr & 0xff, val, banshee);
-            else
-                banshee_cmd_write(banshee, addr, val);
-            break;
-
-        case 0x0100000: /*2D registers*/
-            if ((addr & 0x3fc) == SST_intrCtrl) {
-                banshee->intrCtrl = val & 0x0030003f;
-            } else {
-                voodoo_queue_command(voodoo, (addr & 0x1fc) | FIFO_WRITEL_2DREG, val);
-            }
-            break;
-
-        case 0x0200000:
-        case 0x0300000:
-        case 0x0400000:
-        case 0x0500000: /*3D registers*/
-            switch (addr & 0x3fc) {
-                case SST_intrCtrl:
-                    banshee->intrCtrl = val & 0x0030003f;
-                    break;
-
-                case SST_userIntrCMD:
-                    banshee_log("userIntrCMD write %08x\n", val);
-                    break;
-
-                case SST_swapbufferCMD:
-                case SST_triangleCMD:
-                case SST_ftriangleCMD:
-                case SST_fastfillCMD:
-                case SST_nopCMD:
-                    voodoo->cmd_written++;
-                    voodoo_queue_command(voodoo, (addr & 0x3fc) | FIFO_WRITEL_REG, val);
-                    if (!voodoo->voodoo_busy)
-                        voodoo_wake_fifo_threads(voodoo->set, voodoo);
-                    break;
-
-                case SST_swapPending:
-                    thread_wait_mutex(voodoo->swap_mutex);
-                    voodoo->swap_count++;
-                    thread_release_mutex(voodoo->swap_mutex);
-                    break;
-
-                default:
-                    voodoo_queue_command(voodoo, (addr & 0x3ffffc) | FIFO_WRITEL_REG, val);
-                    break;
-            }
-            break;
-
-        case 0x0600000:
-        case 0x0700000: /*TMU0 Texture download*/
-            voodoo->tex_count++;
-            voodoo_queue_command(voodoo, (addr & 0x1ffffc) | FIFO_WRITEL_TEX, val);
-            break;
-
-        case 0x1000000:
-        case 0x1100000:
-        case 0x1200000:
-        case 0x1300000: /*3D LFB*/
-        case 0x1400000:
-        case 0x1500000:
-        case 0x1600000:
-        case 0x1700000:
-        case 0x1800000:
-        case 0x1900000:
-        case 0x1a00000:
-        case 0x1b00000:
-        case 0x1c00000:
-        case 0x1d00000:
-        case 0x1e00000:
-        case 0x1f00000:
-            voodoo_queue_command(voodoo, (addr & 0xfffffc) | FIFO_WRITEL_FB, val);
-            break;
-
-        default:
-            break;
-    }
-}
-
-/* ---------------- BAR1: the linear frame buffer ---------------- */
-static uint32_t
-linear_addr(banshee_t *banshee, uint32_t addr)
-{
-    const voodoo_t *voodoo = banshee->voodoo;
-
-    addr &= 0x1ffffff;
-    if (addr >= voodoo->tile_base) {
-        int x;
-        int y;
-
-        addr -= voodoo->tile_base;
-        x = addr & (voodoo->tile_stride - 1);
-        y = addr >> voodoo->tile_stride_shift;
-
-        addr = voodoo->tile_base + (x & 127) + ((x >> 7) * 128 * 32) + ((y & 31) * 128) + (y >> 5) * voodoo->tile_x_real;
-    }
-    return addr;
-}
-
-static uint8_t
-banshee_read_linear(uint32_t addr, banshee_t *banshee)
-{
-    addr = linear_addr(banshee, addr);
-    if (addr >= banshee->vram_size)
-        return 0xff;
-    return banshee->vram[addr & banshee->vram_mask];
-}
-
-static uint16_t
-banshee_read_linear_w(uint32_t addr, banshee_t *banshee)
-{
-    if (addr & 1)
-        return banshee_read_linear(addr, banshee) | (banshee_read_linear(addr + 1, banshee) << 8);
-    addr = linear_addr(banshee, addr);
-    if (addr >= banshee->vram_size)
-        return 0xffff;
-    return *(uint16_t *) &banshee->vram[addr & banshee->vram_mask];
-}
-
-static uint32_t
-banshee_read_linear_l(uint32_t addr, banshee_t *banshee)
-{
-    if (addr & 3)
-        return banshee_read_linear_w(addr, banshee) | (banshee_read_linear_w(addr + 2, banshee) << 16);
-    addr = linear_addr(banshee, addr);
-    if (addr >= banshee->vram_size)
-        return 0xffffffff;
-    return *(uint32_t *) &banshee->vram[addr & banshee->vram_mask];
-}
-
-static void
-banshee_write_linear(uint32_t addr, uint8_t val, banshee_t *banshee)
-{
-    addr = linear_addr(banshee, addr);
-    if (addr >= banshee->vram_size)
-        return;
-    banshee->changedvram[addr >> 12]           = changeframecount;
-    banshee->vram[addr & banshee->vram_mask] = val;
-}
-
-static void
-banshee_write_linear_w(uint32_t addr, uint16_t val, banshee_t *banshee)
-{
-    if (addr & 1) {
-        banshee_write_linear(addr, val, banshee);
-        banshee_write_linear(addr + 1, val >> 8, banshee);
-        return;
-    }
-    addr = linear_addr(banshee, addr);
-    if (addr >= banshee->vram_size)
-        return;
-    banshee->changedvram[addr >> 12]                          = changeframecount;
-    *(uint16_t *) &banshee->vram[addr & banshee->vram_mask] = val;
-}
-
-static void
-banshee_write_linear_l(uint32_t addr, uint32_t val, banshee_t *banshee)
-{
-    voodoo_t *voodoo = banshee->voodoo;
-
-    if (addr & 3) {
-        banshee_write_linear_w(addr, val, banshee);
-        banshee_write_linear_w(addr + 2, val >> 16, banshee);
-        return;
-    }
-
-    voodoo->last_write_addr = addr;
-    addr = linear_addr(banshee, addr);
-
-    if (addr >= banshee->vram_size)
-        return;
-
-    banshee->changedvram[addr >> 12]                          = changeframecount;
-    *(uint32_t *) &banshee->vram[addr & banshee->vram_mask] = val;
-    if (voodoo->cmdfifo_enabled && addr >= voodoo->cmdfifo_base && addr < voodoo->cmdfifo_end) {
-        if (addr == voodoo->cmdfifo_base && !voodoo->cmdfifo_holecount) {
-            /*Reset pointers*/
-            voodoo->cmdfifo_amin = voodoo->cmdfifo_base;
-            voodoo->cmdfifo_amax = voodoo->cmdfifo_base;
-            voodoo->cmdfifo_depth_wr++;
-            voodoo_wake_fifo_thread(voodoo);
-        } else if (voodoo->cmdfifo_holecount) {
-            voodoo->cmdfifo_holecount--;
-            if (!voodoo->cmdfifo_holecount) {
-                /*Filled in holes, resume normal operation*/
-                voodoo->cmdfifo_depth_wr += ((voodoo->cmdfifo_amax - voodoo->cmdfifo_amin) >> 2);
-                voodoo->cmdfifo_amin = voodoo->cmdfifo_amax;
-                voodoo_wake_fifo_thread(voodoo);
-            }
-        } else if (addr == voodoo->cmdfifo_amax + 4) {
-            /*In-order write*/
-            voodoo->cmdfifo_amin = addr;
-            voodoo->cmdfifo_amax = addr;
-            voodoo->cmdfifo_depth_wr++;
-            voodoo_wake_fifo_thread(voodoo);
-        } else {
-            /*Out-of-order write*/
-            if (addr < voodoo->cmdfifo_amin) {
-                /*Reset back to start. Note that write is still out of order!*/
-                voodoo->cmdfifo_amin = voodoo->cmdfifo_base - 4;
-            }
-            voodoo->cmdfifo_amax      = addr;
-            voodoo->cmdfifo_holecount = ((voodoo->cmdfifo_amax - voodoo->cmdfifo_amin) >> 2) - 1;
-        }
-    }
-
-    if (voodoo->cmdfifo_enabled_2 && addr >= voodoo->cmdfifo_base_2 && addr < voodoo->cmdfifo_end_2) {
-        if (addr == voodoo->cmdfifo_base_2 && !voodoo->cmdfifo_holecount_2) {
-            /*Reset pointers*/
-            voodoo->cmdfifo_amin_2 = voodoo->cmdfifo_base_2;
-            voodoo->cmdfifo_amax_2 = voodoo->cmdfifo_base_2;
-            voodoo->cmdfifo_depth_wr_2++;
-            voodoo_wake_fifo_thread(voodoo);
-        } else if (voodoo->cmdfifo_holecount_2) {
-            voodoo->cmdfifo_holecount_2--;
-            if (!voodoo->cmdfifo_holecount_2) {
-                /*Filled in holes, resume normal operation*/
-                voodoo->cmdfifo_depth_wr_2 += ((voodoo->cmdfifo_amax_2 - voodoo->cmdfifo_amin_2) >> 2);
-                voodoo->cmdfifo_amin_2 = voodoo->cmdfifo_amax_2;
-                voodoo_wake_fifo_thread(voodoo);
-            }
-        } else if (addr == voodoo->cmdfifo_amax_2 + 4) {
-            /*In-order write*/
-            voodoo->cmdfifo_amin_2 = addr;
-            voodoo->cmdfifo_amax_2 = addr;
-            voodoo->cmdfifo_depth_wr_2++;
-            voodoo_wake_fifo_thread(voodoo);
-        } else {
-            /*Out-of-order write*/
-            if (addr < voodoo->cmdfifo_amin_2) {
-                voodoo->cmdfifo_amin_2 = voodoo->cmdfifo_base_2 - 4;
-            }
-            voodoo->cmdfifo_amax_2      = addr;
-            voodoo->cmdfifo_holecount_2 = ((voodoo->cmdfifo_amax_2 - voodoo->cmdfifo_amin_2) >> 2) - 1;
-        }
-    }
-}
-
-/* ---------------- BAR1 mapped straight onto vram ----------------
-   Trapping every frame buffer access is slow, and nothing needs to see
-   most of them: the guest's writes to plain vram (textures, its own 2D,
-   reading back a picture) go to the same memory the engines draw in. So
-   BAR1's pages are mapped onto vram, user and writable, except those the
-   card must see written: the command FIFOs (hole counting), the tiled
-   part above tile_base (its addresses are swizzled) and past the end of
-   vram. In VMHV the same pages go into the VM's nested page tables.
-   v3trap on the command line keeps every page trapped. */
+/* ---------------- the card ---------------- */
+int v3_on;
+static void *card;
+static voodoo_t *vdo;
+static svga_t *svga;
+static u32 bar0_lin, bar1_lin;                 /* where the BARs were put: unmapped linear space */
+#define V3_IO_BASE 0xD100   /* not D000h: Windows 9x without a PnP BIOS takes the board's devices at 00h-FFh as 10-bit ISA decoders, whose aliases cover D000h-D0FFh */
+
+/* BAR1 pages mapped straight onto vram where the card needn't see the
+   writes: not the command FIFOs (hole counting), not the tiled part above
+   tile_base, not past the end of vram. Every frame is then drawn anew (the
+   card's dirty-page marks miss these writes). In VMHV the same pages go
+   into the VM's nested page tables. v3trap: none. */
+static u8 *lfb_mapped;
+static int lfb_direct, lfb_pages;
+static u32 redraw_n;
+static u32 lfb_key[8];
 static void lfb_remap(int all)
 {
-    banshee_t *b = card;
-    voodoo_t *v = b->voodoo;
-    int ok = lfb_direct && (b->pci_regs[4] & 2) && b->memBaseAddr1 == bar1_lin;
+    u32 key[8] = { v3_card_bar(card, 1), (u32)v3_card_mem_on(card), vdo->tile_base,
+                   vdo->cmdfifo_enabled ? vdo->cmdfifo_base : 1, vdo->cmdfifo_enabled ? vdo->cmdfifo_end : 1,
+                   vdo->cmdfifo_enabled_2 ? vdo->cmdfifo_base_2 : 1, vdo->cmdfifo_enabled_2 ? vdo->cmdfifo_end_2 : 1, 0 };
+    if (!all && !memcmp(key, lfb_key, sizeof key)) return;
+    memcpy(lfb_key, key, sizeof key);
+    int ok = lfb_direct && key[1] && key[0] == bar1_lin;
     u32 lo = ~0u, hi = 0, n = 0;
-    lfb_dirty = 0;
-    for (u32 a = 0; a < b->vram_size; a += 4096) {
-        int want = ok && a + 4096 <= v->tile_base &&
-                   !(v->cmdfifo_enabled && a < v->cmdfifo_end && a + 4096 > v->cmdfifo_base) &&
-                   !(v->cmdfifo_enabled_2 && a < v->cmdfifo_end_2 && a + 4096 > v->cmdfifo_base_2);
+    for (u32 a = 0; a < (u32)svga->vram_max; a += 4096) {
+        int want = ok && a + 4096 <= vdo->tile_base &&
+                   !(vdo->cmdfifo_enabled && a < vdo->cmdfifo_end && a + 4096 > vdo->cmdfifo_base) &&
+                   !(vdo->cmdfifo_enabled_2 && a < vdo->cmdfifo_end_2 && a + 4096 > vdo->cmdfifo_base_2);
         if (!all && want == lfb_mapped[a >> 12]) continue;
         lfb_mapped[a >> 12] = (u8)want;
-        u32 host = want ? (u32)(uintptr_t)b->vram + a : 0;
+        u32 host = want ? (u32)(uintptr_t)svga->vram + a : 0;
         map_page(bar1_lin + a, host, want ? 7 : 0);
         hv_map_gpa(bar1_lin + a, host);
         if (a < lo) lo = a;
@@ -1487,61 +421,49 @@ static void lfb_remap(int all)
         n += want;
     }
     if (hi) tlb_flush_range(bar1_lin + lo, hi - lo);
+    lfb_pages = 0;
+    for (u32 a = 0; a < (u32)svga->vram_max; a += 4096) lfb_pages += lfb_mapped[a >> 12];
     if (hi && v3_log_on) kprintf("voodoo3: frame buffer %x-%x remapped (%u pages direct)\n", lo, hi, n);
 }
 
-/* VMHV has made its nested page tables: the direct pages into them too. */
 void v3_hv_sync(void)
 {
-    if (!v3_on) return;
-    lfb_remap(1);
+    if (v3_on) lfb_remap(1);
 }
 
-/* ---------------- what the kernel calls ---------------- */
-/* Whatever the card does between two looks: retraces, timers, the
-   FIFO and render threads. */
-static void v3_catch_up(void)
+/* Whatever the card does between two looks: its timers (scan lines,
+   retraces, the FIFO thread's wake-up), the FIFO and render threads. */
+static void catch_up(void)
 {
-    if (lfb_dirty) lfb_remap(0);
-    check_vsync();
+    lfb_remap(0);
     v3_poll_timers();
     v3_run();
 }
 
+/* A timer that is always there: timer.c's list mustn't run empty. */
+static pc_timer_t keep_timer;
+static void keep_cb(void *p) { (void)p; timer_advance_u64(&keep_timer, TIMER_USEC * 500000); }
+
+/* ---------------- what the kernel calls ---------------- */
+static int legacy(u32 a) { return a - 0xA0000 < 0x20000; }   /* the VGA's memory */
+
 int v3_window(u32 phys)
 {
     if (!v3_on) return 0;
-    u32 m0 = card->memBaseAddr0, m1 = card->memBaseAddr1;
-    if (!(card->pci_regs[4] & 2)) return 0;   /* memory decoding off */
-    return (m0 && phys - m0 < (32u << 20)) || (m1 && phys - m1 < (32u << 20));
+    return legacy(phys) || phys - bar0_lin < (64u << 20);   /* the VGA's memory, BAR0, BAR1 */
 }
 
 int v3_range(u32 phys, u32 len)
 {
     if (!v3_on || !len) return 0;
-    return v3_window(phys) && v3_window(phys + len - 1) &&
-           ((phys - card->memBaseAddr0 < (32u << 20)) == (phys + len - 1 - card->memBaseAddr0 < (32u << 20)));
+    return phys - bar0_lin < (64u << 20) && len <= (64u << 20) - (phys - bar0_lin);   /* inside BAR0 and BAR1 */
 }
 
 u32 v3_mmio_read(u32 phys, int size)
 {
-    u32 v = 0xFFFFFFFFu;
     v3_enter();
-    if (phys - card->memBaseAddr0 < (32u << 20)) {
-        u32 a = phys - card->memBaseAddr0;
-        u32 l = banshee_reg_readl(a & ~3u, card);
-        if (size == 4 && !(a & 3)) v = l;
-        else if (size == 2 && (a & 3) != 3) v = (l >> ((a & 3) * 8)) & 0xFFFF;
-        else if (size == 1) v = (l >> ((a & 3) * 8)) & 0xFF;
-        else {                                  /* straddling two registers: a byte at a time */
-            v = 0;
-            for (int i = 0; i < size; i++) v |= ((banshee_reg_readl((a + i) & ~3u, card) >> (((a + i) & 3) * 8)) & 0xFF) << (8 * i);
-        }
-    } else {
-        u32 a = phys - card->memBaseAddr1;
-        v = size == 4 ? banshee_read_linear_l(a, card) : size == 2 ? banshee_read_linear_w(a, card) : banshee_read_linear(a, card);
-    }
-    v3_catch_up();
+    catch_up();
+    u32 v = map_read(phys, size);
     v3_leave();
     return v;
 }
@@ -1549,286 +471,141 @@ u32 v3_mmio_read(u32 phys, int size)
 void v3_mmio_write(u32 phys, u32 val, int size)
 {
     v3_enter();
-    if (phys - card->memBaseAddr0 < (32u << 20)) {
-        u32 a = phys - card->memBaseAddr0;
-        if (size == 4 && !(a & 3)) banshee_reg_writel(a, val, card);
-        else if (size == 2 && !(a & 1)) banshee_reg_writew(a, (u16)val, card);
-        else for (int i = 0; i < size; i++) {
-            u32 b = a + i;
-            if (!(b & 0x1f80000)) banshee_ext_out(b & 0xff, (u8)(val >> (8 * i)), card);   /* IO remap */
-        }
-    } else {
-        u32 a = phys - card->memBaseAddr1;
-        if (size == 4) banshee_write_linear_l(a, val, card);
-        else if (size == 2) banshee_write_linear_w(a, (u16)val, card);
-        else banshee_write_linear(a, (u8)val, card);
-    }
-    v3_catch_up();
+    map_write(phys, val, size);
+    catch_up();
     v3_leave();
+}
+
+static int acc_left = 4000;                    /* v3log: the card's own I/O registers and its configuration space */
+static void acc_log(const char *what, u32 a, u32 v)
+{
+    if (!v3_log_on || acc_left <= 0) return;
+    if (!--acc_left) kprintf("voodoo3: access log full\n");
+    else kprintf("voodoo3: %s %03x %08x\n", what, a, v);
 }
 
 int v3_io(u16 port, int size, int write, u32 *val)
 {
-    if (!v3_on || !(card->pci_regs[4] & 1) || !card->ioBaseAddr) return 0;
-    if ((u16)(port - card->ioBaseAddr) >= 0x100) return 0;
-    u16 a = port - card->ioBaseAddr;
+    if (!v3_on) return 0;
+    struct io_h *h = io_at(port);
+    if (!h) {
+        if (port - 0x3B0u < 0x30) {            /* the VGA's ports the card doesn't decode now (mono/colour) */
+            if (!write) *val = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFFFFFFu;
+            return 1;
+        }
+        return 0;
+    }
     v3_enter();
-    if (write) {
-        if (size == 4) banshee_ext_outl(a, *val, card);
-        else if (size == 2) banshee_ext_outw(a, (u16)*val, card);
-        else banshee_ext_out(a, (u8)*val, card);
-    } else
-        *val = size == 4 ? banshee_ext_inl(a, card) : size == 2 ? banshee_ext_inw(a, card) : banshee_ext_in(a, card);
-    v3_catch_up();
+    catch_up();
+    if (write) io_write(port, *val, size);
+    else *val = io_read(port, size);
+    if (port - V3_IO_BASE < 0x100u) acc_log(write ? "io out" : "io in ", port, *val);
     v3_leave();
     return 1;
+}
+
+u32 v3_cfg_read(int reg, int size)
+{
+    u32 v = 0;
+    v3_enter();
+    for (int i = 0; i < size; i++) v |= (u32)pci_rd(0, reg + i, 1, pci_priv) << (8 * i);
+    v3_leave();
+    acc_log("cfg rd", reg, v);
+    return v;
+}
+
+void v3_cfg_write(int reg, u32 val, int size)
+{
+    acc_log("cfg wr", reg, val);
+    v3_enter();
+    for (int i = 0; i < size; i++) pci_wr(0, reg + i, 1, (u8)(val >> (8 * i)), pci_priv);
+    catch_up();
+    v3_leave();
 }
 
 void v3_tick(void)
 {
     if (!v3_on || depth) return;
     v3_enter();
-    v3_catch_up();
+    catch_up();
+    if (lfb_pages && svga->fb_only && !(++redraw_n % 32))    /* the frame buffer written past the card: */
+        svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
     v3_leave();
 }
 
-/* INT 10h set a VGA mode: the card's BIOS turns the video processor off. */
-void v3_mode_set(void)
-{
-    if (!v3_on) return;
-    card->vidProcCfg &= ~(VIDPROCCFG_VIDPROC_ENABLE | VIDPROCCFG_OVERLAY_ENABLE);
-    card->vgaInit0 &= ~VGAINIT0_EXTENDED_SHIFT_OUT;
-}
+void v3_mode_set(void) { }                     /* INT 10h is the card's own BIOS */
 
-/* ---------------- PCI configuration space (86Box's banshee_pci_read/write) ---------------- */
-static u8 cfg_read8(int addr)
-{
-    banshee_t *banshee = card;
-    switch (addr) {
-        case 0x00: return 0x1a; /*3DFX*/
-        case 0x01: return 0x12;
-        case 0x02: return 0x05; /*Voodoo 3*/
-        case 0x03: return 0x00;
-        case 0x04: return banshee->pci_regs[0x04] & 0x27;
-        case 0x05: return 0;
-        case 0x06: return 0x10; /*capabilities list*/
-        case 0x07: return banshee->pci_regs[0x07] & 0x36;
-        case 0x08: return 1;    /*Revision ID*/
-        case 0x09: return 0;
-        case 0x0a: return 0x00; /*VGA*/
-        case 0x0b: return 0x03; /*display controller*/
-        case 0x0d: return banshee->pci_regs[0x0d] & 0xf8;
-        case 0x13: return banshee->memBaseAddr0 >> 24;
-        case 0x17: return banshee->memBaseAddr1 >> 24;
-        case 0x18: return 0x01 | (u8)banshee->ioBaseAddr;
-        case 0x19: return banshee->ioBaseAddr >> 8;
-        case 0x1a: return banshee->ioBaseAddr >> 16;
-        case 0x1b: return banshee->ioBaseAddr >> 24;
-        case 0x2c: case 0x2d: case 0x2e: case 0x2f: return banshee->pci_regs[addr];
-        case 0x34: return 0x60;
-        case 0x3c: return banshee->pci_regs[0x3c];
-        case 0x3d: return 0x01; /*INTA*/
-        case 0x3e: return 0x04;
-        case 0x3f: return 0xff;
-        case 0x40: return 0x01;
-        case 0x50: return banshee->pci_regs[0x50];
-        case 0x60: return 0x01; /*power management capability*/
-        case 0x62: return 0x21;
-        case 0x64: case 0x65: case 0x66: case 0x67: return banshee->pci_regs[addr];
-        default: return 0;
-    }
-}
-
-static void cfg_write8(int addr, u8 val)
-{
-    banshee_t *banshee = card;
-    lfb_dirty = 1;
-    switch (addr) {
-        case 0x04: banshee->pci_regs[0x04] = val & 0x27; return;
-        case 0x07: banshee->pci_regs[0x07] = val & 0x3e; return;
-        case 0x0d: banshee->pci_regs[0x0d] = val & 0xf8; return;
-        case 0x13: banshee->memBaseAddr0 = (val & 0xfe) << 24; break;
-        case 0x17: banshee->memBaseAddr1 = (val & 0xfe) << 24; break;
-        case 0x18: return;
-        case 0x19: banshee->ioBaseAddr = (banshee->ioBaseAddr & 0xffff00ff) | val << 8; break;
-        case 0x1a: banshee->ioBaseAddr = (banshee->ioBaseAddr & 0xff00ffff) | val << 16; break;
-        case 0x1b: banshee->ioBaseAddr = (banshee->ioBaseAddr & 0x00ffffff) | (u32)val << 24; break;
-        case 0x3c: case 0x50: case 0x65: case 0x67: banshee->pci_regs[addr] = val; return;
-        case 0x64: banshee->pci_regs[0x64] = val & 0x03; return;
-        case 0x66: banshee->pci_regs[0x66] = val & 0xc0; return;
-        default: return;
-    }
-    if (addr == 0x13 || addr == 0x17) {
-        u32 b = addr == 0x13 ? banshee->memBaseAddr0 : banshee->memBaseAddr1;
-        if (b != 0xfe000000u && b != (addr == 0x13 ? bar0_lin : bar1_lin))   /* not a size probe, not where it was */
-            kprintf("voodoo3: BAR%d moved to %x: only %x is trapped for sure\n", addr == 0x13 ? 0 : 1, b, addr == 0x13 ? bar0_lin : bar1_lin);
-    }
-}
-
-u32 v3_cfg_read(int reg, int size)
-{
-    u32 v = 0;
-    for (int i = 0; i < size; i++) v |= (u32)cfg_read8(reg + i) << (8 * i);
-    acc_log(size == 4 ? "cfg rd4" : size == 2 ? "cfg rd2" : "cfg rd1", reg, v);
-    return v;
-}
-
-void v3_cfg_write(int reg, u32 val, int size)
-{
-    acc_log(size == 4 ? "cfg wr4" : size == 2 ? "cfg wr2" : "cfg wr1", reg, val);
-    for (int i = 0; i < size; i++) cfg_write8(reg + i, (u8)(val >> (8 * i)));
-    if (lfb_dirty) lfb_remap(0);
-}
-
-/* ---------------- the picture ---------------- */
-static int owns_screen(void)
-{
-    return v3_on && (card->vidProcCfg & VIDPROCCFG_VIDPROC_ENABLE) && (card->vgaInit0 & VGAINIT0_EXTENDED_SHIFT_OUT);
-}
-
+/* The picture: the part of the monitor's bitmap the card last named. */
 int v3_display(u32 *w, u32 *h)
 {
-    if (!owns_screen()) return 0;
-    u32 sw = card->vidScreenSize & 0xfff, sh = (card->vidScreenSize >> 12) & 0xfff;
-    if (!sw || !sh) {                             /* no screen size: the CRTC's display end */
-        sw = ((crtc[1] | (crtc[0x1a] & 4) << 6) + 1) * 8;
-        sh = (crtc[0x12] | (crtc[7] & 2) << 7 | (crtc[7] & 0x40) << 3 | (crtc[0x1b] & 4) << 8) + 1;
-        if (card->vidProcCfg & VIDPROCCFG_2X_MODE) sw *= 2;
-    }
-    if (sw > 2048) sw = 2048;
-    if (sh > 1536) sh = 1536;
-    *w = sw; *h = sh;
-    return 1;
-}
-
-static u32 clut(u32 c, int sel, int bypass)
-{
-    if (bypass || !card->pal_written) return c;
-    const u32 *p = &card->pallook[sel ? 256 : 0];
-    return (p[(c >> 16) & 0xff] & 0xff0000) | (p[(c >> 8) & 0xff] & 0xff00) | (p[c & 0xff] & 0xff);
-}
-
-static u32 px565(u16 v) { return ((v & 0xf800) << 8 | (v & 0xe000) << 3) | ((v & 0x07e0) << 5 | (v & 0x0600) >> 1) | ((v & 0x1f) << 3 | (v & 0x1c) >> 2); }
-
-/* One pixel of a surface in vram: fmt as the video processor counts them. */
-static u32 sample(u32 base, u32 stride, int tiled, int fmt, u32 x, u32 y)
-{
-    u32 bpp = fmt == PIX_FORMAT_8 ? 1 : fmt == PIX_FORMAT_RGB24 ? 3 : fmt == PIX_FORMAT_RGB32 ? 4 : 2;
-    u32 a;
-    if (tiled) {                                  /* 128-byte by 32-line tiles; stride in tiles */
-        u32 bx = x * bpp;
-        a = base + (y >> 5) * stride * 128 * 32 + (bx >> 7) * 128 * 32 + (y & 31) * 128 + (bx & 127);
-    } else a = base + y * stride + x * bpp;
-    const u8 *p = card->vram + (a & card->vram_mask);
-    switch (fmt) {
-    case PIX_FORMAT_8: {
-        const u8 *d = vga_dac[*p];
-        int s = (card->vgaInit0 & VGAINIT0_RAMDAC_8BIT) ? 0 : 2;
-        return (u32)(d[0] << s) << 16 | (u32)(d[1] << s) << 8 | (u32)(d[2] << s); }
-    case PIX_FORMAT_RGB24: return p[0] | p[1] << 8 | p[2] << 16;
-    case PIX_FORMAT_RGB32: return *(const u32 *)p & 0xffffff;
-    default: return px565(*(const u16 *)p);
-    }
+    int bw = blit_w, bh = blit_h;
+    if (!v3_on || bw <= 0 || bh <= 0) return 0;
+    if (blit_x + bw > 2048) bw = 2048 - blit_x;
+    if (blit_y + bh > 2048) bh = 2048 - blit_y;
+    *w = bw;
+    *h = bh;
+    return bw > 0 && bh > 0;
 }
 
 void v3_row(u32 y, u32 *out)
 {
     u32 w, h;
-    if (!v3_display(&w, &h)) return;
-    banshee_t *banshee = card;
-    voodoo_t *voodoo = banshee->voodoo;
-    u32 cfg = banshee->vidProcCfg;
-    int dfmt = VIDPROCCFG_DESKTOP_PIX_FORMAT, dtile = !!(cfg & VIDPROCCFG_DESKTOP_TILE);
-    u32 dstride = banshee->vidDesktopOverlayStride & 0x3fff;
-    u32 dy = (cfg & VIDPROCCFG_HALF_MODE) ? y >> 1 : y;
-    int ov = (cfg & VIDPROCCFG_OVERLAY_ENABLE) && voodoo->overlay.size_x > 0 && voodoo->overlay.size_y > 0 &&
-             (int)y >= voodoo->overlay.start_y && (int)y <= voodoo->overlay.end_y;
-    u32 ox0 = ov ? (u32)voodoo->overlay.start_x : w, ox1 = ov ? (u32)voodoo->overlay.end_x + 1 : w;
-    for (u32 x = 0; x < w; x++) {
-        if (x >= ox0 && x < ox1) continue;
-        u32 c = sample(banshee->vidDesktopStartAddr, dstride, dtile, dfmt, x, dy);
-        if (dfmt != PIX_FORMAT_8) c = clut(c, cfg & VIDPROCCFG_DESKTOP_CLUT_SEL, cfg & VIDPROCCFG_DESKTOP_CLUT_BYPASS);
-        out[x] = c;
-    }
-    if (!ov) return;
-    /* The overlay (Glide's 3D picture): scaled if asked, point sampled. */
-    u32 ostride = (banshee->vidDesktopOverlayStride & VID_STRIDE_OVERLAY_MASK) >> VID_STRIDE_OVERLAY_SHIFT;
-    int otile = !!(cfg & VIDPROCCFG_OVERLAY_TILE);
-    int ofmt = banshee->overlay_pix_fmt == 7 ? 1 : banshee->overlay_pix_fmt;   /* 565 dithered: as 565 */
-    if (ofmt != PIX_FORMAT_RGB565 && ofmt != PIX_FORMAT_RGB24 && ofmt != PIX_FORMAT_RGB32 && ofmt != PIX_FORMAT_8) ofmt = PIX_FORMAT_RGB565;   /* YUV: not done */
-    u32 ry = y - voodoo->overlay.start_y;
-    u32 sy = (cfg & VIDPROCCFG_V_SCALE_ENABLE) ? (u32)(((uint64_t)ry * voodoo->overlay.vidOverlayDvdy) >> 20) : ry;
-    u32 dudx = (cfg & VIDPROCCFG_H_SCALE_ENABLE) ? voodoo->overlay.vidOverlayDudx : (1u << 20);
-    u32 sx = 0;
-    if (ox1 > w) ox1 = w;
-    for (u32 x = ox0; x < ox1; x++, sx += dudx) {
-        u32 c = sample(banshee->overlay_addr, ostride, otile, ofmt, sx >> 20, sy);
-        out[x] = clut(c, cfg & VIDPROCCFG_OVERLAY_CLUT_SEL, cfg & VIDPROCCFG_OVERLAY_CLUT_BYPASS);
-    }
+    if (!v3_display(&w, &h) || y >= h) return;
+    const u32 *src = monitors[0].target_buffer->line[blit_y + y] + blit_x;
+    for (u32 x = 0; x < w; x++) out[x] = src[x] & 0xffffff;
+}
+
+/* The BIOS image, for the guest's C000h. */
+const u8 *v3_rom(u32 *len)
+{
+    if (!v3_on) return 0;
+    u32 n = (u32)(v3_rom_end - v3_rom_start), sz = v3_rom_start[2] * 512u;   /* the size its header gives */
+    *len = sz && sz < n ? sz : n;
+    return v3_rom_start;
 }
 
 /* ---------------- start-up ---------------- */
-
 void v3_init(void)
 {
     if (!strstr(cmdline, "voodoo3")) return;
+    if (!rom_present(0)) {
+        kprintf("voodoo3: vmdos was built without the Voodoo 3 BIOS (roms/voodoo3/3k12sd.rom): off\n");
+        return;
+    }
     v3_log_on = strstr(cmdline, "v3log") ? 2 : 0;
+    lfb_direct = !strstr(cmdline, "v3trap");
     bar0_lin = linear_hole(64u << 20, 32u << 20);
     if (!bar0_lin) { kprintf("voodoo3: no linear space for its BARs, off\n"); return; }
     bar1_lin = bar0_lin + (32u << 20);
-    v3_sched_init();
 
     v3_enter();
-    banshee_t *banshee = calloc(1, sizeof(banshee_t));
-    card = banshee;
-    banshee->vram_size = VRAM_MB << 20;
-    banshee->vram_mask = banshee->vram_size - 1;
-    banshee->vram = phys_try_alloc(banshee->vram_size);
-    banshee->changedvram = calloc(1, banshee->vram_size >> 12);
-    if (!banshee->vram) { v3_leave(); kprintf("voodoo3: no memory for its %u MB, off\n", VRAM_MB); return; }
+    TIMER_USEC = (uint64_t)((cpuclock / 1000000.0) * 4294967296.0);
+    VGACONST1 = (uint64_t)(cpuclock / 25175000.0 * 4294967296.0);
+    VGACONST2 = (uint64_t)(cpuclock / 28322000.0 * 4294967296.0);
+    v3_sched_init();
+    timer_add(&keep_timer, keep_cb, 0, 0);
+    timer_set_delay_u64(&keep_timer, TIMER_USEC * 500000);
+    video_tables();
 
-    banshee->dramInit0 = 1 << 27;                /* as 86Box's Voodoo 3 3000: 16 MB SDRAM */
-    banshee->dramInit1 = 1 << 30;
-    banshee->vidSerialParallelPort = VIDSERIAL_DDC_DCK_W | VIDSERIAL_DDC_DDA_W;
-    banshee->memBaseAddr0 = bar0_lin;
-    banshee->memBaseAddr1 = bar1_lin;
-    banshee->ioBaseAddr = V3_IO_BASE;
-    banshee->pci_regs[0x04] = 3;                  /* the BIOS left I/O and memory on */
-    banshee->pci_regs[0x3c] = 10;                 /* not the NE2000's 11; the card raises none */
-    banshee->pci_regs[0x2c] = 0x1a;               /* subsystem: Voodoo 3 3000 */
-    banshee->pci_regs[0x2d] = 0x12;
-    banshee->pci_regs[0x2e] = 0x3a;
-    banshee->pci_regs[0x2f] = 0x00;
+    const device_t *d = v3_device();
+    card = d->init(d);
+    vdo = v3_card_voodoo(card);
+    svga = v3_card_svga(card);
 
-    voodoo_t *voodoo = voodoo_2d3d_card_init(VOODOO_3);
-    banshee->voodoo        = voodoo;
-    voodoo->priv           = banshee;
-    banshee->set.voodoos[0] = voodoo;
-    banshee->set.nr_cards  = 1;
-    voodoo->set            = &banshee->set;
-    voodoo->vram           = banshee->vram;
-    voodoo->vram_max       = banshee->vram_size;
-    voodoo->changedvram    = banshee->changedvram;
-    voodoo->fb_mem         = banshee->vram;
-    voodoo->fb_mask        = banshee->vram_mask;
-    voodoo->tex_mem[0]     = banshee->vram;
-    voodoo->tex_mem_w[0]   = (uint16_t *) banshee->vram;
-    voodoo->tex_mem[1]     = banshee->vram;
-    voodoo->tex_mem_w[1]   = (uint16_t *) banshee->vram;
-    voodoo->texture_mask   = banshee->vram_mask;
-    voodoo->cmd_status     = (1 << 28);
-    voodoo->cmd_status_2   = (1 << 28);
-    voodoo_generate_filter_v1(voodoo);
-    timer_disable(&voodoo->timer);                /* the Voodoo 1/2 scan-out: not this card's */
-    /* as the card's BIOS leaves it: no tiled part in the linear frame buffer */
-    banshee_ext_outl(Init_lfbMemoryConfig, (banshee->vram_size >> 12) | 0x7f << 16, banshee);
-    v3_leave();
-
+    lfb_mapped = calloc(1, svga->vram_max >> 12);
+    /* as the PC's BIOS leaves a PCI card: its BARs, I/O and memory on */
+    v3_cfg_write(0x10, bar0_lin, 4);
+    v3_cfg_write(0x14, bar1_lin, 4);
+    v3_cfg_write(0x18, V3_IO_BASE, 4);
+    v3_cfg_write(0x3C, 10, 1);
+    v3_cfg_write(0x04, 3, 1);
     v3_on = 1;
-    lfb_mapped = calloc(1, banshee->vram_size >> 12);
-    lfb_direct = !strstr(cmdline, "v3trap");
+    for (u32 a = 0xA0000; a < 0xC0000; a += 4096) map_page(a, 0, 0);   /* the VGA's memory: the card's */
+    tlb_flush_range(0xA0000, 0x20000);
+    vpci_bios_patch();                         /* the PCI BIOS for 32-bit code, its BIOS at C000h (bios_init: again at each restart) */
     lfb_remap(1);
-    vpci_bios_patch();
-    kprintf("voodoo3: Voodoo 3 3000 (86Box's Voodoo), %u MB, PCI 00:01.0, registers at %x, frame buffer at %x, I/O at %x\n",
-            VRAM_MB, bar0_lin, bar1_lin, V3_IO_BASE);
+    v3_leave();
+    kprintf("voodoo3: Voodoo 3 3000 (86Box), 16 MB, its BIOS %u KB; registers at %x, frame buffer at %x, I/O at %x\n",
+            v3_rom_start[2] / 2u, bar0_lin, bar1_lin, V3_IO_BASE);
 }
+

@@ -50,7 +50,8 @@ CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-
 # voodoo3: 86Box's Voodoo (src/voodoo/vid_voodoo*.c, as upstream) and the Voodoo 3 around it
 VOODOO_OBJS := $(addprefix voodoo/,vid_voodoo.o vid_voodoo_banshee_blitter.o vid_voodoo_blitter.o \
               vid_voodoo_display.o vid_voodoo_fb.o vid_voodoo_fifo.o vid_voodoo_reg.o vid_voodoo_render.o \
-              vid_voodoo_setup.o vid_voodoo_texture.o v3.o v3sched.o)
+              vid_voodoo_setup.o vid_voodoo_texture.o vid_svga.o vid_svga_render.o timer.o \
+              v3card.o v3.o v3sched.o v3rom.o)
 OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_nvme.o blk_usb.o virtio.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o vpci.o $(VOODOO_OBJS))
@@ -93,6 +94,11 @@ VOODOO_FLAGS := $(filter-out -march=i386 -mtune=i486 -Wall -Wextra,$(FPFLAGS)) -
 $(BUILD)/voodoo/%.o: src/voodoo/%.c | $(BUILD)
 	@mkdir -p $(BUILD)/voodoo
 	$(CC) $(VOODOO_FLAGS) -c $< -o $@
+# Its BIOS, built in when roms/voodoo3/3k12sd.rom is there.
+V3ROM := $(wildcard roms/voodoo3/3k12sd.rom)
+$(BUILD)/voodoo/v3rom.o: src/voodoo/v3rom.S $(V3ROM) | $(BUILD)
+	@mkdir -p $(BUILD)/voodoo
+	$(CC) -m32 $(if $(V3ROM),-DV3ROM='"$(V3ROM)"') -c $< -o $@
 
 $(BUILD)/boot.o: src/boot.S | $(BUILD)
 	$(CC) -m32 -DFB_W=$(FB_W) -DFB_H=$(FB_H) -c $< -o $@

@@ -49,6 +49,11 @@ start:  mov bx, (progend - start + 100h + 15) / 16 + 1
         mov dx, msg_found
         mov ah, 9
         int 21h
+        mov ax, 4F02h                   ; 640x480, 16 bits, through the card's own VESA BIOS
+        mov bx, 0111h
+        int 10h
+        cmp ax, 004Fh
+        jne .nomode
 
         mov ax, 1687h                   ; DPMI
         int 2Fh
@@ -66,6 +71,8 @@ start:  mov bx, (progend - start + 100h + 15) / 16 + 1
         jc .nodpmi
         jmp pm
 
+.nomode: mov dx, msg_nomode
+        jmp short .fail
 .nopci: mov dx, msg_nopci
         jmp short .fail
 .nocard: mov dx, msg_nocard
@@ -104,11 +111,9 @@ pm:     xor ax, ax                      ; a flat 4 GB data selector
 
         mov esi, [lin0]                 ; ESI: the I/O remap (BAR0 + 0)
         lea edi, [esi + 200000h]        ; EDI: the 3D registers
-        mov dword [fs:esi + 28h], 1000h ; vgaInit0: extended shift out
-        mov dword [fs:esi + 98h], W | H << 12   ; vidScreenSize
-        mov dword [fs:esi + 0E4h], FRONT        ; vidDesktopStartAddr
+        mov dword [fs:esi + 0Ch], 1FFFh         ; lfbMemoryConfig: nothing tiled
+        mov dword [fs:esi + 0E4h], FRONT        ; vidDesktopStartAddr (the BIOS set the mode)
         mov dword [fs:esi + 0E8h], STRIDE | STRIDE << 16
-        mov dword [fs:esi + 5Ch], 1 | 1 << 18 | 1 << 10 | 1 << 11   ; vidProcCfg: on, 565, no CLUT
 
         mov dword [fs:edi + 1ECh], FRONT        ; colBufferAddr
         mov dword [fs:edi + 1F0h], STRIDE       ; colBufferStride
@@ -176,7 +181,13 @@ pm:     xor ax, ax                      ; a flat 4 GB data selector
 
         mov dword [fs:esi + 9Ch], 0                      ; overlay: the whole screen
         mov dword [fs:esi + 0A0h], (W - 1) | (H - 1) << 12
-        mov dword [fs:esi + 5Ch], 1 | 1 << 18 | 1 << 8 | 1 << 21 | 1 << 10 | 1 << 11
+        mov dword [fs:esi + 0A4h], 0                     ; vidOverlayDudx: 1:1
+        mov dword [fs:esi + 0A8h], STRIDE << 19          ; vidOverlayDudxOffsetSrcWidth
+        mov dword [fs:esi + 0ACh], 0                     ; vidOverlayDvdy
+        mov eax, [fs:esi + 5Ch]                          ; vidProcCfg: + the overlay, 565
+        and eax, ~(7 << 21)
+        or eax, 1 << 8 | 1 << 21
+        mov [fs:esi + 5Ch], eax
         mov dword [fs:edi + 250h], BACK                  ; leftOverlayBuf
         mov dword [fs:edi + 128h], 1                     ; swapbufferCMD, at a retrace
         call idle
@@ -237,6 +248,7 @@ entry   dd 0
 devfn   dw 0
 flat    dw 0
 msg_found  db 'V3TEST: Voodoo 3 found, drawing', 13, 10, '$'
+msg_nomode db 'V3TEST: the BIOS has no 640x480x16 (VESA 111h)', 13, 10, '$'
 msg_nopci  db 'V3TEST: no PCI BIOS (vmdos voodoo3?)', 13, 10, '$'
 msg_nocard db 'V3TEST: no Voodoo 3 on the PCI bus', 13, 10, '$'
 msg_nodpmi db 'V3TEST: no DPMI', 13, 10, '$'

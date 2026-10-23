@@ -14,6 +14,7 @@
    Timers (the FIFO thread's wake-up delay) count PIT clocks; due ones fire
    in v3_poll, from the tick and from every access to the card. */
 #include <voodoo_shim.h>
+#include <86box/timer.h>
 
 typedef uint32_t u32;
 typedef uint8_t u8;
@@ -160,45 +161,28 @@ void plat_delay_ms(uint32_t ms)
     if (cur) { cur->sleeping = 1; yield(); }
 }
 
-/* ---------------- time ---------------- */
-uint64_t tsc;                                  /* PIT clocks, 64-bit */
+/* ---------------- time ----------------
+   86Box's timers (timer.c, as upstream) count "CPU cycles" in tsc: here
+   PIT clocks (cpuclock is PIT_HZ), moved on to now whenever the card is
+   looked at. A long wait (the boot CPU busy elsewhere) is caught up at most
+   50 ms at a time: the card's time falls behind rather than rendering a
+   second of scan lines in one go. */
+uint64_t tsc;
 static u32 last_pit;
-static pc_timer_t *timers;
 
-static void time_update(void)
-{
-    u32 now = pit_clock();
-    tsc += (u32)(now - last_pit);
-    last_pit = now;
-}
+uint64_t plat_timer_read(void) { return tsc; }
 
-uint64_t plat_timer_read(void) { time_update(); return tsc; }
-
-void timer_add(pc_timer_t *t, void (*cb)(void *), void *priv, int start)
-{
-    t->callback = cb; t->priv = priv; t->enabled = 0;
-    t->next = timers; timers = t;
-    if (start) timer_set_delay_u64(t, TIMER_USEC);
-}
-void timer_set_delay_u64(pc_timer_t *t, uint64_t delay)
-{
-    time_update();
-    t->ts = (tsc << TIMER_SHIFT) + delay;
-    t->enabled = 1;
-}
-void timer_advance_u64(pc_timer_t *t, uint64_t delay) { t->ts += delay; t->enabled = 1; }
-void timer_disable(pc_timer_t *t) { t->enabled = 0; }
-
-/* Fire the timers that are due, then let the threads run. Main thread only. */
 void v3_poll_timers(void)
 {
-    time_update();
-    uint64_t now = tsc << TIMER_SHIFT;
-    for (pc_timer_t *t = timers; t; t = t->next)
-        if (t->enabled && t->ts <= now) {
-            t->enabled = 0;
-            if (t->callback) t->callback(t->priv);
-        }
+    u32 now = pit_clock(), d = now - last_pit;
+    last_pit = now;
+    if (d > 59659) d = 59659;                  /* 50 ms */
+    tsc += d;
+    if (TIMER_VAL_LESS_THAN_VAL(timer_target, tsc)) timer_process();
 }
 
-void v3_sched_init(void) { last_pit = pit_clock(); }
+void v3_sched_init(void)
+{
+    last_pit = pit_clock();
+    timer_init();
+}
