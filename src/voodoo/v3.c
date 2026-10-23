@@ -109,7 +109,12 @@ int device_get_config_int(const char *name) { return config_int(name); }
 
 /* ---------------- the card ---------------- */
 #define VRAM_MB 16
-#define V3_IO_BASE 0xD000
+/* Its 256 I/O ports at D100h, not the usual D000h: Windows 9x without a
+   PnP BIOS takes the board's own devices (DMA, PIC, PIT, keyboard: 00h-FFh)
+   as ISA with 10-bit decoding, so their aliases cover every xx00h-xxFFh
+   with xx & 3 == 0, and a card there gets Code 12 with nothing in the
+   conflict list. D100h-D1FFh aliases 100h-1FFh, where nothing is. */
+#define V3_IO_BASE 0xD100
 
 typedef struct banshee_t {
     u8 *vram;

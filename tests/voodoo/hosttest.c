@@ -36,6 +36,7 @@ int video_vretrace(void) { return 0; }
 void map_page(u32 lin, u32 phys, u32 flags) { (void)lin; (void)phys; (void)flags; }   /* no paging here: */
 void tlb_flush_range(u32 lin, u32 len) { (void)lin; (void)len; }                   /* every access traps */
 void hv_map_gpa(u32 gpa, u32 host) { (void)gpa; (void)host; }
+void vpci_bios_patch(void) { }
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
 /* ---------------- the card's registers ---------------- */
