@@ -620,8 +620,10 @@ int hv_emu_check(u32 lin, int write)
     u32 gpa = ~0u;
     u8 *p = emu_ptr(lin, &gpa, write);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return 2;
+    if (v3_window(gpa)) return 2;                                 /* the Voodoo 3's BARs */
     return p ? 1 : 0;
 }
+int hv_emu_gpa(u32 lin, u32 *gpa) { return gwalk(lin, gpa); }   /* 0: *gpa is where lin is */
 u8 hv_emu_rd8(u32 lin)
 {
     u32 gpa;
@@ -658,6 +660,7 @@ static void npf_exit(void)
 {
     u32 gpa = (u32)V64(C_INFO2);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
+    if (v3_window(gpa)) { emulate_at(gpa, 1); return; }        /* the Voodoo 3 (voodoo3.h) */
     if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) {
         static int holelog = -1, n;
         if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;

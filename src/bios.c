@@ -474,6 +474,7 @@ static void ps2_irq(struct regs *r)
 /* ---------------- INT 1Ah ---------------- */
 static int int1a(struct regs *r)
 {
+    if (vpci_int1a(r)) return BIOS_DONEF;           /* AH=B1h: the PCI BIOS, with voodoo3 (vpci.c) */
     switch (AH(r)) {
     case 0x00:
         CX(r) = rd16(BDA + 0x6E); DX(r) = rd16(BDA + 0x6C);

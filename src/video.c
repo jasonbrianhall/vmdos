@@ -313,6 +313,7 @@ void video_set_mode(int mode, int clear) { rlock_take(&video_lock); video_set_mo
 static void video_set_mode_(int mode, int clear)
 {
     mode &= 0x7F;
+    v3_mode_set();                                /* the Voodoo 3's BIOS: its video processor off, the VGA shows */
     vbe_off();
     vr_period = VR_PERIOD_VGA; vr_len = VR_LEN_VGA;   /* a BIOS mode's own timing: 70 Hz */
     vbe_interlace = 0;
@@ -406,6 +407,8 @@ static u16 shadow_text[132 * 60];
 static u8 shadow_gfx[GFX_MAXW * GFX_MAXH];
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
+static int vd_on;                              /* the Voodoo 3's video processor owns the screen (voodoo3.h) */
+static u32 vd_w, vd_h;
 static u32 g_x, g_y, g_w, g_h;                 /* the picture's box on the screen: 4:3, all of it (aspect=fill), or whole multiples (scale=off) */
 static u16 xmap[4096], txmap[4096];
 
@@ -642,11 +645,12 @@ static void layout(void)
     if (xbrz_opt < 0) xbrz_opt = strstr(cmdline, "scale=xbrz") != 0;
     if (unscaled < 0) unscaled = strstr(cmdline, "scale=none") != 0;
     if (smooth_opt < 0) smooth_opt = (strstr(cmdline, "scale=smooth") || xbrz_opt) && !no_scale && !unscaled;
-    int text = is_text(video_mode);
-    u32 w = vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
-    u32 h = vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
-    if (last_layout_mode == video_mode && (int)w == last_w && (int)h == last_h) return;
-    last_layout_mode = video_mode;
+    int text = is_text(video_mode) && !vd_on;
+    u32 w = vd_on ? vd_w : vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
+    u32 h = vd_on ? vd_h : vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
+    int lmode = vd_on ? 0x1000 : video_mode;      /* the Voodoo 3's picture: a mode of its own */
+    if (last_layout_mode == lmode && (int)w == last_w && (int)h == last_h) return;
+    last_layout_mode = lmode;
     last_w = (int)w; last_h = (int)h;
     full_redraw = 1;
     clear_fb();
@@ -671,7 +675,7 @@ static void layout(void)
     if (w == fb_w && h == fb_h) { g_w = w; g_h = h; }   /* the screen's own size: as is, whatever its shape */
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
-    u32 xw = vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
+    u32 xw = vd_on ? vd_w : vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
     for (u32 x = 0; x < g_w; x++) xmap[x] = (u16)(x * xw / g_w);
     u32 tw = text_pixels_w();
     for (u32 x = 0; x < g_w; x++) txmap[x] = (u16)(x * tw / g_w);
@@ -1005,8 +1009,8 @@ static void vga_write_planes(u8 v, u8 *base, u32 stride)
 /* A fault on the window: emulate the instruction. */
 int vga16_fault(struct emu_cpu *e, u32 cr2)
 {
-    if (!vga16_window(cr2)) return 0;
-    if (mem_emulate(e)) { mem_emulate_more(e); return 1; }
+    if (!vga16_window(cr2) && !v3_window(cr2)) return 0;   /* the Voodoo 3's BARs (voodoo3.h) the same way */
+    if (mem_emulate(e)) { if (hv_active || v3_window(cr2)) mem_emulate_more(e); return 1; }
     u32 a = e->seg_base[1] + *e->eip;
     kprintf("vga16: can't emulate %02x %02x %02x %02x %02x at %x (address %x)\n",
             rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), a, cr2);
@@ -1359,6 +1363,7 @@ static void vbe_mode_info(int m, u32 a)
 
 static void vbe_set(int m, int clear)
 {
+    v3_mode_set();
     /* A VESA mode set keeps the DAC width, as most SVGA BIOSes do: games
        switch to 8 bits before setting their mode as often as after. The
        default palette it loads is widened to match. */
@@ -2017,6 +2022,36 @@ static void refresh_vbe(void)
     draw_out(n, vbe_draw);
     sh_ptr_x = px; sh_ptr_y = py;
 }
+/* The Voodoo 3's picture (voodoo3.h) while its video processor is on: each
+   row as 32-bit pixels from the card, compared with the last frame's
+   (vshadow), the rows that changed drawn as a 32-bit VESA mode's are. */
+static void refresh_voodoo(void)
+{
+    static u32 row[2048];
+    u32 w = vd_w, h = vd_h, rowb = w * 4, n = 0;
+    for (u32 y = 0; y < h && y < 4096; y++) {
+        v3_row(y, row);
+        u8 *sh = vshadow + y * rowb;
+        u32 x0 = 0, x1 = w;
+        if (!full_redraw) {
+            row_span((const u8 *)row, sh, rowb, 0, &x0, &x1);
+            x0 /= 4; x1 = (x1 + 3) / 4;
+            if (x0 >= x1) continue;
+        }
+        memcpy(sh, row, rowb);
+        if (g_y + y * g_h / h == g_y + (y + 1) * g_h / h && !smooth) continue;   /* no screen row of its own */
+        todo_y[n] = (u16)y; todo_x0[n] = (u16)x0; todo_x1[n] = (u16)x1; n++;
+    }
+    fr.w = w; fr.h = h; fr.B = 4; fr.bpp = 32; fr.rowb = rowb; fr.px = 0; fr.py = -100;
+    fr.black = pack(0, 0, 0); fr.white = pack(63, 63, 63);
+    draw_out(n, vbe_draw);
+}
+
+/* For the Voodoo 3's status register: the vertical retrace, and which
+   frame this is (a retrace has passed when it changes). */
+int video_vretrace(void) { return vpit_clock() % vr_period < vr_len; }
+u32 video_frame_no(void) { return vpit_clock() / vr_period; }
+
 /* ---------------- on-screen note (speed changes, audio output) ---------------- */
 #define OSD_MAX 48
 static char osd_msg[OSD_MAX + 1];
@@ -2212,6 +2247,16 @@ static void video_refresh_(void)
     if (text_fallback) { refresh_fallback(); busy = 0; return; }
     if (!fb) { busy = 0; return; }
     tick_poll_begin();
+    {
+        u32 w = 0, h = 0;
+        int on = v3_display(&w, &h);
+        if (on && w * h * 4 > VRAM_SIZE) h = VRAM_SIZE / (w * 4);   /* vshadow's size */
+        if (on != vd_on || (on && (w != vd_w || h != vd_h))) {
+            if (on != vd_on) kprintf("video: the Voodoo 3's picture %s (%ux%u)\n", on ? "on" : "off", w, h);
+            vd_on = on; vd_w = w; vd_h = h;
+            last_layout_mode = -1;
+        }
+    }
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
@@ -2247,6 +2292,7 @@ static void video_refresh_(void)
         else if (changed && (!vbe_on || vbe_bytespp(vbe_bpp) == 1)) pal_changed = 1;
     }
     if (console_on) { refresh_text(console_cells, -1); }
+    else if (vd_on) refresh_voodoo();
     else if (is_text(video_mode)) {
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);

@@ -10,3 +10,5 @@ vmdos.efi
 vmdos.wav
 tools/t/
 .watcom
+tests/voodoo/obj/
+tests/voodoo/hosttest

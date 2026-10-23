@@ -121,6 +121,24 @@ static void map_page64(u32 lin, u64 phys, u32 flags)
 
 void map_page(u32 lin, u32 phys, u32 flags) { map_page64(lin, phys, flags); }
 
+/* Ring 3 can read (write: and write) linear lin without a fault. Makes no
+   page tables. */
+int page_user(u32 lin, int write)
+{
+    u64 e;
+    if (pae) {
+        u64 pde = pae_pd[lin >> 30][(lin >> 21) & 511];
+        if ((pde & 5) != 5) return 0;
+        if (pde0_temp_on && lin < 0x200000) pde = pde0_real;
+        e = ((u64 *)(uintptr_t)(u32)(pde & ~0xFFFull))[(lin >> 12) & 511];
+    } else {
+        u32 pde = page_dir[lin >> 22];
+        if ((pde & 5) != 5) return 0;
+        e = ((u32 *)(uintptr_t)(pde & ~0xFFFu))[(lin >> 12) & 1023];
+    }
+    return (e & 5) == 5 && (!write || (e & 2));
+}
+
 /* The physical page behind lin, 0 if it isn't mapped. */
 u32 page_phys(u32 lin)
 {
@@ -392,6 +410,19 @@ void *map_mmio64(u64 phys, u32 len)
     map_range(lin, phys - off, len, 3 | 0x10);
     flush_tlb();
     return (void *)(uintptr_t)(lin + off);
+}
+
+/* Linear space with nothing mapped in it, len bytes on an align boundary,
+   below the MMIO window (which then starts under it): an emulated device's
+   memory (the Voodoo 3, voodoo3.h), where every access must fault. 0: none. */
+u32 linear_hole(u32 len, u32 align)
+{
+    for (u32 lin = (mmio_window - len) & ~(align - 1); lin >= ram_top + 0x1000000u && lin < mmio_window; lin -= align) {
+        int used = 0;
+        for (u32 a = lin; a - lin < len && !used; a += 4096) used = page_phys(a) != 0;
+        if (!used) { mmio_window = lin; return lin; }
+    }
+    return 0;
 }
 
 /* Firmware tables (ACPI) below 4 GiB, to read: linear space below the
@@ -740,6 +771,7 @@ void kmain(u32 magic, struct mb_info *mb)
     bios_init();
     sound_init();
     net_init();
+    v3_init();                                    /* voodoo3: its memory before EMS, XMS and DPMI take the heap */
     ems_init();                                   /* before XMS: the page frame takes E000h from the UMBs */
     xms_init();
     mouse_ps2_init();

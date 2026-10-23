@@ -906,6 +906,7 @@ static struct regs *int31(struct ctx *c)
     case 0x0800: { u32 p = rBX << 16 | rCX, n = rSI << 16 | rDI;
         if (p < 0x100000) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* below 1 MiB: as is */
         if (video_vram_range(p, n)) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* VESA LFB: mapped as is */
+        if (v3_range(p, n)) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* the Voodoo 3: unmapped as is, every access trapped */
         void *m = map_mmio64_user(p, n);
         if (!m) { err(c, 0x8021); break; }
         u32 l = (u32)(uintptr_t)m;
@@ -1276,7 +1277,7 @@ struct regs *dpmi_exception(struct regs *r)
     case 14: {                                        /* the 16-colour VGA window? */
         u32 cr2;
         __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
-        if (vga16_window(cr2)) {
+        if (vga16_window(cr2) || v3_window(cr2)) {   /* or the Voodoo 3's registers and frame buffer */
             int pm = c.pm;
             struct emu_cpu e = { { &c.eax, &c.ecx, &c.edx, &c.ebx, &c.esp, &c.ebp, &c.esi, &c.edi }, &c.eip, &c.eflags,
                                  { pm ? sel_base(c.es) : c.es << 4, pm ? sel_base(c.cs) : c.cs << 4,
