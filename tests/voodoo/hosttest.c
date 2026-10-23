@@ -64,7 +64,7 @@ static u32 *shot;
 static void grab(void)
 {
     u32 w, h;
-    for (int i = 0; i < 3; i++) { fake_clock += 19886; v3_tick(); }   /* frames go by: the card draws them */
+    for (int i = 0; i < 10; i++) { fake_clock += 19886; v3_tick(); }   /* frames go by: the card draws them */
     if (!v3_display(&w, &h)) { printf("the video processor doesn't own the screen\n"); exit(1); }
     if (w != W || h != H) printf("screen %ux%u\n", w, h);
     for (u32 y = 0; y < H; y++) v3_row(y, shot + y * W);
