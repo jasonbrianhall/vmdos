@@ -109,7 +109,12 @@ int device_get_config_int(const char *name) { return config_int(name); }
 
 /* ---------------- the card ---------------- */
 #define VRAM_MB 16
-#define V3_IO_BASE 0xD000
+/* Its 256 I/O ports at D100h, not the usual D000h: Windows 9x without a
+   PnP BIOS takes the board's own devices (DMA, PIC, PIT, keyboard: 00h-FFh)
+   as ISA with 10-bit decoding, so their aliases cover every xx00h-xxFFh
+   with xx & 3 == 0, and a card there gets Code 12 with nothing in the
+   conflict list. D100h-D1FFh aliases 100h-1FFh, where nothing is. */
+#define V3_IO_BASE 0xD100
 
 typedef struct banshee_t {
     u8 *vram;
@@ -365,6 +370,7 @@ void voodoo_generate_vb_filters(voodoo_t *voodoo, int fcr, int fcg) { (void)vood
 /* ---------------- I/O space (BAR2, and the I/O remap in BAR0) ---------------- */
 static uint32_t banshee_ext_inl(uint16_t addr, void *priv);
 static void     banshee_ext_outl(uint16_t addr, uint32_t val, void *priv);
+static void acc_log(const char *what, u32 a, u32 v);
 
 static void banshee_out(uint16_t addr, uint8_t val) { video_port_out(addr, val); }
 static uint8_t banshee_in(uint16_t addr) { return (uint8_t)video_port_in(addr); }
@@ -377,6 +383,7 @@ banshee_ext_out(uint16_t addr, uint8_t val, void *priv)
 
     switch (addr & 0xff) {
         case 0xb0 ... 0xdf:
+            acc_log("vga out", (addr & 0xff) + 0x300, val);
             banshee_out((addr & 0xff) + 0x300, val);
             break;
 
@@ -408,11 +415,24 @@ banshee_ext_outw(uint16_t addr, uint16_t val, void *priv)
     }
 }
 
+/* v3log: the first accesses to the card's I/O registers and configuration
+   space in the log, to see what a driver asks of it (not the FIFO, the 3D
+   or the frame buffer). */
+static int acc_left = 4000;
+static void acc_log(const char *what, u32 a, u32 v)
+{
+    if (!v3_log_on || acc_left <= 0) return;
+    if (!--acc_left) kprintf("voodoo3: access log full\n");
+    else kprintf("voodoo3: %s %02x %08x\n", what, a, v);
+}
+
 static void
 banshee_ext_outl(uint16_t addr, uint32_t val, void *priv)
 {
     banshee_t *banshee = (banshee_t *) priv;
     voodoo_t  *voodoo  = banshee->voodoo;
+
+    acc_log("io out", addr & 0xff, val);
 
     switch (addr & 0xff) {
         case Init_pciInit0:
@@ -769,6 +789,7 @@ banshee_ext_inl(uint16_t addr, void *priv)
             break;
     }
 
+    if ((addr & 0xff) != Init_status) acc_log("io in ", addr & 0xff, ret);
     return ret;
 }
 
@@ -1648,11 +1669,13 @@ u32 v3_cfg_read(int reg, int size)
 {
     u32 v = 0;
     for (int i = 0; i < size; i++) v |= (u32)cfg_read8(reg + i) << (8 * i);
+    acc_log(size == 4 ? "cfg rd4" : size == 2 ? "cfg rd2" : "cfg rd1", reg, v);
     return v;
 }
 
 void v3_cfg_write(int reg, u32 val, int size)
 {
+    acc_log(size == 4 ? "cfg wr4" : size == 2 ? "cfg wr2" : "cfg wr1", reg, val);
     for (int i = 0; i < size; i++) cfg_write8(reg + i, (u8)(val >> (8 * i)));
     if (lfb_dirty) lfb_remap(0);
 }
@@ -1764,7 +1787,8 @@ void v3_init(void)
     banshee->changedvram = calloc(1, banshee->vram_size >> 12);
     if (!banshee->vram) { v3_leave(); kprintf("voodoo3: no memory for its %u MB, off\n", VRAM_MB); return; }
 
-    banshee->dramInit0 = 1 << 27 | 1 << 26;      /* 2 x SGRAM: 16 MB */
+    banshee->dramInit0 = 1 << 27;                /* as 86Box's Voodoo 3 3000: 16 MB SDRAM */
+    banshee->dramInit1 = 1 << 30;
     banshee->vidSerialParallelPort = VIDSERIAL_DDC_DCK_W | VIDSERIAL_DDC_DDA_W;
     banshee->memBaseAddr0 = bar0_lin;
     banshee->memBaseAddr1 = bar1_lin;
