@@ -53,6 +53,20 @@ int vpci_port(u16 port, int size, int write, u32 *val)
     return v3_io(port, size, write, val);
 }
 
+/* The BIOS32 service directory in the BIOS image (bios.asm): turned on, so
+   32-bit code (Windows' PCI.VXD) finds the PCI BIOS. With a bus to show
+   only; the BIOS image is copied anew at times, so bios_init calls this too. */
+void vpci_bios_patch(void)
+{
+    if (!v3_on) return;
+    u32 d = 0xF0000u + rd16(0xF0234);
+    wr8(d + 2, '2');
+    wr8(d + 10, 0);
+    u8 sum = 0;
+    for (int i = 0; i < 16; i++) sum += rd8(d + i);
+    wr8(d + 10, (u8)-sum);
+}
+
 static void done(struct regs *r, u8 ah)
 {
     AH(r) = ah;

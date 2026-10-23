@@ -607,6 +607,7 @@ void bios_init(void)
     if (!disk_cyls) disk_cyls = 1;
     if (!disk_on_a) kprintf("disk: %u sectors (%u MiB), CHS %u/%u/%u\n", disk_sectors, disk_sectors >> 11,
             disk_cyls, DISK_HEADS, DISK_SPT);
+    vpci_bios_patch();                                   /* voodoo3: the PCI BIOS for 32-bit code */
 }
 
 /* FreeDOS boot sectors (boot/), laid over C:'s boot sector in memory so a

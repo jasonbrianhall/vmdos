@@ -68,6 +68,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw int67                         ; 022E  EMS (VMEMS.SYS points INT 67h here)
         dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
         dw lfn_open                      ; 0232  long-name open on a 9p drive (fs9p.cpp)
+        dw bios32_dir                    ; 0234  BIOS32 service directory (vpci.c turns it on)
 
 ; ---- stubs ----
 dummy:  iret
@@ -308,6 +309,189 @@ irq_slave:
         out 0x20, al
         pop ax
         iret
+
+; ---- the PCI BIOS for 32-bit callers (Windows' PCI.VXD) ----
+; A BIOS32 service directory with the "$PCI" service. Its signature is
+; "_3?_" here: vpci.c makes it "_32_" (and the checksum right) only when
+; there is a PCI bus to show (voodoo3), so without one nothing finds it.
+; Both entry points are 32-bit, called far; they don't touch memory, so
+; they work whatever base the caller's code selector has. Configuration
+; space through ports CF8h/CFCh (the monitor's virtual bus, vpci.c).
+        align 16
+bios32_dir:
+        db '_3?_'
+        dd 0F0000h + bios32_entry        ; physical
+        db 0                             ; revision
+        db 1                             ; length, paragraphs
+        db 0                             ; checksum (vpci.c)
+        times 5 db 0
+
+        bits 32
+bios32_entry:                            ; EAX = service ID, EBX = 0
+        cmp eax, '$PCI'
+        jne .none
+        mov ebx, 0F0000h                 ; the service: base, length, entry
+        mov ecx, 10000h
+        mov edx, pci32
+        xor al, al
+        retf
+.none:  mov al, 80h
+        retf
+
+; AX = B1xxh, as INT 1Ah. CF and AH: the result.
+pci32:  cmp ah, 0B1h
+        jne .bad
+        cmp al, 01h
+        je .present
+        cmp al, 02h
+        je .finddev
+        cmp al, 03h
+        je .findclass
+        cmp al, 08h
+        jb .bad
+        cmp al, 0Dh
+        ja .bad
+        push eax
+        push edx
+        call .addr                       ; EAX: CF8h value, DX: data port
+        mov dx, 0CF8h
+        out dx, eax
+        pop edx
+        pop eax
+        push edx
+        mov dx, di
+        and dx, 3
+        add dx, 0CFCh
+        cmp al, 08h
+        je .rb
+        cmp al, 09h
+        je .rw
+        cmp al, 0Ah
+        je .rd
+        cmp al, 0Bh
+        je .wb
+        cmp al, 0Ch
+        je .ww
+        mov eax, ecx                     ; 0Dh: write dword
+        out dx, eax
+        jmp .okpop
+.wb:    mov al, cl
+        out dx, al
+        jmp .okpop
+.ww:    mov ax, cx
+        out dx, ax
+        jmp .okpop
+.rb:    in al, dx
+        mov cl, al
+        jmp .okpop
+.rw:    in ax, dx
+        mov cx, ax
+        jmp .okpop
+.rd:    in eax, dx
+        mov ecx, eax
+.okpop: pop edx
+        jmp .ok
+
+.addr:  movzx eax, bx                    ; BH bus, BL device/function
+        shl eax, 8
+        or eax, 80000000h
+        push edi
+        and edi, 0FCh
+        or eax, edi
+        pop edi
+        ret
+
+.present:
+        mov edx, 20494350h               ; "PCI "
+        mov al, 01h                      ; configuration mechanism 1
+        mov bx, 0210h                    ; version 2.10
+        xor cl, cl                       ; last bus: 0
+        xor ah, ah
+        clc
+        retf
+
+.finddev:                                ; device CX of vendor DX, the SI-th
+        push eax
+        push edx
+        push esi
+        push ebp
+        mov ebp, ecx
+        shl ebp, 16
+        mov bp, dx                       ; the ID dword wanted
+        xor ebx, ebx                     ; BH = 0, BL = devfn
+.fdloop:
+        mov eax, ebx
+        shl eax, 8
+        or eax, 80000000h
+        mov dx, 0CF8h
+        out dx, eax
+        mov dx, 0CFCh
+        in eax, dx
+        cmp eax, ebp
+        jne .fdnext
+        test si, si
+        jz .found
+        dec si
+.fdnext:
+        inc bl
+        jnz .fdloop
+        pop ebp
+        pop esi
+        pop edx
+        pop eax
+        jmp .notfound
+.found: pop ebp
+        pop esi
+        pop edx
+        pop eax
+        jmp .ok
+
+.findclass:                              ; class code ECX (24 bits), the SI-th
+        push eax
+        push edx
+        push esi
+        xor ebx, ebx
+.fcloop:
+        mov eax, ebx
+        shl eax, 8
+        or eax, 80000008h
+        mov dx, 0CF8h
+        out dx, eax
+        mov dx, 0CFCh
+        in eax, dx
+        shr eax, 8
+        push ecx
+        and ecx, 0FFFFFFh
+        cmp eax, ecx
+        pop ecx
+        jne .fcnext
+        test si, si
+        jz .fcfound
+        dec si
+.fcnext:
+        inc bl
+        jnz .fcloop
+        pop esi
+        pop edx
+        pop eax
+        jmp .notfound
+.fcfound:
+        pop esi
+        pop edx
+        pop eax
+        jmp .ok
+
+.ok:    xor ah, ah
+        clc
+        retf
+.notfound:
+        mov ah, 86h
+        stc
+        retf
+.bad:   mov ah, 81h
+        stc
+        retf
+        bits 16
 
 config_table:                    ; INT 15h AH=C0h
         dw 8

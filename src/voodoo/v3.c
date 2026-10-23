@@ -1770,7 +1770,7 @@ void v3_init(void)
     banshee->memBaseAddr1 = bar1_lin;
     banshee->ioBaseAddr = V3_IO_BASE;
     banshee->pci_regs[0x04] = 3;                  /* the BIOS left I/O and memory on */
-    banshee->pci_regs[0x3c] = 11;
+    banshee->pci_regs[0x3c] = 10;                 /* not the NE2000's 11; the card raises none */
     banshee->pci_regs[0x2c] = 0x1a;               /* subsystem: Voodoo 3 3000 */
     banshee->pci_regs[0x2d] = 0x12;
     banshee->pci_regs[0x2e] = 0x3a;
@@ -1804,6 +1804,7 @@ void v3_init(void)
     lfb_mapped = calloc(1, banshee->vram_size >> 12);
     lfb_direct = !strstr(cmdline, "v3trap");
     lfb_remap(1);
+    vpci_bios_patch();
     kprintf("voodoo3: Voodoo 3 3000 (86Box's Voodoo), %u MB, PCI 00:01.0, registers at %x, frame buffer at %x, I/O at %x\n",
             VRAM_MB, bar0_lin, bar1_lin, V3_IO_BASE);
 }
