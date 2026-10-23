@@ -264,9 +264,34 @@ void pch_bits(Card& c)
     w32(c, RDTR, 0); w32(c, TIDV, 0);           // no interrupt delays (no interrupts anyway)
 }
 
+// e1000=WORD[,WORD...] on the kernel command line, to find which of the
+// ICH/PCH extras stops a card that works under iPXE (which does none of
+// them): nobits (pch_bits), nophy (the PHY/Kumeran setup), nolink (the
+// link-up K1/IPG/EMI changes), noflag (the software flag and GIO master
+// disable around the reset), plain (all of these).
+enum { SKIP_BITS = 1, SKIP_PHY = 2, SKIP_LINK = 4, SKIP_FLAG = 8 };
+unsigned skip;
+unsigned skip_opts()
+{
+    const char* p = strstr(cmdline, "e1000=");
+    if (!p) return 0;
+    char w[64];
+    int n = 0;
+    for (p += 6; *p && *p != ' ' && n < 63; p++) w[n++] = *p;
+    w[n] = 0;
+    unsigned m = 0;
+    if (strstr(w, "plain")) m |= SKIP_BITS | SKIP_PHY | SKIP_LINK | SKIP_FLAG;
+    if (strstr(w, "nobits")) m |= SKIP_BITS;
+    if (strstr(w, "nophy")) m |= SKIP_PHY;
+    if (strstr(w, "nolink")) m |= SKIP_LINK;
+    if (strstr(w, "noflag")) m |= SKIP_FLAG;
+    return m;
+}
+
 bool link(Card& c);
 bool init(Card& c)
 {
+    skip = skip_opts();
     const Pch* pch = pch_of((uint32_t)c.device << 16 | c.vendor);
     c.e.pch = pch != 0;
     c.e.lv = c.device == 0x1502 || c.device == 0x1503;   // 82579 (Linux: pch2lan)
@@ -289,7 +314,11 @@ bool init(Card& c)
     w32(c, TCTL, 1u << 3);                      // (PSP)
     r32(c, STATUS);
     udelay(10000);
-    if (c.e.pch) {                                // as e1000e: stop DMA, take the flag, reset
+    if (c.e.pch && skip) kprintf("net: %s: e1000= skipping%s%s%s%s\n", pch ? pch->name : "Intel",
+                                 skip & SKIP_BITS ? " bits" : "", skip & SKIP_PHY ? " phy" : "",
+                                 skip & SKIP_LINK ? " link" : "", skip & SKIP_FLAG ? " flag" : "");
+    if (c.e.pch && (skip & SKIP_FLAG) && (c.e.lv || pch_lpt(c))) w32(c, PBA, 26);
+    if (c.e.pch && !(skip & SKIP_FLAG)) {         // as e1000e: stop DMA, take the flag, reset
         // PBA only takes effect on the next reset (Linux e1000e_reset writes it
         // before reset_hw): written after RST, the register reads back 26 but
         // the packet buffer keeps its old split and an 82579 never fetches a
@@ -314,9 +343,10 @@ bool init(Card& c)
     ctl |= (1u << 6) | (1u << 5);               // SLU, ASDE
     ctl &= ~((1u << 2) | (1u << 3) | (1u << 7) | (1u << 30) | (1u << 31));   // GIO master disable, LRST, ILOS, VME, PHY_RST
     w32(c, CTRL, ctl);
-    if (c.e.pch) pch_bits(c);
+    if (c.e.pch && !(skip & SKIP_BITS)) pch_bits(c);
+    else if (c.e.pch) w32(c, TXDCTL0, r32(c, TXDCTL0) | 1u << 25);   // as iPXE: queue enable, nothing else
 
-    if (c.e.pch) pch_phy(c);
+    if (c.e.pch && !(skip & SKIP_PHY)) pch_phy(c);
 
     uint32_t lo = r32(c, RAL), hi = r32(c, RAH);
     if (!c.e.pch && (!(hi & 0x80000000u) || (!lo && !(hi & 0xFFFF)))) {
@@ -361,7 +391,7 @@ bool link(Card& c)
 {
     bool up = r32(c, STATUS) & 2;
     if (up && !c.e.was_up) {
-        if (c.e.pch) link_up_pch(c);
+        if (c.e.pch && !(skip & SKIP_LINK)) link_up_pch(c);
         w32(c, TCTL, r32(c, TCTL) | (1u << 1));    // EN
         dbg(1, "net: %s: link up, transmit on\n", c.name);
     }
