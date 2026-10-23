@@ -566,7 +566,10 @@ int bios_service(struct regs *r, int id, int via_stub)
 /* ---------------- setup ---------------- */
 void bios_init(void)
 {
-    memset(gptr(0), 0, GUEST_TOP);
+    if (v3_on) {                                         /* voodoo3: A0000h-BFFFFh are the card's (unmapped) */
+        memset(gptr(0), 0, 0xA0000);
+        memset(gptr(0xC0000), 0, GUEST_TOP - 0xC0000);
+    } else memset(gptr(0), 0, GUEST_TOP);
     memcpy(gptr(BIOS_LIN), bios_bin, bios_bin_end - bios_bin);
     memcpy(gptr(BIOS_LIN + FONT16_OFF), vga_font16, 4096);
     memcpy(gptr(BIOS_LIN + FONT8_OFF), vga_font8, 2048);
@@ -615,6 +618,12 @@ void bios_init(void)
    the disk itself is not changed. */
 extern const u8 fd_boot16[512], fd_boot32[512];
 
+/* voodoo3: the boot sector is reached through the card's BIOS (bios.asm rom_post). */
+static void v3_post(struct regs *r)
+{
+    if (v3_on) { r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x236); }
+}
+
 /* Start the guest from floppy drive d's boot sector, as a BIOS would:
    loaded at 0000:7C00, DL = the drive. Booters ("self-booting" games)
    run without DOS. 0, or -1 when the drive is empty. */
@@ -633,6 +642,7 @@ static int boot_floppy(struct regs *r, int d)
     r->v86_ds = r->v86_es = r->v86_fs = r->v86_gs = 0;
     r->eax = r->ebx = r->ecx = r->esi = r->edi = r->ebp = 0;
     r->edx = (u32)d;
+    v3_post(r);
     kprintf("booting floppy %c:%s\n", 'A' + d, sec[510] == 0x55 && sec[511] == 0xAA ? "" : " (no 55AA signature; started anyway)");
     return 0;
 }
@@ -720,4 +730,5 @@ void bios_boot(struct regs *r)
     r->edx = 0x80;
     r->esi = part >= 0 ? 0x7BE + part * 16 : 0;
     r->ebp = r->esi;
+    v3_post(r);
 }

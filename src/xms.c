@@ -10,14 +10,14 @@
 #include "kernel.h"
 
 #define MAX_HANDLES 64
-#define UMB_START 0xC800                    /* paragraphs */
+#define UMB_START (v3_on ? 0xCA00 : 0xC800)  /* paragraphs; voodoo3: its BIOS is 40 KB */
 extern u16 umb_end;                         /* ems.c: E000h with an EMS page frame */
 #define UMB_END   umb_end
 
 static u32 cap_kb, used_kb;                 /* the most there can be (xms=), allocated */
 static struct { u8 *mem; u32 size_kb; u8 used, locks; } h[MAX_HANDLES + 1];  /* handle = index, 1.. */
 static int hma_used, a20_global, a20_local;
-static u16 umb_next = UMB_START;
+static u16 umb_next;                         /* 0: UMB_START */
 static struct { u16 seg, paras; } umbs[8];
 
 static int set_size(u16 hd, u32 kb);
@@ -214,6 +214,7 @@ void xms_call(struct regs *r)
     case 0x0F: realloc_kb(r, DX(r), BX(r)); return;
     case 0x8F: realloc_kb(r, DX(r), r->ebx); return;
     case 0x10: {                                  /* request UMB: DX paragraphs */
+        if (!umb_next) umb_next = UMB_START;
         u16 left = UMB_END - umb_next;
         if (!left) { DX(r) = 0; fail(r, 0xB1); return; }
         if (DX(r) > left) { DX(r) = left; fail(r, 0xB0); return; }

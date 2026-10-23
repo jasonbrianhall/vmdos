@@ -64,6 +64,7 @@ static u32 *shot;
 static void grab(void)
 {
     u32 w, h;
+    for (int i = 0; i < 3; i++) { fake_clock += 19886; v3_tick(); }   /* frames go by: the card draws them */
     if (!v3_display(&w, &h)) { printf("the video processor doesn't own the screen\n"); exit(1); }
     if (w != W || h != H) printf("screen %ux%u\n", w, h);
     for (u32 y = 0; y < H; y++) v3_row(y, shot + y * W);
@@ -75,6 +76,21 @@ static int check(const char *what, int x, int y, u32 want)
              abs((int)(got & 255) - (int)(want & 255)) < 12;
     printf("%-34s (%3d,%3d): %06x, want %06x  %s\n", what, x, y, got, want, ok ? "ok" : "WRONG");
     return ok;
+}
+
+/* what the card's BIOS would do for 640x480: the VGA's timings (mode 12h's) */
+static void outb(u16 p, u8 v) { u32 x = v; v3_io(p, 1, 1, &x); }
+static u8 inb(u16 p) { u32 x = 0; v3_io(p, 1, 0, &x); return x; }
+static void vga_640x480(void)
+{
+    static const u8 crtc[25] = { 0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0x0B, 0x3E, 0x00, 0x40, 0, 0, 0, 0, 0, 0,
+                                 0xEA, 0x8C, 0xDF, 0x28, 0x00, 0xE7, 0x04, 0xE3, 0xFF };
+    outb(0x3C2, 0xE3);
+    outb(0x3C4, 0); outb(0x3C5, 3);
+    outb(0x3C4, 1); outb(0x3C5, 1);
+    outb(0x3D4, 0x11); outb(0x3D5, 0);
+    for (int i = 0; i < 25; i++) { outb(0x3D4, i); outb(0x3D5, crtc[i]); }
+    inb(0x3DA); outb(0x3C0, 0x20);                         /* the attribute controller: palette on */
 }
 
 int main(int argc, char **argv)
@@ -92,6 +108,8 @@ int main(int argc, char **argv)
     v3_cfg_write(0x10, BAR0, 4);
 
     /* the screen: 640x480, 16 bpp desktop at FRONT */
+    vga_640x480();
+    io(0x0c, 0x1fff);                                      /* lfbMemoryConfig: nothing tiled */
     io(0x28, 1 << 12);                                     /* vgaInit0: extended shift out */
     io(0x98, W | H << 12);                                 /* vidScreenSize */
     io(0xe4, FRONT);                                       /* vidDesktopStartAddr */
@@ -153,6 +171,9 @@ int main(int argc, char **argv)
     /* swap: show BACK through the overlay, as Glide does */
     io(0x9c, 0);                                           /* vidOverlayStartCoords */
     io(0xa0, (W - 1) | (H - 1) << 12);                     /* vidOverlayEndScreenCoords */
+    io(0xa4, 0);                                           /* vidOverlayDudx: 1:1 */
+    io(0xa8, (u32)STRIDE << 19);                           /* vidOverlayDudxOffsetSrcWidth: its width in bytes */
+    io(0xac, 0);                                           /* vidOverlayDvdy */
     io(0x5c, 1 | 1 << 18 | 1 << 8 | 1 << 21 | 1 << 10 | 1 << 11);   /* + overlay, 565 */
     r3d(0x250, BACK);                                      /* leftOverlayBuf */
     r3d(0x128, 1);                                         /* swapbufferCMD, at a retrace */

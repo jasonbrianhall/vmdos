@@ -253,17 +253,15 @@ smooth, xBRZ and no scaling while a program runs, whatever the command line chos
 (`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 
-`voodoo3` on the kernel command line (the boot menu's last entry, "with Voodoo 3"; off otherwise) adds an emulated 3dfx Voodoo 3 3000
-(16 MB, PCI) on 86Box's Voodoo code, for Glide programs that support the
-Voodoo 3 (Banshee/H3 Glide, e.g. a V3 `GLIDE2X.OVL`); once a program turns
-on the card's video processor the screen shows the Voodoo's picture, and a
-VGA mode set brings the VGA back. With it the VGA is the Voodoo's: the Tseng
-ET4000 registers and BIOS modes are gone (VESA modes stay), so Windows finds
-the Voodoo 3, not a Tseng, as on a real Voodoo 3 PC. Needs a Pentium Pro or later and about
-40 MB of RAM. The frame buffer is mapped straight onto the card's memory;
-register and command FIFO accesses are trapped and emulated, so busy scenes
-run slower than on the real card (`v3trap` traps the frame buffer too;
-`tests/voodoo` has the tests).
+`voodoo3` on the kernel command line (the boot menu's last entry, "with Voodoo 3"; off otherwise) makes the PC's video card an emulated
+3dfx Voodoo 3 3000 (16 MB, PCI): 86Box's card (its Voodoo, Banshee and SVGA
+code) running the card's own BIOS, as 86Box does. The BIOS is built into
+vmdos from `roms/voodoo3/3k12sd.rom` (86Box's file); a build without it
+leaves `voodoo3` off. The VGA, its modes and VESA are then the card's BIOS's,
+and Windows finds a Voodoo 3. Needs a Pentium Pro or later and about 60 MB of
+RAM. VGA memory, register and command FIFO accesses are trapped and emulated;
+the frame buffer is mapped straight onto the card's memory (`v3trap` traps it
+too; `tests/voodoo` has the tests).
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
@@ -689,7 +687,7 @@ untested.
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 |
-| `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo core (vid_voodoo*.c as upstream; see src/voodoo/UPSTREAM), the card's registers (v3.c), green threads (v3sched.c); the guest's PCI bus |
+| `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |

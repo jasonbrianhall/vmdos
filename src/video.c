@@ -313,7 +313,7 @@ void video_set_mode(int mode, int clear) { rlock_take(&video_lock); video_set_mo
 static void video_set_mode_(int mode, int clear)
 {
     mode &= 0x7F;
-    v3_mode_set();                                /* the Voodoo 3's BIOS: its video processor off, the VGA shows */
+    if (v3_on) return;                            /* voodoo3: the card's own BIOS sets its modes */
     vbe_off();
     vr_period = VR_PERIOD_VGA; vr_len = VR_LEN_VGA;   /* a BIOS mode's own timing: 70 Hz */
     vbe_interlace = 0;
@@ -912,6 +912,7 @@ static void ega_check(void)
 
 int vga16_window(u32 lin)
 {
+    if (v3_on) return 0;                                       /* voodoo3: the VGA is the card (v3_window) */
     if (video_et_split(lin)) return 1;                         /* ET4000 split segments: writes emulated */
     if (lin >= 0xA0000 && lin < 0xB0000) return ega_on || modex_trap || (planar_on && mapped_ro);
     if (lin >= 0xB0000 && lin < 0xC0000) return ega_on && ((b_trap >> ((lin - 0xB0000) >> 15)) & 1);
@@ -1148,7 +1149,7 @@ static void refresh_gfx(void)
 }
 static void refresh_fallback(void)
 {
-    if (!is_text(video_mode) && !console_on) return;
+    if ((!is_text(video_mode) && !console_on) || (v3_on && !console_on)) return;
     u16 *dst = phys_low(0xB8000);
     const u16 *src = console_on ? console_cells : (const u16 *)gptr(text_base + (crtc[0x0C] << 8 | crtc[0x0D]) * 2);
     memcpy(dst, src, 80 * 25 * 2);
@@ -2259,7 +2260,7 @@ static void video_refresh_(void)
         int on = v3_display(&w, &h);
         if (on && w * h * 4 > VRAM_SIZE) h = VRAM_SIZE / (w * 4);   /* vshadow's size */
         if (on != vd_on || (on && (w != vd_w || h != vd_h))) {
-            if (on != vd_on) kprintf("video: the Voodoo 3's picture %s (%ux%u)\n", on ? "on" : "off", w, h);
+            kprintf("video: the Voodoo 3's picture %s (%ux%u)\n", on ? "on" : "off", w, h);
             vd_on = on; vd_w = w; vd_h = h;
             last_layout_mode = -1;
         }
@@ -2299,7 +2300,7 @@ static void video_refresh_(void)
         else if (changed && (!vbe_on || vbe_bytespp(vbe_bpp) == 1)) pal_changed = 1;
     }
     if (console_on) { refresh_text(console_cells, -1); }
-    else if (vd_on) refresh_voodoo();
+    else if (v3_on) { if (vd_on) refresh_voodoo(); }   /* voodoo3: only the card's picture (A0000h-BFFFFh are its) */
     else if (is_text(video_mode)) {
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);

@@ -96,131 +96,27 @@ static inline uint32_t bswap32(uint32_t v) { return __builtin_bswap32(v); }
 static inline uint16_t bswap16(uint16_t v) { return (uint16_t)(v >> 8 | v << 8); }
 
 extern int cycles;                          /* bus-time accounting: ignored */
-extern int pci_burst_time, pci_nonburst_time;
+extern int pci_burst_time, pci_nonburst_time, agp_burst_time, agp_nonburst_time;
 extern uint32_t mem_size;
-extern double cpuclock;
+extern double cpuclock;                     /* the timers' "CPU cycles": PIT clocks here */
 typedef struct { uint32_t pc; } cpu_state_t;
 extern cpu_state_t cpu_state;
-
-/* ---------------- devices ---------------- */
-#define CONFIG_END        -1
-#define CONFIG_STRING     0
-#define CONFIG_INT        1
-#define CONFIG_BINARY     2
-#define CONFIG_SELECTION  3
-#define CONFIG_MIDI_OUT   4
-#define CONFIG_FNAME      5
-#define CONFIG_SPINNER    6
-#define CONFIG_HEX16      7
-#define CONFIG_HEX20      8
-#define CONFIG_MAC        9
-#define CONFIG_MIDI_IN    10
-#define CONFIG_BIOS       11
-#define CONFIG_MEMORY     12
-#define CONFIG_SERPORT    13
-#define DEVICE_ISA        0x0008
-#define DEVICE_ISA16      0x0010
-#define DEVICE_PCI        0x10000
-#define DEVICE_AGP        0x20000
-#define DEVICE_AC97       0x40000
-typedef struct device_config_selection_t { const char *description; int value; } device_config_selection_t;
-typedef struct device_config_spinner_t { int16_t min, max, step; } device_config_spinner_t;
-typedef struct device_config_bios_t {
-    const char *name, *internal_name;
-    uint8_t bios_type; int8_t files_no; uint32_t local, size; uint64_t flags; void *dev[2]; const char *files[9];
-} device_config_bios_t;
-typedef struct _device_config_ {
-    const char *name, *description; int type; const char *default_string; int default_int; const char *file_filter;
-    const device_config_spinner_t spinner;
-    const device_config_selection_t selection[64];
-    const device_config_bios_t bios[32];
-} device_config_t;
-typedef struct _device_ {
-    const char *name, *internal_name; uint32_t flags; uintptr_t local;
-    void *(*init)(const struct _device_ *); void (*close)(void *priv); void (*reset)(void *priv);
-    int (*available)(void); void (*speed_changed)(void *priv); void (*force_redraw)(void *priv);
-    const char *alias, *machine; const device_config_t *config;
-    void (*power_button)(void *priv);
-    const char *short_name;
-    uint32_t (*ide_boards)(const struct _device_ *);
-    uint32_t (*scsi_buses)(const struct _device_ *);
-} device_t;
 int device_get_config_int(const char *name);
-static inline const char *device_get_config_bios(const char *n) { (void)n; return ""; }
-static inline const char *device_get_bios_file(const device_t *d, const char *n, int i) { (void)d; (void)n; (void)i; return ""; }
-static inline uint32_t device_get_bios_local(const device_t *d, const char *n) { (void)d; (void)n; return 0; }
-static inline uint64_t device_get_bios_flags(const device_t *d, const char *n) { (void)d; (void)n; return 0; }
-static inline void device_start(void) { }
 
-/* ---------------- memory and I/O mappings (the Voodoo 1/2 glue only) ---------------- */
-typedef struct mem_mapping_t { int dummy; } mem_mapping_t;
-#define MEM_MAPPING_EXTERNAL 1
-static inline void mem_mapping_add(mem_mapping_t *m, uint32_t b, uint32_t s, void *rb, void *rw, void *rl, void *wb, void *ww, void *wl, void *ex, int fl, void *p)
-{ (void)m; (void)b; (void)s; (void)rb; (void)rw; (void)rl; (void)wb; (void)ww; (void)wl; (void)ex; (void)fl; (void)p; }
-static inline void mem_mapping_disable(mem_mapping_t *m) { (void)m; }
-static inline void mem_mapping_enable(mem_mapping_t *m) { (void)m; }
-static inline void mem_mapping_set_addr(mem_mapping_t *m, uint32_t b, uint32_t s) { (void)m; (void)b; (void)s; }
-static inline void mem_mapping_set_handler(mem_mapping_t *m, void *rb, void *rw, void *rl, void *wb, void *ww, void *wl) { (void)m; (void)rb; (void)rw; (void)rl; (void)wb; (void)ww; (void)wl; }
-uint32_t mem_readl_phys(uint32_t addr);       /* AGP: the guest's memory */
-static inline void dma_bm_read(uint32_t a, uint8_t *d, int n, int s) { (void)s; for (int i = 0; i < n; i += 4) *(uint32_t *)(d + i) = mem_readl_phys(a + i); }
-typedef struct rom_t { uint8_t *rom; uint32_t mask; } rom_t;
-static inline int rom_present(const char *f) { (void)f; return 0; }
-#define PCI_ADD_VIDEO 0
-#define PCI_ADD_NORMAL 0
-#define BIOS_NORMAL 0
-#define BIOS_LIMIT_MAX_MEMORY 0
-#define BIOS_LIMIT_MIN_MEMORY 0
-#define PCI_ADD_AGP 0
-#define PCI_REG_COMMAND 4
-#define PCI_COMMAND_IO 1
-#define PCI_COMMAND_MEM 2
-static inline void pci_add_card(int t, void *r, void *w, void *p, uint8_t *s) { (void)t; (void)r; (void)w; (void)p; (void)s; }
-static inline void pci_set_irq(int s, int p, void *st) { (void)s; (void)p; (void)st; }
-static inline void pci_clear_irq(int s, int p, void *st) { (void)s; (void)p; (void)st; }
-#define PCI_INTA 1
-static inline void io_sethandler(uint16_t b, int n, void *a, void *c, void *d, void *e, void *f, void *g, void *p) { (void)b; (void)n; (void)a; (void)c; (void)d; (void)e; (void)f; (void)g; (void)p; }
-static inline void io_removehandler(uint16_t b, int n, void *a, void *c, void *d, void *e, void *f, void *g, void *p) { (void)b; (void)n; (void)a; (void)c; (void)d; (void)e; (void)f; (void)g; (void)p; }
+typedef struct v3_file FILE;                /* rom.h names it */
 
-/* ---------------- video ---------------- */
-#define VIDEO_PCI 0
-#define VIDEO_AGP 1
-#define VIDEO_ISA 2
-#define VIDEO_FLAG_TYPE_SPECIAL 0
-typedef struct { int type, write_b, write_w, write_l, read_b, read_w, read_l; } video_timings_t;
-typedef struct { uint32_t *line[1]; } bitmap_t;
-typedef struct monitor_t { int mon_renderedframes, mon_overscan_x, mon_overscan_y; bitmap_t *target_buffer; } monitor_t;
-extern monitor_t monitors[1];
-extern int changeframecount;
-typedef struct svga_t { int override; monitor_t *monitor; } svga_t;   /* what the Voodoo 1/2 display code looks at */
-static inline void svga_set_override(svga_t *s, int o) { (void)s; (void)o; }
-static inline void svga_recalctimings(svga_t *s) { (void)s; }
-static inline void svga_doblit(int x, int y, svga_t *s) { (void)x; (void)y; (void)s; }
-static inline svga_t *svga_get_pri(void) { return 0; }
-static inline void video_inform(int t, const video_timings_t *v) { (void)t; (void)v; }
-static inline void video_wait_for_buffer_monitor(int m) { (void)m; }
-static inline void video_clamp_vram(uint64_t f, int *s) { (void)f; (void)s; }
-extern uint32_t *video_6to8, *video_8togs, *video_8to32, *video_15to32, *video_16to32;
-static inline uint32_t makecol32(int r, int g, int b) { return (uint32_t)(r << 16 | g << 8 | b); }
-
-/* ---------------- time ---------------- */
-/* TIMER_USEC: a microsecond in the timers' units (PIT clocks << 16 here) */
-#define TIMER_SHIFT 16
-#define TIMER_USEC ((uint64_t)(1.193182 * 65536))
-typedef struct pc_timer_t {
-    uint64_t ts;                              /* when, in PIT clocks << 16 */
-    int enabled;
-    void (*callback)(void *priv);
-    void *priv;
-    struct pc_timer_t *next;
-} pc_timer_t;
-void timer_add(pc_timer_t *t, void (*cb)(void *), void *priv, int start);
-void timer_set_delay_u64(pc_timer_t *t, uint64_t delay);
-void timer_advance_u64(pc_timer_t *t, uint64_t delay);
-void timer_disable(pc_timer_t *t);
-static inline int timer_is_enabled(pc_timer_t *t) { return t->enabled; }
-static inline uint64_t timer_get_ts_int(pc_timer_t *t) { return t->ts >> TIMER_SHIFT; }
-extern uint64_t tsc;                          /* now, in PIT clocks (timer_get_ts_int's units) */
-static inline void timer_on_auto(pc_timer_t *t, double us) { if (us > 0) timer_set_delay_u64(t, (uint64_t)(us * TIMER_USEC)); else timer_disable(t); }
+/* ---------------- devices, memory, I/O, timers, video ----------------
+   86Box's own headers (86box/device.h, mem.h, io.h, pci.h, rom.h, timer.h,
+   video.h, vid_svga.h ...); v3glue.c does what their functions do here. */
+#include <86box/device.h>
+#include <86box/mem.h>
+#include <86box/io.h>
+#include <86box/pci.h>
+#include <86box/rom.h>
+#include <86box/timer.h>
+#include <86box/video.h>
+#include <86box/i2c.h>
+#include <86box/vid_ddc.h>
 uint64_t plat_timer_read(void);
 void plat_delay_ms(uint32_t ms);
 static inline uint64_t plat_get_ticks(void) { return 0; }
@@ -240,15 +136,5 @@ int thread_wait_mutex(mutex_t *m);
 int thread_release_mutex(mutex_t *m);
 void thread_close_mutex(mutex_t *m);
 int thread_wait(thread_t *t);
-
-/* ---------------- I2C / DDC (no monitor behind it) ---------------- */
-static inline void *i2c_gpio_init(const char *n) { (void)n; return 0; }
-static inline void i2c_gpio_close(void *p) { (void)p; }
-static inline void i2c_gpio_set(void *p, uint8_t scl, uint8_t sda) { (void)p; (void)scl; (void)sda; }
-static inline uint8_t i2c_gpio_get_scl(void *p) { (void)p; return 1; }
-static inline uint8_t i2c_gpio_get_sda(void *p) { (void)p; return 1; }
-static inline void *i2c_gpio_get_bus(void *p) { (void)p; return 0; }
-static inline void *ddc_init(void *b) { (void)b; return 0; }
-static inline void ddc_close(void *p) { (void)p; }
 
 #endif

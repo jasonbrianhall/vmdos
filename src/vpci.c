@@ -65,6 +65,9 @@ void vpci_bios_patch(void)
     u8 sum = 0;
     for (int i = 0; i < 16; i++) sum += rd8(d + i);
     wr8(d + 10, (u8)-sum);
+    u32 n;
+    const u8 *rom = v3_rom(&n);                          /* and the card's BIOS at C000h, as a PC's BIOS copies it */
+    memcpy(gptr(0xC0000), rom, n);
 }
 
 static void done(struct regs *r, u8 ah)
