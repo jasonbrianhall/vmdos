@@ -253,7 +253,7 @@ smooth, xBRZ and no scaling while a program runs, whatever the command line chos
 (`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 
-`voodoo3` on the kernel command line adds an emulated 3dfx Voodoo 3 3000
+`voodoo3` on the kernel command line (the boot menu's last entry, "with Voodoo 3"; off otherwise) adds an emulated 3dfx Voodoo 3 3000
 (16 MB, PCI) on 86Box's Voodoo code, for Glide programs that support the
 Voodoo 3 (Banshee/H3 Glide, e.g. a V3 `GLIDE2X.OVL`); once a program turns
 on the card's video processor the screen shows the Voodoo's picture, and a

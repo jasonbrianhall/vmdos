@@ -344,6 +344,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   $(foreach v,ask max $(GRUB_RES),echo '    menuentry "$(or $(VGA_TITLE_$(v)),$(v))" {'; \
 	     echo '      chainloader /EFI/vmdos/vmdos.efi vga=$(v) $(KARGS_ALL)'; echo '    }';) \
 	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) voodoo3'; \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
@@ -366,6 +369,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   $(foreach r,$(GRUB_RES),echo '    menuentry "$(r)" {'; \
 	     echo '      multiboot /boot/vmdos.elf $(KARGS_ALL)'; echo '      set gfxpayload=$(r)x32,$(r)'; \
 	     echo '      module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; echo '    }';) \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) voodoo3'; \
+	   $(call bios_vga,$(VGA_ARG)) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
