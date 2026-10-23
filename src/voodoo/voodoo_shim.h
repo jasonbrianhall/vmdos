@@ -58,6 +58,7 @@ static inline double log2(double x) { double r; __asm__("fld1; fxch; fyl2x" : "=
 static inline double fabs(double x) { __asm__("fabs" : "+t"(x)); return x; }
 static inline float fabsf(float x) { return (float)fabs(x); }
 static inline double floor(double x) { long long i = (long long)x; return (double)(i - (x < (double)i)); }
+double round(double x);                    /* v3.c */
 static inline double ceil(double x) { long long i = (long long)x; return (double)(i + (x > (double)i)); }
 static inline double pow(double b, double e)
 {
