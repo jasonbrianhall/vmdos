@@ -4,7 +4,7 @@
    addresses nothing is mapped at, so every guest access faults and is
    emulated; its frame buffer (BAR1) is mapped onto the card's memory except
    where the card must see the writes (the command FIFO); its I/O registers
-   at V3_IO_BASE.
+   at V3_IO_BASE (D100h).
    vmdos's own VGA stays the VGA; once a program turns on the Voodoo's
    video processor (Glide does), the screen shows the Voodoo's picture. */
 #ifndef VMDOS_VOODOO3_H
