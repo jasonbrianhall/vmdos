@@ -16,23 +16,48 @@ static int probe, probe_bad, probe_win;  /* dry run: accesses checked, not done 
 
 enum { ES, CS, SS, DS, FS, GS };
 
+/* The dry run's view of linear a: 0 can't be touched (the guest would
+   fault), 1 memory, 2 trapped memory that is emulated. In VMHV through the
+   guest's page tables (hv.c); otherwise the guest and the kernel share the
+   address space, and only the Voodoo 3's BARs count as trapped (batches
+   are run for them alone, see mem_emulate_more). */
+static int probe_check(u32 a, int write)
+{
+    if (hv_active) return hv_emu_check(a, write);
+    if (v3_on && v3_window(a)) return 2;
+    return page_user(a, write);
+}
+
 static u8 fetch8(void)
 {
     u32 a = E->seg_base[CS] + (E->code32 ? ip : (ip & 0xFFFF));
     ip++;
-    if (probe && hv_emu_check(a, 0) != 1) { probe_bad = 1; return 0x90; }
+    if (probe && probe_check(a, 0) != 1) { probe_bad = 1; return 0x90; }
     return hv_active ? hv_emu_rd8(a) : rd8(a);
 }
 static u16 fetch16(void) { u16 v = fetch8(); return v | (u16)(fetch8() << 8); }
 static u32 fetch32(void) { u32 v = fetch16(); return v | (u32)fetch16() << 16; }
 
 /* ---------------- memory ---------------- */
+/* The emulated Voodoo 3's registers or frame buffer (voodoo3.h) behind
+   linear a: its address on the card's bus in *p. Its accesses go through
+   whole (a dword register write is one write, not four bytes). */
+static int v3_at(u32 a, u32 *p)
+{
+    if (!v3_on) return 0;
+    if (hv_active) { if (hv_emu_gpa(a, p)) return 0; }
+    else *p = a;
+    return v3_window(*p);
+}
+
 /* In VMHV the addresses are the guest's linear ones: hv.c walks its page
    tables and finds the window by guest-physical address. */
 static u8 mrd8(u32 a)
 {
+    u32 p;
+    if (!probe && v3_at(a, &p)) return (u8)v3_mmio_read(p, 1);
     if (probe) {
-        int c = hv_emu_check(a, 0);
+        int c = probe_check(a, 0);
         if (c == 2) { probe_win = 1; return 0; }
         if (!c) { probe_bad = 1; return 0; }
     }
@@ -40,8 +65,10 @@ static u8 mrd8(u32 a)
 }
 static void mwr8(u32 a, u8 v)
 {
+    u32 p;
+    if (!probe && v3_at(a, &p)) { v3_mmio_write(p, v, 1); return; }
     if (probe) {                                   /* only window writes: no guest page faults to miss */
-        if (hv_emu_check(a, 1) == 2) probe_win = 1; else probe_bad = 1;
+        if (probe_check(a, 1) == 2) probe_win = 1; else probe_bad = 1;
         return;
     }
     if (hv_active) hv_emu_wr8(a, v);
@@ -50,11 +77,18 @@ static void mwr8(u32 a, u8 v)
 }
 static u32 mrd(u32 a, int sz)
 {
+    u32 p, q;
+    if (!probe && sz > 1 && v3_at(a, &p) && v3_at(a + sz - 1, &q) && q - p == (u32)sz - 1) return v3_mmio_read(p, sz);
     u32 v = 0;
     for (int i = 0; i < sz; i++) v |= (u32)mrd8(a + i) << (8 * i);
     return v;
 }
-static void mwr(u32 a, u32 v, int sz) { for (int i = 0; i < sz; i++) mwr8(a + i, (u8)(v >> (8 * i))); }
+static void mwr(u32 a, u32 v, int sz)
+{
+    u32 p, q;
+    if (!probe && sz > 1 && v3_at(a, &p) && v3_at(a + sz - 1, &q) && q - p == (u32)sz - 1) { v3_mmio_write(p, v, sz); return; }
+    for (int i = 0; i < sz; i++) mwr8(a + i, (u8)(v >> (8 * i)));
+}
 
 /* ---------------- registers ---------------- */
 static u32 rget(int r, int sz)
@@ -73,6 +107,7 @@ static void rset(int r, u32 v, int sz)
 
 /* ---------------- ModRM ---------------- */
 static int mod_, reg_, rm_;
+static u8 modrm_byte;
 static u32 ea, ea_off;                 /* linear address, offset when mod != 3 */
 
 static u32 segbase(int def) { return E->seg_base[seg_ovr >= 0 ? seg_ovr : def]; }
@@ -80,6 +115,7 @@ static u32 segbase(int def) { return E->seg_base[seg_ovr >= 0 ? seg_ovr : def]; 
 static void modrm(void)
 {
     u8 m = fetch8();
+    modrm_byte = m;
     mod_ = m >> 6; reg_ = (m >> 3) & 7; rm_ = m & 7;
     if (mod_ == 3) return;
     u32 off = 0;
@@ -243,6 +279,81 @@ static int cond(int cc)
     return (cc & 1) ? !r : r;
 }
 
+/* ---------------- x87 ----------------
+   A float stored straight into trapped memory (Glide writing vertices into
+   the Voodoo's command FIFO: FSTP DWORD [EDI]). The guest's x87 state is
+   live in the CPU (vmdos never switches it), so the instruction itself is
+   run here, its memory operand changed to a buffer, and the buffer is then
+   written to (or was first read from) the trapped memory. */
+static u8 x87_code[16] __attribute__((aligned(16)));
+static u8 x87_buf[16] __attribute__((aligned(16)));
+
+/* Bytes of memory operand an x87 op reads (*rd) or writes (*wr); 0: none
+   of the forms done here. */
+static int x87_size(u8 op, int reg, int *rd, int *wr)
+{
+    *rd = *wr = 0;
+    switch (op) {
+    case 0xD8: *rd = 1; return 4;                       /* FADD.. m32real */
+    case 0xDA: *rd = 1; return 4;                       /* FIADD.. m32int */
+    case 0xDC: *rd = 1; return 8;                       /* FADD.. m64real */
+    case 0xDE: *rd = 1; return 2;                       /* FIADD.. m16int */
+    case 0xD9:
+        if (reg == 0) { *rd = 1; return 4; }            /* FLD m32 */
+        if (reg == 2 || reg == 3) { *wr = 1; return 4; }   /* FST(P) m32 */
+        if (reg == 5) { *rd = 1; return 2; }            /* FLDCW */
+        if (reg == 7) { *wr = 1; return 2; }            /* FNSTCW */
+        return 0;
+    case 0xDB:
+        if (reg == 0) { *rd = 1; return 4; }            /* FILD m32 */
+        if (reg >= 1 && reg <= 3) { *wr = 1; return 4; }   /* FISTTP FIST FISTP m32 */
+        if (reg == 5) { *rd = 1; return 10; }           /* FLD m80 */
+        if (reg == 7) { *wr = 1; return 10; }           /* FSTP m80 */
+        return 0;
+    case 0xDD:
+        if (reg == 0) { *rd = 1; return 8; }            /* FLD m64 */
+        if (reg >= 1 && reg <= 3) { *wr = 1; return 8; }   /* FISTTP FST FSTP m64 */
+        if (reg == 7) { *wr = 1; return 2; }            /* FNSTSW */
+        return 0;
+    case 0xDF:
+        if (reg == 0) { *rd = 1; return 2; }            /* FILD m16 */
+        if (reg >= 1 && reg <= 3) { *wr = 1; return 2; }   /* FISTTP FIST FISTP m16 */
+        if (reg == 5) { *rd = 1; return 8; }            /* FILD m64 */
+        if (reg == 7) { *wr = 1; return 8; }            /* FISTP m64 */
+        return 0;
+    }
+    return 0;
+}
+
+static int x87_op(u8 op)
+{
+    modrm();
+    u8 *c = x87_code;
+    if (mod_ == 3) {                                    /* registers only: as it is */
+        if (probe) return 1;
+        c[0] = op; c[1] = modrm_byte; c[2] = 0xC3;
+    } else {
+        int rd, wr, n = x87_size(op, reg_, &rd, &wr);
+        if (!n) return 0;
+        if (rd) for (int i = 0; i < n; i++) x87_buf[i] = mrd8(ea + i);
+        else if (probe) mwr8(ea, 0);                    /* the dry run: is it the window */
+        if (probe) return 1;
+        u32 b = (u32)(uintptr_t)x87_buf;
+        c[0] = op; c[1] = (u8)(reg_ << 3 | 5);          /* [disp32]: the buffer */
+        c[2] = (u8)b; c[3] = (u8)(b >> 8); c[4] = (u8)(b >> 16); c[5] = (u8)(b >> 24);
+        c[6] = 0xC3;
+        __asm__ volatile("call *%0" :: "r"(c) : "memory", "cc");
+        if (wr) {
+            u32 i = 0;
+            for (; i + 4 <= (u32)n; i += 4) mwr(ea + i, *(u32 *)(x87_buf + i), 4);
+            for (; i + 2 <= (u32)n; i += 2) mwr(ea + i, *(u16 *)(x87_buf + i), 2);
+        }
+        return 1;
+    }
+    __asm__ volatile("call *%0" :: "r"(c) : "memory", "cc");
+    return 1;
+}
+
 /* ---------------- one instruction ---------------- */
 int mem_emulate(struct emu_cpu *e)
 {
@@ -342,6 +453,9 @@ int mem_emulate(struct emu_cpu *e)
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
         if (!string_op(op, rep)) return 0;
         break;
+    case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+        if (!x87_op(op)) return 0;
+        break;
     case 0xC6: case 0xC7: {
         modrm();
         u32 imm = op == 0xC6 ? fetch8() : osz == 4 ? fetch32() : fetch16();
@@ -394,11 +508,12 @@ int mem_emulate(struct emu_cpu *e)
    emulating them while each one, tried first as a dry run, touches only
    the window (or reads mapped memory) and is something the emulator does;
    stop at anything else, or after 16 instructions without a window access,
-   and let the guest run on from there. VMHV only (the guest's page tables
-   are walked for every access). */
+   and let the guest run on from there. In VMHV (the guest's page tables
+   are walked for every access), and for the Voodoo 3 (a command FIFO or a
+   texture written a dword at a time) with the guest's pages checked. */
 int mem_emulate_more(struct emu_cpu *e)
 {
-    if (!hv_active || (*e->eflags & EFL_TF)) return 0;
+    if ((!hv_active && !v3_on) || (*e->eflags & EFL_TF)) return 0;
     int n = 0, idle = 0;
     while (n < 4096 && idle < 16) {
         u32 r[8], rip = *e->eip, fl = *e->eflags;

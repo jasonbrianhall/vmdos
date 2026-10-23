@@ -166,6 +166,18 @@ static u64 *npt_pt(u32 gpa)                    /* NPT page table for gpa (made i
     return (u64 *)(uintptr_t)(u32)(*e & ~0xFFFull);
 }
 
+/* Guest-physical page gpa onto host page host (0: not present), for an
+   emulated device's memory (the Voodoo 3's frame buffer). Both kinds of
+   nested tables: VT-x's EPT through hv_ept_map (hvvmx.c). */
+void (*hv_ept_map)(u32 gpa, u32 host);
+void hv_map_gpa(u32 gpa, u32 host)
+{
+    if (!npt_pdpt) return;                                      /* no VM yet: v3_hv_sync later */
+    npt_pt(gpa)[(gpa >> 12) & 511] = host ? host | 7 : 0;
+    if (hv_ept_map) hv_ept_map(gpa, host);
+    hv_tlb_dirty = 1;
+}
+
 static int npt_init(void)
 {
     /* host linear 1 MB+64K..9 MB: the VM's extended memory (the DPMI
@@ -185,6 +197,7 @@ static int npt_init(void)
     for (u32 a = 0; a < vsize; a += 4096)
         npt_pt(HV_LFB + a)[((HV_LFB + a) >> 12) & 511] = (vbase + a) | 7;
     gview_pt = phys_alloc(4096);
+    v3_hv_sync();
     return 0;
 }
 
@@ -620,8 +633,10 @@ int hv_emu_check(u32 lin, int write)
     u32 gpa = ~0u;
     u8 *p = emu_ptr(lin, &gpa, write);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) return 2;
+    if (v3_window(gpa)) return 2;                                 /* the Voodoo 3's BARs */
     return p ? 1 : 0;
 }
+int hv_emu_gpa(u32 lin, u32 *gpa) { return gwalk(lin, gpa); }   /* 0: *gpa is where lin is */
 u8 hv_emu_rd8(u32 lin)
 {
     u32 gpa;
@@ -658,6 +673,7 @@ static void npf_exit(void)
 {
     u32 gpa = (u32)V64(C_INFO2);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
+    if (v3_window(gpa)) { emulate_at(gpa, 1); return; }        /* the Voodoo 3 (voodoo3.h) */
     if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) {
         static int holelog = -1, n;
         if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;

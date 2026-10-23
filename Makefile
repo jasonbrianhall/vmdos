@@ -47,9 +47,13 @@ CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin 
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
 CXXFLAGS := $(filter-out -fno-delete-null-pointer-checks,$(CFLAGS)) -fno-delete-null-pointer-checks \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17
+# voodoo3: 86Box's Voodoo (src/voodoo/vid_voodoo*.c, as upstream) and the Voodoo 3 around it
+VOODOO_OBJS := $(addprefix voodoo/,vid_voodoo.o vid_voodoo_banshee_blitter.o vid_voodoo_blitter.o \
+              vid_voodoo_display.o vid_voodoo_fb.o vid_voodoo_fifo.o vid_voodoo_reg.o vid_voodoo_render.o \
+              vid_voodoo_setup.o vid_voodoo_texture.o v3.o v3sched.o)
 OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_nvme.o blk_usb.o virtio.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
-              sb/opl.o sb/dbopl.o)
+              sb/opl.o sb/dbopl.o vpci.o $(VOODOO_OBJS))
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
 # and restores the FPU around it); everything that runs later is integer.
 FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
@@ -81,6 +85,14 @@ $(BUILD)/sb/gmtables.o $(BUILD)/sb/fpmath.o: $(BUILD)/sb/%.o: src/sb/%.c | $(BUI
 $(BUILD)/sb/%.o: src/sb/%.cpp | $(BUILD)
 	@mkdir -p $(BUILD)/sb
 	g++ $(filter-out -mgeneral-regs-only,$(CXXFLAGS)) -mfpmath=387 -mno-sse -mno-mmx -Wno-unused -Wno-switch -Wno-implicit-fallthrough -c $< -o $@
+
+# The Voodoo code uses the x87 (v3.c saves the guest's state around it) and
+# needs a Pentium Pro or later (CMOV); its own <string.h> etc. are voodoo/libc.
+VOODOO_FLAGS := $(filter-out -march=i386 -mtune=i486 -Wall -Wextra,$(FPFLAGS)) -march=i686 -mtune=generic \
+              -DNO_CODEGEN -DTEX_CACHE_MAX=16 -Isrc/voodoo/libc -Isrc/voodoo -w
+$(BUILD)/voodoo/%.o: src/voodoo/%.c | $(BUILD)
+	@mkdir -p $(BUILD)/voodoo
+	$(CC) $(VOODOO_FLAGS) -c $< -o $@
 
 $(BUILD)/boot.o: src/boot.S | $(BUILD)
 	$(CC) -m32 -DFB_W=$(FB_W) -DFB_H=$(FB_H) -c $< -o $@
@@ -332,6 +344,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   $(foreach v,ask max $(GRUB_RES),echo '    menuentry "$(or $(VGA_TITLE_$(v)),$(v))" {'; \
 	     echo '      chainloader /EFI/vmdos/vmdos.efi vga=$(v) $(KARGS_ALL)'; echo '    }';) \
 	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) voodoo3'; \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
@@ -354,6 +369,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   $(foreach r,$(GRUB_RES),echo '    menuentry "$(r)" {'; \
 	     echo '      multiboot /boot/vmdos.elf $(KARGS_ALL)'; echo '      set gfxpayload=$(r)x32,$(r)'; \
 	     echo '      module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; echo '    }';) \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) voodoo3'; \
+	   $(call bios_vga,$(VGA_ARG)) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new

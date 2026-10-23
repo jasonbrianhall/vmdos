@@ -1,0 +1,8 @@
+vid_voodoo*.c and 86box/vid_voodoo*.h are from 86Box (GPL-2.0-or-later),
+https://github.com/86Box/86Box, src/video and src/include/86box at
+b6fbd231957c26d33bb434a7e2d2f410263c3ecd. Not taken: vid_voodoo_banshee.c
+(its registers are in v3.c, the SVGA side left out), the JIT
+(vid_voodoo_codegen_*.h; built with NO_CODEGEN). One change:
+86box/vid_voodoo_common.h's TEX_CACHE_MAX is #ifndef'd so the Makefile can
+make it smaller. The other 86box/*.h, cpu.h and libc/*.h are one-line stand-ins
+for voodoo_shim.h. To update: copy the files over and rebuild.

@@ -149,6 +149,12 @@ static void ept_sync(u32 lin)
     ept_pt(lin)[(lin >> 12) & 511] = e;
 }
 
+extern void (*hv_ept_map)(u32 gpa, u32 host);
+static void ept_map(u32 gpa, u32 host)
+{
+    ept_pt(gpa)[(gpa >> 12) & 511] = host ? host | EPT_RWX | EPT_WB : 0;
+}
+
 static void ept_init(void)
 {
     ept_pml4 = phys_alloc(4096);
@@ -165,6 +171,8 @@ static void ept_init(void)
     for (u32 a = 0; a < vsize; a += 4096) ept_pt(hv_lfb() + a)[((hv_lfb() + a) >> 12) & 511] = (vbase + a) | EPT_RWX | EPT_WB;
     eptp = (u32)(uintptr_t)ept_pml4 | 6 | 3 << 3;                /* write-back, 4-level walk */
     hv_map_hook = ept_sync;
+    hv_ept_map = ept_map;
+    v3_hv_sync();
 }
 
 static void invept(void)

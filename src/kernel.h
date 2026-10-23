@@ -136,6 +136,8 @@ void smp_tick(void);                          /* boot CPU, each timer tick: wake
 void video_tlb_tick(void);                    /* boot CPU, each timer tick: the TLB flush the VESA redraw asked for */
 void map_page(u32 lin, u32 phys, u32 flags);
 u32 page_phys(u32 lin);                       /* physical page behind lin, 0: not mapped */
+u32 linear_hole(u32 len, u32 align);          /* unmapped linear space for an emulated device (cpu.c) */
+int page_user(u32 lin, int write);            /* ring 3 may access it without a fault */
 void set_a20(int on);
 extern int a20_on;
 extern int usb_ready;
@@ -315,6 +317,7 @@ int hv_e820(struct regs *r);
 int v86_wrap_string(struct regs *r);           /* v86.c: 8086 segment wrap of a string instruction */
 int hv_emu_check(u32 lin, int write);          /* 0 unmapped, 1 memory, 2 the trapped VGA window */
 u8 hv_emu_rd8(u32 lin);                       /* mememu.c in VMHV: guest linear memory */
+int hv_emu_gpa(u32 lin, u32 *gpa);            /* VMHV: guest linear to guest physical, 0 if mapped */
 void hv_emu_wr8(u32 lin, u8 v);
 
 /* ---- fs9p.cpp: host folders over virtio-9p as DOS drives (VMDOSNET.COM) ---- */
@@ -406,3 +409,4 @@ int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
 int video_gfx_height(void);                   /* graphics mode height (200 in text modes) */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;
+#include "voodoo3.h"
