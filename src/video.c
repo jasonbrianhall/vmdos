@@ -1490,8 +1490,15 @@ void video_et_write(u32 lin, u8 v)
     vram[(u32)(et_seg & 15) * 65536 + o] = v;
 }
 
+/* The ET4000's own registers (3CDh, CRTC 20h-3Fh) and BIOS modes are
+   there unless the Voodoo 3 is (voodoo3): then the VGA is the Voodoo's,
+   as on a real Voodoo 3 PC, and nothing answers as a Tseng (Windows would
+   find two display adapters on the same VGA ports). */
+static int et_ext(void) { return !v3_on; }
+
 static int et_mode(int mode, int clear)
 {
+    if (!et_ext()) return 0;
     static const struct { u8 no; u16 vbe; u8 c1, c12, c7, c13; } t[] = {
         { 0x2E, 0x101, 0x4F, 0xDF, 0x3E, 0x50 },        /* 640x480: vertical display end 1DFh */
         { 0x30, 0x103, 0x63, 0x57, 0xF0, 0x64 },        /* 800x600: 257h */
@@ -2421,11 +2428,11 @@ static u32 video_port_in_(u16 port)
         return v; }
     case 0x3CA: return 0;
     case 0x3CC: return misc_out;
-    case 0x3CD: return et_seg;                     /* ET4000 segment select */
+    case 0x3CD: return et_ext() ? et_seg : 0xFF;   /* ET4000 segment select */
     case 0x3CE: return gc_idx & 15;
     case 0x3CF: return gc[gc_idx & 15];
     case 0x3B4: case 0x3D4: return crtc_idx;
-    case 0x3B5: case 0x3D5: return crtc_idx < 64 ? crtc[crtc_idx] : 0;   /* past the ET4000's: none
+    case 0x3B5: case 0x3D5: return crtc_idx < (et_ext() ? 64 : 0x20) ? crtc[crtc_idx] : 0;   /* past the ET4000's: none
                                                     (wrapped, 50h read as 10h: an ARK chip ID to svgalib) */
     case 0x3BA: case 0x3DA: {
         atc_flip = 0;
@@ -2503,7 +2510,7 @@ static void video_port_out_(u16 port, u8 v)
         atc_flip ^= 1;
         return;
     case 0x3C2: misc_out = v; return;
-    case 0x3CD: et_segment(v); return;               /* ET4000 segment select */
+    case 0x3CD: if (et_ext()) et_segment(v); return;   /* ET4000 segment select */
     case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
@@ -2529,7 +2536,7 @@ static void video_port_out_(u16 port, u8 v)
         return;
     case 0x3B4: case 0x3D4: crtc_idx = v; return;
     case 0x3B5: case 0x3D5:
-        if (crtc_idx >= 64) return;
+        if (crtc_idx >= (et_ext() ? 64 : 0x20)) return;
         crtc[crtc_idx] = v;
         et_crtc();
         if (vbe_on && vbe_crtc_follow && (crtc_idx == 0x01 || crtc_idx == 0x07 || crtc_idx == 0x09 || crtc_idx == 0x12))

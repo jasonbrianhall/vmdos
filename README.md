@@ -257,7 +257,9 @@ The framebuffer is mapped write-combining (`nowc` turns that off).
 (16 MB, PCI) on 86Box's Voodoo code, for Glide programs that support the
 Voodoo 3 (Banshee/H3 Glide, e.g. a V3 `GLIDE2X.OVL`); once a program turns
 on the card's video processor the screen shows the Voodoo's picture, and a
-VGA mode set brings the VGA back. Needs a Pentium Pro or later and about
+VGA mode set brings the VGA back. With it the VGA is the Voodoo's: the Tseng
+ET4000 registers and BIOS modes are gone (VESA modes stay), so Windows finds
+the Voodoo 3, not a Tseng, as on a real Voodoo 3 PC. Needs a Pentium Pro or later and about
 40 MB of RAM. The frame buffer is mapped straight onto the card's memory;
 register and command FIFO accesses are trapped and emulated, so busy scenes
 run slower than on the real card (`v3trap` traps the frame buffer too;
