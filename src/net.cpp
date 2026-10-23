@@ -22,7 +22,8 @@
 // (BCM570x/575x/578x/5906/5717-5762 NetXtreme and NetLink, Linux's tg3), Atheros/Killer AR8161/8162/8171/8172
 // and E2200/E2400/E2500 (alx), Atheros AR8131/8132/8151/8152 (atl1c), virtio-net (QEMU,
 // -nic model=virtio-net-pci). Kernel options: net=off (none), nic=N,
-// netlog (every call and frame in the log).
+// netlog (every call and frame in the log), e1000=plain|nobits,nophy,nolink,noflag
+// (leave out the ICH/PCH setup steps, to find one a card won't send with).
 //
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
 //   0  query: AX = 1 card / 0 none, CL = link up, CH = card kind
