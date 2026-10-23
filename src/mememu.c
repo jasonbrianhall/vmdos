@@ -327,6 +327,11 @@ static int x87_size(u8 op, int reg, int *rd, int *wr)
 
 static int x87_op(u8 op)
 {
+    /* Only for the Voodoo 3, and only if the guest would run it itself:
+       with CR0.TS (Windows switches x87 state lazily, on the #NM it
+       raises) or CR0.EM set the instruction must fault in the guest, and
+       running it here would use another thread's x87 state. */
+    if (!v3_on || (hv_guest_cr0() & 0xC)) return 0;
     modrm();
     u8 *c = x87_code;
     if (mod_ == 3) {                                    /* registers only: as it is */
