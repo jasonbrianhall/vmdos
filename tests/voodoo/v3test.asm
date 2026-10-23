@@ -3,7 +3,8 @@
 ; protected mode through DPMI, maps the card's registers and frame buffer
 ; (DPMI 0800h) and writes them: a 640x480 16-bit screen, a fill, a Gouraud
 ; triangle through the setup unit (its vertices stored with FSTP, as
-; compiled Glide code does), then the command FIFO in the frame buffer
+; compiled Glide code does), a white band written into the frame buffer
+; directly, then the command FIFO in the frame buffer
 ; filling the back buffer, shown through the overlay after a swap. Waits
 ; about 10 seconds (time for a screenshot), sets text mode and exits.
 ;   nasm -f bin -o V3TEST.COM v3test.asm
@@ -137,6 +138,18 @@ pm:     xor ax, ax                      ; a flat 4 GB data selector
 .next:  add bx, 12
         loop .vtx
         call idle
+
+        push edi                                ; a white band, rows 20-29, straight into
+        push es                                 ; the frame buffer (BAR1: mapped, no traps)
+        mov es, [flat]
+        mov edi, [lin1]
+        add edi, FRONT + 20 * STRIDE
+        mov ecx, 10 * STRIDE / 4
+        mov eax, 0FFFFFFFFh
+        cld
+        a32 rep stosd
+        pop es
+        pop edi
         mov ecx, 55                             ; about 3 s to look at it
         call delay
 

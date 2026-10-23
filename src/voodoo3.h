@@ -1,8 +1,10 @@
 /* The emulated 3dfx Voodoo 3 (src/voodoo/v3.c, 86Box's Voodoo core): what
    the rest of vmdos calls. Off unless the command line has voodoo3; then
-   it is a PCI card (bus 0, device 1) with its registers (BAR0) and frame
-   buffer (BAR1) at linear addresses nothing is mapped at, so every guest
-   access faults and is emulated, and its I/O registers at V3_IO_BASE.
+   it is a PCI card (bus 0, device 1) with its registers (BAR0) at linear
+   addresses nothing is mapped at, so every guest access faults and is
+   emulated; its frame buffer (BAR1) is mapped onto the card's memory except
+   where the card must see the writes (the command FIFO); its I/O registers
+   at V3_IO_BASE.
    vmdos's own VGA stays the VGA; once a program turns on the Voodoo's
    video processor (Glide does), the screen shows the Voodoo's picture. */
 #ifndef VMDOS_VOODOO3_H
@@ -21,6 +23,7 @@ uint32_t v3_cfg_read(int reg, int size);      /* PCI configuration space */
 void v3_cfg_write(int reg, uint32_t val, int size);
 void v3_tick(void);                           /* every timer tick (boot CPU) */
 void v3_mode_set(void);                       /* INT 10h set a mode: the VGA shows again */
+void v3_hv_sync(void);                        /* VMHV made its nested page tables: map the frame buffer there */
 /* The picture, when the Voodoo's video processor owns the screen. */
 int v3_display(uint32_t *w, uint32_t *h);
 void v3_row(uint32_t y, uint32_t *out);       /* 0x00RRGGBB, w pixels */

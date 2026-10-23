@@ -41,6 +41,9 @@ u32 video_frame_no(void);
 extern u8 vga_dac[256][3];
 extern u8 crtc[64];
 void v3_run(void);
+void map_page(u32 lin, u32 phys, u32 flags);
+void tlb_flush_range(u32 lin, u32 len);
+void hv_map_gpa(u32 gpa, u32 host);
 void v3_poll_timers(void);
 void v3_sched_init(void);
 
@@ -292,6 +295,10 @@ int v3_on;
 static banshee_t *card;
 static u32 bar0_lin, bar1_lin;                 /* where the BARs were put: unmapped linear space */
 
+/* BAR1 pages mapped straight onto vram (lfb_remap) */
+static u8 *lfb_mapped;
+static int lfb_direct, lfb_dirty;
+
 #define banshee_log(...) do { if (v3_log_on > 1) kprintf("voodoo3: " __VA_ARGS__); } while (0)
 
 /* ---------------- the guest's x87 state, around the card's code ----------------
@@ -419,6 +426,7 @@ banshee_ext_outl(uint16_t addr, uint32_t val, void *priv)
             voodoo->tile_stride_shift = 10 + ((val >> 13) & 7);
             voodoo->tile_x            = ((val >> 16) & 0x7f) * 128;
             voodoo->tile_x_real       = ((val >> 16) & 0x7f) * 128 * 32;
+            lfb_dirty = 1;
             break;
 
         case Init_miscInit0:
@@ -1062,11 +1070,13 @@ banshee_cmd_write(void *priv, uint32_t addr, uint32_t val)
             break;
 
         case cmdBaseAddr0:
+            lfb_dirty = 1;
             voodoo->cmdfifo_base = (val & 0xfff) << 12;
             voodoo->cmdfifo_end  = voodoo->cmdfifo_base + (((voodoo->cmdfifo_size & 0xff) + 1) << 12);
             break;
 
         case cmdBaseSize0:
+            lfb_dirty = 1;
             voodoo->cmdfifo_size    = val;
             voodoo->cmdfifo_end     = voodoo->cmdfifo_base + (((voodoo->cmdfifo_size & 0xff) + 1) << 12);
             voodoo->cmdfifo_enabled = val & 0x100;
@@ -1099,11 +1109,13 @@ banshee_cmd_write(void *priv, uint32_t addr, uint32_t val)
             break;
 
         case cmdBaseAddr1:
+            lfb_dirty = 1;
             voodoo->cmdfifo_base_2 = (val & 0xfff) << 12;
             voodoo->cmdfifo_end_2  = voodoo->cmdfifo_base_2 + (((voodoo->cmdfifo_size_2 & 0xff) + 1) << 12);
             break;
 
         case cmdBaseSize1:
+            lfb_dirty = 1;
             voodoo->cmdfifo_size_2    = val;
             voodoo->cmdfifo_end_2     = voodoo->cmdfifo_base_2 + (((voodoo->cmdfifo_size_2 & 0xff) + 1) << 12);
             voodoo->cmdfifo_enabled_2 = val & 0x100;
@@ -1424,11 +1436,52 @@ banshee_write_linear_l(uint32_t addr, uint32_t val, banshee_t *banshee)
     }
 }
 
+/* ---------------- BAR1 mapped straight onto vram ----------------
+   Trapping every frame buffer access is slow, and nothing needs to see
+   most of them: the guest's writes to plain vram (textures, its own 2D,
+   reading back a picture) go to the same memory the engines draw in. So
+   BAR1's pages are mapped onto vram, user and writable, except those the
+   card must see written: the command FIFOs (hole counting), the tiled
+   part above tile_base (its addresses are swizzled) and past the end of
+   vram. In VMHV the same pages go into the VM's nested page tables.
+   v3trap on the command line keeps every page trapped. */
+static void lfb_remap(int all)
+{
+    banshee_t *b = card;
+    voodoo_t *v = b->voodoo;
+    int ok = lfb_direct && (b->pci_regs[4] & 2) && b->memBaseAddr1 == bar1_lin;
+    u32 lo = ~0u, hi = 0, n = 0;
+    lfb_dirty = 0;
+    for (u32 a = 0; a < b->vram_size; a += 4096) {
+        int want = ok && a + 4096 <= v->tile_base &&
+                   !(v->cmdfifo_enabled && a < v->cmdfifo_end && a + 4096 > v->cmdfifo_base) &&
+                   !(v->cmdfifo_enabled_2 && a < v->cmdfifo_end_2 && a + 4096 > v->cmdfifo_base_2);
+        if (!all && want == lfb_mapped[a >> 12]) continue;
+        lfb_mapped[a >> 12] = (u8)want;
+        u32 host = want ? (u32)(uintptr_t)b->vram + a : 0;
+        map_page(bar1_lin + a, host, want ? 7 : 0);
+        hv_map_gpa(bar1_lin + a, host);
+        if (a < lo) lo = a;
+        hi = a + 4096;
+        n += want;
+    }
+    if (hi) tlb_flush_range(bar1_lin + lo, hi - lo);
+    if (hi && v3_log_on) kprintf("voodoo3: frame buffer %x-%x remapped (%u pages direct)\n", lo, hi, n);
+}
+
+/* VMHV has made its nested page tables: the direct pages into them too. */
+void v3_hv_sync(void)
+{
+    if (!v3_on) return;
+    lfb_remap(1);
+}
+
 /* ---------------- what the kernel calls ---------------- */
 /* Whatever the card does between two looks: retraces, timers, the
    FIFO and render threads. */
 static void v3_catch_up(void)
 {
+    if (lfb_dirty) lfb_remap(0);
     check_vsync();
     v3_poll_timers();
     v3_run();
@@ -1568,6 +1621,7 @@ static u8 cfg_read8(int addr)
 static void cfg_write8(int addr, u8 val)
 {
     banshee_t *banshee = card;
+    lfb_dirty = 1;
     switch (addr) {
         case 0x04: banshee->pci_regs[0x04] = val & 0x27; return;
         case 0x07: banshee->pci_regs[0x07] = val & 0x3e; return;
@@ -1600,6 +1654,7 @@ u32 v3_cfg_read(int reg, int size)
 void v3_cfg_write(int reg, u32 val, int size)
 {
     for (int i = 0; i < size; i++) cfg_write8(reg + i, (u8)(val >> (8 * i)));
+    if (lfb_dirty) lfb_remap(0);
 }
 
 /* ---------------- the picture ---------------- */
@@ -1746,6 +1801,9 @@ void v3_init(void)
     v3_leave();
 
     v3_on = 1;
+    lfb_mapped = calloc(1, banshee->vram_size >> 12);
+    lfb_direct = !strstr(cmdline, "v3trap");
+    lfb_remap(1);
     kprintf("voodoo3: Voodoo 3 3000 (86Box's Voodoo), %u MB, PCI 00:01.0, registers at %x, frame buffer at %x, I/O at %x\n",
             VRAM_MB, bar0_lin, bar1_lin, V3_IO_BASE);
 }

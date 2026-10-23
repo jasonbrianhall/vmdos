@@ -258,8 +258,10 @@ The framebuffer is mapped write-combining (`nowc` turns that off).
 Voodoo 3 (Banshee/H3 Glide, e.g. a V3 `GLIDE2X.OVL`); once a program turns
 on the card's video processor the screen shows the Voodoo's picture, and a
 VGA mode set brings the VGA back. Needs a Pentium Pro or later and about
-40 MB of RAM. Every access to the card is trapped and emulated, so busy
-scenes run slower than on the real card (`tests/voodoo` has the tests).
+40 MB of RAM. The frame buffer is mapped straight onto the card's memory;
+register and command FIFO accesses are trapped and emulated, so busy scenes
+run slower than on the real card (`v3trap` traps the frame buffer too;
+`tests/voodoo` has the tests).
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
