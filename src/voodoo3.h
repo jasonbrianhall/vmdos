@@ -32,5 +32,6 @@ void v3_row(uint32_t y, uint32_t *out);       /* 0x00RRGGBB, w pixels */
 int vpci_port(uint16_t port, int size, int write, uint32_t *val);
 struct regs;
 int vpci_int1a(struct regs *r);               /* AH=B1h: 1 handled */
+void vpci_bios_patch(void);                   /* the BIOS32 directory on, with voodoo3 */
 
 #endif
