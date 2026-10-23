@@ -242,7 +242,9 @@ void pch_bits(Card& c)
     // descriptor write-back: GRAN 1, WTHRESH 1 (each done descriptor written
     // back at once), PTHRESH 31
     t0 = (t0 & ~0x003F003Fu) | 0x01010000u | 0x0100001Fu;
-    t0 |= 1u << 25;                             // queue enable: ignored by most, wanted by some (iPXE sets it always)
+    // queue enable on some parts; on the 82579 and I217-I219 bits 31:25 are
+    // LWTHRESH instead, so leave it clear there (as Linux)
+    if (!c.e.lv && !pch_lpt(c)) t0 |= 1u << 25;
     w32(c, TXDCTL0, t0);
     w32(c, TXDCTL1, t0);                        // erratum: both queues the same
     w32(c, RXDCTL0, r32(c, RXDCTL0) | 1u << 25);
@@ -260,7 +262,6 @@ void pch_bits(Card& c)
     else g = (g & ~0x3Fu) | ~0x3Fu;             // as Linux: e1000e_set_pcie_no_snoop(~PCIE_NO_SNOOP_ALL)
     w32(c, GCR, g);
     w32(c, RDTR, 0); w32(c, TIDV, 0);           // no interrupt delays (no interrupts anyway)
-    if (c.e.lv || pch_lpt(c)) w32(c, PBA, 26);  // Linux (e1000e_reset): 26 KB receive, the rest transmit
 }
 
 bool link(Card& c);
@@ -289,6 +290,11 @@ bool init(Card& c)
     r32(c, STATUS);
     udelay(10000);
     if (c.e.pch) {                                // as e1000e: stop DMA, take the flag, reset
+        // PBA only takes effect on the next reset (Linux e1000e_reset writes it
+        // before reset_hw): written after RST, the register reads back 26 but
+        // the packet buffer keeps its old split and an 82579 never fetches a
+        // transmit descriptor (TDH stays 0) while receive works.
+        if (c.e.lv || pch_lpt(c)) w32(c, PBA, 26);   // 26 KB receive, the rest transmit
         w32(c, CTRL, r32(c, CTRL) | (1u << 2));                 // GIO master disable
         for (int i = 0; i < 800 && (r32(c, STATUS) & (1u << 19)); i++) udelay(100);
         if (!swflag(c)) dbg(1, "net: %s: no software flag, resetting anyway\n", c.name);
