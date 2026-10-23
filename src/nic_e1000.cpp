@@ -242,9 +242,7 @@ void pch_bits(Card& c)
     // descriptor write-back: GRAN 1, WTHRESH 1 (each done descriptor written
     // back at once), PTHRESH 31
     t0 = (t0 & ~0x003F003Fu) | 0x01010000u | 0x0100001Fu;
-    // queue enable on some parts; on the 82579 and I217-I219 bits 31:25 are
-    // LWTHRESH instead, so leave it clear there (as Linux)
-    if (!c.e.lv && !pch_lpt(c)) t0 |= 1u << 25;
+    // (queue enable, bit 25: set in init once the ring is written)
     w32(c, TXDCTL0, t0);
     w32(c, TXDCTL1, t0);                        // erratum: both queues the same
     w32(c, RXDCTL0, r32(c, RXDCTL0) | 1u << 25);
@@ -344,7 +342,6 @@ bool init(Card& c)
     ctl &= ~((1u << 2) | (1u << 3) | (1u << 7) | (1u << 30) | (1u << 31));   // GIO master disable, LRST, ILOS, VME, PHY_RST
     w32(c, CTRL, ctl);
     if (c.e.pch && !(skip & SKIP_BITS)) pch_bits(c);
-    else if (c.e.pch) w32(c, TXDCTL0, r32(c, TXDCTL0) | 1u << 25);   // as iPXE: queue enable, nothing else
 
     if (c.e.pch && !(skip & SKIP_PHY)) pch_phy(c);
 
@@ -372,9 +369,18 @@ bool init(Card& c)
     w32(c, RDH, 0); w32(c, RDT, NRX - 1);
     c.rx_cur = 0;
     w32(c, RCTL, 1u << 26);                     // SECRC; 2048-byte buffers; off until set_mode
+    // ICH/PCH, as iPXE and Linux: the queue off while its base, length,
+    // head and tail are written, then enabled. Enabled first (with TDLEN
+    // still 0), a real 82579 never fetches a descriptor: TDH stays 0.
+    uint32_t txdctl = r32(c, TXDCTL0);
+    if (c.e.pch) {
+        w32(c, TXDCTL0, txdctl & ~(1u << 25));
+        for (int i = 0; i < 100 && (r32(c, TXDCTL0) & (1u << 25)); i++) udelay(1000);
+    }
     w32(c, TDBAL, (uint32_t)(uintptr_t)c.txd); w32(c, TDBAH, 0);
     w32(c, TDLEN, NTX * sizeof(TxD));
     w32(c, TDH, 0); w32(c, TDT, 0);
+    if (c.e.pch) w32(c, TXDCTL0, txdctl | (1u << 25));   // queue enable
     c.tx_cur = 0;
     w32(c, TIPG, 0x0060200A);
     // PSP, CT, COLD, RTLC; enabled (EN) once there's a link and the link-up
