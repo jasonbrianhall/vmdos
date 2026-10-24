@@ -162,27 +162,41 @@ void plat_delay_ms(uint32_t ms)
 }
 
 /* ---------------- time ----------------
-   86Box's timers (timer.c, as upstream) count "CPU cycles" in tsc: here
-   PIT clocks (cpuclock is PIT_HZ), moved on to now whenever the card is
-   looked at. A long wait (the boot CPU busy elsewhere) is caught up at most
-   50 ms at a time: the card's time falls behind rather than rendering a
-   second of scan lines in one go. */
+   86Box's timers (timer.c, as upstream) count CPU cycles in tsc, at
+   cpuclock a second: here the TSC itself (v3.c sets cpuclock from its
+   rate), read whenever the card is looked at. Reading the PIT instead
+   costs five port accesses, on every access to the card. A long wait (the
+   boot CPU busy elsewhere) is caught up at most 50 ms at a time: the
+   card's time falls behind rather than rendering a second of scan lines in
+   one go. Without a TSC rate (it wasn't measured): PIT clocks. */
 uint64_t tsc;
-static u32 last_pit;
+static uint64_t last;
+static uint32_t max_step;
+static int use_tsc;
+uint64_t tsc_read(void);
+uint32_t tsc_khz(void);
 
 uint64_t plat_timer_read(void) { return tsc; }
 
+static uint64_t clock_now(void) { return use_tsc ? tsc_read() : pit_clock(); }
+
 void v3_poll_timers(void)
 {
-    u32 now = pit_clock(), d = now - last_pit;
-    last_pit = now;
-    if (d > 59659) d = 59659;                  /* 50 ms */
+    uint64_t now = clock_now(), d = now - last;
+    last = now;
+    if (!use_tsc) d = (u32)d;                  /* pit_clock wraps at 32 bits */
+    if (d > max_step) d = max_step;            /* 50 ms */
     tsc += d;
     if (TIMER_VAL_LESS_THAN_VAL(timer_target, tsc)) timer_process();
 }
 
-void v3_sched_init(void)
+/* The clock's rate, Hz: what cpuclock is. */
+double v3_sched_init(void)
 {
-    last_pit = pit_clock();
+    use_tsc = tsc_khz() != 0;
+    double hz = use_tsc ? tsc_khz() * 1000.0 : 1193182.0;
+    max_step = (uint32_t)(hz / 20);
+    last = clock_now();
     timer_init();
+    return hz;
 }

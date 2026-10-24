@@ -35,7 +35,7 @@ void tlb_flush_range(u32 lin, u32 len);
 void hv_map_gpa(u32 gpa, u32 host);
 void v3_run(void);
 void v3_poll_timers(void);
-void v3_sched_init(void);
+double v3_sched_init(void);
 
 /* v3card.c */
 const device_t *v3_device(void);
@@ -51,7 +51,7 @@ extern const u8 v3_rom_start[], v3_rom_end[];
 int v3_log_on;
 int cycles;
 int pci_burst_time = 1, pci_nonburst_time = 1, agp_burst_time = 1, agp_nonburst_time = 1;
-double cpuclock = 1193182.0;                   /* timers count PIT clocks */
+double cpuclock = 1193182.0;                   /* the timers' clock (v3sched.c): the TSC's rate */
 uint64_t VGACONST1, VGACONST2;
 cpu_state_t cpu_state;
 machine_t machines[1];
@@ -426,9 +426,48 @@ static void lfb_remap(int all)
     if (hi && v3_log_on) kprintf("voodoo3: frame buffer %x-%x remapped (%u pages direct)\n", lo, hi, n);
 }
 
+/* The VGA's window (A0000h-BFFFFh) mapped straight onto vram too while a
+   byte written there is just that byte in vram, and a byte read is just
+   read (86Box's "fast" packed modes: mode 13h, the VESA banked modes, with
+   one bank for reads and writes); trapped otherwise (text, planar modes,
+   write modes, latches). Its frames then are drawn anew, as with BAR1. */
+extern int v3_map_own;                         /* cpu.c: map_page may map A0000h-BFFFFh now */
+static u32 leg_key[4];
+static int leg_pages;
+static void legacy_remap(int all)
+{
+    u32 base = 0, len = 0, off = 0;
+    int map = (svga->gdcreg[6] >> 2) & 3;
+    if (svga->fast && !svga->translate_address && !(svga->gdcreg[5] & 8) && lfb_direct &&
+        ((svga->chain4 && (svga->packed_chain4 || svga->force_old_addr)) || svga->fb_only)) {
+        if (map <= 1) {
+            base = 0xA0000; len = map ? 0x10000 : 0x20000; off = svga->write_bank;
+            if (svga->read_bank != svga->write_bank) len = 0;
+        } else {
+            base = map == 2 ? 0xB0000 : 0xB8000; len = 0x8000;
+        }
+        off &= svga->decode_mask;
+        if ((off & 0xfff) || off + len > (u32)svga->vram_max) len = 0;
+    }
+    u32 key[4] = { base, len, off, 0 };
+    if (!all && !memcmp(key, leg_key, sizeof key)) return;
+    memcpy(leg_key, key, sizeof key);
+    v3_map_own = 1;
+    for (u32 a = 0xA0000; a < 0xC0000; a += 4096) {
+        int want = len && a - base < len;
+        u32 host = want ? (u32)(uintptr_t)svga->vram + off + (a - base) : 0;
+        map_page(a, host, want ? 7 : 0);
+        hv_map_gpa(a, host);
+    }
+    v3_map_own = 0;
+    tlb_flush_range(0xA0000, 0x20000);
+    leg_pages = len >> 12;
+    if (v3_log_on) kprintf("voodoo3: VGA window %s (%x+%x at vram %x)\n", len ? "direct" : "trapped", base, len, off);
+}
+
 void v3_hv_sync(void)
 {
-    if (v3_on) lfb_remap(1);
+    if (v3_on) { lfb_remap(1); legacy_remap(1); }
 }
 
 /* Whatever the card does between two looks: its timers (scan lines,
@@ -436,13 +475,14 @@ void v3_hv_sync(void)
 static void catch_up(void)
 {
     lfb_remap(0);
+    legacy_remap(0);
     v3_poll_timers();
     v3_run();
 }
 
 /* A timer that is always there: timer.c's list mustn't run empty. */
 static pc_timer_t keep_timer;
-static void keep_cb(void *p) { (void)p; timer_advance_u64(&keep_timer, TIMER_USEC * 500000); }
+static void keep_cb(void *p) { (void)p; timer_advance_u64(&keep_timer, TIMER_USEC * 100000); }
 
 /* ---------------- what the kernel calls ---------------- */
 static int legacy(u32 a) { return a - 0xA0000 < 0x20000; }   /* the VGA's memory */
@@ -497,7 +537,7 @@ int v3_io(u16 port, int size, int write, u32 *val)
     }
     v3_enter();
     catch_up();
-    if (write) io_write(port, *val, size);
+    if (write) { io_write(port, *val, size); legacy_remap(0); }
     else *val = io_read(port, size);
     if (port - V3_IO_BASE < 0x100u) acc_log(write ? "io out" : "io in ", port, *val);
     v3_leave();
@@ -528,7 +568,7 @@ void v3_tick(void)
     if (!v3_on || depth) return;
     v3_enter();
     catch_up();
-    if (lfb_pages && svga->fb_only && !(++redraw_n % 32))    /* the frame buffer written past the card: */
+    if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
         svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
     v3_leave();
 }
@@ -579,12 +619,12 @@ void v3_init(void)
     bar1_lin = bar0_lin + (32u << 20);
 
     v3_enter();
+    cpuclock = v3_sched_init();
     TIMER_USEC = (uint64_t)((cpuclock / 1000000.0) * 4294967296.0);
     VGACONST1 = (uint64_t)(cpuclock / 25175000.0 * 4294967296.0);
     VGACONST2 = (uint64_t)(cpuclock / 28322000.0 * 4294967296.0);
-    v3_sched_init();
     timer_add(&keep_timer, keep_cb, 0, 0);
-    timer_set_delay_u64(&keep_timer, TIMER_USEC * 500000);
+    timer_set_delay_u64(&keep_timer, TIMER_USEC * 100000);
     video_tables();
 
     const device_t *d = v3_device();
@@ -600,8 +640,7 @@ void v3_init(void)
     v3_cfg_write(0x3C, 10, 1);
     v3_cfg_write(0x04, 3, 1);
     v3_on = 1;
-    for (u32 a = 0xA0000; a < 0xC0000; a += 4096) map_page(a, 0, 0);   /* the VGA's memory: the card's */
-    tlb_flush_range(0xA0000, 0x20000);
+    legacy_remap(1);                           /* the VGA's memory: the card's */
     vpci_bios_patch();                         /* the PCI BIOS for 32-bit code, its BIOS at C000h (bios_init: again at each restart) */
     lfb_remap(1);
     v3_leave();

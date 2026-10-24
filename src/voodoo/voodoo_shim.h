@@ -99,7 +99,7 @@ static inline uint16_t bswap16(uint16_t v) { return (uint16_t)(v >> 8 | v << 8);
 extern int cycles;                          /* bus-time accounting: ignored */
 extern int pci_burst_time, pci_nonburst_time, agp_burst_time, agp_nonburst_time;
 extern uint32_t mem_size;
-extern double cpuclock;                     /* the timers' "CPU cycles": PIT clocks here */
+extern double cpuclock;                     /* the timers' "CPU cycles": the TSC's rate (or the PIT's) */
 typedef struct { uint32_t pc; } cpu_state_t;
 extern cpu_state_t cpu_state;
 int device_get_config_int(const char *name);

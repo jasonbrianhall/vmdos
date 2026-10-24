@@ -37,6 +37,9 @@ void map_page(u32 lin, u32 phys, u32 flags) { (void)lin; (void)phys; (void)flags
 void tlb_flush_range(u32 lin, u32 len) { (void)lin; (void)len; }                   /* every access traps */
 void hv_map_gpa(u32 gpa, u32 host) { (void)gpa; (void)host; }
 void vpci_bios_patch(void) { }
+int v3_map_own;
+uint64_t tsc_read(void) { return 0; }
+uint32_t tsc_khz(void) { return 0; }                /* no TSC rate: the card's clock is pit_clock */
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
 /* ---------------- the card's registers ---------------- */
