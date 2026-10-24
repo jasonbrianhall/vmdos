@@ -527,7 +527,13 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x09:                                            /* the stub read port 60h and EOIs (bios.asm) */
         keyboard_irq(AL(r));
         return BIOS_CONT;
-    case 0x10: return video_int10(r) ? BIOS_CONT : BIOS_DONEF;
+    case 0x10:
+        if (v3_on) {                                      /* voodoo3: INT 10h is the card's BIOS; vmdos's VGA isn't there */
+            static int said;
+            if (!said++) kprintf("voodoo3: INT 10h AX=%04x reached vmdos's own handler (ignored)\n", AX(r));
+            return BIOS_DONEF;
+        }
+        return video_int10(r) ? BIOS_CONT : BIOS_DONEF;
     case 0x11: AX(r) = rd16(BDA + 0x10); return BIOS_DONEF;
     case 0x12: AX(r) = rd16(BDA + 0x13); return BIOS_DONEF;
     case 0x13: return int13(r);
