@@ -900,7 +900,7 @@ int hv_start(int key)
        vmdos's INT 10h stub). Windows' display code expects one there. */
     u32 v3len;
     if (v3_rom(&v3len)) {                                         /* voodoo3: the card's own BIOS there (bios_init copied it) */
-        for (u32 a = 0; a < v3len; a += 4096) map_page(HOLE_LO + a, (u32)(uintptr_t)gptr(HOLE_LO + a), 5);
+        for (u32 a = 0; a < v3len; a += 4096) map_page(HOLE_LO + a, guest_phys(HOLE_LO + a), 5);
     } else {
     if (!vrom) {
         vrom = phys_alloc(VROM_SIZE);
@@ -933,7 +933,7 @@ int hv_start(int key)
 
     for (;;) {
         if (hv_force) force_exit();
-        if (debug_level >= 3) {                                    /* debug=3: the text screen to the log, every 20 s */
+        if (debug_level >= 3 && !v3_on) {                         /* debug=3: the text screen to the log, every 20 s */
             static u32 last_dump;
             if (ticks - last_dump >= 20000) {
                 last_dump = ticks;
