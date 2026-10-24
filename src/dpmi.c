@@ -907,6 +907,10 @@ static struct regs *int31(struct ctx *c)
         if (p < 0x100000) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* below 1 MiB: as is */
         if (video_vram_range(p, n)) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* VESA LFB: mapped as is */
         if (v3_range(p, n)) { SET16(ebx, p >> 16); SET16(ecx, p); break; }   /* the Voodoo 3: unmapped as is, every access trapped */
+        u32 lfb = p >= GUEST_TOP ? vga_native_lfb(p, n) : 0;
+        if (lfb) {                                     /* video=vbe: the card's LFB, write-combining */
+            map_fb(p, lfb); set_user(p, lfb, 1);
+            SET16(ebx, p >> 16); SET16(ecx, p); break; }
         void *m = map_mmio64_user(p, n);
         if (!m) { err(c, 0x8021); break; }
         u32 l = (u32)(uintptr_t)m;

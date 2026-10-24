@@ -566,7 +566,7 @@ int bios_service(struct regs *r, int id, int via_stub)
 /* ---------------- setup ---------------- */
 void bios_init(void)
 {
-    if (v3_on) {                                         /* voodoo3: A0000h-BFFFFh are the card's (unmapped) */
+    if (v3_on || vga_native) {                           /* voodoo3, video=vbe: A0000h-BFFFFh are the card's */
         memset(gptr(0), 0, 0xA0000);
         memset(gptr(0xC0000), 0, GUEST_TOP - 0xC0000);
     } else memset(gptr(0), 0, GUEST_TOP);
@@ -603,7 +603,8 @@ void bios_init(void)
     u32 secs = bcd2bin(cmos_bcd(4)) * 3600 + bcd2bin(cmos_bcd(2)) * 60 + bcd2bin(cmos_bcd(0));
     wr32(BDA + 0x6C, secs * 19663 / 1080);
 
-    video_set_mode(3, 1);
+    if (vga_native) vga_native_bios();                   /* video=vbe: the card's BIOS, vectors and data */
+    else video_set_mode(3, 1);
 
     disk_cyls = disk_sectors / (DISK_HEADS * DISK_SPT);
     if (disk_cyls > 1024) disk_cyls = 1024;
@@ -622,6 +623,7 @@ extern const u8 fd_boot16[512], fd_boot32[512];
 static void v3_post(struct regs *r)
 {
     if (v3_on) { r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x236); }
+    if (vga_native) { r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x238); }   /* video=vbe: mode 3 by the card's BIOS first */
 }
 
 /* Start the guest from floppy drive d's boot sector, as a BIOS would:

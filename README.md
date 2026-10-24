@@ -222,6 +222,21 @@ takes mode N from that list, `vga=640x480` the mode of that size, and
 scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
 submenu's sizes.
 
+VBE or GOP (`video=`): `video=fb` (the default) is the above: vmdos's
+own VGA and VESA BIOS, drawn scaled onto the framebuffer the firmware set up
+(GOP on UEFI, GRUB's VESA mode on a BIOS/CSM boot). On a BIOS/CSM boot,
+`video=vbe` (the boot menu's "video card's own BIOS (VBE, no scaling)" entry)
+gives DOS the PC's real card instead: its VGA BIOS from C000h with INT 10h
+and the VESA modes it has, the VGA ports and the card's I/O straight to the
+hardware, A0000h-BFFFFh on the card's memory, its PCI configuration space
+(and the PCI BIOS), and DPMI 0800h maps its linear framebuffer
+write-combining. Modes are the card's own, unscaled; vmdos draws nothing
+(no scaling, log overlay or screenshots; the INT 33h pointer of vmdos's
+mouse driver is drawn only in text modes; CTMOUSE draws its own), and VMHV
+won't start with it. A UEFI boot has no VGA BIOS, so `video=vbe` is ignored
+there (logged) and the framebuffer is used. `make esp KARGS=video=vbe` makes
+it the BIOS/CSM menu's default.
+
 Which screen (UEFI, before `vga=`): `display=ask` lists the display outputs
 the firmware has (a laptop's panel and its HDMI port, two graphics cards)
 with their kind and asks for a number, `display=N` takes output N,
@@ -670,6 +685,7 @@ untested.
 | `src/vdev.c` | virtual PIC, PIT, keyboard controller, A20, CMOS |
 | `src/bios.c`, `src/bios.asm` | BIOS data area, IVT, services; F000h stub segment |
 | `src/video.c` | VGA state, INT 10h, framebuffer renderer |
+| `src/vgabios.c` | `video=vbe`: the card's own VGA/VESA BIOS, ports and memory (BIOS/CSM boots) |
 | `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
 | `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
 | `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI, UHCI and OHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |

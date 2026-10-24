@@ -54,7 +54,7 @@ VOODOO_OBJS := $(addprefix voodoo/,vid_voodoo.o vid_voodoo_banshee_blitter.o vid
               v3card.o v3.o v3sched.o v3rom.o)
 OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o blk_nvme.o blk_usb.o virtio.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
-              sb/opl.o sb/dbopl.o vpci.o $(VOODOO_OBJS))
+              sb/opl.o sb/dbopl.o vpci.o vgabios.o $(VOODOO_OBJS))
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
 # and restores the FPU around it); everything that runs later is integer.
 FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
@@ -332,6 +332,9 @@ GRUB_ASK = echo '      set pager=1'; echo '      videoinfo'; echo '      set pag
 VGA_ARG := $(firstword $(patsubst vga=%,%,$(filter vga=%,$(KARGS_ALL))))
 bios_vga = $(if $(filter ask,$(1)),$(GRUB_ASK),$(if $(filter max,$(1)),echo '      set gfxpayload=auto';,$(if $(findstring x,$(1)),echo '      set gfxpayload=$(1)x32$(comma)$(1)';)))
 VGA_TITLE_max := Largest (usually the panel native size)
+# video=vbe in KARGS (the card's own VGA BIOS, BIOS/CSM boots only): GRUB
+# leaves the card in text mode instead of setting a framebuffer mode.
+bios_video = $(if $(filter video=vbe,$(KARGS_ALL)),echo '    set gfxpayload=text';,$(call bios_vga,$(VGA_ARG)))
 $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	@mkdir -p $(BUILD)/grub
 	@{ echo '# vmdos boot menu (made by make esp: changes here are overwritten;'; \
@@ -356,12 +359,12 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
-	   $(call bios_vga,$(VGA_ARG)) \
+	   $(bios_video) \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) noxms" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) noxms'; \
-	   $(call bios_vga,$(VGA_ARG)) \
+	   $(bios_video) \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo '  submenu "FreeDOS (vmdos), screen resolution" {'; \
@@ -378,7 +381,12 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) voodoo3'; \
-	   $(call bios_vga,$(VGA_ARG)) \
+	   $(bios_video) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos), video card'"'"'s own BIOS (VBE, no scaling)" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(filter-out video=% vga=%,$(KARGS_ALL)) video=vbe'; \
+	   echo '    set gfxpayload=text'; \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
 	   echo 'fi'; \

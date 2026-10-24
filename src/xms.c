@@ -10,7 +10,7 @@
 #include "kernel.h"
 
 #define MAX_HANDLES 64
-#define UMB_START (v3_on ? 0xCA00 : 0xC800)  /* paragraphs; voodoo3: its BIOS is 40 KB */
+#define UMB_START (v3_on ? 0xCA00 : vga_native_rom_end() > 0xC800 ? vga_native_rom_end() : 0xC800)   /* paragraphs; voodoo3: its BIOS is 40 KB; video=vbe: the card's */
 extern u16 umb_end;                         /* ems.c: E000h with an EMS page frame */
 #define UMB_END   umb_end
 

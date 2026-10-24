@@ -146,6 +146,7 @@ void *isa_dma_buffer(u32 *phys);              /* 64 KiB of RAM below 16 MiB, 64 
 void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
+void io_allow(u16 port, u32 n);               /* ports straight to the hardware for the guest (no trap) */
 void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */
 void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
 void usb_start(const char *cmdline);
@@ -410,4 +411,14 @@ int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
 int video_gfx_height(void);                   /* graphics mode height (200 in text modes) */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;
+
+/* ---- vgabios.c: video=vbe, the video card's own VGA/VESA BIOS (legacy BIOS / CSM boots) ---- */
+extern int vga_native;                        /* the guest has the real card: its ROM, ports, memory */
+void vga_native_init(void);                   /* video_init: decide, find the card, give the guest its ports */
+void vga_native_bios(void);                   /* bios_init: the ROM at C000h, its vectors and BIOS data */
+u16 vga_native_rom_end(void);                 /* the paragraph after the card's ROM (UMBs start there) */
+u32 vga_native_lfb(u32 phys, u32 len);        /* [phys, +len) in the card's memory: the bytes to map (DPMI 0800h), else 0 */
+int vga_native_pci(int bus, int devfn);       /* 1: the card's own PCI function (its config writes go through) */
+void video_native_sync(void);                 /* video.c: video_mode from the BIOS data area */
+void video_native_pointer(void);              /* video.c: the INT 33h text-mode pointer, drawn in video memory */
 #include "voodoo3.h"

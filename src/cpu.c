@@ -122,6 +122,7 @@ static void map_page64(u32 lin, u64 phys, u32 flags)
 void map_page(u32 lin, u32 phys, u32 flags)
 {
     if (v3_on && lin - 0xA0000u < 0x20000u) phys = flags = 0;   /* voodoo3: the VGA's memory is the card's, every access trapped */
+    if (vga_native && lin - 0xA0000u < 0x20000u) phys = lin, flags = 7 | 0x10;   /* video=vbe: the real card's, uncached */
     map_page64(lin, phys, flags);
 }
 
@@ -480,6 +481,13 @@ static void tables_init(void)
     idt[0x30] = gate((u32)(uintptr_t)ap_wake_isr);
     idt[0x3F] = gate((u32)(uintptr_t)ap_spurious_isr);
     idt_load();
+}
+
+/* Ports [port, port + n) straight to the hardware for the guest (v86 and
+   ring-3 code): no trap, the real device answers (video=vbe: the card's). */
+void io_allow(u16 port, u32 n)
+{
+    for (u32 p = port; p < (u32)port + n && p < 0x10000; p++) tss.iobitmap[p >> 3] &= (u8)~(1 << (p & 7));
 }
 
 static void pic_init(void)

@@ -744,6 +744,7 @@ static const char *const hv_err[] = {
     "VT-x is turned off in the firmware setup",
     "this CPU's VT-x lacks EPT or unrestricted guest (Intel CPUs from 2010 on have them)",
     "VT-x could not be started",
+    "not with video=vbe (the VM has no way to the video card's own BIOS)",
 };
 static int vmx;                       /* Intel VT-x (hvvmx.c) instead of AMD-V */
 int vmx_check(void);
@@ -753,6 +754,7 @@ void vmx_run(u8 *shadow, u32 *g);
 
 static int hv_setup(void)
 {
+    if (vga_native) return 10;
     int e = svm_check();
     if (e == 5) { e = vmx_check(); vmx = !e; }
     if (e) return e;

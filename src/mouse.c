@@ -236,6 +236,7 @@ int mouse_log(void) { if (mlog < 0) mlog = !!strstr(cmdline, "mouselog"); return
 
 void mouse_int33(struct regs *r)
 {
+    video_native_sync();                               /* video=vbe: the card's mode, for the ranges */
     mouse_update();
     if (mouse_log()) {
         static u32 polls;
@@ -290,4 +291,5 @@ void mouse_int33(struct regs *r)
     case 0x24: BX(r) = 0x0626; CX(r) = 0x040C; break;  /* v6.26, PS/2, IRQ 12 */
     default: dbg(1, "INT 33h AX=%04x unsupported\n", AX(r));
     }
+    video_native_pointer();                            /* video=vbe: shown / hidden / moved now, in video memory */
 }

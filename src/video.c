@@ -276,7 +276,12 @@ static int gfx_h(void)
     if (is_ega(video_mode)) { ega_geom(&w, &h); return h; }
     return 200;
 }
-int video_gfx_height(void) { return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h(); }
+static int native_height(void);
+int video_gfx_height(void)
+{
+    if (vga_native) return native_height();
+    return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h();
+}
 
 /* CGA color select (port 3D9h, INT 10h AH=0Bh): background (or the
    640x200 foreground), palette and intensity, as attribute-palette entries. */
@@ -313,7 +318,7 @@ void video_set_mode(int mode, int clear) { rlock_take(&video_lock); video_set_mo
 static void video_set_mode_(int mode, int clear)
 {
     mode &= 0x7F;
-    if (v3_on) return;                            /* voodoo3: the card's own BIOS sets its modes */
+    if (v3_on || vga_native) return;              /* voodoo3, video=vbe: the card's own BIOS sets its modes */
     vbe_off();
     vr_period = VR_PERIOD_VGA; vr_len = VR_LEN_VGA;   /* a BIOS mode's own timing: 70 Hz */
     vbe_interlace = 0;
@@ -2252,6 +2257,7 @@ static void video_refresh_(void)
     frame_no++;
     if (par_lost) { par_lost = 0; full_redraw = 1; }
     if ((frame_no & 15) == 0) blink_phase ^= 1;
+    if (vga_native) { video_native_pointer(); busy = 0; return; }   /* video=vbe: the card shows it */
     if (text_fallback) { refresh_fallback(); busy = 0; return; }
     if (!fb) { busy = 0; return; }
     tick_poll_begin();
@@ -2323,6 +2329,7 @@ void video_console_attr(const char *title, const char *msg, u16 attr) { rlock_ta
 static void video_console_attr_(const char *title, const char *msg, u16 attr)
 {
     u16 a = (u16)(attr << 8);
+    if (vga_native) title = "vmdos stopped (video=vbe: the screen shows only in a text mode)";
     for (int i = 0; i < 80 * 25; i++) console_cells[i] = a | 0x20;
     int row = 1, col = 2;
     for (int i = 0; title[i]; i++) console_cells[row * 80 + col + i] = a | (u8)title[i];
@@ -2330,6 +2337,10 @@ static void video_console_attr_(const char *title, const char *msg, u16 attr)
     for (; *msg && row < 24; msg++) {
         if (*msg == '\n' || col >= 78) { row++; col = 2; if (*msg == '\n') continue; }
         console_cells[row * 80 + col++] = a | (u8)*msg;
+    }
+    if (vga_native) {                             /* video=vbe: into the card's text memory as it is */
+        memcpy(gptr(0xB8000), console_cells, sizeof console_cells);
+        return;
     }
     console_on = 1;
     if (!is_text(video_mode)) { video_mode = 3; text_cols = 80; }
@@ -2371,8 +2382,66 @@ static void video_console_restore_(void)
 void video_text_fallback(void) { text_fallback = 1; }
 int video_fb_ready(void) { return fb != 0 || text_fallback; }
 
+/* ---------------- video=vbe (vgabios.c): the card's own BIOS ----------------
+   The mode is the card's; video_mode follows the BIOS data area, for the
+   mouse driver's ranges. In text modes the INT 33h pointer is drawn into
+   video memory as a mouse driver does: the cell's attribute ANDed and
+   XORed with the masks (fn 0Ah), put back when it moves or is hidden,
+   unless the program has written the cell since. Called on show / hide /
+   move (INT 33h) and with each refresh (motion). */
+void video_native_sync(void)
+{
+    if (vga_native) video_mode = rd8(BDA + 0x49) & 0x7F;
+}
+
+static int native_height(void)
+{
+    video_native_sync();
+    int m = video_mode;
+    if (is_text(m)) { int rows = rd8(BDA + 0x84) + 1; return (rows < 25 ? 25 : rows) * 8; }
+    if (m == 0x0F || m == 0x10) return 350;
+    if (m == 0x11 || m == 0x12) return 480;
+    return 200;
+}
+
+static u32 np_addr;
+static u16 np_saved, np_drawn;
+static int np_on;
+static void video_native_pointer_(void);
+void video_native_pointer(void) { if (!vga_native) return; rlock_take(&video_lock); video_native_pointer_(); rlock_drop(&video_lock); }
+static void video_native_pointer_(void)
+{
+    int x, y;
+    u16 am, xm;
+    video_native_sync();
+    int shown = is_text(video_mode) && mouse_pointer(&x, &y, &am, &xm);
+    u32 a = 0;
+    if (shown) {
+        u32 cols = rd16(BDA + 0x4A), rows = rd8(BDA + 0x84) + 1u;
+        if (!cols || cols > 132) cols = 80;
+        if (rows < 25) rows = 25;
+        u32 col = (u32)(x < 0 ? 0 : x) / (cols <= 40 ? 16 : 8), row = (u32)(y < 0 ? 0 : y) / 8;
+        if (col >= cols) col = cols - 1;
+        if (row >= rows) row = rows - 1;
+        a = (video_mode == 7 ? 0xB0000 : 0xB8000) + rd16(BDA + 0x4E) + (row * cols + col) * 2;
+        if (a + 2 > 0xC0000) shown = 0;
+    }
+    if (np_on && (!shown || a != np_addr)) {
+        if (rd16(np_addr) == np_drawn) wr16(np_addr, np_saved);
+        np_on = 0;
+    }
+    if (!shown || (np_on && rd16(a) == np_drawn)) return;
+    np_saved = rd16(a);
+    np_drawn = (u16)((np_saved & am) ^ xm);
+    wr16(a, np_drawn);
+    np_addr = a;
+    np_on = 1;
+}
+
 void video_init(void)
 {
+    vga_native_init();
+    if (vga_native) { fb = 0; return; }          /* video=vbe: nothing drawn by vmdos */
     vbe_init();
     if (!fb && !bochs_vbe()) {
         kprintf("no linear framebuffer: using VGA text mode\n");
@@ -2962,6 +3031,7 @@ static void video_puts_(const char *s);
 void video_puts(const char *s) { rlock_take(&video_lock); video_puts_(s); rlock_drop(&video_lock); }
 static void video_puts_(const char *s)
 {
-    if (!is_text(video_mode)) video_set_mode(3, 1);
+    if (vga_native) video_native_sync();
+    if (!is_text(video_mode)) { if (vga_native) return; video_set_mode(3, 1); }
     while (*s) teletype((u8)*s++, rd8(BDA + 0x62), 7);
 }
