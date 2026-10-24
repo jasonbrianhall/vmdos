@@ -119,9 +119,10 @@ static void map_page64(u32 lin, u64 phys, u32 flags)
     if (hv_map_hook && lin < (10u << 20)) hv_map_hook(lin);
 }
 
+int v3_map_own;                        /* voodoo3: v3.c maps the VGA's window itself */
 void map_page(u32 lin, u32 phys, u32 flags)
 {
-    if (v3_on && lin - 0xA0000u < 0x20000u) phys = flags = 0;   /* voodoo3: the VGA's memory is the card's, every access trapped */
+    if (v3_on && !v3_map_own && lin - 0xA0000u < 0x20000u) return;   /* voodoo3: the VGA's memory is the card's (v3.c) */
     map_page64(lin, phys, flags);
 }
 
