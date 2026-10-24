@@ -66,10 +66,21 @@ static int aux_cmd(u8 c)
 void mouse_ps2_init(void)
 {
     if (inb(0x64) == 0xFF) return;                     /* no 8042 */
+    /* The keyboard side too, whatever the firmware left: a legacy BIOS /
+       CSM boot can hand over the 8042 with the keyboard port or its
+       scanning off, and then nothing comes (a PS/2 keyboard seems dead;
+       USB ones work). */
+    for (int i = 0; i < 16 && (inb(0x64) & 1); i++) inb(0x60);   /* stale bytes */
+    kbc_wait_write(); outb(0x64, 0xAE);                /* enable the keyboard port */
+    kbc_wait_write(); outb(0x60, 0xF4);                /* the keyboard: scanning on */
+    if (kbc_wait_read()) inb(0x60);                    /* its ACK */
     kbc_wait_write(); outb(0x64, 0xA8);                /* enable the aux port */
     kbc_wait_write(); outb(0x64, 0x20);
     if (!kbc_wait_read()) return;
     u8 cfg = inb(0x60);
+    if ((cfg & 0x51) != 0x41) kprintf("kbd: 8042 command byte %02x: keyboard IRQ, clock and translation on\n", cfg);
+    cfg |= 0x41;                                       /* keyboard IRQ 1, set 2 -> set 1 translation */
+    cfg &= ~0x10;                                      /* keyboard clock on */
     cfg |= 0x02;                                       /* aux IRQ 12 */
     cfg &= ~0x20;                                      /* aux clock on */
     kbc_wait_write(); outb(0x64, 0x60);
