@@ -70,6 +70,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw lfn_open                      ; 0232  long-name open on a 9p drive (fs9p.cpp)
         dw bios32_dir                    ; 0234  BIOS32 service directory (vpci.c turns it on)
         dw rom_post                      ; 0236  voodoo3: the card's BIOS initialised, then the boot sector
+        dw vga_post                      ; 0238  video=vbe: text mode by the card's BIOS, then the boot sector
 
 ; ---- stubs ----
 dummy:  iret
@@ -83,6 +84,20 @@ rom_post:
         push es
         mov ax, 0x0008
         call 0xC000:0x0003
+        pop es
+        pop ds
+        popad
+        jmp 0x0000:0x7C00
+
+; video=vbe: the PC's card has its own BIOS (initialised by the PC's); a
+; clean text mode from it, as a BIOS leaves the screen at boot, then the
+; boot sector.
+vga_post:
+        pushad
+        push ds
+        push es
+        mov ax, 0x0003
+        int 0x10
         pop es
         pop ds
         popad
