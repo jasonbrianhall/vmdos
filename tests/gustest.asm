@@ -1,5 +1,7 @@
 ; GUSTEST.COM: the Gravis UltraSound (ULTRASND=240,3,3,7,7).
-; 1. DRAM: pokes AA 55 at 0 and 1 through 347h and reads them back
+; 1. DRAM: pokes AA 55 at 0 and 1 through 347h and reads them back; then
+;    4Ch read back after 07h (07) and 3X3h after 3X2h <- 05h (05), as on a
+;    real GF1 (Gravis's SETUP looks)
 ; 2. uploads 1 KB by DMA (channel 3, MSB inverted) and waits for the TC
 ;    IRQ (IRQ 7); prints the IRQ status (80) and DRAM 0 and 16 (40 C0)
 ; 3. timer 1 at 10 ms for 1 s: prints the IRQ count (about 0064)
@@ -39,6 +41,22 @@ DRAMIO  equ GUS + 107h
 
         mov ax, 074Ch                   ; run, DAC on, IRQs on
         call wreg8
+        mov dx, msg_r
+        call str
+        mov dx, REG
+        mov al, 4Ch
+        out dx, al
+        mov dx, DATAHI
+        in al, dx
+        call hex
+        mov al, ' '
+        call chr
+        mov dx, VOICE
+        mov al, 5
+        out dx, al
+        inc dx
+        in al, dx
+        call hex
         mov dx, GUS                     ; latches: DMA 3, then IRQ 7
         mov al, 0Bh
         out dx, al
@@ -348,6 +366,7 @@ chr:    push dx
         ret
 
 msg_d   db 'DRAM: $'
+msg_r   db 13, 10, '4Ch, 3X3h: $'
 msg_i   db 13, 10, 'DMA IRQ status: $'
 msg_m   db ' DRAM: $'
 msg_t   db 13, 10, 'Timer 1 IRQs in 1 s: $'

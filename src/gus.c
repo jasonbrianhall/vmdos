@@ -38,8 +38,10 @@ static int enabled, irq_line = 7, dma_ch = 3;
 static int voices = 14;
 static u32 active_mask = (1u << 14) - 1;
 static u8 mixctl = 0x0B, irq_status, voice_sel, reg_sel, reset_reg;
+static u8 last_io;                          /* the last byte through 3X2h-3X5h: 3X2h/3X3h read it back */
+static int hi_held = -1;                    /* 3X5h right after 3X4h: the same read's high byte */
 static u16 reg_data;
-static u8 dmactl, timerctl, sampctl, adlib_cmd;
+static u8 dmactl, dma_tc, timerctl, sampctl, adlib_cmd;
 static u16 dma_addr;
 static u32 dram_addr;
 static u32 wave_irq, ramp_irq;              /* a bit per voice */
@@ -64,9 +66,20 @@ static const u16 pan_l[16] = { 32767, 32587, 32051, 31163, 29934, 28377, 26509, 
    unity (Q16). */
 static inline int32_t vol_amp(int v) { return (int32_t)((u32)(256 + (v & 255)) << (v >> 8) >> 8); }
 
+/* The status bits that are enabled, as 2X6h shows them: the DMA's with its
+   IRQ on (41h bit 5), the timers' with theirs (45h), the voices' with the
+   master IRQ enable (4Ch bit 2). */
+static u8 status(void)
+{
+    u8 r = irq_status & timerctl & 0x0C;
+    if (dmactl & 0x20) r |= irq_status & 0x80;
+    if (reset_reg & 4) r |= irq_status & 0x60;
+    return r;
+}
+
 static void check_irq(void)
 {
-    if (irq_status && (mixctl & 0x08)) irq_req = 1;
+    if (status() && (mixctl & 0x08)) irq_req = 1;
 }
 
 /* Bits 5-6 of the IRQ status from the voices' flags, and the voice 8Fh
@@ -97,8 +110,13 @@ static void reset(void)
 {
     irq_status = 0;
     memset(tm, 0, sizeof tm);
+    for (int t = 0; t < 2; t++) { tm[t].value = 0xFF; tm[t].reached = 1; }
     adlib_cmd = 0x55;
-    dmactl = timerctl = sampctl = 0;
+    dmactl = dma_tc = timerctl = sampctl = 0;
+    dma_addr = 0;
+    dram_addr = 0;
+    reg_data = 0;
+    voice_sel = 0;
     mixctl = 0x0B;
     wave_irq = ramp_irq = 0;
     irq_chan = 0;
@@ -163,8 +181,13 @@ void gus_dma_poll(void)
         else for (int i = 0; i < n; i++) dram[a + i] ^= 0x80;
     }
     dbg(2, "GUS: DMA %s %u bytes at %05x (ch %d)\n", read ? "read" : "write", n, a, dma_ch);
+    a += n;                                                     /* the address register moves on */
+    if (dmactl & 4) a = (a & 0xC0000) | ((a & 0x3FFFF) >> 1);
+    dma_addr = (u16)(a >> 4);
     dmactl &= ~1;
-    if (dmactl & 0x20) { irq_status |= 0x80; check_irq(); }
+    dma_tc = 1;
+    irq_status |= 0x80;
+    check_irq();
 }
 
 /* ---------------------------------------------------------------- registers */
@@ -209,6 +232,7 @@ static void write_reg(void)
     case 0x41:
         dmactl = hi;
         gus_dma_poll();
+        check_irq();
         return;
     case 0x42: dma_addr = reg_data; return;
     case 0x43: dram_addr = (dram_addr & 0xF0000) | reg_data; return;
@@ -219,14 +243,18 @@ static void write_reg(void)
         if (!tm[0].irq) irq_status &= ~4;
         tm[1].irq = (hi & 8) != 0;
         if (!tm[1].irq) irq_status &= ~8;
+        check_irq();
         return;
     case 0x46: tm[0].value = hi; tm[0].period = (256 - hi) * 960; return;
     case 0x47: tm[1].value = hi; tm[1].period = (256 - hi) * 3840; return;
     case 0x49: sampctl = hi; return;                            /* recording isn't emulated */
-    case 0x4C:
-        reset_reg = hi;
+    case 0x4C: {                                                /* a reset, and coming out of one, clear bits 1-2 */
+        u8 old = reset_reg;
+        reset_reg = hi & 7;
         if (!(hi & 1)) reset();
-        return;
+        if (!(reset_reg & 1) || !(old & 1)) reset_reg &= 1;
+        check_irq();
+        return; }
     }
 }
 
@@ -236,13 +264,14 @@ static u16 read_reg(void)
     u32 m = 1u << (voice_sel & 31);
     switch (reg_sel) {
     case 0x41: {                                                /* reading acknowledges the DMA IRQ */
-        u8 r = (u8)((dmactl & 0xBF) | (irq_status & 0x80) >> 1);
+        u8 r = (u8)((dmactl & 0xBF) | (dma_tc ? 0x40 : 0));
+        dma_tc = 0;
         irq_status &= 0x7F;
         return (u16)(r << 8); }
     case 0x42: return dma_addr;
     case 0x45: return (u16)(timerctl << 8);
-    case 0x49: return (u16)(sampctl << 8);
-    case 0x4C: return (u16)(reset_reg << 8);
+    case 0x49: return (u16)(((sampctl & 0xBF) | (dma_tc ? 0x40 : 0)) << 8);
+    case 0x4C: return (u16)(reset_reg << 8 | reset_reg);         /* the same from 3X4h and 3X5h */
     case 0x80: return (u16)((v->wctl | (wave_irq & m ? 0x80 : 0)) << 8);
     case 0x81: return v->fc;
     case 0x82: return (u16)(v->start >> 16);
@@ -257,7 +286,7 @@ static u16 read_reg(void)
     case 0x8B: return (u16)v->addr;
     case 0x8C: return (u16)(v->pan << 8);
     case 0x8D: return (u16)((v->rctl | (ramp_irq & m ? 0x80 : 0)) << 8);
-    case 0x8E: return (u16)((0xC0 | (voices - 1)) << 8);
+    case 0x8E: return (u16)((0xE0 | (voices - 1)) << 8);
     case 0x8F: {                                                /* the next voice with an IRQ; acknowledges it */
         u8 r = 0x20;
         u32 cm = 1u << irq_chan;
@@ -269,7 +298,7 @@ static u16 read_reg(void)
         check_voice_irq();
         return (u16)(r << 8); }
     }
-    return 0xFFFF;
+    return reg_data;
 }
 
 static void timer_ctl(u8 v)                                     /* 2X9h after 04h in 2X8h, as on the AdLib */
@@ -295,24 +324,26 @@ static void latch(u8 v)
 
 void gus_out(u16 port, u8 v)
 {
+    hi_held = -1;
     switch (port - base) {
     case 0x000: mixctl = v; check_irq(); return;
     case 0x008: adlib_cmd = v; return;
     case 0x009: if (adlib_cmd == 4) timer_ctl(v); return;
     case 0x00B: latch(v); return;
     case 0x101: gm_midi_byte(v); return;                        /* MIDI out: the GM synth */
-    case 0x102: voice_sel = v & 31; return;
-    case 0x103: reg_sel = v; reg_data = 0; return;
-    case 0x104: reg_data = (u16)((reg_data & 0xFF00) | v); return;
-    case 0x105: reg_data = (u16)((reg_data & 0x00FF) | v << 8); write_reg(); return;
+    case 0x102: voice_sel = v & 31; last_io = v; return;
+    case 0x103: reg_sel = last_io = v; reg_data = 0; return;
+    case 0x104: reg_data = v; last_io = v; return;
+    case 0x105: reg_data = (u16)((reg_data & 0x00FF) | v << 8); last_io = v; write_reg(); return;
     case 0x107: dram[dram_addr] = v; return;
     }
 }
 
 u8 gus_in(u16 port)
 {
+    if (port - base != 0x105) hi_held = -1;
     switch (port - base) {
-    case 0x006: return irq_status;
+    case 0x006: return status();
     case 0x008: {                                               /* timer status */
         u8 r = 0;
         if (tm[0].reached) r |= 0x40;
@@ -323,10 +354,16 @@ u8 gus_in(u16 port)
         return r; }
     case 0x100: return 0x02;                                    /* MIDI: transmit empty, nothing received */
     case 0x101: return 0x00;
-    case 0x102: return voice_sel;
-    case 0x103: return reg_sel;
-    case 0x104: return (u8)read_reg();
-    case 0x105: return (u8)(read_reg() >> 8);
+    case 0x00A: return adlib_cmd;
+    case 0x102: case 0x103: return last_io;
+    case 0x104: {                                               /* a word read (3X4h then 3X5h) reads the register once */
+        u16 r = read_reg();
+        hi_held = r >> 8;
+        return last_io = (u8)r; }
+    case 0x105: {
+        int h = hi_held >= 0 ? hi_held : read_reg() >> 8;
+        hi_held = -1;
+        return last_io = (u8)h; }
     case 0x107: return dram[dram_addr];
     }
     return 0xFF;
