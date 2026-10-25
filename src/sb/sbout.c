@@ -203,6 +203,7 @@ void sb_irq_ack(int bits16)     { irq_stat &= bits16 ? ~2 : ~1; }
 static void start(int record, int autoinit, int bits16, int sign, int stereo,
                   uint32_t rate, uint32_t len, int silence)
 {
+    int prev_ch = s.ch;
     s.record = 0;
     s.active = 0;
     s.bits16 = bits16;
@@ -220,22 +221,28 @@ static void start(int record, int autoinit, int bits16, int sign, int stereo,
     s.block_len = len ? len : 1;
     s.block_left = s.block_len;
 
-    if (!silence) {
+    /* The 8237 doesn't start over because the DSP got a new command: it
+       goes on from where it is until the program reprograms the channel
+       (dma_valid drops). Re-reading the registers here jumped back to the
+       buffer's start whenever a driver re-issued 1Ch/14h/Cxh mid-stream:
+       a stretch played twice, a click at each restart. */
+    int keep = !silence && s.ch == prev_ch && dma_valid && !dma_done && s.mem;
+    if (!silence && !keep) {
         read_dma_controller();
         if (!map_dma_buffer()) {
             dbg(1, "SB: DMA buffer %x not in conventional memory\n", s.dma_phys);
             return;
         }
     }
-    dbg(2, "SB: %s %s%s len=%u rate=%u%s dma=%x/%u ch%d\n", record ? "record" : "start",
+    dbg(2, "SB: %s %s%s len=%u rate=%u%s dma=%x/%u ch%d%s\n", record ? "record" : "start",
         autoinit ? "auto" : "single", bits16 ? " 16-bit" : "", s.block_len, rate,
-        s.stereo ? " stereo" : "", s.dma_phys, s.dma_len, s.ch);
+        s.stereo ? " stereo" : "", s.dma_phys, s.dma_len, s.ch, keep ? " (DMA goes on)" : "");
 
     /* Detection transfers (a few bytes) finish in microseconds on a real
        card; complete them now so the IRQ arrives before any timeout. */
     if (!autoinit && s.block_len <= 64) {
         if (!silence) {
-            s.dma_pos = s.block_len % (s.dma_len ? s.dma_len : 1);
+            s.dma_pos = ((keep ? s.dma_pos : 0) + s.block_len) % (s.dma_len ? s.dma_len : 1);
             if (s.dma_pos == 0) { dma_done = 1; dma_tc = 1; }
         }
         raise_irq(bits16);
