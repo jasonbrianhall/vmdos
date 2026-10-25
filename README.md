@@ -317,7 +317,7 @@ C:\README.TXT lists the shortcuts, vmdos's DOS commands and the main boot
 options (`dos/README.TXT`).
 
 Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
-with no serial port, when a game misbehaves), at the bottom of the screen,
+with no serial port, when a game misbehaves), over the whole screen,
 following new lines as they come; Ctrl+Shift+F10 again hides it. Nothing
 pauses: the game keeps running and gets every other key (pause it with
 its own controls if you want). With the log showing, Ctrl+Shift with the

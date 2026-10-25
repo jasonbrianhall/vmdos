@@ -2082,8 +2082,8 @@ static void video_osd_(const char *msg)
 
 /* ---------------- the log, over the running game (Ctrl+Shift+F10) ----------------
    Nothing pauses: the game goes on under it, and pausing is the game's own
-   business. The newest lines at the bottom of the screen, following the
-   log as it grows; Ctrl+Shift+Up/Down/PgUp/PgDn/Home/End scroll back. */
+   business. The newest lines at the bottom, following the
+   log as it grows, over the whole screen; Ctrl+Shift+Up/Down/PgUp/PgDn/Home/End scroll back. */
 #define LOGOV_W 76                              /* lib.c's LOG_W */
 static volatile int logov_on, logov_scroll;
 static int logov_rows;
@@ -2112,16 +2112,14 @@ static void draw_log_box(void)
     static char text[64][LOGOV_W + 1];
     static u32 line[4096];
     int s = fb_w >= 1280 && fb_h >= 800 ? 2 : 1;
-    int cols = LOGOV_W + 2;
-    while (cols > 10 && (u32)(cols * 8 * s) > fb_w) cols--;
-    int rows = (int)(fb_h * 2 / 5) / (16 * s);
+    int rows = (int)fb_h / (16 * s);                                 /* the whole screen */
     if (rows > 64) rows = 64;
     if (rows < 3) return;
     logov_rows = rows;
     int body = rows - 1;                                             /* row 0: the title */
     logov_scroll = log_tail(&text[0][0], body, logov_scroll);
-    u32 w = (u32)(cols * 8 * s), h = (u32)(rows * 16 * s);
-    u32 x0 = (fb_w - w) / 2, y0 = fb_h > h + 8 ? fb_h - h - 8 : 0;
+    u32 w = fb_w < 4096 ? fb_w : 4096, h = (u32)(rows * 16 * s);
+    u32 x0 = 0, y0 = 0;
     u32 fg = pack(55, 55, 55), bg = pack(0, 0, 16), tfg = pack(63, 63, 63), tbg = pack(0, 0, 42);
     static const char title_live[] = "vmdos log - Ctrl+Shift+F10 closes, Ctrl+Shift+PgUp/PgDn scrolls";
     static const char title_back[] = "vmdos log (scrolled back: Ctrl+Shift+End for the newest)";
@@ -2141,6 +2139,8 @@ static void draw_log_box(void)
             put_row(line, w, x0, y0 + (u32)(r * 16 * s + gy));
         }
     }
+    for (u32 x = 0; x < w; x++) line[x] = bg;                        /* what's left under the last row */
+    for (u32 y = h; y < fb_h; y++) put_row(line, w, x0, y);
 }
 
 static void draw_osd_text(void);

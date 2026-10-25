@@ -523,7 +523,14 @@ void vkbd_refill(void)
     if (kbd_full && kbd_aux && ticks - aux_since > 250) kbd_full = 0;   /* nobody reads the mouse: don't block the keyboard */
     if (kbd_full) return;
     if (aux_moved && mq_head == mq_tail && !(ccb & 0x20)) aux_packet();
-    if (mq_head != mq_tail && !vpic_in_service(12)) {
+    /* A real PS/2 mouse sends a byte about every millisecond (11 bits at
+       10-16 kHz). Handed over the moment the last one is acknowledged, the
+       next byte's IRQ 12 hit LSL7's handler right at its STI before IRETD,
+       every byte: handlers nested until "DPMI: nesting too deep", and the
+       sound stuttered meanwhile. */
+    static u32 aux_last;
+    if (mq_head != mq_tail && !vpic_in_service(12) && (u32)(pit_clock() - aux_last) >= 1193) {
+        aux_last = pit_clock();
         kbd_obuf = mq[mq_head];
         mq_head = (mq_head + 1) % sizeof mq;
         kbd_full = 1; kbd_aux = 1;

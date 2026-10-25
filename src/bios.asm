@@ -71,6 +71,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw bios32_dir                    ; 0234  BIOS32 service directory (vpci.c turns it on)
         dw rom_post                      ; 0236  voodoo3: the card's BIOS initialised, then the boot sector
         dw vga_post                      ; 0238  video=vbe: text mode by the card's BIOS, then the boot sector
+        dw dpmi_mousecb                  ; 023A  INT 33h 0Ch/14h from PM: the driver calls this, it calls the PM handler
 
 ; ---- stubs ----
 dummy:  iret
@@ -252,6 +253,9 @@ dpmi_cb0:
         nop
   %assign i i+1
 %endrep
+dpmi_mousecb:                    ; far-called by the mouse driver with the event registers
+        TRAP 0x5B                ; the client's protected-mode handler, then on here
+        retf
 pm_hwret:
         TRAP 0x51
 pm_excret:

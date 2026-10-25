@@ -211,6 +211,7 @@ static u16 stubs(int slot) { return rd16(0xF0000 + slot); }
 #define S_RMRETF 0x220
 #define S_DEFINT 0x222
 #define S_INTSTUB 0x224
+#define S_MOUSECB 0x23A
 
 /* Run INT n in real mode through the stub: the monitor's INT handling
    (XMS, DPMI and mouse answers, BIOS shortcuts) applies as for any INT. */
@@ -270,14 +271,30 @@ static u32 pop(struct ctx *c, int wide)
 }
 
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
-enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC };
-#define XDEPTH 24
+enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC, X_MOUSE };
+#define XDEPTH 64
 static struct xent { int kind; struct ctx saved; u32 a, b, lk; } xs[XDEPTH];   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
 
 static struct xent *xpush(int kind, struct ctx *saved)
 {
-    if (xdepth >= XDEPTH) panic("DPMI: nesting too deep");
+    if (xdepth >= XDEPTH) {                    /* what piled up: kind, mode, where each level came from */
+        static const char kc[] = "RrSAFZHCEM";
+        kprintf("DPMI nesting (kind %c now), outermost first:", kc[kind]);
+        for (int i = 0; i < xdepth; i++) {
+            if (i % 6 == 0) kprintf("\n ");
+            if (xs[i].kind == X_HW) kprintf(" H%x", xs[i].a); else kprintf(" %c", kc[xs[i].kind]);   /* H: its vector */
+            kprintf("%s%x:%x", xs[i].saved.pm ? "p" : "r", xs[i].saved.cs, xs[i].saved.eip);
+        }
+        kprintf("\n");
+        void dpmi_dump_code(u32 sel, u32 off, int n);
+        for (int i = xdepth - 1, shown = 0; i >= 0 && shown < 2; i--)   /* where the innermost IRQ and reflect came from */
+            if (xs[i].saved.pm && (xs[i].kind == X_HW ? shown == 0 : xs[i].kind == X_REFLECT && shown == 1)) {
+                dpmi_dump_code(xs[i].saved.cs, xs[i].saved.eip - 0x20, 0x30);
+                shown++;
+            }
+        panic("DPMI: nesting too deep");
+    }
     struct xent *x = &xs[xdepth++];
     x->kind = kind;
     x->saved = *saved;
@@ -285,8 +302,25 @@ static struct xent *xpush(int kind, struct ctx *saved)
     return x;
 }
 
-static u16 rm_sp(void) { return (u16)(0x2000 - (xdepth & 3) * 0x800); }   /* in rm_stack_seg */
 #define RM_STACK_PARAS 0x200
+/* Where a new real-mode excursion's stack starts in rm_stack_seg: below
+   every real-mode context still live on it (each switch from real mode to
+   PM saves one in xs[]). Fixed slots by depth wrapped after four levels
+   and counted PM-only visits, so nested IRQ handlers (LSL7: three timer
+   visits, then a reflected INT) reused a live excursion's stack, and its
+   IRET popped the inner handler's pushes: a jump into the stack itself. */
+#define RM_GAP 0x20
+static u16 rm_sp(void)
+{
+    u32 e = RM_STACK_PARAS * 16;
+    for (int i = 0; i < xdepth; i++) {
+        const struct ctx *s = &xs[i].saved;
+        if (!s->pm && (s->ss & 0xFFFF) == rm_stack_seg && (s->esp & 0xFFFF) - RM_GAP < e)
+            e = (s->esp & 0xFFFF) - RM_GAP;
+    }
+    if (e < 0x200) panic("DPMI: real-mode stack overflow (nesting %d)", xdepth);
+    return (u16)(e & ~1u);
+}
 
 /* Start a real-mode excursion: run CS:IP in v86 with an IRET (iret=1) or
    RETF return frame pointing at the dpmi_rmret stub. */
@@ -310,12 +344,33 @@ static void rm_from_pm(struct ctx *rm, struct ctx *pm)
 }
 
 /* Reflect interrupt n into real mode (registers go as they are). */
+/* INT 33h AX=000Ch/0014h from protected mode: ES:EDX is the client's PM
+   event handler. A host translates it (as Windows does; LSL7's extender
+   counts on it): the mouse driver, built in or CTMOUSE, gets F000:dpmi_mousecb,
+   which calls the PM handler. Passed on as is, the driver kept ES = the
+   real-mode stack segment and called into it (invalid opcode, then a hang
+   with IRQ 0 never acknowledged). */
+static u16 mouse_pm_sel;
+static u32 mouse_pm_off;
+static int mouse_handler_pm(struct ctx *c, struct ctx *rm)
+{
+    u16 ax = (u16)c->eax;
+    if (ax != 0x000C && ax != 0x0014) return 0;
+    u32 off = client32 ? c->edx : (c->edx & 0xFFFF);
+    if (!(c->es & 0xFFFC) && !off) { mouse_pm_sel = 0; return 0; }      /* none: 0:0 as it is */
+    mouse_pm_sel = (u16)c->es; mouse_pm_off = off;
+    rm->es = 0xF000; rm->edx = (rm->edx & 0xFFFF0000u) | stubs(S_MOUSECB);
+    dbg(2, "DPMI: mouse event handler %x:%x (protected mode), mask %x\n", mouse_pm_sel, off, c->ecx & 0xFFFF);
+    return 1;
+}
+
 static struct regs *reflect(struct ctx *c, int n, int kind)
 {
     xpush(kind, c);
     struct ctx rm;
     rm_from_pm(&rm, c);
     rm.vif = c->vif;                            /* the INT itself clears IF for the handler */
+    if (n == 0x33) mouse_handler_pm(c, &rm);
     return go_real_int(&rm, n);
 }
 
@@ -388,6 +443,7 @@ static void nest_push(void);
 static void nest_pop(void);
 static void reset_client(void)
 {
+    mouse_pm_sel = 0;                           /* its PM mouse handler: gone with it */
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
     for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1 && blk[i].lvl == nest) blk[i].used = 0;   /* its own, not a waiting parent's */
     release_free();
@@ -969,7 +1025,9 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
                       rd16(vec * 4 + 2), rd16(vec * 4));
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
-    return visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
+    struct regs *nr = visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
+    xs[xdepth - 1].a = (u32)vec;               /* for the nesting report */
+    return nr;
 }
 
 /* A service in the monitor (INT 10h VESA) was reached by reflecting a
@@ -1346,8 +1404,8 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg)
             return reflect(c, arg, X_REFLECT_HW);
         }
         return default_int(c, arg); }
-    case 0x51: {                               /* hardware interrupt handler returned */
-        if (!xdepth || xs[xdepth - 1].kind != X_HW) break;
+    case 0x51: {                               /* hardware interrupt handler returned (or the mouse's, RETF) */
+        if (!xdepth || (xs[xdepth - 1].kind != X_HW && xs[xdepth - 1].kind != X_MOUSE)) break;
         struct ctx s = xs[--xdepth].saved;
         return resume(&s); }
     case 0x52: {                               /* exception handler returned (RETF) */
@@ -1410,6 +1468,17 @@ int dpmi_rm_trap(struct regs *r, int id)
         return BIOS_CONT;
     }
     if (id == 0x55) { enter_pm(r); return BIOS_SWITCH; }
+    if (id == 0x5B) {                          /* the mouse driver calls the client's PM event handler */
+        if (!client || !mouse_pm_sel) return BIOS_CONT;                  /* gone: on to the RETF */
+        for (int i = 0; i < xdepth; i++)       /* one at a time: an event while its handler runs is dropped */
+            if (xs[i].kind == X_MOUSE) return BIOS_CONT;
+        c.eip = (c.eip & 0xFFFF) + 2;          /* back at the RETF after the trap */
+        struct ctx p = c;
+        p.pm = 1;
+        p.ds = p.es = p.fs = p.gs = 0;
+        visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
+        return BIOS_SWITCH;
+    }
     if (id == 0x56) {                          /* raw switch real -> protected */
         if (!client) return BIOS_CONT;
         struct ctx p = c;
