@@ -8,6 +8,11 @@ REM Sound Blaster 16 (16-bit sound; Creative's own programs like Parrot
 REM want it): take the REM off the next two lines. SB Pro otherwise.
 REM C:\VMDOS\VMSB 16 >NUL
 REM SET BLASTER=A220 I5 D1 H5 P330 T6
+REM Gravis UltraSound: take the REM off the next two lines. Games that see
+REM ULTRASND use it in place of the Sound Blaster; for MIDI music on it
+REM (Doom, ULTRAMID) they want Gravis's patches in C:\ULTRASND\MIDI.
+REM SET ULTRASND=240,3,3,7,7
+REM SET ULTRADIR=C:\ULTRASND
 LH C:\VMDOS\SHSUCDX /Q /D:?VMCD0001 >NUL
 REM A folder QEMU shares (make run SHARE=dir) as drive V:, with long names:
 REM VMDOSNET V: share /LFN

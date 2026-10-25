@@ -29,5 +29,9 @@ int  sb_irq_line(void);
 int     dma_owns(uint16_t port);
 uint8_t dma_in(uint16_t port);
 void    dma_out(uint16_t port, uint8_t v);
+/* Another device's transfer (the GUS), all at once: as many bytes as the
+   channel's count says (at most max) between buf and guest memory. -1 when
+   the channel is masked. */
+int     dma_xfer(int ch, uint8_t *buf, uint32_t max, int to_mem);
 
 #endif

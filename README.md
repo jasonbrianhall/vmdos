@@ -504,6 +504,17 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
   play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.
   See AUTOEXEC.BAT. Test: `tests/sb16test.asm`.
+  Gravis UltraSound (GF1, 1 MB of DRAM; 240h, IRQ 7, DMA 3; `src/gus.c`):
+  32 voices with loops, 8/16-bit samples, volume ramps and pan, mixed at the
+  GF1's own rate (44.1 kHz at 14 voices, 19.3 kHz at 32), timers, DMA
+  uploads and downloads, voice/ramp/timer/DMA IRQs; the IRQ and DMA the
+  game writes to the card's latches are used. Its MIDI port plays on the
+  General MIDI synth. Games find it by `ULTRASND=240,3,3,7,7`, which
+  AUTOEXEC.BAT leaves off (take the REM off): many games pick the GUS over
+  the Sound Blaster when it's set, and those that play MIDI on it (Doom's
+  DMX, ULTRAMID) load Gravis's patches from `%ULTRADIR%\MIDI`, which aren't
+  included. `gus=off` takes it away, `gus=2X0` moves it (210h-260h).
+  Recording isn't emulated. Test: `tests/gustest.asm`.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
@@ -691,6 +702,7 @@ untested.
 | `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI, UHCI and OHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |
 | `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
 | `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
+| `src/gus.c` | Gravis UltraSound (GF1) |
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
