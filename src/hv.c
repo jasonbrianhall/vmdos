@@ -872,6 +872,7 @@ void ems_restart(void);
 void mouse_restart(void);
 void cdaudio_stop(void);
 void sb_out_stop(void);
+void gus_stop(void);
 extern int xms_hidden;
 
 int hv_start(int key)
@@ -884,6 +885,7 @@ int hv_start(int key)
     rlock_take(&sound_lock);                     /* the helper CPU's render */
     cdaudio_stop();
     sb_out_stop();
+    gus_stop();
     rlock_drop(&sound_lock);
     mouse_restart();
     ems_restart();

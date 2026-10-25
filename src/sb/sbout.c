@@ -11,6 +11,7 @@
 #include "dsp.h"
 #include "sbout.h"
 #include "opl.h"
+#include "../gus.h"
 
 #define OUT_RATE 48000
 
@@ -42,6 +43,7 @@ int audio_capture_latest(int rate);
 static struct { uint16_t addr, count; uint8_t page, mode; } dch[8];
 static uint8_t dma_mask = 0xFF, dma_ff[2];
 static int dma_valid, dma_tc, dma_done;
+static uint8_t tc_other;                    /* terminal count of dma_xfer's channels */
 
 static int page_channel(uint16_t port)
 {
@@ -115,6 +117,8 @@ static uint8_t status_in(int hi)
         if (s.active && !s.silence) v |= 0x10 << (s.ch - b);
         dma_tc = 0;
     }
+    v |= (tc_other >> b) & 0x0F;
+    tc_other &= (uint8_t)~(0x0F << b);
     return v;
 }
 
@@ -153,6 +157,26 @@ static int map_dma_buffer(void)
     if (s.dma_phys + bytes > GUEST_TOP) return 0;
     s.mem = (const volatile uint8_t *)(hv_active && s.dma_phys >= (10u << 20) ? hv_gpa_ptr(s.dma_phys) : gptr(s.dma_phys));   /* VMHV RAM above 10 MB isn't at its own address */
     return 1;
+}
+
+int dma_xfer(int ch, uint8_t *buf, uint32_t max, int to_mem)
+{
+    if (ch < 0 || ch > 7 || ch == 4 || (dma_mask & (1 << ch))) return -1;
+    int w = ch >= 4;
+    uint32_t phys = w ? (uint32_t)(dch[ch].page & 0xFE) << 16 | (uint32_t)dch[ch].addr << 1
+                      : (uint32_t)dch[ch].page << 16 | dch[ch].addr;
+    uint32_t n = ((uint32_t)dch[ch].count + 1) << w;
+    if (n > max) n = max & ~(uint32_t)w;
+    if (phys + n > GUEST_TOP) return 0;
+    volatile uint8_t *m = hv_active && phys >= (10u << 20) ? hv_gpa_ptr(phys) : gptr(phys);
+    if (to_mem) for (uint32_t i = 0; i < n; i++) m[i] = buf[i];
+    else for (uint32_t i = 0; i < n; i++) buf[i] = m[i];
+    if (!(dch[ch].mode & 0x10)) {                       /* single: the registers end past the block */
+        dch[ch].addr = (uint16_t)(dch[ch].addr + (n >> w));
+        dch[ch].count = 0xFFFF;
+    }
+    tc_other |= (uint8_t)(1 << ch);
+    return (int)n;
 }
 
 /* ---------------------------------------------------------------- control */
@@ -385,6 +409,7 @@ static void render_chunk(int16_t *out, int frames)
         mix[i * 2 + 1] = r;
     }
     opl_mix(mix, frames);
+    gus_mix(mix, frames);
     speaker_mix(mix, frames);
     for (int i = 0; i < frames * 2; i++)
         out[i] = limit(mix[i]);

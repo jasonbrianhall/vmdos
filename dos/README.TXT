@@ -93,6 +93,7 @@ BOOT OPTIONS
     audio=usb|hda|hdmi|ac97|sb|off   Pick the sound output
     latency=ms     Sound buffer length
     sb16=1         Sound Blaster 16 instead of Pro
+    gus=off        No Gravis UltraSound (gus=260: at 260h; 240h otherwise)
   Memory
     noxms          No XMS driver (also in the boot menu)
     xms=MB  ems=MB  ems=0  dpmi=MB

@@ -1,5 +1,6 @@
 /* Sound: the guest's Sound Blaster Pro 2.0 + OPL3 (port 220h, IRQ 5, DMA 1),
-   AdLib (388h) and MPU-401 / General MIDI (330h), emulated by SBPRO's core
+   AdLib (388h), MPU-401 / General MIDI (330h) and a Gravis UltraSound
+   (240h, IRQ 7, DMA 3; gus.c), emulated by SBPRO's core
    (src/sb), played through the real card by audio.cpp (HD Audio, AC'97 or
    a real Sound Blaster). Rendered from the timer interrupt, or by the
    helper CPU (smp.c); sound_lock keeps the guest's port accesses and the
@@ -9,6 +10,7 @@
 #include "sb/sbout.h"
 #include "sb/opl.h"
 #include "sb/mpu.h"
+#include "gus.h"
 
 int audio_start(const char *cmdline);
 int audio_wanted(int nominal);
@@ -16,6 +18,7 @@ void audio_put_stereo(const int16_t *lr, int n);
 
 #define SB_BASE 0x220
 #define MPU_BASE 0x330
+#define GUS_BASE 0x240                      /* ULTRASND=240,3,3,7,7 */
 #define TICKS_PER_RENDER 4                  /* 250 Hz */
 
 static int sound_on, sb_ready;
@@ -29,6 +32,13 @@ void sound_init(void)
     mpu_init(MPU_BASE);
     sb_out_init(5, 1);
     if (strstr(cmdline, "sb16=1")) dsp_set_sb16(1);
+    const char *g = strstr(cmdline, "gus=");
+    if (!g || strncmp(g + 4, "off", 3)) {
+        u16 gb = GUS_BASE;
+        if (g && g[4] == '2' && g[5] >= '1' && g[5] <= '6' && g[6] == '0') gb = (u16)(0x200 + (g[5] - '0') * 0x10);
+        gus_init(gb, 7, 3);
+        kprintf("sound: Gravis UltraSound at %xh, IRQ 7, DMA 3\n", gb);
+    }
     sb_ready = 1;
     if (strstr(cmdline, "audio=off")) { kprintf("sound: off\n"); return; }
     sound_on = audio_start(cmdline);
@@ -51,6 +61,7 @@ int sound_sb_api(int bx)
 static void check_irq(void)
 {
     if (sb_take_irq()) vpic_raise(sb_irq_line());
+    if (gus_take_irq()) vpic_raise(gus_irq_line());
 }
 
 static int sound_port_(u16 port, int write, u8 *v)
@@ -65,8 +76,14 @@ static int sound_port_(u16 port, int write, u8 *v)
         if (write) mpu_out(port, *v); else *v = mpu_in(port);
         return 1;
     }
+    if (gus_owns(port)) {
+        if (write) gus_out(port, *v); else *v = gus_in(port);
+        if (debug_level >= 4) kprintf("GUS %s %03x %02x\n", write ? "out" : "in ", port, *v);
+        check_irq();
+        return 1;
+    }
     if (dma_owns(port)) {
-        if (write) dma_out(port, *v); else *v = dma_in(port);
+        if (write) { dma_out(port, *v); gus_dma_poll(); check_irq(); } else *v = dma_in(port);
         return 1;
     }
     return 0;
