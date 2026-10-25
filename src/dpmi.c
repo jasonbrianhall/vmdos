@@ -272,7 +272,7 @@ static u32 pop(struct ctx *c, int wide)
 
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
 enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC, X_MOUSE };
-#define XDEPTH 24
+#define XDEPTH 64
 static struct xent { int kind; struct ctx saved; u32 a, b, lk; } xs[XDEPTH];   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
 
@@ -281,9 +281,18 @@ static struct xent *xpush(int kind, struct ctx *saved)
     if (xdepth >= XDEPTH) {                    /* what piled up: kind, mode, where each level came from */
         static const char kc[] = "RrSAFZHCEM";
         kprintf("DPMI nesting (kind %c now), outermost first:", kc[kind]);
-        for (int i = 0; i < xdepth; i++)
-            kprintf("%s %c%s%x:%x", i % 6 ? "" : "\n ", kc[xs[i].kind], xs[i].saved.pm ? "p" : "r", xs[i].saved.cs, xs[i].saved.eip);
+        for (int i = 0; i < xdepth; i++) {
+            if (i % 6 == 0) kprintf("\n ");
+            if (xs[i].kind == X_HW) kprintf(" H%x", xs[i].a); else kprintf(" %c", kc[xs[i].kind]);   /* H: its vector */
+            kprintf("%s%x:%x", xs[i].saved.pm ? "p" : "r", xs[i].saved.cs, xs[i].saved.eip);
+        }
         kprintf("\n");
+        void dpmi_dump_code(u32 sel, u32 off, int n);
+        for (int i = xdepth - 1, shown = 0; i >= 0 && shown < 2; i--)   /* where the innermost IRQ and reflect came from */
+            if (xs[i].saved.pm && (xs[i].kind == X_HW ? shown == 0 : xs[i].kind == X_REFLECT && shown == 1)) {
+                dpmi_dump_code(xs[i].saved.cs, xs[i].saved.eip - 0x20, 0x30);
+                shown++;
+            }
         panic("DPMI: nesting too deep");
     }
     struct xent *x = &xs[xdepth++];
@@ -1016,7 +1025,9 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
                       rd16(vec * 4 + 2), rd16(vec * 4));
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
-    return visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
+    struct regs *nr = visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
+    xs[xdepth - 1].a = (u32)vec;               /* for the nesting report */
+    return nr;
 }
 
 /* A service in the monitor (INT 10h VESA) was reached by reflecting a
