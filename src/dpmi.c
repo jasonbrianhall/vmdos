@@ -278,7 +278,14 @@ static int xdepth;
 
 static struct xent *xpush(int kind, struct ctx *saved)
 {
-    if (xdepth >= XDEPTH) panic("DPMI: nesting too deep");
+    if (xdepth >= XDEPTH) {                    /* what piled up: kind, mode, where each level came from */
+        static const char kc[] = "RrSAFZHCEM";
+        kprintf("DPMI nesting (kind %c now), outermost first:", kc[kind]);
+        for (int i = 0; i < xdepth; i++)
+            kprintf("%s %c%s%x:%x", i % 6 ? "" : "\n ", kc[xs[i].kind], xs[i].saved.pm ? "p" : "r", xs[i].saved.cs, xs[i].saved.eip);
+        kprintf("\n");
+        panic("DPMI: nesting too deep");
+    }
     struct xent *x = &xs[xdepth++];
     x->kind = kind;
     x->saved = *saved;
@@ -1452,6 +1459,8 @@ int dpmi_rm_trap(struct regs *r, int id)
     if (id == 0x55) { enter_pm(r); return BIOS_SWITCH; }
     if (id == 0x5B) {                          /* the mouse driver calls the client's PM event handler */
         if (!client || !mouse_pm_sel) return BIOS_CONT;                  /* gone: on to the RETF */
+        for (int i = 0; i < xdepth; i++)       /* one at a time: an event while its handler runs is dropped */
+            if (xs[i].kind == X_MOUSE) return BIOS_CONT;
         c.eip = (c.eip & 0xFFFF) + 2;          /* back at the RETF after the trap */
         struct ctx p = c;
         p.pm = 1;
