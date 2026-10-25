@@ -557,7 +557,7 @@ int bios_service(struct regs *r, int id, int via_stub)
         return BIOS_DONE;
     case 0x43: xms_call(r); return BIOS_CONT;                  /* XMS entry, then RETF */
     case 0x33: mouse_int33(r); return BIOS_DONE;
-    case 0x50: case 0x54: case 0x55: case 0x56: return dpmi_rm_trap(r, id);
+    case 0x50: case 0x54: case 0x55: case 0x56: case 0x5B: return dpmi_rm_trap(r, id);
     case 0x34: mouse_cb_regs(r); return BIOS_CONT;
     case 0x46: video_vbe_window(r); return BIOS_CONT;         /* VESA WinFuncPtr */
     case 0x35: mouse_cb_done(); return BIOS_CONT;

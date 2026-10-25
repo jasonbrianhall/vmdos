@@ -19,9 +19,6 @@ static int show = -1;                 /* visible when 0 */
 static int press_cnt[3], release_cnt[3];
 static int press_x[3], press_y[3], release_x[3], release_y[3];
 static u16 handler_mask, handler_off, handler_seg;
-static int handler_pm;                /* fn 0Ch/14h from a DPMI client in PM: its selector:offset */
-static u16 handler_sel;
-static u32 handler_pmoff;
 static u16 pending_cond;
 static int in_callback;
 static u16 text_and = 0xFFFF, text_xor = 0x7700;  /* fn 0Ah: screen / cursor masks */
@@ -187,7 +184,7 @@ int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask)
 int mouse_callback_due(void)
 {
     mouse_update();
-    return !in_callback && (handler_seg || handler_pm) && (pending_cond & handler_mask);
+    return !in_callback && handler_seg && (pending_cond & handler_mask);
 }
 
 void mouse_start_callback(struct regs *r)
@@ -229,45 +226,13 @@ void mouse_cb_regs(struct regs *r)
 
 void mouse_cb_done(void) { in_callback = 0; }
 
-int mouse_callback_pm(void) { return handler_pm; }
-
-struct regs *mouse_pm_callback(struct regs *r)
-{
-    static int n;
-    if (mouse_log() && n++ < 10) kprintf("mouse: event handler %x:%x called (protected mode), events %x\n", handler_sel, handler_pmoff, pending_cond & handler_mask);
-    u16 ev[6] = { (u16)(pending_cond & handler_mask), (u16)buttons, (u16)report_x(), (u16)report_y(), (u16)mick_x, (u16)mick_y };
-    pending_cond = 0;
-    in_callback = 1;
-    return dpmi_mouse_call(r, handler_sel, handler_pmoff, ev);
-}
-
-void mouse_pm_forget(void)
-{
-    if (handler_pm) { handler_pm = 0; handler_mask = 0; in_callback = 0; }
-}
-
-/* Fn 0Ch/14h: the new handler, real-mode ES:DX or a DPMI client's PM ES:EDX. */
-static void set_handler(struct regs *r)
-{
-    u16 sel; u32 off;
-    handler_mask = CX(r);
-    if (dpmi_reflected_pm(r, &sel, &off)) {
-        handler_pm = 1; handler_sel = sel; handler_pmoff = off;
-        handler_seg = handler_off = 0;
-        if (mouse_log()) kprintf("mouse: event handler %x:%x (protected mode), mask %x\n", sel, off, handler_mask);
-    } else {
-        handler_pm = 0;
-        handler_off = DX(r); handler_seg = (u16)r->v86_es;
-    }
-}
-
 /* ---------------- INT 33h ---------------- */
 static void soft_reset(void)
 {
     show = -1;
     reset_ranges();
     ratio_x = 8; ratio_y = 16;
-    handler_mask = 0; handler_seg = handler_off = 0; handler_pm = 0;
+    handler_mask = 0; handler_seg = handler_off = 0;
     mick_x = mick_y = 0;
     text_and = 0xFFFF; text_xor = 0x7700;
     for (int i = 0; i < 3; i++) press_cnt[i] = release_cnt[i] = 0;
@@ -320,15 +285,14 @@ void mouse_int33(struct regs *r)
     case 0x09: break;                                  /* graphics cursor shape: standard arrow only */
     case 0x0A: if (BX(r) == 0) { text_and = CX(r); text_xor = DX(r); } break;
     case 0x0B: CX(r) = (u16)mick_x; DX(r) = (u16)mick_y; mick_x = mick_y = 0; break;
-    case 0x0C: set_handler(r); break;
+    case 0x0C: handler_mask = CX(r); handler_off = DX(r); handler_seg = (u16)r->v86_es; break;
     case 0x0F: if (CX(r)) ratio_x = CX(r); if (DX(r)) ratio_y = DX(r); break;
     case 0x10: break;                                  /* conditional off: ignored */
     case 0x13: break;
     case 0x14: {
-        u16 m = handler_mask, o = handler_pm ? (u16)handler_pmoff : handler_off, s = handler_seg;
-        set_handler(r);
-        CX(r) = m; DX(r) = o;
-        if (!handler_pm) r->v86_es = s;
+        u16 m = handler_mask, o = handler_off, s = handler_seg;
+        handler_mask = CX(r); handler_off = DX(r); handler_seg = (u16)r->v86_es;
+        CX(r) = m; DX(r) = o; r->v86_es = s;
         break; }
     case 0x15: BX(r) = 64; break;                      /* state buffer size */
     case 0x16: case 0x17: break;

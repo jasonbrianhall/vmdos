@@ -285,11 +285,6 @@ struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip);
 int dpmi_reflected_buffer(struct regs *r, u32 *lin);   /* PM ES:EDI of a reflected INT */
 void mouse_cb_regs(struct regs *r);
 void mouse_cb_done(void);
-int mouse_callback_pm(void);                    /* the handler is a DPMI client's, in protected mode */
-struct regs *mouse_pm_callback(struct regs *r);
-void mouse_pm_forget(void);
-int dpmi_reflected_pm(struct regs *r, u16 *sel, u32 *off);
-struct regs *dpmi_mouse_call(struct regs *r, u16 sel, u32 off, const u16 *ev);
 int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);
 
 /* ---- dpmi.c: DPMI 0.9 host ---- */

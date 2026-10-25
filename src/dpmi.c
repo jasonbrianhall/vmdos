@@ -211,6 +211,7 @@ static u16 stubs(int slot) { return rd16(0xF0000 + slot); }
 #define S_RMRETF 0x220
 #define S_DEFINT 0x222
 #define S_INTSTUB 0x224
+#define S_MOUSECB 0x23A
 
 /* Run INT n in real mode through the stub: the monitor's INT handling
    (XMS, DPMI and mouse answers, BIOS shortcuts) applies as for any INT. */
@@ -327,12 +328,33 @@ static void rm_from_pm(struct ctx *rm, struct ctx *pm)
 }
 
 /* Reflect interrupt n into real mode (registers go as they are). */
+/* INT 33h AX=000Ch/0014h from protected mode: ES:EDX is the client's PM
+   event handler. A host translates it (as Windows does; LSL7's extender
+   counts on it): the mouse driver, built in or CTMOUSE, gets F000:dpmi_mousecb,
+   which calls the PM handler. Passed on as is, the driver kept ES = the
+   real-mode stack segment and called into it (invalid opcode, then a hang
+   with IRQ 0 never acknowledged). */
+static u16 mouse_pm_sel;
+static u32 mouse_pm_off;
+static int mouse_handler_pm(struct ctx *c, struct ctx *rm)
+{
+    u16 ax = (u16)c->eax;
+    if (ax != 0x000C && ax != 0x0014) return 0;
+    u32 off = client32 ? c->edx : (c->edx & 0xFFFF);
+    if (!(c->es & 0xFFFC) && !off) { mouse_pm_sel = 0; return 0; }      /* none: 0:0 as it is */
+    mouse_pm_sel = (u16)c->es; mouse_pm_off = off;
+    rm->es = 0xF000; rm->edx = (rm->edx & 0xFFFF0000u) | stubs(S_MOUSECB);
+    dbg(2, "DPMI: mouse event handler %x:%x (protected mode), mask %x\n", mouse_pm_sel, off, c->ecx & 0xFFFF);
+    return 1;
+}
+
 static struct regs *reflect(struct ctx *c, int n, int kind)
 {
     xpush(kind, c);
     struct ctx rm;
     rm_from_pm(&rm, c);
     rm.vif = c->vif;                            /* the INT itself clears IF for the handler */
+    if (n == 0x33) mouse_handler_pm(c, &rm);
     return go_real_int(&rm, n);
 }
 
@@ -405,7 +427,7 @@ static void nest_push(void);
 static void nest_pop(void);
 static void reset_client(void)
 {
-    mouse_pm_forget();                          /* a handler in its protected mode is gone with it */
+    mouse_pm_sel = 0;                           /* its PM mouse handler: gone with it */
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
     for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1 && blk[i].lvl == nest) blk[i].used = 0;   /* its own, not a waiting parent's */
     release_free();
@@ -1002,32 +1024,6 @@ int dpmi_reflected_buffer(struct regs *r, u32 *lin)
     return 1;
 }
 
-/* INT 33h AX=000Ch/0014h from protected mode, reflected: the handler the
-   program meant is its PM ES:EDX (a host translates these, as Windows
-   does; LSL7's extender counts on it). Reflected as is, the mouse driver
-   saw ES = the host's real-mode stack segment and called into that. */
-int dpmi_reflected_pm(struct regs *r, u16 *sel, u32 *off)
-{
-    if (!client || !xdepth || xs[xdepth - 1].kind != X_REFLECT || (r->v86_es & 0xFFFF) != rm_stack_seg) return 0;
-    struct ctx *pm = &xs[xdepth - 1].saved;
-    *sel = (u16)pm->es;
-    *off = client32 ? pm->edx : (pm->edx & 0xFFFF);
-    return 1;
-}
-
-/* Call that protected-mode handler (far call, RETF) with the event
-   registers, from protected or real mode; it resumes as it was. */
-struct regs *dpmi_mouse_call(struct regs *r, u16 sel, u32 off, const u16 *ev)
-{
-    struct ctx from;
-    get_ctx(r, &from);
-    if (!client) { mouse_cb_done(); return r; }
-    struct ctx p = from;
-    if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
-    p.eax = ev[0]; p.ebx = ev[1]; p.ecx = ev[2]; p.edx = ev[3]; p.esi = ev[4]; p.edi = ev[5];
-    return visit_pm(&from, X_MOUSE, sel, off, S_HWRET, 0, &p);
-}
-
 /* Run a real-mode routine that ends with IRET (the mouse driver's event
    callback) for a client in protected mode; it resumes as it was. */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip)
@@ -1392,7 +1388,6 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg)
         return default_int(c, arg); }
     case 0x51: {                               /* hardware interrupt handler returned (or the mouse's, RETF) */
         if (!xdepth || (xs[xdepth - 1].kind != X_HW && xs[xdepth - 1].kind != X_MOUSE)) break;
-        if (xs[xdepth - 1].kind == X_MOUSE) mouse_cb_done();
         struct ctx s = xs[--xdepth].saved;
         return resume(&s); }
     case 0x52: {                               /* exception handler returned (RETF) */
@@ -1455,6 +1450,15 @@ int dpmi_rm_trap(struct regs *r, int id)
         return BIOS_CONT;
     }
     if (id == 0x55) { enter_pm(r); return BIOS_SWITCH; }
+    if (id == 0x5B) {                          /* the mouse driver calls the client's PM event handler */
+        if (!client || !mouse_pm_sel) return BIOS_CONT;                  /* gone: on to the RETF */
+        c.eip = (c.eip & 0xFFFF) + 2;          /* back at the RETF after the trap */
+        struct ctx p = c;
+        p.pm = 1;
+        p.ds = p.es = p.fs = p.gs = 0;
+        visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
+        return BIOS_SWITCH;
+    }
     if (id == 0x56) {                          /* raw switch real -> protected */
         if (!client) return BIOS_CONT;
         struct ctx p = c;
