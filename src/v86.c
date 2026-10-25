@@ -157,6 +157,7 @@ static struct regs *deliver(struct regs *r)
     int vec = vpic_pending();
     if (vec < 0) {
         if (mouse_callback_due()) {
+            if (mouse_callback_pm()) return mouse_pm_callback(r);   /* LSL7: a PM handler */
             if (!pm) mouse_start_callback(r);
             else return dpmi_rm_iret_call(r, 0xF000, mouse_begin_callback());   /* DOS/4GW games */
         }

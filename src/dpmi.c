@@ -270,7 +270,7 @@ static u32 pop(struct ctx *c, int wide)
 }
 
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
-enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC };
+enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC, X_MOUSE };
 #define XDEPTH 24
 static struct xent { int kind; struct ctx saved; u32 a, b, lk; } xs[XDEPTH];   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
@@ -405,6 +405,7 @@ static void nest_push(void);
 static void nest_pop(void);
 static void reset_client(void)
 {
+    mouse_pm_forget();                          /* a handler in its protected mode is gone with it */
     if (psp_seg && env_seg) wr16(LIN(psp_seg, 0x2C), env_seg);
     for (int i = 0; i < MAX_BLOCKS; i++) if (blk[i].used == 1 && blk[i].lvl == nest) blk[i].used = 0;   /* its own, not a waiting parent's */
     release_free();
@@ -1001,6 +1002,32 @@ int dpmi_reflected_buffer(struct regs *r, u32 *lin)
     return 1;
 }
 
+/* INT 33h AX=000Ch/0014h from protected mode, reflected: the handler the
+   program meant is its PM ES:EDX (a host translates these, as Windows
+   does; LSL7's extender counts on it). Reflected as is, the mouse driver
+   saw ES = the host's real-mode stack segment and called into that. */
+int dpmi_reflected_pm(struct regs *r, u16 *sel, u32 *off)
+{
+    if (!client || !xdepth || xs[xdepth - 1].kind != X_REFLECT || (r->v86_es & 0xFFFF) != rm_stack_seg) return 0;
+    struct ctx *pm = &xs[xdepth - 1].saved;
+    *sel = (u16)pm->es;
+    *off = client32 ? pm->edx : (pm->edx & 0xFFFF);
+    return 1;
+}
+
+/* Call that protected-mode handler (far call, RETF) with the event
+   registers, from protected or real mode; it resumes as it was. */
+struct regs *dpmi_mouse_call(struct regs *r, u16 sel, u32 off, const u16 *ev)
+{
+    struct ctx from;
+    get_ctx(r, &from);
+    if (!client) { mouse_cb_done(); return r; }
+    struct ctx p = from;
+    if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
+    p.eax = ev[0]; p.ebx = ev[1]; p.ecx = ev[2]; p.edx = ev[3]; p.esi = ev[4]; p.edi = ev[5];
+    return visit_pm(&from, X_MOUSE, sel, off, S_HWRET, 0, &p);
+}
+
 /* Run a real-mode routine that ends with IRET (the mouse driver's event
    callback) for a client in protected mode; it resumes as it was. */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip)
@@ -1363,8 +1390,9 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg)
             return reflect(c, arg, X_REFLECT_HW);
         }
         return default_int(c, arg); }
-    case 0x51: {                               /* hardware interrupt handler returned */
-        if (!xdepth || xs[xdepth - 1].kind != X_HW) break;
+    case 0x51: {                               /* hardware interrupt handler returned (or the mouse's, RETF) */
+        if (!xdepth || (xs[xdepth - 1].kind != X_HW && xs[xdepth - 1].kind != X_MOUSE)) break;
+        if (xs[xdepth - 1].kind == X_MOUSE) mouse_cb_done();
         struct ctx s = xs[--xdepth].saved;
         return resume(&s); }
     case 0x52: {                               /* exception handler returned (RETF) */
