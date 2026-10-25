@@ -285,8 +285,25 @@ static struct xent *xpush(int kind, struct ctx *saved)
     return x;
 }
 
-static u16 rm_sp(void) { return (u16)(0x2000 - (xdepth & 3) * 0x800); }   /* in rm_stack_seg */
 #define RM_STACK_PARAS 0x200
+/* Where a new real-mode excursion's stack starts in rm_stack_seg: below
+   every real-mode context still live on it (each switch from real mode to
+   PM saves one in xs[]). Fixed slots by depth wrapped after four levels
+   and counted PM-only visits, so nested IRQ handlers (LSL7: three timer
+   visits, then a reflected INT) reused a live excursion's stack, and its
+   IRET popped the inner handler's pushes: a jump into the stack itself. */
+#define RM_GAP 0x20
+static u16 rm_sp(void)
+{
+    u32 e = RM_STACK_PARAS * 16;
+    for (int i = 0; i < xdepth; i++) {
+        const struct ctx *s = &xs[i].saved;
+        if (!s->pm && (s->ss & 0xFFFF) == rm_stack_seg && (s->esp & 0xFFFF) - RM_GAP < e)
+            e = (s->esp & 0xFFFF) - RM_GAP;
+    }
+    if (e < 0x200) panic("DPMI: real-mode stack overflow (nesting %d)", xdepth);
+    return (u16)(e & ~1u);
+}
 
 /* Start a real-mode excursion: run CS:IP in v86 with an IRET (iret=1) or
    RETF return frame pointing at the dpmi_rmret stub. */
