@@ -153,7 +153,24 @@ static struct regs *deliver(struct regs *r)
     vkbd_refill();
     if (!vif) return r;
     int pm = !(r->eflags & EFL_VM);
-    if (dpmi_route_rm_irqs < 0) dpmi_route_rm_irqs = !strstr(cmdline, "norouteirq");
+    /* norouteirq: no IRQ taken in real mode goes straight to a PM handler;
+       norouteirq=0,1: only those IRQs (to find which one a program minds) */
+    static u16 route_mask = 0xFFFF;
+    if (dpmi_route_rm_irqs < 0) {
+        const char *o = strstr(cmdline, "norouteirq");
+        dpmi_route_rm_irqs = !o;
+        if (o && o[10] == '=') {
+            route_mask = 0xFFFF;
+            for (const char *p = o + 11; *p >= '0' && *p <= '9'; ) {
+                int n = 0;
+                while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+                if (n < 16) route_mask &= (u16)~(1u << n);
+                if (*p == ',') p++;
+            }
+            dpmi_route_rm_irqs = 1;
+            kprintf("DPMI: IRQs taken in real mode not routed to PM handlers: mask %04x\n", (u16)~route_mask);
+        } else if (o) route_mask = 0;
+    }
     int vec = vpic_pending();
     if (vec < 0) {
         if (mouse_callback_due()) {
@@ -164,7 +181,8 @@ static struct regs *deliver(struct regs *r)
     }
     vpic_ack(vec);
     if (vec == vpic_base0()) stat_vec8++;
-    if (dpmi_pm_hooked(vec) && (pm || dpmi_route_rm_irqs)) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
+    int irqn = chosen_irq_of(vec);
+    if (dpmi_pm_hooked(vec) && (pm || (dpmi_route_rm_irqs && irqn >= 0 && ((route_mask >> irqn) & 1)))) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
     if (pm) { stat_reflirq++; return dpmi_reflect_irq(r, vec); }
     stat_rmirq++;
     v86_reflect(r, vec);
