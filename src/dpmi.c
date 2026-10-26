@@ -356,6 +356,9 @@ static int mouse_handler_pm(struct ctx *c, struct ctx *rm)
 {
     u16 ax = (u16)c->eax;
     if (ax != 0x000C && ax != 0x0014) return 0;
+    static int off_ = -1;
+    if (off_ < 0) off_ = strstr(cmdline, "nomousepm") != 0;   /* passed on as before, for comparison */
+    if (off_) return 0;
     u32 off = client32 ? c->edx : (c->edx & 0xFFFF);
     if (!(c->es & 0xFFFC) && !off) { mouse_pm_sel = 0; return 0; }      /* none: 0:0 as it is */
     mouse_pm_sel = (u16)c->es; mouse_pm_off = off;
@@ -1476,6 +1479,8 @@ int dpmi_rm_trap(struct regs *r, int id)
         struct ctx p = c;
         p.pm = 1;
         p.ds = p.es = p.fs = p.gs = 0;
+        p.eax &= 0xFFFF; p.ebx &= 0xFFFF; p.ecx &= 0xFFFF;      /* the driver's 16-bit event registers, nothing above */
+        p.edx &= 0xFFFF; p.esi &= 0xFFFF; p.edi &= 0xFFFF;
         visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
         return BIOS_SWITCH;
     }
