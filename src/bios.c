@@ -458,6 +458,11 @@ static void ps2_irq(struct regs *r)
     int b = (AH(r) & 1) ? AL(r) : -1;                     /* read by the stub from port 60h (bios.asm) */
     if (mouse_log()) { static int n; if (n++ < 40) kprintf("mouse: BIOS IRQ 12 handler, byte %s%02x\n", b < 0 ? "none " : "", b & 0xFF); }
     if (b < 0) return;
+    /* After a byte nobody read was dropped (vdev.c, with the rest of its
+       packet) what comes next starts a packet: start over there. */
+    extern u32 vaux_drops;
+    static u32 drops_seen;
+    if (drops_seen != vaux_drops) { drops_seen = vaux_drops; ps2_n = 0; }
     if (ps2_n == 0 && !(b & 0x08)) return;              /* resync on byte 0 (bit 3 set) */
     ps2_pkt[ps2_n++] = (u8)b;
     if (ps2_n < 3) return;

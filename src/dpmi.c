@@ -273,7 +273,7 @@ static u32 pop(struct ctx *c, int wide)
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
 enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC, X_MOUSE };
 #define XDEPTH 64
-static struct xent { int kind; struct ctx saved; u32 a, b, lk; } xs[XDEPTH];   /* lk: locked-stack ESP a PM visit started at */
+static struct xent { int kind; struct ctx saved; u32 a, b, lk, rms; } xs[XDEPTH];   /* rms: the real-mode stack an excursion was given */   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
 
 static struct xent *xpush(int kind, struct ctx *saved)
@@ -299,17 +299,21 @@ static struct xent *xpush(int kind, struct ctx *saved)
     x->kind = kind;
     x->saved = *saved;
     x->lk = 0;
+    x->rms = 0;
     return x;
 }
 
 #define RM_STACK_PARAS 0x200
 /* Where a new real-mode excursion's stack starts in rm_stack_seg: below
-   every real-mode context still live on it (each switch from real mode to
-   PM saves one in xs[]). Fixed slots by depth wrapped after four levels
-   and counted PM-only visits, so nested IRQ handlers (LSL7: three timer
-   visits, then a reflected INT) reused a live excursion's stack, and its
-   IRET popped the inner handler's pushes: a jump into the stack itself. */
+   everything still live on it. A context saved there (an IRQ or callback
+   that took us from real mode to PM) is known exactly; an excursion that
+   is still out (its INT or 0300h call hasn't returned: it may have gone
+   back to PM by a raw switch, or be in a PM handler some other way) is
+   known only by where it started, so RM_SLOT below that. Fixed slots by
+   depth (the old way) wrapped after four levels and counted PM-only visits
+   (LSL7: three timer visits, then a reflected INT, reused a live stack). */
 #define RM_GAP 0x20
+#define RM_SLOT 0x600
 static u16 rm_sp(void)
 {
     u32 e = RM_STACK_PARAS * 16;
@@ -317,9 +321,12 @@ static u16 rm_sp(void)
         const struct ctx *s = &xs[i].saved;
         if (!s->pm && (s->ss & 0xFFFF) == rm_stack_seg && (s->esp & 0xFFFF) - RM_GAP < e)
             e = (s->esp & 0xFFFF) - RM_GAP;
+        if (xs[i].rms && xs[i].rms - RM_SLOT < e) e = xs[i].rms - RM_SLOT;
     }
-    if (e < 0x200) panic("DPMI: real-mode stack overflow (nesting %d)", xdepth);
-    return (u16)(e & ~1u);
+    if (e < 0x100) panic("DPMI: real-mode stack overflow (nesting %d)", xdepth);
+    e &= ~1u;
+    if (xdepth) xs[xdepth - 1].rms = e;        /* every caller has just pushed the excursion this is for */
+    return (u16)e;
 }
 
 /* Start a real-mode excursion: run CS:IP in v86 with an IRET (iret=1) or
@@ -356,6 +363,9 @@ static int mouse_handler_pm(struct ctx *c, struct ctx *rm)
 {
     u16 ax = (u16)c->eax;
     if (ax != 0x000C && ax != 0x0014) return 0;
+    static int off_ = -1;
+    if (off_ < 0) off_ = strstr(cmdline, "nomousepm") != 0;   /* passed on as before, for comparison */
+    if (off_) return 0;
     u32 off = client32 ? c->edx : (c->edx & 0xFFFF);
     if (!(c->es & 0xFFFC) && !off) { mouse_pm_sel = 0; return 0; }      /* none: 0:0 as it is */
     mouse_pm_sel = (u16)c->es; mouse_pm_off = off;
@@ -1476,6 +1486,8 @@ int dpmi_rm_trap(struct regs *r, int id)
         struct ctx p = c;
         p.pm = 1;
         p.ds = p.es = p.fs = p.gs = 0;
+        p.eax &= 0xFFFF; p.ebx &= 0xFFFF; p.ecx &= 0xFFFF;      /* the driver's 16-bit event registers, nothing above */
+        p.edx &= 0xFFFF; p.esi &= 0xFFFF; p.edi &= 0xFFFF;
         visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
         return BIOS_SWITCH;
     }

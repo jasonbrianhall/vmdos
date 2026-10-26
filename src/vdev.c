@@ -223,13 +223,17 @@ static u8 aux_stream, aux_param;      /* reporting on; command waiting for its p
 static int aux_dx, aux_dy, aux_b, aux_moved;
 static u32 aux_since;                 /* when the unread mouse byte arrived */
 
-static void mq_put(u8 v)
+u32 vaux_drops;                       /* bios.c's packet assembly starts over after one */
+static u8 mq_cont[64];                /* 1: the 2nd or 3rd byte of a movement packet */
+static void mq_put_t(u8 v, u8 cont)
 {
     u8 n = (mq_tail + 1) % sizeof mq;
     if (n == mq_head) return;
     mq[mq_tail] = v;
+    mq_cont[mq_tail] = cont;
     mq_tail = n;
 }
+static void mq_put(u8 v) { mq_put_t(v, 0); }
 
 /* From mouse_input(): motion in counts (dy positive = down) and buttons. */
 void vaux_motion(int dx, int dy, int b)
@@ -248,8 +252,8 @@ static void aux_packet(void)
     if (dy < -256) dy = -256;
     aux_dx -= dx; aux_dy += dy;
     mq_put((u8)(0x08 | aux_b | (dx < 0 ? 0x10 : 0) | (dy < 0 ? 0x20 : 0)));
-    mq_put((u8)dx);
-    mq_put((u8)dy);
+    mq_put_t((u8)dx, 1);
+    mq_put_t((u8)dy, 1);
     if (!aux_dx && !aux_dy) aux_moved = 0;
 }
 
@@ -520,7 +524,17 @@ void vkbd_real_scancode(u8 sc)
 
 void vkbd_refill(void)
 {
-    if (kbd_full && kbd_aux && ticks - aux_since > 250) kbd_full = 0;   /* nobody reads the mouse: don't block the keyboard */
+    if (kbd_full && kbd_aux && ticks - aux_since > 250) {    /* nobody reads the mouse: don't block the keyboard */
+        /* Its request goes too (else the next byte, maybe a key, is taken
+           as this one's), and the rest of its packet: a byte short, every
+           packet after it would be read a byte out of step (the pointer
+           wandering, buttons pressed by movement bits). */
+        kbd_full = 0;
+        ps.irr &= ~(1 << 4);
+        vaux_drops++;
+        while (mq_head != mq_tail && mq_cont[mq_head]) mq_head = (mq_head + 1) % sizeof mq;
+        MLOG("mouse: a byte nobody read in 250 ms dropped, with the rest of its packet\n");
+    }
     if (kbd_full) return;
     if (aux_moved && mq_head == mq_tail && !(ccb & 0x20)) aux_packet();
     /* A real PS/2 mouse sends a byte about every millisecond (11 bits at
