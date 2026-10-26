@@ -199,10 +199,30 @@ static void raise_irq(int bits16)
 int  sb_irq_status(void)        { return irq_stat; }
 void sb_irq_ack(int bits16)     { irq_stat &= bits16 ? ~2 : ~1; }
 
+/* A block's IRQ the program hasn't acknowledged yet (22Eh / 22Fh) when the
+   next block ends would be lost: the PIC sees one edge. A program that
+   refills half-buffers on each IRQ is then a block out of step until it
+   restarts the sound: the "fuzzy" LSL7 noise (VOGONS t=66284: it waits
+   for retrace with interrupts off). On a real card that takes a CLI longer
+   than a block; here also a render batch that covers two block ends before
+   the guest has run. So the stream holds at such a block end until the
+   acknowledgement comes (a short gap instead of lasting noise), at most
+   STALL_MAX output frames, then goes on as before. */
+#define STALL_MAX (OUT_RATE / 10)
+static int stall_n;
+static int must_hold(void)
+{
+    if (!s.autoinit || s.block_left > (s.stereo ? 2u : 1u) || !(irq_stat & (s.bits16 ? 2 : 1))) { stall_n = 0; return 0; }
+    if (stall_n >= STALL_MAX) return 0;
+    if (stall_n++ == 0) { static int n; if (n++ < 8) dbg(1, "SB: held for an unacknowledged IRQ\n"); }
+    return 1;
+}
+
 /* rate: sample frames per second; len: samples (each channel counts) */
 static void start(int record, int autoinit, int bits16, int sign, int stereo,
                   uint32_t rate, uint32_t len, int silence)
 {
+    int prev_ch = s.ch;
     s.record = 0;
     s.active = 0;
     s.bits16 = bits16;
@@ -220,22 +240,28 @@ static void start(int record, int autoinit, int bits16, int sign, int stereo,
     s.block_len = len ? len : 1;
     s.block_left = s.block_len;
 
-    if (!silence) {
+    /* The 8237 doesn't start over because the DSP got a new command: it
+       goes on from where it is until the program reprograms the channel
+       (dma_valid drops). Re-reading the registers here jumped back to the
+       buffer's start whenever a driver re-issued 1Ch/14h/Cxh mid-stream:
+       a stretch played twice, a click at each restart. */
+    int keep = !silence && s.ch == prev_ch && dma_valid && !dma_done && s.mem;
+    if (!silence && !keep) {
         read_dma_controller();
         if (!map_dma_buffer()) {
             dbg(1, "SB: DMA buffer %x not in conventional memory\n", s.dma_phys);
             return;
         }
     }
-    dbg(2, "SB: %s %s%s len=%u rate=%u%s dma=%x/%u ch%d\n", record ? "record" : "start",
+    dbg(2, "SB: %s %s%s len=%u rate=%u%s dma=%x/%u ch%d%s\n", record ? "record" : "start",
         autoinit ? "auto" : "single", bits16 ? " 16-bit" : "", s.block_len, rate,
-        s.stereo ? " stereo" : "", s.dma_phys, s.dma_len, s.ch);
+        s.stereo ? " stereo" : "", s.dma_phys, s.dma_len, s.ch, keep ? " (DMA goes on)" : "");
 
     /* Detection transfers (a few bytes) finish in microseconds on a real
        card; complete them now so the IRQ arrives before any timeout. */
     if (!autoinit && s.block_len <= 64) {
         if (!silence) {
-            s.dma_pos = s.block_len % (s.dma_len ? s.dma_len : 1);
+            s.dma_pos = ((keep ? s.dma_pos : 0) + s.block_len) % (s.dma_len ? s.dma_len : 1);
             if (s.dma_pos == 0) { dma_done = 1; dma_tc = 1; }
         }
         raise_irq(bits16);
@@ -395,6 +421,7 @@ static void render_chunk(int16_t *out, int frames)
         if (s.active && !s.record && !dsp.paused) {
             s.frac += s.step;
             while (s.frac >= 0x10000 && s.active) {
+                if (must_hold()) { s.frac = 0x10000; break; }
                 s.frac -= 0x10000;
                 next_frame();
             }
