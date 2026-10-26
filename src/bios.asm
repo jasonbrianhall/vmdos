@@ -309,9 +309,13 @@ int74:                           ; IRQ 12: PS/2 mouse byte -> INT 15h C207h hand
         push ds
         push es
         in al, 0x64              ; the byte from the 8042 with real port reads, as a BIOS
-        mov ah, al               ; does it: under Windows the keyboard VxD has taken it
-        in al, 0x60              ; already and hands it to the VM through port 60h
-        TRAP 0x74                ; AH status (bit 0: AL is a byte); DX=1: packet done, AX status, BX X, CX Y
+        and al, 0x21             ; does it: under Windows the keyboard VxD has taken it
+        cmp al, 0x21             ; already and hands it to the VM through port 60h.
+        mov ah, 0                ; Only a mouse byte (bit 5): a key waiting there is the
+        jne .take                ; keyboard handler's, not to be eaten as mouse motion
+        mov ah, 1
+        in al, 0x60
+.take:  TRAP 0x74                ; AH status (bit 0: AL is a byte); DX=1: packet done, AX status, BX X, CX Y
         test dx, dx
         jz .eoi
         push ax
