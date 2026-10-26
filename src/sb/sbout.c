@@ -199,6 +199,25 @@ static void raise_irq(int bits16)
 int  sb_irq_status(void)        { return irq_stat; }
 void sb_irq_ack(int bits16)     { irq_stat &= bits16 ? ~2 : ~1; }
 
+/* A block's IRQ the program hasn't acknowledged yet (22Eh / 22Fh) when the
+   next block ends would be lost: the PIC sees one edge. A program that
+   refills half-buffers on each IRQ is then a block out of step until it
+   restarts the sound: the "fuzzy" LSL7 noise (VOGONS t=66284: it waits
+   for retrace with interrupts off). On a real card that takes a CLI longer
+   than a block; here also a render batch that covers two block ends before
+   the guest has run. So the stream holds at such a block end until the
+   acknowledgement comes (a short gap instead of lasting noise), at most
+   STALL_MAX output frames, then goes on as before. */
+#define STALL_MAX (OUT_RATE / 10)
+static int stall_n;
+static int must_hold(void)
+{
+    if (!s.autoinit || s.block_left > (s.stereo ? 2u : 1u) || !(irq_stat & (s.bits16 ? 2 : 1))) { stall_n = 0; return 0; }
+    if (stall_n >= STALL_MAX) return 0;
+    if (stall_n++ == 0) { static int n; if (n++ < 8) dbg(1, "SB: held for an unacknowledged IRQ\n"); }
+    return 1;
+}
+
 /* rate: sample frames per second; len: samples (each channel counts) */
 static void start(int record, int autoinit, int bits16, int sign, int stereo,
                   uint32_t rate, uint32_t len, int silence)
@@ -402,6 +421,7 @@ static void render_chunk(int16_t *out, int frames)
         if (s.active && !s.record && !dsp.paused) {
             s.frac += s.step;
             while (s.frac >= 0x10000 && s.active) {
+                if (must_hold()) { s.frac = 0x10000; break; }
                 s.frac -= 0x10000;
                 next_frame();
             }
