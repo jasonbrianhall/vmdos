@@ -239,7 +239,7 @@ static void serial_putc(char c)
 
 /* The last few KiB of the log, shown on the "vmdos stopped" screen: on a
    real PC there is usually no serial port to read it from. */
-static char logbuf[1024 * 1024];                  /* 1 MiB: a debug=2 run of a game fits (VMDOS.LOG takes as much) */
+static char logbuf[16384];
 static u32 logpos;
 
 void kprintf(const char *fmt, ...)
