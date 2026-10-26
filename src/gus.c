@@ -180,7 +180,7 @@ void gus_dma_poll(void)
         if (dmactl & 0x40) for (int i = 1; i < n; i += 2) dram[a + i] ^= 0x80;
         else for (int i = 0; i < n; i++) dram[a + i] ^= 0x80;
     }
-    dbg(2, "GUS: DMA %s %u bytes at %05x (ch %d)\n", read ? "read" : "write", n, a, dma_ch);
+    dbg(3, "GUS: DMA %s %u bytes at %05x (ch %d)\n", read ? "read" : "write", n, a, dma_ch);
     a += n;                                                     /* the address register moves on */
     if (dmactl & 4) a = (a & 0xC0000) | ((a & 0x3FFFF) >> 1);
     dma_addr = (u16)(a >> 4);

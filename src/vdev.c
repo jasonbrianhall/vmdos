@@ -35,6 +35,7 @@ static int pic_best(struct pic *p, u8 extra)
     return -1;
 }
 
+int vpic_base0(void) { return pm.base; }
 int vpic_pending(void)
 {
     int s = pic_best(&ps, 0);
@@ -143,7 +144,8 @@ static void pit_write(int n, u8 v)
         c->start = pit_clock();
         if (n == 0) {
             next_irq0 = c->start + reload_of(c);
-            //dbg(1, "guest PIT ch0: reload %u (%u Hz)\n", reload_of(c), PIT_HZ / reload_of(c));
+            static u32 last_rl;
+            if (reload_of(c) != last_rl) { last_rl = reload_of(c); dbg(2, "guest PIT ch0: reload %u (%u Hz), mode %u\n", last_rl, 1193182u / last_rl, c->mode); }
             if (reload_of(c) == 65536) video_vgalog_giveup();          /* vgalog: Windows putting the timer back as it quits */
         }
     }
@@ -184,6 +186,8 @@ void vdev_tick(void)
 {
     u32 now = pit_clock(), per = reload_of(&pit[0]);
     if ((int32_t)(now - next_irq0) >= 0) {
+        extern u32 stat_irq0;
+        stat_irq0++;
         vpic_raise(0);
         next_irq0 += per;
         if ((int32_t)(now - next_irq0) >= 0)        /* fell behind: drop the backlog */

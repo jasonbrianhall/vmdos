@@ -170,6 +170,7 @@ void guest_start(void) __attribute__((noreturn));
 void vdev_init(void);
 void vpic_raise(int irq);
 int vpic_pending(void);                       /* vector to deliver now, or -1 */
+int vpic_base0(void);                         /* the master PIC's vector base (IRQ 0) */
 void vpic_ack(int vec);                       /* mark in service */
 void vpic_eoi_master(void);
 void vpic_eoi_irq(int irq);

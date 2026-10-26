@@ -393,7 +393,16 @@ static void video_set_mode_(int mode, int clear)
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
         else if (is_cga(mode)) memset(gptr(0xB8000), 0, 0x8000);
         else if (is_ega(mode)) memset(planes, 0, 4 * 65536);
-        else memset(gptr(0xA0000), 0, 0x10000);
+        else {
+            /* Through the window's own memory, not the guest's A0000h
+               mapping: under VMHV that can be unmapped here (the window
+               trapped for an unchained screen), and the kernel faulted on
+               its own memset (Dark Forces' second mode 13h set). */
+            if (page_phys(0xA0000) != guest_phys(0xA0000))
+                dbg(1, "video: mode %02x set with the A000h window %s\n", mode, page_phys(0xA0000) ? "on a plane" : "unmapped");
+            if (planes) memset(planes, 0, 4 * 65536);
+            memset((void *)(uintptr_t)guest_phys(0xA0000), 0, 0x10000);
+        }
     }
     if (dac8 && !vbe_setting) kprintf("video: mode %02x set: DAC back to 6 bits\n", mode);
     dac8 = 0;                                      /* a VGA mode set: 6-bit DAC, all pixel bits (vbe_set keeps 8) */

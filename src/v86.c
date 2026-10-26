@@ -146,7 +146,7 @@ static void kbc_unstick(void)
 
 /* Deliver a pending virtual IRQ; returns the frame to resume (a DPMI
    client's protected-mode handler may mean a mode switch). */
-u32 stat_pmirq, stat_rmirq, stat_reflirq;
+u32 stat_pmirq, stat_rmirq, stat_reflirq, stat_irq0, stat_vec8;
 int dpmi_route_rm_irqs = -1;
 static struct regs *deliver(struct regs *r)
 {
@@ -163,6 +163,7 @@ static struct regs *deliver(struct regs *r)
         return r;
     }
     vpic_ack(vec);
+    if (vec == vpic_base0()) stat_vec8++;
     if (dpmi_pm_hooked(vec) && (pm || dpmi_route_rm_irqs)) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
     if (pm) { stat_reflirq++; return dpmi_reflect_irq(r, vec); }
     stat_rmirq++;
@@ -691,6 +692,9 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             char b1[64], b2[64];
             vpic_debug(b1, sizeof b1);
             dpmi_depth(b2, sizeof b2);
+            static u32 last_irq0, last_vec8;
+            kprintf("[%us] timer: %u/s raised, %u/s delivered\n", ticks / 1000, (stat_irq0 - last_irq0) / 5, (stat_vec8 - last_vec8) / 5);
+            last_irq0 = stat_irq0; last_vec8 = stat_vec8;
             kprintf("[%us] irqs pm %u reflected %u rm %u, vif %u, mode %s, %x:%x  %s  %s\n", ticks / 1000,
                     stat_pmirq, stat_reflirq, stat_rmirq, vif, from_v86 ? "v86" : from_pm ? "pm" : "kernel",
                     r->cs, r->eip, b1, b2);
