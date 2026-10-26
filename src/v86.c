@@ -717,6 +717,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                     stat_pmirq, stat_reflirq, stat_rmirq, vif, from_v86 ? "v86" : from_pm ? "pm" : "kernel",
                     r->cs, r->eip, b1, b2);
             if (from_pm) { void dpmi_dump_code(u32, u32, int); dpmi_dump_code(r->cs, r->eip - 0x30, 0x60); }
+            { void dpmi_timer_report(void); dpmi_timer_report(); }
         }
         if (irq == 0) video_tlb_tick();
         if (irq == 0) v3_tick();                                         /* the Voodoo 3: retraces, its FIFO's wake-up */
