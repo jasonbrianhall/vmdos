@@ -1,6 +1,6 @@
 ; DMESG.COM: vmdos's log, as on its Ctrl+Shift+F10 screen.
 ;   DMESG               the log on standard output (DMESG > LOG.TXT, DMESG | MORE)
-;   DMESG /K            make C:\VMDOS\VMDOS.LOG (32 KiB): when vmdos stops,
+;   DMESG /K            make C:\VMDOS\VMDOS.LOG (1 MiB): when vmdos stops,
 ;                       or on S in its Ctrl+Shift+F10 log, vmdos writes its
 ;                       log into that file itself, in place (for a guest
 ;                       that has crashed or hung; read it after a restart)
@@ -10,7 +10,7 @@
         org 100h
 
 BUFSZ   equ 4096
-LOGSZ   equ 32768
+LOGSZ   equ 1024 * 1024
 
         mov si, 81h
 .opt:   lodsb
