@@ -1031,7 +1031,7 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
 {
     struct ctx from;
     get_ctx(r, &from);
-    if (!from.pm) dbg(2, "DPMI: IRQ vector %x from real mode to PM handler (IVT %04x:%04x)\n", vec,
+    if (!from.pm) dbg(3, "DPMI: IRQ vector %x from real mode to PM handler (IVT %04x:%04x)\n", vec,
                       rd16(vec * 4 + 2), rd16(vec * 4));
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
