@@ -231,6 +231,80 @@ static void apic_ipi(u32 dest, u32 cmd)
 
 static void wrmsr(u32 m, u64 v) { __asm__ volatile("wrmsr" :: "c"(m), "a"((u32)v), "d"((u32)(v >> 32)) : "memory"); }
 static u32 lapic_pa;                          /* where the boot CPU's xAPIC registers are */
+static int apic_ok;                            /* lapic mapped (or x2APIC): the boot CPU's is usable */
+
+/* ---------------- the boot CPU's APIC timer: a fast guest PIT ----------------
+   The host tick is 1 kHz, so the guest's IRQ 0 came at most 1000 times a
+   second whatever DOS set the PIT to. Programs that play samples from the
+   timer (Creative's Parrot / VOICE.DRV: DSP 10h at ~8 kHz; PC speaker and
+   Covox players) ran slow and low. When DOS sets channel 0 faster than the
+   tick, vdev.c asks for an interrupt at its next due time from the local
+   APIC timer (one-shot, divide by 1), calibrated once against the PIT.
+   No APIC, or one software-disabled: as before. nofastpit: off. */
+static int ft_state;                           /* 0 untried, 1 usable, 2 being measured, -1 not */
+static u32 ft_per_k;                           /* APIC timer counts per 1024 PIT clocks */
+static u32 ft_p0, ft_c0;                       /* the measurement's start: PIT clock, APIC count */
+
+static u32 apic_rd(u32 off) { return x2apic ? (u32)rdmsr(0x800 + (off >> 4)) : lapic[off / 4]; }
+static void apic_wr(u32 off, u32 v) { if (x2apic) wrmsr(0x800 + (off >> 4), v); else lapic[off / 4] = v; }
+
+/* The APIC timer's rate, measured over 20 ms of host ticks from the first
+   one (no busy wait: pit_clock wants interrupts on). */
+static int fast_timer_measure(void);
+static int fast_timer_start(void)
+{
+    if (!apic_ok || strstr(cmdline, "nofastpit")) return 0;
+    u32 svr = apic_rd(0xF0);
+    if (!(svr & 0x100)) { kprintf("fast PIT: the local APIC is software-disabled\n"); return 0; }
+    apic_wr(0xF0, (svr & ~0xFFu) | AP_SPURIOUS_VEC);   /* a spurious one: within our IDT, just IRET */
+    apic_wr(0x320, 0x10000 | FAST_TIMER_VEC);  /* masked, one-shot */
+    apic_wr(0x3E0, 0xB);                       /* divide by 1 */
+    apic_wr(0x380, 0xFFFFFFFFu);
+    ft_p0 = pit_clock();
+    ft_c0 = apic_rd(0x390);
+    return 1;
+}
+
+/* Each host tick (vdev.c), before the guest's timer is looked at. */
+void fast_timer_tick(void)
+{
+    if (ft_state == 2) fast_timer_measure();
+    else if (!ft_state && apic_ok) ft_state = fast_timer_start() ? 2 : -1;   /* at boot: ready before DOS wants it */
+}
+
+static int fast_timer_measure(void)
+{
+    u32 p1 = pit_clock(), c1 = apic_rd(0x390);
+    if (p1 - ft_p0 < 20 * PIT_PER_TICK) return 0;
+    apic_wr(0x380, 0);
+    u64 r = (u64)(ft_c0 - c1) * 1024 / (p1 - ft_p0);
+    if (c1 == 0 || r < 1024 || r > 0xFFFFFFFFull) {    /* ran out, too slow, absurd */
+        kprintf("fast PIT: APIC timer unusable (%u counts in %u PIT clocks)\n", ft_c0 - c1, p1 - ft_p0);
+        ft_state = -1;
+        return 0;
+    }
+    ft_per_k = (u32)r;
+    ft_state = 1;
+    kprintf("fast PIT: APIC timer at %u kHz\n", (u32)(r * (PIT_HZ / 1000) >> 10));
+    return 1;
+}
+
+void fast_timer_arm(u32 pit_clocks)
+{
+    if (smp_on_ap()) return;
+    if (!pit_clocks) {
+        if (ft_state == 1) apic_wr(0x380, 0);  /* stops a one-shot count */
+        return;
+    }
+    if (!ft_state) { ft_state = fast_timer_start() ? 2 : -1; return; }
+    if (ft_state != 1) return;
+    u32 n = (u32)((u64)pit_clocks * ft_per_k >> 10);
+    apic_wr(0x320, FAST_TIMER_VEC);            /* one-shot, unmasked */
+    apic_wr(0x380, n ? n : 1);
+}
+
+void fast_timer_eoi(void) { if (ft_state == 1) apic_wr(0xB0, 0); }
+int fast_timer_ok(void) { return ft_state == 1; }
 
 /* On the helper: software-enable its local APIC (INIT leaves it off, and
    off it takes no fixed IPIs), let every priority through, and have the
@@ -475,7 +549,6 @@ static int start_cpu(u32 id, u32 tramp, volatile int *alive)
 /* tramp: a free page below 1 MiB (physical), 0 if there's none. */
 void smp_start(u32 tramp)
 {
-    if (strstr(cmdline, "nosmp")) { kprintf("smp: off (nosmp)\n"); return; }
     u32 a = 0, b, c, d;
     __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
                      : "=&r"(a), "=&r"(b));
@@ -495,6 +568,8 @@ void smp_start(u32 tramp)
         lapic = map_mmio64(pa, 4096);
         if (!lapic) { kprintf("smp: can't map the local APIC at %x\n", pa); return; }
     }
+    apic_ok = 1;                                                    /* the fast timer may use it, nosmp or not */
+    if (strstr(cmdline, "nosmp")) { kprintf("smp: off (nosmp)\n"); return; }
     const u8 *madt = madt_find();
     if (!madt) { kprintf("smp: no ACPI MADT: one CPU\n"); return; }
     u32 self = apic_id();

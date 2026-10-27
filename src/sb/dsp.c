@@ -60,7 +60,7 @@ static void dsp_reset(void)
     sb_out_stop();
     dsp.paused = 0;
     dsp.speaker = 0;
-    dsp.dac_value = 0x80;
+    sb_dac_reset();                                              /* DAC at 80h */
     dsp.rate = 0;
     q_push(0xAA);
 }
@@ -86,7 +86,7 @@ static void exec(void)
 {
     uint32_t w = (uint32_t)(args[0] | (args[1] << 8)) + 1;
     switch (cmd) {
-    case 0x10: dsp.dac_value = args[0]; break;
+    case 0x10: sb_dac_write(args[0]); break;                     /* direct DAC, timed (sbout.c) */
     case 0x14: sb_out_start(0, w, 0); break;                     /* 8-bit single-cycle */
     case 0x91: sb_out_start(0, dsp.block_len + 1u, 0); break;    /* high-speed single */
     case 0x1C: case 0x90:                                        /* auto-init (+high-speed) */

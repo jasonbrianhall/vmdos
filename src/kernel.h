@@ -362,6 +362,14 @@ void smp_start(u32 tramp);                    /* tramp: a free physical page bel
 void smp_go(void);
 void smp_park(void);                          /* VMHV: everything back on the boot CPU, for good */
 void smp_ap_fault(struct regs *r) __attribute__((noreturn));
+/* The boot CPU's local APIC timer, one-shot, for the guest's PIT channel 0
+   above the 1 kHz tick (vdev.c). Vector FAST_TIMER_VEC (boot.S). */
+#define FAST_TIMER_VEC 0x31
+void fast_timer_arm(u32 pit_clocks);          /* interrupt in that many PIT clocks; 0: off */
+void fast_timer_eoi(void);
+void fast_timer_tick(void);                   /* each host tick: its calibration */
+int fast_timer_ok(void);                      /* calibrated and usable */
+void vdev_fast_tick(void);                    /* vdev.c: from the APIC timer */
 
 /* ---- sound.c ---- */
 void sound_init(void);
