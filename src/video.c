@@ -668,8 +668,14 @@ static void layout(void)
     last_w = (int)w; last_h = (int)h;
     full_redraw = 1;
     clear_fb();
-    g_h = fb_h; g_w = fb_h * 4 / 3;
-    if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * 3 / 4; }
+    /* The picture's shape: 4:3, as a monitor shows every VGA and VESA mode,
+       except the widescreen VESA modes (848 wide or more and 16:10 or
+       wider: not 640x400, which a monitor shows at 4:3), shown with
+       square pixels at their own shape. */
+    u32 ax = 4, ay = 3;
+    if (vbe_on && !vd_on && w >= 848 && w * 10 >= h * 16) { ax = w; ay = h; }
+    g_h = fb_h; g_w = fb_h * ax / ay;
+    if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * ay / ax; }
     if (no_scale) {
         /* scale=off: the size a VGA card puts out (low resolutions doubled,
            as it does), times the largest whole number that fits. Too big
@@ -1210,6 +1216,14 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
     { 0x134, 640, 400, 24 }, { 0x135, 640, 480, 24 }, { 0x136, 800, 600, 24 }, { 0x137, 1024, 768, 24 },
     /* VBE 1.2's 800x600 in 16 colours: four planes, as mode 12h (see vbe_planar) */
     { 0x102, 800, 600, 4 },
+    /* widescreen, square pixels, shown at their own shape (layout): 16:9
+       848x480 (as DOSBox Staging's vesa_modes=all, which Doom's -widescreen
+       picks), 1280x720 and 1920x1080, and 16:10 1280x800. 1920x1080 only
+       as far as fits in video memory (8 and 16 bits). */
+    { 0x138, 848, 480, 8 }, { 0x139, 848, 480, 15 }, { 0x13A, 848, 480, 16 }, { 0x13B, 848, 480, 24 }, { 0x13C, 848, 480, 32 },
+    { 0x13D, 1280, 720, 8 }, { 0x13E, 1280, 720, 15 }, { 0x13F, 1280, 720, 16 }, { 0x140, 1280, 720, 24 }, { 0x141, 1280, 720, 32 },
+    { 0x142, 1280, 800, 8 }, { 0x143, 1280, 800, 15 }, { 0x144, 1280, 800, 16 }, { 0x145, 1280, 800, 24 }, { 0x146, 1280, 800, 32 },
+    { 0x147, 1920, 1080, 8 }, { 0x148, 1920, 1080, 15 }, { 0x149, 1920, 1080, 16 },
 };
 #define N_VMODES (int)(sizeof vmodes / sizeof vmodes[0])
 

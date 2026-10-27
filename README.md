@@ -456,7 +456,9 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   segment select register (3CDh, separate read and write segments), 1 MB.
 - VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 (power-of-two line
   pitch, so no pixel crosses a bank) and 32 bits per pixel,
-  800x600 in 16 colours (102h / 6Ah, planar),
+  800x600 in 16 colours (102h / 6Ah, planar), widescreen 848x480,
+  1280x720, 1280x800 (138h-146h, all depths) and 1920x1080 (147h-149h,
+  8/15/16 bits), shown at their own shape rather than 4:3,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
   switchable to 8 bits a colour (4F08h, as most SVGA cards; test:
