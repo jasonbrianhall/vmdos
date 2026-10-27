@@ -1026,6 +1026,12 @@ static struct regs *pm_int(struct ctx *c, int n)
 }
 
 /* ---------------- hardware interrupts ---------------- */
+/* The client is waiting in real mode for a DOS/BIOS call it made from
+   protected mode (a reflected INT, or 0300h-0302h). */
+int dpmi_in_rm_call(void)
+{
+    return client && xdepth && (xs[xdepth - 1].kind == X_REFLECT || xs[xdepth - 1].kind == X_SIM);
+}
 int dpmi_pm_hooked(int vec) { return client && pm_vec[vec & 0xFF].sel; }
 
 struct regs *dpmi_hw_interrupt(struct regs *r, int vec)

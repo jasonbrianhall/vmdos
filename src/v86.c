@@ -171,7 +171,21 @@ static struct regs *deliver(struct regs *r)
             kprintf("DPMI: IRQs taken in real mode not routed to PM handlers: mask %04x\n", (u16)~route_mask);
         } else if (o) route_mask = 0;
     }
+    /* deferirq: IRQ 0 taken while a DPMI client waits in DOS for a call it
+       made goes to its PM handler when the call returns, not in the
+       middle of DOS (Dark Forces' cutscenes end early otherwise; norouteirq=0
+       fixes them but loses those ticks). Taken back from the PIC meanwhile,
+       so the keyboard and the rest still get through. */
+    static int defer = -1, deferred;
+    if (defer < 0) defer = strstr(cmdline, "deferirq") != 0;
+    if (deferred && pm) { deferred = 0; vpic_raise(0); }
+    int dpmi_in_rm_call(void);
     int vec = vpic_pending();
+    if (defer && vec >= 0 && !pm && chosen_irq_of(vec) == 0 && dpmi_pm_hooked(vec) && dpmi_in_rm_call()) {
+        vpic_lower(0);
+        deferred = 1;
+        vec = vpic_pending();
+    }
     if (vec < 0) {
         if (mouse_callback_due()) {
             if (!pm) mouse_start_callback(r);
