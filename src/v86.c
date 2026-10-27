@@ -171,21 +171,29 @@ static struct regs *deliver(struct regs *r)
             kprintf("DPMI: IRQs taken in real mode not routed to PM handlers: mask %04x\n", (u16)~route_mask);
         } else if (o) route_mask = 0;
     }
-    /* deferirq: IRQ 0 taken while a DPMI client waits in DOS for a call it
-       made goes to its PM handler when the call returns, not in the
+    /* deferirq: IRQ 0 and 12 taken while a DPMI client waits in DOS for a
+       call it made go to its PM handlers when the call returns, not in the
        middle of DOS (Dark Forces' cutscenes end early otherwise; norouteirq=0
        fixes them but loses those ticks). Taken back from the PIC meanwhile,
-       so the keyboard and the rest still get through. */
-    static int defer = -1, deferred;
-    if (defer < 0) defer = strstr(cmdline, "deferirq") != 0;
-    if (deferred && pm) { deferred = 0; vpic_raise(0); }
-    int dpmi_in_rm_call(void);
+       so the keyboard and the rest still get through. Mouse events for a
+       PM handler wait the same way (dpmi.c). */
+    int dpmi_in_rm_call(void), dpmi_defer_on(void);
+    struct regs *dpmi_mouse_flush(struct regs *r);
+    static u16 deferred;
+    int defer = dpmi_defer_on();
+    if (deferred && pm) {
+        for (int i = 0; i < 16; i++) if ((deferred >> i) & 1) vpic_raise(i);
+        deferred = 0;
+    }
     int vec = vpic_pending();
-    if (defer && vec >= 0 && !pm && chosen_irq_of(vec) == 0 && dpmi_pm_hooked(vec) && dpmi_in_rm_call()) {
-        vpic_lower(0);
-        deferred = 1;
+    while (defer && vec >= 0 && !pm && dpmi_pm_hooked(vec) && dpmi_in_rm_call() &&
+           (chosen_irq_of(vec) == 0 || chosen_irq_of(vec) == 12)) {
+        int irq = chosen_irq_of(vec);
+        vpic_lower(irq);
+        deferred |= (u16)(1u << irq);
         vec = vpic_pending();
     }
+    if (defer && pm && vec < 0) { struct regs *n = dpmi_mouse_flush(r); if (n) return n; }
     if (vec < 0) {
         if (mouse_callback_due()) {
             if (!pm) mouse_start_callback(r);

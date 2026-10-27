@@ -1032,6 +1032,31 @@ int dpmi_in_rm_call(void)
 {
     return client && xdepth && (xs[xdepth - 1].kind == X_REFLECT || xs[xdepth - 1].kind == X_SIM);
 }
+int dpmi_defer_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = strstr(cmdline, "deferirq") != 0;
+    return on;
+}
+
+/* deferirq: a mouse event that came while the client was in a DOS call
+   (mev[0]: its conditions, 0 none), for its PM handler now that it's back
+   in protected mode. NULL: nothing to do. */
+static u16 mev[6];
+struct regs *dpmi_mouse_flush(struct regs *r)
+{
+    if (!mev[0]) return 0;
+    if (!client || !mouse_pm_sel) { mev[0] = 0; return 0; }
+    for (int i = 0; i < xdepth; i++) if (xs[i].kind == X_MOUSE) return 0;
+    struct ctx c;
+    get_ctx(r, &c);
+    if (!c.pm) return 0;
+    struct ctx p = c;
+    p.ds = p.es = p.fs = p.gs = 0;
+    p.eax = mev[0]; p.ebx = mev[1]; p.ecx = mev[2]; p.edx = mev[3]; p.esi = mev[4]; p.edi = mev[5];
+    mev[0] = 0;
+    return visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
+}
 int dpmi_pm_hooked(int vec) { return client && pm_vec[vec & 0xFF].sel; }
 
 struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
@@ -1491,6 +1516,11 @@ int dpmi_rm_trap(struct regs *r, int id)
         if (!client || !mouse_pm_sel) return BIOS_CONT;                  /* gone: on to the RETF */
         for (int i = 0; i < xdepth; i++)       /* one at a time: an event while its handler runs is dropped */
             if (xs[i].kind == X_MOUSE) return BIOS_CONT;
+        if (dpmi_defer_on() && dpmi_in_rm_call()) {   /* deferirq: not in the middle of its DOS call; when it's back */
+            mev[0] |= (u16)c.eax; mev[1] = (u16)c.ebx; mev[2] = (u16)c.ecx;
+            mev[3] = (u16)c.edx; mev[4] = (u16)c.esi; mev[5] = (u16)c.edi;
+            return BIOS_CONT;
+        }
         c.eip = (c.eip & 0xFFFF) + 2;          /* back at the RETF after the trap */
         struct ctx p = c;
         p.pm = 1;
