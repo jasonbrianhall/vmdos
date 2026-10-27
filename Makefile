@@ -41,7 +41,7 @@ VERSION  ?= $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/nul
 FLOPPY   := $(BUILD)/floppy.img
 
 CC       := gcc
-CFLAGS   := -m32 -march=i386 -mtune=i486 -I$(BUILD) -ffreestanding -fno-builtin -fno-pic -fno-pie \
+CFLAGS   := -m32 -march=i686 -mtune=generic -I$(BUILD) -ffreestanding -fno-builtin -fno-pic -fno-pie \
             -fno-stack-protector -fcf-protection=none -mgeneral-regs-only \
             -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
