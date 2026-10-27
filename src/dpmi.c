@@ -785,6 +785,7 @@ static struct regs *dos_call(struct ctx *c, int kind, u16 ax, u16 bx, u16 es)
 
 #define MAX_CB 16
 static struct { u16 sel; u32 off; u16 ssel; u32 soff; u8 used; } cbs[MAX_CB];
+static u32 dstat_raw, dstat_cb[MAX_CB], dstat_hw8[2], dstat_rf8;   /* dpmi_timer_report */
 
 /* A client's whole state, put aside while a client it started runs. */
 static struct parked {
@@ -1025,6 +1026,37 @@ static struct regs *pm_int(struct ctx *c, int n)
 }
 
 /* ---------------- hardware interrupts ---------------- */
+/* The client is waiting in real mode for a DOS/BIOS call it made from
+   protected mode (a reflected INT, or 0300h-0302h). */
+int dpmi_in_rm_call(void)
+{
+    return client && xdepth && (xs[xdepth - 1].kind == X_REFLECT || xs[xdepth - 1].kind == X_SIM);
+}
+int dpmi_defer_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = strstr(cmdline, "nodeferirq") == 0;    /* on unless nodeferirq */
+    return on;
+}
+
+/* deferirq: a mouse event that came while the client was in a DOS call
+   (mev[0]: its conditions, 0 none), for its PM handler now that it's back
+   in protected mode. NULL: nothing to do. */
+static u16 mev[6];
+struct regs *dpmi_mouse_flush(struct regs *r)
+{
+    if (!mev[0]) return 0;
+    if (!client || !mouse_pm_sel) { mev[0] = 0; return 0; }
+    for (int i = 0; i < xdepth; i++) if (xs[i].kind == X_MOUSE) return 0;
+    struct ctx c;
+    get_ctx(r, &c);
+    if (!c.pm) return 0;
+    struct ctx p = c;
+    p.ds = p.es = p.fs = p.gs = 0;
+    p.eax = mev[0]; p.ebx = mev[1]; p.ecx = mev[2]; p.edx = mev[3]; p.esi = mev[4]; p.edi = mev[5];
+    mev[0] = 0;
+    return visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
+}
 int dpmi_pm_hooked(int vec) { return client && pm_vec[vec & 0xFF].sel; }
 
 struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
@@ -1035,6 +1067,7 @@ struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
                       rd16(vec * 4 + 2), rd16(vec * 4));
     struct ctx p = from;
     if (!p.pm) { p.ds = p.es = p.fs = p.gs = 0; }
+    if (vec == 8) dstat_hw8[from.pm]++;
     struct regs *nr = visit_pm(&from, X_HW, pm_vec[vec].sel, pm_vec[vec].off, S_HWRET, 1, &p);
     xs[xdepth - 1].a = (u32)vec;               /* for the nesting report */
     return nr;
@@ -1411,6 +1444,7 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg)
         c->eflags = (c->eflags & ~0x0DD5u) | (fl & 0x0DD5);
         if (xdepth && xs[xdepth - 1].kind == X_HW && (cs & 0xFFFF) == HOST_CS) {
             /* a hardware interrupt the client passed on: reflect it, then finish the visit */
+            if (arg == 8) dstat_rf8++;
             return reflect(c, arg, X_REFLECT_HW);
         }
         return default_int(c, arg); }
@@ -1482,6 +1516,11 @@ int dpmi_rm_trap(struct regs *r, int id)
         if (!client || !mouse_pm_sel) return BIOS_CONT;                  /* gone: on to the RETF */
         for (int i = 0; i < xdepth; i++)       /* one at a time: an event while its handler runs is dropped */
             if (xs[i].kind == X_MOUSE) return BIOS_CONT;
+        if (dpmi_defer_on() && dpmi_in_rm_call()) {   /* deferirq: not in the middle of its DOS call; when it's back */
+            mev[0] |= (u16)c.eax; mev[1] = (u16)c.ebx; mev[2] = (u16)c.ecx;
+            mev[3] = (u16)c.edx; mev[4] = (u16)c.esi; mev[5] = (u16)c.edi;
+            return BIOS_CONT;
+        }
         c.eip = (c.eip & 0xFFFF) + 2;          /* back at the RETF after the trap */
         struct ctx p = c;
         p.pm = 1;
@@ -1491,6 +1530,8 @@ int dpmi_rm_trap(struct regs *r, int id)
         visit_pm(&c, X_MOUSE, mouse_pm_sel, mouse_pm_off, S_HWRET, 0, &p);
         return BIOS_SWITCH;
     }
+    if (id == 0x56) dstat_raw++;
+    if (id >= 0x60 && id < 0x60 + MAX_CB) dstat_cb[id - 0x60]++;
     if (id == 0x56) {                          /* raw switch real -> protected */
         if (!client) return BIOS_CONT;
         struct ctx p = c;
@@ -1599,6 +1640,24 @@ void dpmi_espfix(struct regs *r)
     espfix_ptr = esp;
     espfix_on = 1;
 
+}
+
+/* debug=2, every 5 s: how the timer reaches the client (Dark Forces'
+   cutscenes end early when IRQ 0 taken in real mode goes straight to its
+   PM handler) */
+void dpmi_timer_report(void)
+{
+    static u32 last_raw, last_cb[MAX_CB], last_hw[2], last_rf;
+    kprintf("DPMI timer: PM handler %x:%x; IVT 8 %04x:%04x, 1C %04x:%04x; per s: IRQ 0 to PM from real %u from PM %u, "
+            "reflected %u, raw switches %u, callbacks",
+            pm_vec[8].sel, pm_vec[8].off, rd16(8 * 4 + 2), rd16(8 * 4), rd16(0x1C * 4 + 2), rd16(0x1C * 4),
+            (dstat_hw8[0] - last_hw[0]) / 5, (dstat_hw8[1] - last_hw[1]) / 5, (dstat_rf8 - last_rf) / 5, (dstat_raw - last_raw) / 5);
+    for (int i = 0; i < MAX_CB; i++) {
+        if (dstat_cb[i] != last_cb[i]) kprintf(" #%d %u (%x:%x)", i, (dstat_cb[i] - last_cb[i]) / 5, cbs[i].sel, cbs[i].off);
+        last_cb[i] = dstat_cb[i];
+    }
+    kprintf("\n");
+    last_raw = dstat_raw; last_hw[0] = dstat_hw8[0]; last_hw[1] = dstat_hw8[1]; last_rf = dstat_rf8;
 }
 
 int dpmi_depth(char *buf, int n)

@@ -153,8 +153,47 @@ static struct regs *deliver(struct regs *r)
     vkbd_refill();
     if (!vif) return r;
     int pm = !(r->eflags & EFL_VM);
-    if (dpmi_route_rm_irqs < 0) dpmi_route_rm_irqs = !strstr(cmdline, "norouteirq");
+    /* norouteirq: no IRQ taken in real mode goes straight to a PM handler;
+       norouteirq=0,1: only those IRQs (to find which one a program minds) */
+    static u16 route_mask = 0xFFFF;
+    if (dpmi_route_rm_irqs < 0) {
+        const char *o = strstr(cmdline, "norouteirq");
+        dpmi_route_rm_irqs = !o;
+        if (o && o[10] == '=') {
+            route_mask = 0xFFFF;
+            for (const char *p = o + 11; *p >= '0' && *p <= '9'; ) {
+                int n = 0;
+                while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+                if (n < 16) route_mask &= (u16)~(1u << n);
+                if (*p == ',') p++;
+            }
+            dpmi_route_rm_irqs = 1;
+            kprintf("DPMI: IRQs taken in real mode not routed to PM handlers: mask %04x\n", (u16)~route_mask);
+        } else if (o) route_mask = 0;
+    }
+    /* (nodeferirq turns this off) IRQ 0 and 12 taken while a DPMI client waits in DOS for a
+       call it made go to its PM handlers when the call returns, not in the
+       middle of DOS (Dark Forces' cutscenes end early otherwise; norouteirq=0
+       fixes them but loses those ticks). Taken back from the PIC meanwhile,
+       so the keyboard and the rest still get through. Mouse events for a
+       PM handler wait the same way (dpmi.c). */
+    int dpmi_in_rm_call(void), dpmi_defer_on(void);
+    struct regs *dpmi_mouse_flush(struct regs *r);
+    static u16 deferred;
+    int defer = dpmi_defer_on();
+    if (deferred && pm) {
+        for (int i = 0; i < 16; i++) if ((deferred >> i) & 1) vpic_raise(i);
+        deferred = 0;
+    }
     int vec = vpic_pending();
+    while (defer && vec >= 0 && !pm && dpmi_pm_hooked(vec) && dpmi_in_rm_call() &&
+           (chosen_irq_of(vec) == 0 || chosen_irq_of(vec) == 12)) {
+        int irq = chosen_irq_of(vec);
+        vpic_lower(irq);
+        deferred |= (u16)(1u << irq);
+        vec = vpic_pending();
+    }
+    if (defer && pm && vec < 0) { struct regs *n = dpmi_mouse_flush(r); if (n) return n; }
     if (vec < 0) {
         if (mouse_callback_due()) {
             if (!pm) mouse_start_callback(r);
@@ -164,7 +203,8 @@ static struct regs *deliver(struct regs *r)
     }
     vpic_ack(vec);
     if (vec == vpic_base0()) stat_vec8++;
-    if (dpmi_pm_hooked(vec) && (pm || dpmi_route_rm_irqs)) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
+    int irqn = chosen_irq_of(vec);
+    if (dpmi_pm_hooked(vec) && (pm || (dpmi_route_rm_irqs && irqn >= 0 && ((route_mask >> irqn) & 1)))) { stat_pmirq++; return dpmi_hw_interrupt(r, vec); }
     if (pm) { stat_reflirq++; return dpmi_reflect_irq(r, vec); }
     stat_rmirq++;
     v86_reflect(r, vec);
@@ -699,6 +739,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                     stat_pmirq, stat_reflirq, stat_rmirq, vif, from_v86 ? "v86" : from_pm ? "pm" : "kernel",
                     r->cs, r->eip, b1, b2);
             if (from_pm) { void dpmi_dump_code(u32, u32, int); dpmi_dump_code(r->cs, r->eip - 0x30, 0x60); }
+            { void dpmi_timer_report(void); dpmi_timer_report(); }
         }
         if (irq == 0) video_tlb_tick();
         if (irq == 0) v3_tick();                                         /* the Voodoo 3: retraces, its FIFO's wake-up */

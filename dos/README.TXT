@@ -106,6 +106,8 @@ BOOT OPTIONS
   Trouble
     debug=1|2|3    More in the log
     mouselog       Log the mouse driver's calls
+    nodeferirq     DPMI games: timer and mouse in the middle of DOS calls
+    norouteirq     DPMI games: IRQs from real mode via real-mode handlers
     bootlog=off    No boot messages on screen
 
 More: README.md at https://github.com/jasonbrianhall/vmdos
