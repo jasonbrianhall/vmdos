@@ -33,7 +33,6 @@ static struct {
     int record;                             /* the DMA goes the other way: ADC -> memory */
     int32_t in_acc, in_n;                   /* 48 kHz input samples summed for the next one */
 } s;
-static int16_t last_in;                     /* latest input sample (DSP 20h) */
 int audio_capture_read(int16_t *mono, int n);   /* audio.cpp: 48 kHz mic samples, 0 when none */
 int audio_capture_latest(int rate);
 
@@ -218,6 +217,9 @@ static int must_hold(void)
     return 1;
 }
 
+static void store(int16_t v);
+static int16_t last_in;                     /* latest input sample (DSP 20h) */
+
 /* rate: sample frames per second; len: samples (each channel counts) */
 static void start(int record, int autoinit, int bits16, int sign, int stereo,
                   uint32_t rate, uint32_t len, int silence)
@@ -253,6 +255,15 @@ static void start(int record, int autoinit, int bits16, int sign, int stereo,
     /* Detection transfers (a few bytes) finish in microseconds on a real
        card; complete them now so the IRQ arrives before any timeout. */
     if (!autoinit && s.block_len <= 64) {
+        if (record) {
+            /* A recording one writes its samples too: Dr. Sbaitso's card
+               test records 1 byte over a 1 it put there, and says "DMA
+               Error" unless both the IRQ came and the byte changed. */
+            s.active = s.record = 1;
+            while (s.active) store(last_in);        /* the last one raises the IRQ */
+            s.record = 0;
+            return;
+        }
         if (!silence) {
             s.dma_pos = s.block_len % (s.dma_len ? s.dma_len : 1);
             if (s.dma_pos == 0) { dma_done = 1; dma_tc = 1; }
