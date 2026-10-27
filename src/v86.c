@@ -171,7 +171,7 @@ static struct regs *deliver(struct regs *r)
             kprintf("DPMI: IRQs taken in real mode not routed to PM handlers: mask %04x\n", (u16)~route_mask);
         } else if (o) route_mask = 0;
     }
-    /* deferirq: IRQ 0 and 12 taken while a DPMI client waits in DOS for a
+    /* (nodeferirq turns this off) IRQ 0 and 12 taken while a DPMI client waits in DOS for a
        call it made go to its PM handlers when the call returns, not in the
        middle of DOS (Dark Forces' cutscenes end early otherwise; norouteirq=0
        fixes them but loses those ticks). Taken back from the PIC meanwhile,

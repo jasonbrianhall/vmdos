@@ -1035,7 +1035,7 @@ int dpmi_in_rm_call(void)
 int dpmi_defer_on(void)
 {
     static int on = -1;
-    if (on < 0) on = strstr(cmdline, "deferirq") != 0;
+    if (on < 0) on = strstr(cmdline, "nodeferirq") == 0;    /* on unless nodeferirq */
     return on;
 }
 
