@@ -184,6 +184,14 @@ ap_wake_isr:
 ap_spurious_isr:
     iret
 
+# The boot CPU's local APIC timer (smp.c fast_timer_*): the guest's PIT
+# channel 0 when DOS sets it faster than the 1 kHz tick. Like a PIC IRQ.
+.global isr_fast_timer
+isr_fast_timer:
+    push $0
+    push $0x31
+    jmp  isr_common
+
 isr_common:
     pusha
     push %ds

@@ -136,6 +136,8 @@ static int pit_out2(void)
     return (e % rl) != rl - 1;
 }
 
+static void fast_pit_arm(u32 now);
+
 static void pit_write(int n, u8 v)
 {
     struct pitch *c = &pit[n];
@@ -151,6 +153,7 @@ static void pit_write(int n, u8 v)
         c->start = pit_clock();
         if (n == 0) {
             next_irq0 = c->start + reload_of(c);
+            fast_pit_arm(c->start);
             static u32 last_rl;
             if (reload_of(c) != last_rl) { last_rl = reload_of(c); dbg(2, "guest PIT ch0: reload %u (%u Hz), mode %u\n", last_rl, 1193182u / last_rl, c->mode); }
             if (reload_of(c) == 65536) video_vgalog_giveup();          /* vgalog: Windows putting the timer back as it quits */
@@ -189,18 +192,37 @@ static void pit_control(u8 v)
     c->latched = 0;
 }
 
-void vdev_tick(void)
+/* Channel 0 faster than the host's 1 kHz tick: the APIC timer (smp.c)
+   interrupts at the next IRQ 0's time, so DOS gets its 8 kHz (Parrot's
+   VOICE.DRV) and its samples come when they should. Not below 40 PIT
+   clocks (~30 kHz): a tiny reload must not take the CPU from DOS. */
+#define FAST_PIT_MIN 40
+static void fast_pit_arm(u32 now)
+{
+    if (reload_of(&pit[0]) >= PIT_PER_TICK) { fast_timer_arm(0); return; }
+    int32_t left = (int32_t)(next_irq0 - now);
+    fast_timer_arm(left < FAST_PIT_MIN ? FAST_PIT_MIN : (u32)left);
+}
+
+static void irq0_check(void)
 {
     u32 now = pit_clock(), per = reload_of(&pit[0]);
     if ((int32_t)(now - next_irq0) >= 0) {
         extern u32 stat_irq0;
         stat_irq0++;
         vpic_raise(0);
-        next_irq0 += per;
-        if ((int32_t)(now - next_irq0) >= 0)        /* fell behind: drop the backlog */
+        next_irq0 += per < FAST_PIT_MIN ? FAST_PIT_MIN : per;
+        /* Fell behind: drop the backlog. A fast timer (a sample player)
+           catches up a few ms instead, an IRQ each time DOS can take one,
+           so it doesn't come out slow after a long host tick. */
+        if ((int32_t)(now - next_irq0) >= (per < PIT_PER_TICK ? 4 * (int32_t)PIT_PER_TICK : 0))
             next_irq0 = now + per;
     }
+    if (per < PIT_PER_TICK) fast_pit_arm(now);
 }
+
+void vdev_tick(void) { fast_timer_tick(); irq0_check(); }   /* the host's tick */
+void vdev_fast_tick(void) { irq0_check(); }        /* the APIC timer */
 
 /* PC speaker: channel 2 as a square wave while ports 61h bits 0-1 are set. */
 void speaker_mix(int32_t *lr, int frames)

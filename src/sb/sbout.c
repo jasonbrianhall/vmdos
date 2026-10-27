@@ -355,6 +355,49 @@ static void next_frame(void)
     s.cur_r = r;
 }
 
+/* Direct DAC (DSP 10h): each write is kept with the time it was made
+   (pit_clock), and the render plays it at that point of the span it
+   covers, so samples a program sends from a fast timer (Parrot at 8 kHz)
+   come out evenly instead of only the last of each 4 ms render. */
+#define DAC_Q 4096
+static struct { uint32_t t; uint8_t v; } dacq[DAC_Q];
+static uint32_t dac_head, dac_tail;
+static uint32_t span_t0, span_len, span_frames, span_pos;
+
+void sb_dac_write(uint8_t v)
+{
+    uint32_t next = (dac_tail + 1) % DAC_Q;
+    if (next == dac_head) {                             /* nobody rendering: the oldest goes now */
+        dsp.dac_value = dacq[dac_head].v;
+        dac_head = (dac_head + 1) % DAC_Q;
+    }
+    dacq[dac_tail].t = pit_clock();
+    dacq[dac_tail].v = v;
+    dac_tail = next;
+}
+
+/* The next sb_render covers PIT time [t0, t1). */
+void sb_render_span(uint32_t t0, uint32_t t1)
+{
+    span_t0 = t0;
+    span_len = t1 - t0;
+    span_frames = 0;
+    span_pos = 0;
+}
+
+void sb_dac_reset(void) { dac_head = dac_tail = 0; dsp.dac_value = 0x80; }
+
+/* The DAC writes made before this frame's time */
+static inline void dac_catch_up(uint32_t frame)
+{
+    if (dac_head == dac_tail) return;
+    uint32_t t = span_t0 + (span_frames ? frame * span_len / span_frames : span_len);
+    while (dac_head != dac_tail && (int32_t)(dacq[dac_head].t - t) <= 0) {
+        dsp.dac_value = dacq[dac_head].v;
+        dac_head = (dac_head + 1) % DAC_Q;
+    }
+}
+
 static int32_t mix[2 * OPL_MAX_FRAMES];
 void speaker_mix(int32_t *lr, int frames);            /* vdev.c: PC speaker */
 
@@ -411,6 +454,7 @@ static void render_chunk(int16_t *out, int frames)
     if (s.active && s.record) record_chunk(frames);
     for (int i = 0; i < frames; i++) {
         int32_t l, r;
+        dac_catch_up(span_pos + (uint32_t)i);
         if (s.active && !s.record && !dsp.paused) {
             s.frac += s.step;
             while (s.frac >= 0x10000 && s.active) {
@@ -424,7 +468,7 @@ static void render_chunk(int16_t *out, int frames)
         } else {
             l = r = ((int32_t)dsp.dac_value - 128) * 256;  /* direct DAC (10h) */
         }
-        if (!dsp.speaker) l = r = 0;
+        if (!dsp.speaker && !dsp.sb16) l = r = 0;      /* the SB16 ignores D1h/D3h: always on */
         mix[i * 2] = l;
         mix[i * 2 + 1] = r;
     }
@@ -433,14 +477,19 @@ static void render_chunk(int16_t *out, int frames)
     speaker_mix(mix, frames);
     for (int i = 0; i < frames * 2; i++)
         out[i] = limit(mix[i]);
+    span_pos += (uint32_t)frames;
 }
 
 void sb_render(int16_t *out, int frames)
 {
+    span_frames = (uint32_t)frames;
+    span_pos = 0;
     while (frames > 0) {
         int n = frames > OPL_MAX_FRAMES ? OPL_MAX_FRAMES : frames;
         render_chunk(out, n);
         out += n * 2;
         frames -= n;
     }
+    dac_catch_up(span_frames);                          /* all of the span's writes are out */
+    span_t0 += span_len;                                /* a render without a new span goes on from here */
 }

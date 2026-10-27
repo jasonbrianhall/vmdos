@@ -169,6 +169,7 @@ void sound_tick(void)
     int n = sound_on ? audio_wanted(nominal) : nominal;
     if (n > 2048) n = 2048;
     if (n > 0) {
+        sb_render_span((last - el) * PIT_PER_TICK, last * PIT_PER_TICK);   /* direct DAC timing */
         sb_render(buf, n);
         cdaudio_mix(buf, n);
     }

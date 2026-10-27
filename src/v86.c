@@ -665,6 +665,11 @@ static struct regs *isr_dispatch_inner(struct regs *r)
     u32 vec = r->vec;
 
     if (smp_on_ap()) smp_ap_fault(r);                /* the helper CPU takes no interrupts: a fault */
+    if (vec == FAST_TIMER_VEC) {                     /* the APIC timer: the guest's fast PIT (smp.c) */
+        fast_timer_eoi();
+        vdev_fast_tick();
+        goto out;
+    }
     if (vec >= 0x20) {
         int irq = vec - 0x20;
         if (irq == 7 || irq == 15) {                 /* spurious? */

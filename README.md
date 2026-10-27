@@ -504,6 +504,11 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
   play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.
   See AUTOEXEC.BAT. Test: `tests/sb16test.asm`.
+  Direct DAC (DSP 10h) samples play at the time they were written, and a
+  guest timer set faster than vmdos's 1 kHz tick (Creative's Parrot and its
+  VOICE.DRV: 8 kHz) runs at its own rate from the local APIC timer
+  (`nofastpit`: capped at 1 kHz as before). Test: `tests/dacdir.asm`
+  (3 s of a 440 Hz sine from an 8 kHz timer).
   Gravis UltraSound (GF1, 1 MB of DRAM; 240h, IRQ 7, DMA 3; `src/gus.c`):
   32 voices with loops, 8/16-bit samples, volume ramps and pan, mixed at the
   GF1's own rate (44.1 kHz at 14 voices, 19.3 kHz at 32), timers, DMA

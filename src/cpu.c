@@ -457,7 +457,7 @@ struct __attribute__((packed)) tss {
 };
 static struct tss tss __attribute__((aligned(16)));
 static u64 idt[64];                    /* 0-47: isr_table; 30h and 3Fh: the helper CPU's (smp.c) */
-extern u8 ap_wake_isr[], ap_spurious_isr[];
+extern u8 ap_wake_isr[], ap_spurious_isr[], isr_fast_timer[];
 static u64 gate(u32 h) { return (h & 0xFFFF) | ((u64)0x08 << 16) | ((u64)0x8E << 40) | ((u64)(h >> 16) << 48); }
 
 void idt_load(void)                   /* smp.c: the helper CPU uses the same IDT */
@@ -480,6 +480,7 @@ static void tables_init(void)
 
     for (int i = 0; i < 48; i++) idt[i] = gate(isr_table[i]);
     idt[0x30] = gate((u32)(uintptr_t)ap_wake_isr);
+    idt[FAST_TIMER_VEC] = gate((u32)(uintptr_t)isr_fast_timer);
     idt[0x3F] = gate((u32)(uintptr_t)ap_spurious_isr);
     idt_load();
 }
