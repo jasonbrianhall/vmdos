@@ -668,14 +668,12 @@ static void layout(void)
     last_w = (int)w; last_h = (int)h;
     full_redraw = 1;
     clear_fb();
-    /* The picture's shape: 4:3, as a monitor shows every VGA and VESA mode,
-       except the widescreen VESA modes (848 wide or more and 16:10 or
-       wider: not 640x400, which a monitor shows at 4:3), shown with
-       square pixels at their own shape. */
-    u32 ax = 4, ay = 3;
-    if (vbe_on && !vd_on && w >= 848 && w * 10 >= h * 16) { ax = w; ay = h; }
-    g_h = fb_h; g_w = fb_h * ax / ay;
-    if (g_w > fb_w || aspect_fill) { g_w = fb_w; g_h = aspect_fill ? fb_h : fb_w * ay / ax; }
+    /* The widescreen VESA modes (848 wide or more and 16:10 or wider: not
+       640x400, which a monitor shows at 4:3) fill the whole screen,
+       stretched to it, with no bars; everything else is 4:3. */
+    int wide = vbe_on && !vd_on && w >= 848 && w * 10 >= h * 16;
+    g_h = fb_h; g_w = fb_h * 4 / 3;
+    if (g_w > fb_w || aspect_fill || wide) { g_w = fb_w; g_h = aspect_fill || wide ? fb_h : fb_w * 3 / 4; }
     if (no_scale) {
         /* scale=off: the size a VGA card puts out (low resolutions doubled,
            as it does), times the largest whole number that fits. Too big
