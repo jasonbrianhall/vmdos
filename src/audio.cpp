@@ -413,13 +413,22 @@ static bool route_to_pin(int cad, int nid, int target, int depth) {
 
 // Is pin n a better microphone than the one we have? Jack mic (plugged in
 // first), then internal mic, then line in.
-static void consider_mic(int cad, int n, uint32_t pcaps, int start, int count) {
+// relax: the codec has no mic by its configuration. Laptop headset (combo)
+// jacks often have their mic pin marked "not connected" (Linux fixes that
+// per model): then take an input pin with a mic bias (VREF) that isn't
+// configured as an output, a plugged-in one first.
+static void consider_mic(int cad, int n, uint32_t pcaps, int start, int count, bool relax = false) {
     if (!(pcaps & (1 << 5))) return;                  // not input capable
+    if (pcaps & ((1 << 7) | (1u << 24))) return;      // HDMI / DisplayPort
     uint32_t cfg = verb(cad, n, 0xF1C, 0);
     int conn = cfg >> 30, dev = (cfg >> 20) & 0xF;
-    if (conn == 1) return;                            // nothing connected
     int score = 0;
-    if (dev == 0xA && conn != 2) {
+    if (relax) {
+        if (conn != 1 || !((pcaps >> 8) & 0xFF)) return;   // configured (seen already), or no mic bias
+        score = 1;
+        if ((pcaps & (1 << 2)) && (verb(cad, n, 0xF09, 0) & (1u << 31))) score = 2;   // plugged in
+    } else if (conn == 1) return;                     // nothing connected
+    else if (dev == 0xA && conn != 2) {
         score = 3;
         if ((pcaps & (1 << 2)) && (verb(cad, n, 0xF09, 0) & (1u << 31))) score = 4;   // plugged in
     } else if (dev == 0xA) score = 2;
@@ -590,10 +599,17 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
                 }
                 continue;
             }
+            if (debug_level >= 1 && hda_mode == HDA_ANALOG)            // for finding a missing mic or output
+                printf("HDA:   pin %d config %08x caps %08x sense %x\n", n, verb(cad, n, 0xF1C, 0), pcaps,
+                       (pcaps & (1 << 2)) ? verb(cad, n, 0xF09, 0) >> 31 : 0);
             if ((pcaps & (1 << 16)) && !is_digital_out(pcaps))
                 verb(cad, n, 0x70C, (verb(cad, n, 0xF0C, 0) & 0xFF) | 0x02);   // EAPD on
             if (!is_analog_out(cad, n, pcaps)) consider_mic(cad, n, pcaps, start, count);
         }
+        if (cap_cad < 0 && hda_mode == HDA_ANALOG)                  // no mic configured: an unconfigured one
+            for (int n = start; n < start + count && n < 128; n++)
+                if (widgets[n].type == 4 && !is_analog_out(cad, n, pin_caps[n]))
+                    consider_mic(cad, n, pin_caps[n], start, count, true);
 
         // Route every analog output pin; if the BIOS's pin configuration
         // gives none, take what the pins themselves say they can do.
@@ -903,7 +919,7 @@ static bool hda_try(const PciDevice& d, bool digital) {
             uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
             int dev = (cfg >> 20) & 0xF;
             printf("HDA: codec %d pin %d -> ADC %d (%s)\n", cap_cad, cap_pin, cap_adc,
-                   dev == 0x8 ? "line in" : cfg >> 30 == 2 ? "internal mic" : "mic jack");
+                   cfg >> 30 == 1 ? "unconfigured pin, headset mic?" : dev == 0x8 ? "line in" : cfg >> 30 == 2 ? "internal mic" : "mic jack");
         }
     }
     return true;
