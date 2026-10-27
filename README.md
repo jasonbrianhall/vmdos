@@ -209,7 +209,8 @@ GRUB uses) only sets modes before the kernel starts, and switching later
 would need a driver for each graphics card (Intel, AMD, NVIDIA). Firmware
 doesn't offer DOS's own sizes (320x200, 640x400) anyway, and a flat panel
 shows only its own size, so something scales either way. The boot menu has
-a "screen resolution" submenu (640x480 up to 1280x1024, "Ask" and
+a "screen resolution" submenu (640x480 up to 1280x1024, the widescreen
+1280x720 and 1920x1080, "Ask" and
 "Largest"; on a BIOS/CSM boot, "Ask" shows GRUB's list of the card's VESA
 modes and takes a size typed as 1024x768, and "Largest" is the monitor's
 preferred mode from its EDID); the `vga=` kernel option picks it too (on a

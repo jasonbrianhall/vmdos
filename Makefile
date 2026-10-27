@@ -321,7 +321,7 @@ $(BUILD)/grub/core.img: $(BUILD)/grub/early.cfg $(BUILD)/grub/mods
 $(BUILD)/grub/BOOTX64.EFI: $(BUILD)/grub/early.cfg $(BUILD)/grub/mods
 	$(GRUB_MKIMAGE) -O x86_64-efi -d $(GRUB_LIB)/x86_64-efi -o $@ -c $< -p /boot/grub efi_gop efi_uga $(GRUB_MODS)
 # The fixed choices in the boot menu's screen resolution submenu.
-GRUB_RES ?= 640x480 800x600 1024x768 1280x1024
+GRUB_RES ?= 640x480 800x600 1024x768 1280x1024 1280x720 1920x1080
 VGA_TITLE_ask := Ask: list the modes this screen has
 # BIOS/CSM boots: GRUB sets the screen mode (gfxpayload), so vga= from KARGS
 # is turned into that here; vga=N (a UEFI mode number) has no meaning there.
