@@ -2,7 +2,7 @@
 
 Virtual Monitor DOS is a type 1 hypervisor designed to boot FreeDOS
 and other versions of DOS (MS-DOS) on modern hardware and run at full 
-speed on the 80x86 platform.  It virtualized the hardware so DOS thinks
+speed on the 80x86 platform.  It virtualizes the hardware so DOS thinks
 it owns the computer.
 
 FreeDOS running in virtual-8086 mode under a small 32-bit protected-mode
