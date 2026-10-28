@@ -296,6 +296,7 @@ int dpmi_rm_trap(struct regs *r, int id);     /* v86-side stubs; BIOS_* */
 struct regs *dpmi_exception(struct regs *r);  /* any fault from a protected-mode client */
 struct regs *dpmi_take_switch(void);          /* frame of a mode switch, or NULL */
 int dpmi_pm_hooked(int vec);
+int dpmi_hw_active(int vec);                 /* its PM handler is still running */
 struct regs *dpmi_hw_interrupt(struct regs *r, int vec);
 struct regs *dpmi_reflect_irq(struct regs *r, int vec);
 void wait_for_irq(void);
