@@ -563,6 +563,7 @@ static void release_all(Keyboard& k) {
 }
 
 static bool ua_dispatch(int slot, int ep, const Trb& e);   // the audio stream's (below)
+static bool um_dispatch(int slot, int ep, const Trb& e);   // the microphone's (below)
 static bool un_dispatch(int slot, int ep, const Trb& e);   // USB Ethernet's receive ring (below)
 // Events that arrive while we're waiting for something else.
 static void dispatch(const Trb& e) {
@@ -575,6 +576,7 @@ static void dispatch(const Trb& e) {
     if (type != TRB_TRANSFER_EVENT) return;
     int slot = e.d3 >> 24, ep = (e.d3 >> 16) & 0x1F, cc = e.d2 >> 24;
     if (ua_dispatch(slot, ep, e)) return;
+    if (um_dispatch(slot, ep, e)) return;
     if (un_dispatch(slot, ep, e)) return;
     for (auto& k : kbds) {
         if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD || k.kind == AUDIO || k.kind == NET) continue;
@@ -1103,12 +1105,14 @@ static bool ctl_try(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint
     return false;
 }
 
-// An audio streaming alternate setting with an isochronous OUT endpoint.
+// An audio streaming alternate setting with an isochronous endpoint: OUT
+// (speakers; an IN one beside it is its feedback) or IN (a microphone).
 struct UaAlt {
     int iface, alt, ep, mps, interval;
     int ch, bytes, bits;
     uint32_t rates[8]; int nrates;                     // UAC1: discrete rates; nrates < 0: range rates[0]..rates[1]
     bool fmt_pcm;
+    int ep_in, in_mps, in_interval;                    // the first isochronous IN data endpoint
 };
 
 static bool ua_rate_ok(const UaAlt& a, uint32_t r) {
@@ -1124,18 +1128,149 @@ static int ua_score(const UaAlt& a) {
     if (a.bytes == 2) s += 2;
     return s;
 }
+// A microphone's rate: 48 kHz, else 44.1, else the highest up to 48 kHz
+// (webcams often have only 16 kHz), else the lowest. Resampled to 48 kHz.
+static uint32_t um_rate(const UaAlt& a) {
+    if (ua_rate_ok(a, 48000)) return 48000;
+    if (ua_rate_ok(a, 44100)) return 44100;
+    if (a.nrates < 0) return a.rates[1] < 48000 ? a.rates[1] : a.rates[0];
+    uint32_t best = 0, low = 0;
+    for (int i = 0; i < a.nrates; i++) {
+        if (a.rates[i] <= 48000 && a.rates[i] > best) best = a.rates[i];
+        if (!low || a.rates[i] < low) low = a.rates[i];
+    }
+    return best ? best : low;
+}
+static int um_score(const UaAlt& a) {
+    if (!a.fmt_pcm || a.ch < 1 || a.bytes < 2 || a.bytes > 4) return -1;
+    uint32_t r = um_rate(a);
+    if (r < 8000 || r > 96000) return -1;
+    int s = r == 48000 ? 8 : r == 44100 ? 6 : r >= 32000 ? 4 : 2;
+    if (a.ch <= 2) s += 2;                             // mono or stereo before more channels
+    if (a.bytes == 2) s += 2;
+    return s;
+}
+
+// ---------------------------------------------------------------- microphone
+// USB Audio Class 1 and 2 input (USB microphones, headsets' mics, webcams'
+// mics), xHCI only: one isochronous IN stream, its packets turned into
+// 48 kHz mono samples as their transfer events come in (usb_poll, every
+// 8 ms), into a ring audio.cpp reads like the HD Audio input's: Sound
+// Blaster recording, VMSB MIC. It runs from when it's plugged in.
+#define UM_TRBS 256                                    // the stream's ring, link TRB included
+#define UM_RING 16384                                  // 48 kHz mono frames (audio.cpp's RING_FRAMES)
+#define UM_QUEUE_US 24000                              // TDs kept queued
+static struct {
+    int dev = -1;                                      // kbds index, -1: none plugged in
+    uint32_t gen;                                      // plug count
+    volatile Trb* trb;
+    volatile uint8_t* pkt;                             // 1024 bytes a ring slot
+    int pkt_max;
+    int enq; uint32_t cycle;
+    int dci;
+    uint32_t td_us;
+    uint32_t rate; int ch, bytes;
+    uint32_t seq_of[UM_TRBS];
+    uint32_t seq_done, seq_enq;
+    int16_t ring[UM_RING];
+    volatile uint32_t wpos;                            // frames written, ever
+    uint32_t step, ph; int prev;                       // resampling to 48 kHz: 16.16 step and phase
+    uint32_t ev_dry, ev_missed, ev_err, last_cc;
+    uint16_t vid, pid;
+    char name[64];
+} um;
+static bool um_is(void) { return um.dev >= 0 && kbds[um.dev].active && kbds[um.dev].kind == AUDIO; }
+
+// Keep the ring UM_QUEUE_US ahead with empty packets for the device to fill.
+static void um_fill(void) {
+    Keyboard& k = kbds[um.dev];
+    uint32_t q = UM_QUEUE_US / um.td_us; if (q < 4) q = 4; if (q > UM_TRBS - 8) q = UM_TRBS - 8;
+    bool any = false;
+    while ((int32_t)(um.seq_enq - um.seq_done) < (int32_t)q) {
+        volatile Trb& t = um.trb[um.enq];
+        uint64_t a = phys(um.pkt + um.enq * 1024);
+        t.d0 = (uint32_t)a; t.d1 = (uint32_t)(a >> 32); t.d2 = (uint32_t)um.pkt_max;
+        um.seq_of[um.enq] = um.seq_enq;
+        barrier();
+        // Isoch TRB, as soon as possible, an event for every one (its length).
+        t.d3 = 5u << 10 | 1u << 5 | 1u << 2 | 1u << 31 | um.cycle;
+        if (++um.enq == UM_TRBS - 1) {
+            volatile Trb& link = um.trb[UM_TRBS - 1];
+            link.d3 = (link.d3 & ~1u) | um.cycle;
+            um.enq = 0;
+            um.cycle ^= 1;
+        }
+        um.seq_enq++;
+        any = true;
+    }
+    if (any) k.hc->db[k.slot] = um.dci;
+}
+
+// A packet's samples, mixed to mono and resampled (linear) into um.ring.
+static void um_take(const volatile uint8_t* p, int len) {
+    int fb = um.ch * um.bytes;
+    for (int o = 0; o + fb <= len; o += fb) {
+        int sum = 0;
+        for (int c = 0; c < um.ch; c++) {
+            const volatile uint8_t* s = p + o + c * um.bytes + (um.bytes - 2);   // the top 16 bits
+            sum += (int16_t)(s[0] | s[1] << 8);
+        }
+        int cur = sum / um.ch;
+        while (um.ph < 65536) {
+            int v = um.prev + (((cur - um.prev) * (int)(um.ph >> 2)) >> 14);
+            um.ring[um.wpos % UM_RING] = (int16_t)v;
+            um.wpos = um.wpos + 1;
+            um.ph += um.step;
+        }
+        um.ph -= 65536;
+        um.prev = cur;
+    }
+}
+
+// A transfer event on the microphone's endpoint (from dispatch).
+static bool um_dispatch(int slot, int ep, const Trb& e) {
+    if (!um_is() || kbds[um.dev].hc != H || kbds[um.dev].slot != slot || ep != um.dci) return false;
+    int cc = e.d2 >> 24;
+    uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
+    int idx = (int)((trb - phys(um.trb)) / sizeof(Trb));
+    if (cc == 14 || cc == 15) { um.ev_dry++; um.seq_done = um.seq_enq; um_fill(); return true; }   // ran dry
+    if (cc == 23) um.ev_missed++;
+    else if (cc != 1 && cc != 13) { um.ev_err++; um.last_cc = (uint32_t)cc; }
+    if (idx >= 0 && idx < UM_TRBS - 1 && (int32_t)(um.seq_of[idx] + 1 - um.seq_done) > 0) {
+        if (cc == 1 || cc == 13) {
+            int got = um.pkt_max - (int)(e.d2 & 0xFFFFFF);
+            if (got > 0) um_take(um.pkt + idx * 1024, got);
+        }
+        um.seq_done = um.seq_of[idx] + 1;
+    }
+    um_fill();
+    return true;
+}
+
+// audio.cpp's side.
+extern "C" int usb_mic_present(void) { return um_is(); }
+extern "C" uint32_t usb_mic_gen(void) { return um.gen; }
+extern "C" const char* usb_mic_name(void) { return um.name; }
+extern "C" uint32_t usb_mic_pos(void) { return um.wpos; }
+extern "C" const int16_t* usb_mic_ring(uint32_t* frames) { *frames = UM_RING; return um.ring; }
 
 // Device k's descriptors (config descriptor `d`, `total` bytes): if it plays
-// audio, set it up as the USB audio output. True: driven (as AUDIO).
+// audio, set it up as the USB audio output; if it has a microphone, as the
+// USB microphone (a headset: both). True: driven (as AUDIO).
 static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int config, uint16_t vid, uint16_t pid) {
     int uac = 0, ac_iface = -1;
     int fu[8], nfu = 0, clk[4], nclk = 0;
     UaAlt best{}; int best_score = -1;
+    UaAlt mic{}; int mic_score = -1;
     UaAlt cur{}; bool in_as = false, cur_valid = false;
     auto finish = [&]() {
-        if (in_as && cur_valid && cur.ep) {
+        if (!in_as || !cur_valid) return;
+        if (cur.ep) {
             int s = ua_score(cur);
             if (s > best_score) { best = cur; best_score = s; }
+        } else if (cur.ep_in) {
+            int s = um_score(cur);
+            if (s > mic_score) { mic = cur; mic_score = s; }
         }
     };
     for (int i = 0; i + 1 < total && d[i] >= 2; i += d[i]) {
@@ -1182,49 +1317,86 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
                 cur.ep = a;
                 cur.mps = (d[i + 4] | d[i + 5] << 8) & 0x7FF;
                 cur.interval = d[i + 6] ? d[i + 6] : 1;
+            } else if ((attr & 3) == 1 && (a & 0x80) && ((attr >> 4) & 3) != 1 && !cur.ep_in) {   // isochronous IN data
+                cur.ep_in = a;
+                cur.in_mps = (d[i + 4] | d[i + 5] << 8) & 0x7FF;
+                cur.in_interval = d[i + 6] ? d[i + 6] : 1;
             }
         }
     }
     finish();
     if (ac_iface < 0) return false;                    // not an audio device
-    if (best_score < 0) {
-        printf("USB: audio device %04x:%04x on %s: no output it can play here (only a microphone?)\n", vid, pid, k.where);
-        return false;
-    }
-    if (H->type != HC_XHCI && best.interval != 1 && k.speed != 3) {
-        printf("USB: audio device %04x:%04x on %s: a packet every %d frames isn't supported\n", vid, pid, k.where,
-               1 << (best.interval - 1));
-        return false;
-    }
-    if (H->type != HC_XHCI && k.speed == 3 && best.interval > 4) {
-        printf("USB: audio device %04x:%04x on %s: a packet every %d microframes isn't supported\n", vid, pid, k.where,
-               1 << (best.interval - 1));
+
+    // What can be driven of it here: its output, its microphone.
+    bool want_out = best_score >= 0, want_in = mic_score >= 0;
+    if (!want_out && !want_in) {
+        printf("USB: audio device %04x:%04x on %s: no output or microphone it can use here\n", vid, pid, k.where);
         return false;
     }
     if (k.speed >= 4) { printf("USB: audio device on %s: SuperSpeed audio isn't supported\n", k.where); return false; }
-    if (ua_is()) { printf("USB: audio device on %s: one is plugged in already\n", k.where); return false; }
-    if (!ua.trb) {
+    if (want_out && H->type != HC_XHCI && best.interval != 1 && k.speed != 3) {
+        printf("USB: audio device %04x:%04x on %s: a packet every %d frames isn't supported\n", vid, pid, k.where,
+               1 << (best.interval - 1));
+        want_out = false;
+    }
+    if (want_out && H->type != HC_XHCI && k.speed == 3 && best.interval > 4) {
+        printf("USB: audio device %04x:%04x on %s: a packet every %d microframes isn't supported\n", vid, pid, k.where,
+               1 << (best.interval - 1));
+        want_out = false;
+    }
+    if (want_out && ua_is()) { printf("USB: audio device on %s: an audio output is plugged in already\n", k.where); want_out = false; }
+    if (want_in && H->type != HC_XHCI) {
+        printf("USB: microphone %04x:%04x on %s: only on xHCI (USB 3) controllers\n", vid, pid, k.where);
+        want_in = false;
+    }
+    if (want_in && um_is()) { printf("USB: microphone on %s: one is plugged in already\n", k.where); want_in = false; }
+    if (!want_out && !want_in) return false;
+    if (want_out && !ua.trb) {
         ua.trb = (volatile Trb*)dma_alloc(UA_TRBS * sizeof(Trb), 64);
         ua.pkt = (volatile uint8_t*)dma_alloc(UA_TRBS * 1024, 64);
-        if (!ua.trb || !ua.pkt) { printf("USB: %s: out of memory for audio\n", k.where); ua.trb = nullptr; return false; }
+        if (!ua.trb || !ua.pkt) { printf("USB: %s: out of memory for audio\n", k.where); ua.trb = nullptr; want_out = false; }
     }
+    if (want_in && !um.trb) {
+        um.trb = (volatile Trb*)dma_alloc(UM_TRBS * sizeof(Trb), 64);
+        um.pkt = (volatile uint8_t*)dma_alloc(UM_TRBS * 1024, 64);
+        if (!um.trb || !um.pkt) { printf("USB: %s: out of memory for the microphone\n", k.where); um.trb = nullptr; want_in = false; }
+    }
+    if (!want_out && !want_in) return false;
     if (best.mps > 1024) best.mps = 1024;
+    if (mic.in_mps > 1024) mic.in_mps = 1024;
 
     if (!control(k, 0x00, 9, config, 0, 0, nullptr)) {                          // SET_CONFIGURATION
         printf("USB: %s: audio: SET_CONFIGURATION %d failed (cc=%d)\n", k.where, config, ctl_cc);
         return false;
     }
-    if (!control(k, 0x01, 11, best.alt, best.iface, 0, nullptr)) {               // SET_INTERFACE
+    if (want_out && !control(k, 0x01, 11, best.alt, best.iface, 0, nullptr)) {  // SET_INTERFACE
         printf("USB: %s: audio: SET_INTERFACE %d alt %d failed\n", k.where, best.iface, best.alt);
-        return false;
+        want_out = false;
     }
+    if (want_in && !control(k, 0x01, 11, mic.alt, mic.iface, 0, nullptr)) {
+        printf("USB: %s: microphone: SET_INTERFACE %d alt %d failed\n", k.where, mic.iface, mic.alt);
+        want_in = false;
+    }
+    if (!want_out && !want_in) return false;
     static volatile uint8_t buf[8] __attribute__((aligned(64)));
     uint32_t rate = ua_rate_ok(best, 48000) ? 48000 : 44100;
+    uint32_t mrate = um_rate(mic);
     if (uac == 1) {
         // Sampling frequency control on the endpoint (if it has one).
-        buf[0] = (uint8_t)rate; buf[1] = (uint8_t)(rate >> 8); buf[2] = (uint8_t)(rate >> 16);
-        ctl_try(k, 0x22, 0x01, 0x0100, best.ep, 3, buf);
-        if (best.nrates == 1) rate = best.rates[0];
+        if (want_out) {
+            buf[0] = (uint8_t)rate; buf[1] = (uint8_t)(rate >> 8); buf[2] = (uint8_t)(rate >> 16);
+            ctl_try(k, 0x22, 0x01, 0x0100, best.ep, 3, buf);
+            if (best.nrates == 1) rate = best.rates[0];
+        }
+        if (want_in) {
+            buf[0] = (uint8_t)mrate; buf[1] = (uint8_t)(mrate >> 8); buf[2] = (uint8_t)(mrate >> 16);
+            ctl_try(k, 0x22, 0x01, 0x0100, mic.ep_in, 3, buf);
+            buf[0] = buf[1] = buf[2] = 0;                                            // what it took
+            if (ctl_try(k, 0xA2, 0x81, 0x0100, mic.ep_in, 3, buf)) {
+                uint32_t got = buf[0] | buf[1] << 8 | buf[2] << 16;
+                if (got >= 8000 && got <= 96000) mrate = got;
+            }
+        }
     } else {
         // Every clock source to 48 kHz (else 44.1), then what it says it runs at.
         for (int c = 0; c < nclk; c++) {
@@ -1236,11 +1408,12 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
             buf[0] = buf[1] = buf[2] = buf[3] = 0;
             if (ctl_try(k, 0xA1, 0x01, 0x0100, (uint16_t)(clk[c] << 8 | ac_iface), 4, buf)) {
                 uint32_t got = buf[0] | buf[1] << 8 | buf[2] << 16 | (uint32_t)buf[3] << 24;
-                if (got >= 8000 && got <= 192000) rate = got;
+                if (got >= 8000 && got <= 192000) rate = mrate = got;
             }
         }
     }
-    // Unmuted, at 0 dB (the volume setting is applied to the samples).
+    // Unmuted, at 0 dB (the volume setting is applied to the samples);
+    // the microphone's too (VMSB BOOST raises it).
     for (int f = 0; f < nfu; f++)
         for (int c = 0; c <= 2; c++) {
             buf[0] = 0;
@@ -1249,52 +1422,103 @@ static bool ua_setup(Keyboard& k, const volatile uint8_t* d, int total, int conf
             ctl_try(k, 0x21, 0x01, (uint16_t)(2 << 8 | c), (uint16_t)(fu[f] << 8 | ac_iface), 2, buf);     // volume 0 dB
         }
 
-    // The isochronous OUT endpoint. Interval: 2^(bInterval-1) frames (full
-    // speed) or microframes (high speed), in xHCI's 125 us units.
-    int interval = k.speed == 3 ? best.interval - 1 : best.interval - 1 + 3;
-    if (interval < 0) interval = 0;
-    if (interval > 15) interval = 15;
-    int dci = (best.ep & 0xF) * 2;
-    ua.running = false;
-    if (H->type != HC_XHCI) {                          // EHCI / UHCI: a descriptor a frame
-        if (!ua2_link(k, best)) return false;
-        interval = 3;                                  // 1 ms
-        dci = best.ep & 0xF;
-    } else {
-        memset((void*)k.in_ctx, 0, 33 * H->csz);
-        ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
-        fill_slot(k, dci);
-        volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
-        ep[0] = (uint32_t)interval << 16;
-        ep[1] = 1u << 3 | (uint32_t)best.mps << 16;              // isochronous OUT, CErr 0
-        for (int i = 0; i < UA_TRBS; i++) ua.trb[i].d0 = ua.trb[i].d1 = ua.trb[i].d2 = ua.trb[i].d3 = 0;
-        volatile Trb& link = ua.trb[UA_TRBS - 1];
-        link.d0 = (uint32_t)phys(ua.trb); link.d1 = (uint32_t)(phys(ua.trb) >> 32);
-        link.d3 = TRB_LINK << 10 | (1 << 1);
-        uint64_t ri = phys(ua.trb) | 1;
-        ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
-        ep[4] = (uint32_t)best.mps | (uint32_t)best.mps << 16;   // average TRB length, max ESIT payload
-        uint64_t ic = phys(k.in_ctx);
-        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
-        if (cc != 1) { printf("USB: %s: audio: configure endpoint failed (%d)\n", k.where, cc); return false; }
+    int out_dci = 0;
+    if (want_out) {
+        // The isochronous OUT endpoint. Interval: 2^(bInterval-1) frames (full
+        // speed) or microframes (high speed), in xHCI's 125 us units.
+        int interval = k.speed == 3 ? best.interval - 1 : best.interval - 1 + 3;
+        if (interval < 0) interval = 0;
+        if (interval > 15) interval = 15;
+        int dci = (best.ep & 0xF) * 2;
+        ua.running = false;
+        bool ok = true;
+        if (H->type != HC_XHCI) {                      // EHCI / UHCI: a descriptor a frame
+            ok = ua2_link(k, best);
+            interval = 3;                              // 1 ms
+            dci = best.ep & 0xF;
+        } else {
+            memset((void*)k.in_ctx, 0, 33 * H->csz);
+            ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
+            fill_slot(k, dci);
+            volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+            ep[0] = (uint32_t)interval << 16;
+            ep[1] = 1u << 3 | (uint32_t)best.mps << 16;              // isochronous OUT, CErr 0
+            for (int i = 0; i < UA_TRBS; i++) ua.trb[i].d0 = ua.trb[i].d1 = ua.trb[i].d2 = ua.trb[i].d3 = 0;
+            volatile Trb& link = ua.trb[UA_TRBS - 1];
+            link.d0 = (uint32_t)phys(ua.trb); link.d1 = (uint32_t)(phys(ua.trb) >> 32);
+            link.d3 = TRB_LINK << 10 | (1 << 1);
+            uint64_t ri = phys(ua.trb) | 1;
+            ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+            ep[4] = (uint32_t)best.mps | (uint32_t)best.mps << 16;   // average TRB length, max ESIT payload
+            uint64_t ic = phys(k.in_ctx);
+            int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+            if (cc != 1) { printf("USB: %s: audio: configure endpoint failed (%d)\n", k.where, cc); ok = false; }
+            else out_dci = dci;
+        }
+        if (ok) {
+            ua.enq = 0; ua.cycle = 1;
+            ua.dci = dci;
+            ua.td_us = 125u << interval;
+            ua.pkt_max = best.mps;
+            ua.rate = rate; ua.ch = best.ch; ua.bytes = best.bytes;
+            ua.seq_done = ua.seq_enq = 0;
+            ua.facc = 0;
+            k.dci = dci;
+            ua.dev = (int)(&k - kbds);
+            snprintf(ua.name, sizeof ua.name, "USB audio %04x:%04x on %s", vid, pid, k.where);
+            ua.gen++;
+            printf("USB: audio output on %s: %04x:%04x, UAC%d, %u Hz, %d-bit, %d channel%s, %u us packets (slot %d, %s speed)\n",
+                   k.where, vid, pid, uac, rate, best.bits ? best.bits : best.bytes * 8, best.ch, best.ch == 1 ? "" : "s",
+                   ua.td_us, k.slot, speed_name(k.speed));
+        } else want_out = false;
     }
 
-    ua.enq = 0; ua.cycle = 1;
-    ua.dci = dci;
-    ua.td_us = 125u << interval;
-    ua.pkt_max = best.mps;
-    ua.rate = rate; ua.ch = best.ch; ua.bytes = best.bytes;
-    ua.seq_done = ua.seq_enq = 0;
-    ua.facc = 0;
+    if (want_in) {                                     // the isochronous IN endpoint (xHCI)
+        int interval = k.speed == 3 ? mic.in_interval - 1 : mic.in_interval - 1 + 3;
+        if (interval < 0) interval = 0;
+        if (interval > 15) interval = 15;
+        int dci = (mic.ep_in & 0xF) * 2 + 1;
+        memset((void*)k.in_ctx, 0, 33 * H->csz);
+        ctx(k.in_ctx, 0)[1] = 1 | 1u << dci;
+        fill_slot(k, dci > out_dci ? dci : out_dci);
+        volatile uint32_t* ep = ctx(k.in_ctx, 1 + dci);
+        ep[0] = (uint32_t)interval << 16;
+        ep[1] = 5u << 3 | (uint32_t)mic.in_mps << 16;            // isochronous IN, CErr 0
+        for (int i = 0; i < UM_TRBS; i++) um.trb[i].d0 = um.trb[i].d1 = um.trb[i].d2 = um.trb[i].d3 = 0;
+        volatile Trb& link = um.trb[UM_TRBS - 1];
+        link.d0 = (uint32_t)phys(um.trb); link.d1 = (uint32_t)(phys(um.trb) >> 32);
+        link.d3 = TRB_LINK << 10 | (1 << 1);
+        uint64_t ri = phys(um.trb) | 1;
+        ep[2] = (uint32_t)ri; ep[3] = (uint32_t)(ri >> 32);
+        ep[4] = (uint32_t)mic.in_mps | (uint32_t)mic.in_mps << 16;
+        uint64_t ic = phys(k.in_ctx);
+        int cc = command((uint32_t)ic, (uint32_t)(ic >> 32), 0, TRB_CONFIGURE_EP << 10 | (uint32_t)k.slot << 24, nullptr);
+        if (cc != 1) { printf("USB: %s: microphone: configure endpoint failed (%d)\n", k.where, cc); want_in = false; }
+        else {
+            um.enq = 0; um.cycle = 1;
+            um.dci = dci;
+            um.td_us = 125u << interval;
+            um.pkt_max = mic.in_mps;
+            um.rate = mrate; um.ch = mic.ch; um.bytes = mic.bytes;
+            um.seq_done = um.seq_enq = 0;
+            um.step = mrate * 4096 / 3000;                   // mrate / 48000, in 16.16
+            um.ph = 0; um.prev = 0;
+            um.ev_dry = um.ev_missed = um.ev_err = 0;
+            um.vid = vid; um.pid = pid;
+            um.dev = (int)(&k - kbds);
+            snprintf(um.name, sizeof um.name, "USB mic %04x:%04x on %s", vid, pid, k.where);
+            um.gen++;
+            k.kind = AUDIO;                            // (um_is, for um_fill's doorbell)
+            k.active = true;
+            um_fill();
+            printf("USB: microphone on %s: %04x:%04x, UAC%d, %u Hz, %d-bit, %d channel%s, %u us packets (slot %d, %s speed)\n",
+                   k.where, vid, pid, uac, mrate, mic.bits ? mic.bits : mic.bytes * 8, mic.ch, mic.ch == 1 ? "" : "s",
+                   um.td_us, k.slot, speed_name(k.speed));
+        }
+    }
+    if (!want_out && !want_in) return false;
     k.kind = AUDIO;
-    k.dci = dci;
     k.active = true;
-    ua.dev = (int)(&k - kbds);
-    snprintf(ua.name, sizeof ua.name, "USB audio %04x:%04x on %s", vid, pid, k.where);
-    ua.gen++;
-    printf("USB: audio output on %s: %04x:%04x, UAC%d, %u Hz, %d-bit, %d channel%s, %u us packets (slot %d, %s speed)\n",
-           k.where, vid, pid, uac, rate, best.bits ? best.bits : best.bytes * 8, best.ch, best.ch == 1 ? "" : "s",
-           ua.td_us, k.slot, speed_name(k.speed));
     return true;
 }
 
@@ -1798,8 +2022,11 @@ static bool setup_slot(Keyboard& k, int ki) {
     }
 
     // Room for a headset's configuration (a microphone and several formats
-    // run past 256 bytes, and what didn't fit was never seen).
-    static volatile uint8_t desc[1024] __attribute__((aligned(64)));
+    // run past 256 bytes, and what didn't fit was never seen), and a
+    // webcam's: its video formats come before its microphone, and run to
+    // several KB. xHCI reads up to 16 KB, the others 1 KB as before.
+    static volatile uint8_t desc[16384] __attribute__((aligned(16384)));
+    const int desc_max = H->type == HC_XHCI ? (int)sizeof(desc) : 1024;
     if (!control(k, 0x80, 6, 0x0100, 0, 8, desc)) { printf("USB: %s: no descriptor\n", k.where); return false; }
     int mps = desc[7];
     bool hub = desc[4] == 9;                            // device class: hub
@@ -1824,9 +2051,9 @@ static bool setup_slot(Keyboard& k, int ki) {
         return false;
     }
     int total = desc[2] | desc[3] << 8;
-    if (total > (int)sizeof(desc)) {
-        printf("USB: %s: %04x:%04x: configuration of %d bytes, only the first %d read\n", k.where, vid, pid, total, (int)sizeof(desc));
-        total = sizeof(desc);
+    if (total > desc_max) {
+        printf("USB: %s: %04x:%04x: configuration of %d bytes, only the first %d read\n", k.where, vid, pid, total, desc_max);
+        total = desc_max;
     }
     if (!control(k, 0x80, 6, 0x0200, 0, total, desc)) {
         printf("USB: %s: %04x:%04x: configuration (%d bytes) not read (cc=%d)\n", k.where, vid, pid, total, ctl_cc);
@@ -1999,6 +2226,7 @@ static void forget(int i) {
         ua.running = false; ua.dev = -1; ua.gen++;
         if (H->type != HC_XHCI) ua2_unlink();
     }
+    if (k.kind == AUDIO && um.dev == i) { um.dev = -1; um.gen++; }
     k.active = false;
     seen_drop(k.hc, k.where);
     if (H->type == HC_XHCI) command(0, 0, 0, 10 << 10 | (uint32_t)k.slot << 24, nullptr);   // disable slot
@@ -2361,6 +2589,11 @@ extern "C" void usb_kick_ports(void) {
 }
 
 bool usb_init(const char* cmdline) {
+    // Nothing runs the kernel's C++ constructors, and the audio structs'
+    // "dev = -1" is one (they're too big for the compiler to lay out as
+    // data): none plugged in, before anything asks (a mic-only device is
+    // an AUDIO device too, so kbds[0] would pass for the audio output).
+    ua.dev = -1; um.dev = -1;
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
     pad_keys_option(cmdline);
@@ -2667,7 +2900,11 @@ extern "C" int usb_list(char* buf, int max, int verbose)
                 case HUB: o.add(", hub, %d ports", k.nports); break;
                 case MSD: o.add(", %s: %s", k.bsize == 2048 ? "CD/DVD drive" : "disk", k.model); break;
                 case JOY: if (k.lay.tablet) o.add(", tablet: the mouse"); else o.add(", gamepad: joystick %c", 'A' + k.pad); break;
-                case AUDIO: o.add(", audio (vmdos's sound output)"); break;
+                case AUDIO: {
+                    int ki = (int)(&k - kbds);
+                    bool out = ua.dev == ki, mic = um.dev == ki;
+                    o.add(", audio (vmdos's %s)", out && mic ? "sound output and microphone" : mic ? "microphone" : "sound output");
+                    break; }
                 case NET: o.add(", Ethernet adapter"); break;
                 }
             } else {

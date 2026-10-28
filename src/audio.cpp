@@ -393,6 +393,7 @@ static bool cap_on;               // input stream running
 static int cap_cad = -1, cap_adc, cap_pin, cap_score;
 static uint32_t cap_pin_caps;     // its widget caps (widgets[] holds the last codec scanned)
 static uint32_t cap_read;
+static PciDevice cap_dev;         // the controller it's on (VMMIC)
 
 // Depth-first from an ADC to pin `target`; on success configures the path.
 static bool route_to_pin(int cad, int nid, int target, int depth) {
@@ -860,6 +861,7 @@ static bool hda_try(const PciDevice& d, bool digital) {
     const uint16_t fmt = 0x0011;                      // 48 kHz, 16-bit, 2 channels
     hda_mode = digital ? HDA_DIGITAL : HDA_ANALOG;
     cap_cad = -1; cap_score = 0; cap_on = false;
+    cap_dev = d;
     bool routed = false;
     for (int cad = 0; cad < 15 && !(digital && routed); cad++)
         if (codecs & (1 << cad)) routed |= hda_setup_codec(cad, tag, fmt);
@@ -925,19 +927,74 @@ static bool hda_try(const PciDevice& d, bool digital) {
     return true;
 }
 
-static uint32_t cap_pos() { return (r32(0x80 + 0x04) / 4) % RING_FRAMES; }
+// ---- Which microphone: HD Audio's (while playing through its analog
+// output) or a USB one (usb.cpp: its 48 kHz mono ring, whatever plays).
+// VMMIC picks; by default (auto) a USB mic when one is plugged in.
+extern "C" {
+int usb_mic_present(void);
+uint32_t usb_mic_gen(void);
+const char* usb_mic_name(void);
+uint32_t usb_mic_pos(void);
+const int16_t* usb_mic_ring(uint32_t* frames);
+}
+enum MicSrc { MIC_NONE, MIC_HDA, MIC_USB };
+static int mic_choice = -1;                            // -1 auto, else a MicSrc (mic=hda|usb|off)
+static int mic_cur = -1;                               // the one in use (cap_read is its)
+static uint32_t mic_usb_gen;
+static int usb_gain = 256;                             // USB mic: VMSB BOOST, 1/256ths
+static bool hda_mic_ok() { return cap_on && driver == AUDIO_HDA; }
+static bool usb_mic_ok() {
+    uint32_t n = 0;
+    return usb_mic_present() && usb_mic_ring(&n) && n == RING_FRAMES;
+}
+static int mic_pick() {
+    if (mic_choice == MIC_NONE) return MIC_NONE;
+    bool h = hda_mic_ok(), u = usb_mic_ok();
+    if (mic_choice == MIC_HDA && h) return MIC_HDA;
+    if (mic_choice == MIC_USB && u) return MIC_USB;
+    return u ? MIC_USB : h ? MIC_HDA : MIC_NONE;      // the one asked for isn't there: what is
+}
+// The microphone to read now; a different one than last time starts over.
+static int mic_src() {
+    int s = mic_pick();
+    uint32_t g = usb_mic_gen();
+    if (s != mic_cur || (s == MIC_USB && g != mic_usb_gen)) {
+        if (mic_cur >= 0 || s != MIC_NONE)
+            printf("Audio: microphone: %s\n", s == MIC_USB ? usb_mic_name() : s == MIC_HDA ? "HD Audio" : "none");
+        mic_cur = s; mic_usb_gen = g;
+        cap_read = 0xFFFFFFFF;
+    }
+    return s;
+}
+
+static uint32_t cap_pos() {
+    if (mic_cur == MIC_USB) return usb_mic_pos() % RING_FRAMES;
+    return (r32(0x80 + 0x04) / 4) % RING_FRAMES;
+}
 // The controller's link position runs ahead of what has reached memory (the
-// input FIFO is written out in bursts): stay this far behind it.
+// input FIFO is written out in bursts): stay this far behind it. (USB's
+// ring is written as the transfer events come in, every 8 ms: the same.)
 static const uint32_t CAP_SAFE = 1024;                 // ~21 ms
 static uint32_t cap_peak, cap_clips, cap_resyncs;       // for VMSB MIC
 static int16_t cap_frame(uint32_t f) {
-    volatile int16_t* p = &cap_ring[f * 2];
-    if (clflush_ok() && ((f & 15) == 0 || f == cap_read))   // in case the controller doesn't snoop
-        __asm__ volatile("clflush %0" :: "m"(*(volatile char*)p));
-    int l = p[0], r = p[1];
-    int v = (l + r) / 2;
-    int a = l < 0 ? -l : l, b = r < 0 ? -r : r;
-    if (a > 32000 || b > 32000) cap_clips++;
+    int v;
+    bool clip;
+    if (mic_cur == MIC_USB) {
+        uint32_t n;
+        v = usb_mic_ring(&n)[f % n] * usb_gain / 256;
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        clip = v > 32000 || v < -32000;
+    } else {
+        volatile int16_t* p = &cap_ring[f * 2];
+        if (clflush_ok() && ((f & 15) == 0 || f == cap_read))   // in case the controller doesn't snoop
+            __asm__ volatile("clflush %0" :: "m"(*(volatile char*)p));
+        int l = p[0], r = p[1];
+        v = (l + r) / 2;
+        int a = l < 0 ? -l : l, b = r < 0 ? -r : r;
+        clip = a > 32000 || b > 32000;
+    }
+    if (clip) cap_clips++;
     uint32_t m = (uint32_t)(v < 0 ? -v : v);
     if (m > cap_peak) cap_peak = m;
     return (int16_t)v;
@@ -954,7 +1011,7 @@ static uint32_t cap_ready(uint32_t pos) {               // frames safely in memo
 
 // Microphone samples (48 kHz mono) recorded since the last call, up to n.
 extern "C" int audio_capture_read(int16_t* mono, int n) {
-    if (!cap_on || driver != AUDIO_HDA) return 0;
+    if (mic_src() == MIC_NONE) return 0;
     uint32_t pos = cap_pos();
     if (cap_read == 0xFFFFFFFF) cap_read = (pos + RING_FRAMES - CAP_SAFE - n) % RING_FRAMES;
     uint32_t avail = cap_ready(pos);
@@ -972,7 +1029,7 @@ extern "C" uint32_t pit_clock(void);
 extern "C" uint32_t pit_clock(void);
 extern "C" int audio_capture_latest(int rate) {
     (void)rate;
-    if (!cap_on || driver != AUDIO_HDA) return 0;
+    if (mic_src() == MIC_NONE) return 0;
     static uint32_t last_t, frac;
     uint32_t pos = cap_pos(), t = pit_clock();
     uint32_t lag = (pos + RING_FRAMES - cap_read) % RING_FRAMES;
@@ -996,19 +1053,30 @@ extern "C" int audio_capture_latest(int rate) {
 }
 // VMSB MIC: what the microphone is, and its peak level since the last call.
 extern "C" int audio_capture_stats(uint32_t* peak, uint32_t* clips, uint32_t* resyncs) {
-    if (cap_on && driver == AUDIO_HDA) {                // take in what's arrived (when no program is recording)
+    if (mic_src() != MIC_NONE) {                        // take in what's arrived (when no program is recording)
         int16_t tmp[256];
         for (int i = 0; i < 64 && audio_capture_read(tmp, 256) > 0; i++) {}
     }
     *peak = cap_peak; *clips = cap_clips; *resyncs = cap_resyncs;
     cap_peak = 0; cap_clips = 0;
-    if (!cap_on || driver != AUDIO_HDA) return 0;
+    if (mic_cur == MIC_USB) return 4;
+    if (mic_cur != MIC_HDA) return 0;
     uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
-    return ((cfg >> 20) & 0xF) == 0x8 ? 3 : cfg >> 30 == 2 ? 2 : 1;   // 1 jack, 2 internal, 3 line in
+    return ((cfg >> 20) & 0xF) == 0x8 ? 3 : cfg >> 30 == 2 ? 2 : 1;   // 1 jack, 2 internal, 3 line in, 4 USB
 }
-// VMSB BOOST n: the mic pin's boost, in dB (rounded to the codec's steps).
+// VMSB BOOST n: the mic pin's boost, in dB (rounded to the codec's steps);
+// a USB mic's is applied to its samples (0-40 dB).
 extern "C" int audio_capture_boost(int db) {
-    if (!cap_on || driver != AUDIO_HDA || !(cap_pin_caps & (1 << 1))) return -1;
+    int s = mic_src();
+    if (s == MIC_USB) {
+        if (db < 0) db = 0;
+        if (db > 40) db = 40;
+        int g = 256;
+        for (int i = 0; i < db; i++) g = g * 73533 / 65536;   // +1 dB
+        usb_gain = g;
+        return db;
+    }
+    if (s != MIC_HDA || !(cap_pin_caps & (1 << 1))) return -1;
     uint32_t c = amp_caps(cap_cad, cap_pin, cap_pin_caps, false);
     int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
     int g = off + db * 4 / q;
@@ -1016,6 +1084,30 @@ extern "C" int audio_capture_boost(int db) {
     if (g < 0) g = 0;
     verb4(cap_cad, cap_pin, 0x3, 0x7000 | g);
     return (g - off) * q / 4;
+}
+
+// VMMIC: the microphones there are (names[MIC_HDA], names[MIC_USB]; empty:
+// not there), the choice (-1 auto, else a MicSrc); returns the one in use.
+extern "C" int audio_mic_list(char names[3][64], int* choice) {
+    for (int i = 0; i < 3; i++) names[i][0] = 0;
+    if (hda_mic_ok()) {
+        uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
+        int dev = (cfg >> 20) & 0xF;
+        snprintf(names[MIC_HDA], 64, "HD Audio %s (%02x:%02x.%x)",
+                 cfg >> 30 == 1 ? "headset mic" : dev == 0x8 ? "line in" : cfg >> 30 == 2 ? "internal mic" : "mic jack",
+                 cap_dev.bus, cap_dev.dev, cap_dev.fn);
+    }
+    if (usb_mic_ok()) snprintf(names[MIC_USB], 64, "%s", usb_mic_name());
+    *choice = mic_choice;
+    return mic_src();
+}
+// VMMIC n / OFF / AUTO: -1 auto, else a MicSrc. False: that one isn't there.
+extern "C" int audio_mic_choose(int c) {
+    if (c == MIC_HDA && !hda_mic_ok()) return 0;
+    if (c == MIC_USB && !usb_mic_ok()) return 0;
+    mic_choice = c < MIC_NONE || c > MIC_USB ? -1 : c;
+    mic_src();
+    return 1;
 }
 
 static void hda_stop() {
@@ -1365,6 +1457,12 @@ AudioDriver audio_init(const char* cmdline) {
             for (const char* q = p + 8; *q >= '0' && *q <= '9'; q++) v = v * 10 + (*q - '0');
             if (v >= 5 && v <= 200) latency_ms = v;
         }
+
+    // mic=usb|hda|off: the microphone to record from (VMMIC changes it).
+    for (const char* p = cmdline; p && *p; p++)
+        if (!strncmp(p, "mic=", 4))
+            mic_choice = !strncmp(p + 4, "usb", 3) ? MIC_USB : !strncmp(p + 4, "hda", 3) ? MIC_HDA :
+                         !strncmp(p + 4, "off", 3) ? MIC_NONE : -1;
 
     // Find every output. HD Audio: each controller's analog jacks, and every
     // HDMI/DisplayPort pin with a monitor the codec knows about.
