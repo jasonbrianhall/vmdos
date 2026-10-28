@@ -3,7 +3,8 @@
 ;   VMSB PRO      a Sound Blaster Pro 2.0 (DSP 3.02; the default)
 ;   VMSB          show which
 ;   VMSB MIC      mic level meter for 10 s (talk into it); Esc stops
-;   VMSB BOOST n  mic boost, n dB (0, 10, 20, 30: the codec rounds it)
+;   VMSB BOOST n  mic boost, n dB (0, 10, 20, 30: the codec rounds it;
+;                 a USB mic: 0-40, applied to its samples)
 ; Prints the BLASTER line to match; exits with errorlevel 16 or 2.
 ; (INT 2Fh AX=5642h, BX = 0 ask / 2 / 16 / 1 mic stats / 3 boost CX dB;
 ;  returns BX = 'VM'.)
@@ -114,6 +115,9 @@ mic:    mov ax, 5642h                   ; reset the counters, and which input
         mov dx, src_int
         je .s
         mov dx, src_line
+        cmp ax, 4
+        jb .s
+        mov dx, src_usb
 .s:     mov ah, 9
         int 21h
         mov word [left], 40             ; 40 x 1/4 s
@@ -221,12 +225,13 @@ pro     db 'Sound Blaster Pro 2.0 (DSP 3.02)', 13, 10
 sb16    db 'Sound Blaster 16 (DSP 4.05)', 13, 10
         db 'SET BLASTER=A220 I5 D1 H5 P330 T6', 13, 10, '$'
 msg_novm db 'VMSB: not running under vmdos', 13, 10, '$'
-msg_nomic db 'No microphone (it needs HD Audio analog output on the same card)', 13, 10, '$'
+msg_nomic db 'No microphone (a USB one, or HD Audio', 39, 's while it plays through its analog output; VMMIC lists them)', 13, 10, '$'
 msg_boost db 'Mic boost $'
 msg_db  db ' dB', 13, 10, '$'
 src_jack db 'Mic jack. Talk; Esc stops.', 13, 10, '$'
 src_int db 'Internal mic. Talk; Esc stops.', 13, 10, '$'
 src_line db 'Line in. Talk; Esc stops.', 13, 10, '$'
+src_usb db 'USB mic. Talk; Esc stops.', 13, 10, '$'
 msg_pct db '% $'
 msg_clip db 13, 10, 'clipped samples: $'
 msg_rs  db '   resyncs: $'

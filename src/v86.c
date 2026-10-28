@@ -303,6 +303,17 @@ static void do_int(struct regs *r, int n, u16 ip0)
             CX(r) = (u16)pk; DX(r) = (u16)(cl > 0xFFFF ? 0xFFFF : cl); SI(r) = (u16)rs;
         } else if (BX(r) == 3) {        /* mic boost CX dB: AX = what it got (FFFF: none) */
             AX(r) = (u16)audio_capture_boost((short)CX(r));
+        } else if (BX(r) == 4) {        /* VMMIC: the mics, 64-byte names at ES:DI (1 HD Audio, 2 USB; */
+            extern int audio_mic_list(char names[3][64], int *choice);   /* "": not there), AX = in use, CX = choice */
+            char names[3][64];
+            int choice;
+            AX(r) = (u16)audio_mic_list(names, &choice);
+            CX(r) = (u16)choice;
+            u8 *o = gptr(LIN(r->v86_es, DI(r)));
+            for (int i = 1; i < 3; i++) memcpy(o + (i - 1) * 64, names[i], 64);
+        } else if (BX(r) == 5) {        /* VMMIC: use mic CX (0 none, 1 HD Audio, 2 USB, FFFF auto); AX = 1 ok */
+            extern int audio_mic_choose(int c);
+            AX(r) = (u16)audio_mic_choose((short)CX(r));
         } else AX(r) = (u16)sound_sb_api(BX(r));
         BX(r) = 0x564D;
         return;

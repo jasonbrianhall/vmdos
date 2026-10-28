@@ -501,9 +501,14 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   `-device qemu-xhci -device usb-audio,audiodev=a0 -audiodev wav,id=a0,path=out.wav`
   (or `-device piix3-usb-uhci` or `-device pci-ohci` in place of `qemu-xhci`).
   A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
-  Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from the PC's mic jack (else
+  Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from a USB microphone (USB
+  Audio Class 1 or 2 on xHCI: a USB mic, a headset's mic, a webcam's mic;
+  any rate, resampled to 48 kHz mono), or the PC's mic jack (else
   internal mic, else line in) when playing through HD Audio analog;
-  silence otherwise. Test: `tests/sbrec.asm`.
+  silence otherwise. A USB one is used when it's plugged in; `VMMIC` lists
+  the microphones and picks one (`VMMIC 1` HD Audio, `VMMIC 2` USB,
+  `VMMIC OFF`, `VMMIC AUTO`), as does `mic=hda|usb|off` at boot.
+  `VMSB MIC` shows the level, `VMSB BOOST n` raises it. Test: `tests/sbrec.asm`.
   `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
   play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.
   See AUTOEXEC.BAT. Test: `tests/sb16test.asm`.
