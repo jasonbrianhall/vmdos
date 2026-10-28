@@ -505,9 +505,12 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   Audio Class 1 or 2 on xHCI: a USB mic, a headset's mic, a webcam's mic;
   any rate, resampled to 48 kHz mono), or the PC's mic jack (else
   internal mic, else line in) when playing through HD Audio analog;
-  silence otherwise. A USB one is used when it's plugged in; `VMMIC` lists
-  the microphones and picks one (`VMMIC 1` HD Audio, `VMMIC 2` USB,
-  `VMMIC OFF`, `VMMIC AUTO`), as does `mic=hda|usb|off` at boot.
+  silence otherwise. A USB one is used when it's plugged in, else the HD
+  Audio input with something plugged in (jack sense, checked every half
+  second: a mic jack before line in, then the internal mic). `VMMIC` lists
+  every input (`mic jack, rear pink`, `line in, rear blue`, `internal mic`,
+  the USB mic) and `VMMIC n` records from one (`VMMIC OFF`, `VMMIC AUTO`);
+  `mic=hda|usb|off` at boot.
   `VMSB MIC` shows the level, `VMSB BOOST n` raises it. Test: `tests/sbrec.asm`.
   `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
   play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.

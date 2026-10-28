@@ -39,7 +39,7 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMIPX                 IPX for network games (load VMPKT first)
   VMNIC [n | AUTO]      List the network cards, or pick the one to use
   VMSB 16 | PRO         Sound Blaster 16 or Pro (VMSB alone shows which)
-  VMMIC [n | OFF | AUTO] List the microphones (1 HD Audio, 2 USB), or pick one
+  VMMIC [n | OFF | AUTO] List the microphones (each jack, and USB), or pick one
   VMSB MIC              Mic level meter (written for parrot but the parrot game doesn't
                           work because of the way it handles audio)
 

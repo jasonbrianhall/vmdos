@@ -1,12 +1,13 @@
 ; VMMIC.COM: which microphone vmdos records from (Sound Blaster recording,
 ; VMSB MIC).
-;   VMMIC          list the microphones; * marks the one in use
-;   VMMIC 1        the HD Audio one (mic jack, else internal mic, else line
-;                  in; only while sound plays through HD Audio analog)
-;   VMMIC 2        the USB one (a USB microphone, headset or webcam)
+;   VMMIC          list the microphones; * marks the one in use: each HD
+;                  Audio input (mic jacks, internal mic, line in; while
+;                  sound plays through HD Audio analog), then a USB one
+;   VMMIC n        use microphone n
 ;   VMMIC OFF      none (recording gets silence)
-;   VMMIC AUTO     a USB one when it's plugged in, else HD Audio (the default)
-; Exits with errorlevel = the one in use (0 none, 1, 2).
+;   VMMIC AUTO     a USB one when it's plugged in, else the HD Audio input
+;                  with something plugged in (the default)
+; Exits with errorlevel = the one in use (0 none).
 ; (INT 2Fh AX=5642h, as VMSB: BX=4 lists into ES:DI, BX=5 picks CX;
 ;  returns BX = 'VM'.)
         cpu 286
@@ -19,16 +20,16 @@
         je .skip
         cmp al, 13
         je list
-        mov cx, 1
-        cmp al, '1'
-        je pick
-        inc cx
-        cmp al, '2'
-        je pick
-        xor cx, cx
         cmp al, '0'
-        je pick
-        or al, 20h
+        jb .word
+        cmp al, '9'
+        ja .word
+        sub al, '0'
+        xor ah, ah
+        mov cx, ax
+        jmp pick
+.word:  or al, 20h
+        xor cx, cx
         cmp al, 'o'
         je pick
         mov cx, 0FFFFh
@@ -59,9 +60,15 @@ list:   mov ax, 5642h
         jne novm
         mov [inuse], al
         mov [choice], cx
-        mov dx, msg_head
+        mov [count], dl
+        or dl, dl
+        jnz .have
+        mov dx, msg_none
         call puts
-        mov bl, 1                       ; 1 HD Audio, 2 USB
+        jmp .foot
+.have:  mov dx, msg_head
+        call puts
+        mov bl, 1
         mov si, names
 .mic:   mov dl, ' '
         cmp bl, [inuse]
@@ -75,15 +82,7 @@ list:   mov ax, 5642h
         call putc
         mov dx, msg_sp2
         call puts
-        cmp byte [si], 0
-        jne .name
-        mov dx, msg_hda_none
-        cmp bl, 1
-        je .p
-        mov dx, msg_usb_none
-.p:     call puts
-        jmp .next
-.name:  push si
+        push si
 .c:     lodsb
         or al, al
         jz .e
@@ -93,15 +92,15 @@ list:   mov ax, 5642h
 .e:     pop si
         mov dx, msg_crlf
         call puts
-.next:  add si, 64
+        add si, 64
         inc bl
-        cmp bl, 3
-        jb .mic
+        cmp bl, [count]
+        jbe .mic
         cmp byte [inuse], 0
-        jne .ch
+        jne .foot
         mov dx, msg_inuse0
         call puts
-.ch:    mov dx, msg_auto
+.foot:  mov dx, msg_auto
         cmp word [choice], 0FFFFh
         je .s
         mov dx, msg_off
@@ -129,21 +128,22 @@ puts:   push ax
         pop ax
         ret
 
-msg_head:     db 'Microphones (* in use)', 13, 10, '$'
-msg_sp2:      db '  $'
-msg_crlf:     db 13, 10, '$'
-msg_hda_none: db '(HD Audio: none, or sound isn', 39, 't playing through its analog output)', 13, 10, '$'
-msg_usb_none: db '(USB: none plugged in)', 13, 10, '$'
-msg_inuse0:   db 'None in use: recording gets silence.', 13, 10, '$'
-msg_auto:     db 'Picked automatically: USB when plugged in (VMMIC n to choose).', 13, 10, '$'
-msg_off:      db 'Microphone off (VMMIC AUTO to turn it back on).', 13, 10, '$'
-msg_set:      db 'Chosen with VMMIC (VMMIC AUTO to let vmdos pick).', 13, 10, '$'
-msg_nomic:    db 'VMMIC: that microphone isn', 39, 't there', 13, 10, '$'
-msg_novm:     db 'VMMIC: not running under vmdos', 13, 10, '$'
-msg_usage:    db 'usage: VMMIC         list the microphones', 13, 10
-              db '       VMMIC 1 | 2   use microphone 1 (HD Audio) or 2 (USB)', 13, 10
-              db '       VMMIC OFF     no microphone', 13, 10
-              db '       VMMIC AUTO    USB when plugged in, else HD Audio', 13, 10, '$'
+msg_head:   db 'Microphones (* in use)', 13, 10, '$'
+msg_sp2:    db '  $'
+msg_crlf:   db 13, 10, '$'
+msg_none:   db 'No microphones: plug in a USB one, or play through HD Audio analog', 13, 10
+            db 'output to record from its jacks.', 13, 10, '$'
+msg_inuse0: db 'None in use: recording gets silence.', 13, 10, '$'
+msg_auto:   db 'Picked automatically: USB, else a plugged-in jack (VMMIC n to choose).', 13, 10, '$'
+msg_off:    db 'Microphone off (VMMIC AUTO to turn it back on).', 13, 10, '$'
+msg_set:    db 'Chosen with VMMIC (VMMIC AUTO to let vmdos pick).', 13, 10, '$'
+msg_nomic:  db 'VMMIC: no such microphone', 13, 10, '$'
+msg_novm:   db 'VMMIC: not running under vmdos', 13, 10, '$'
+msg_usage:  db 'usage: VMMIC         list the microphones', 13, 10
+            db '       VMMIC n       use microphone n', 13, 10
+            db '       VMMIC OFF     no microphone', 13, 10
+            db '       VMMIC AUTO    USB, else a jack with something plugged in', 13, 10, '$'
 inuse:  db 0
+count:  db 0
 choice: dw 0
-names:  times 2 * 64 db 0
+names:  times 9 * 64 db 0
