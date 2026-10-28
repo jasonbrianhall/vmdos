@@ -201,6 +201,7 @@ static struct regs *deliver(struct regs *r)
         }
         return r;
     }
+    if (dpmi_hw_active(vec)) return r;          /* its PM handler hasn't returned yet: after it has (dpmi.c) */
     vpic_ack(vec);
     if (vec == vpic_base0()) stat_vec8++;
     int irqn = chosen_irq_of(vec);
@@ -732,7 +733,16 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                 u32 a = r->cs * 16 + (r->eip & 0xFFFF);
                 kprintf("log: guest at %04x:%04x (V86, IF %u), code %02x %02x %02x %02x %02x %02x\n", r->cs, r->eip, vif,
                         *(u8 *)a, *(u8 *)(a + 1), *(u8 *)(a + 2), *(u8 *)(a + 3), *(u8 *)(a + 4), *(u8 *)(a + 5));
-            } else kprintf("log: guest at %x:%x (%s)\n", r->cs, r->eip, from_pm ? "protected mode" : "kernel");
+            } else kprintf("log: guest at %x:%x (%s, IF %u)\n", r->cs, r->eip, from_pm ? "protected mode" : "kernel", vif);
+            {   /* why a hung program gets no interrupts: the PICs, its nesting, the timer */
+                void vpic_debug(char *buf, int n);
+                int dpmi_depth(char *buf, int n);
+                char b1[64], b2[64];
+                vpic_debug(b1, sizeof b1);
+                dpmi_depth(b2, sizeof b2);
+                kprintf("log: %s, DPMI %s, IRQ 0 raised %u delivered %u, pm %u refl %u rm %u\n",
+                        b1, b2, stat_irq0, stat_vec8, stat_pmirq, stat_reflirq, stat_rmirq);
+            }
             video_log_toggle();
         }
     log_done:

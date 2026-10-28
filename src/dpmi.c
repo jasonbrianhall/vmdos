@@ -1059,6 +1059,22 @@ struct regs *dpmi_mouse_flush(struct regs *r)
 }
 int dpmi_pm_hooked(int vec) { return client && pm_vec[vec & 0xFF].sel; }
 
+/* Is the client's protected-mode handler for this vector still running
+   (a visit for it on the nesting stack)? At IOPL 0 its PUSHF sees the real
+   IF (on), so DJGPP's disable()/enable() pair turns the virtual IF back on
+   inside a handler, which can't happen on a PC. If the same IRQ then comes
+   again after the handler's EOI but before its IRET, DJGPP's IRET wrapper
+   sees itself busy and skips the handler, EOI and all: the IRQ stays in
+   service for good (Wolf3D's 700 Hz music timer: no timer or keyboard
+   after that). So that IRQ waits until the handler has returned. */
+int dpmi_hw_active(int vec)
+{
+    if (!client) return 0;
+    for (int i = 0; i < xdepth; i++)
+        if (xs[i].kind == X_HW && xs[i].a == (u32)vec) return 1;
+    return 0;
+}
+
 struct regs *dpmi_hw_interrupt(struct regs *r, int vec)
 {
     struct ctx from;
