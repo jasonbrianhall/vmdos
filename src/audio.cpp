@@ -390,66 +390,162 @@ static void hdmi_infoframe(int cad, int pin, bool dp) {
 static int16_t cap_ring[RING_FRAMES * 2] __attribute__((aligned(4096)));
 static HdaBDL cap_bdl[RING_BUFS] __attribute__((aligned(128)));
 static bool cap_on;               // input stream running
-static int cap_cad = -1, cap_adc, cap_pin, cap_score;
-static uint32_t cap_pin_caps;     // its widget caps (widgets[] holds the last codec scanned)
+static int cap_cad = -1, cap_adc, cap_pin;
+static uint32_t cap_pin_caps;     // its widget caps
 static uint32_t cap_read;
 static PciDevice cap_dev;         // the controller it's on (VMMIC)
 
-// Depth-first from an ADC to pin `target`; on success configures the path.
-static bool route_to_pin(int cad, int nid, int target, int depth) {
+// Every input this controller has (mic jacks, internal mics, line in), each
+// with an ADC that reaches it and the path between them, found while the
+// codecs are scanned. One records at a time; VMMIC switches, and left on
+// auto the one with something plugged in is taken (checked again every
+// half second). The paths are kept (widgets[] only holds the last codec).
+struct PathStep { uint8_t nid, idx, type, nconn; uint32_t caps; };
+struct HdaIn {
+    uint8_t cad, pin, adc, nsteps;
+    PathStep steps[8];
+    uint32_t pcaps, wcaps, cfg;   // pin caps, widget caps, configuration default
+    bool relax;                   // marked "not connected" (a headset jack's mic?)
+};
+#define MAX_INS 8
+#define MIC_LIST (MAX_INS + 1)          // VMMIC's list: the inputs and a USB mic
+static HdaIn ins[MAX_INS];
+static int nins;
+static int cap_in = -1;           // ins[] index recording
+static int hda_choice = -1;       // VMMIC's: an ins[] index, -1 auto
+static const uint8_t cap_tag = 2; // the input stream's tag
+static const uint16_t cap_fmt = 0x0011;
+
+// Depth-first from an ADC to pin `target`: the path, without touching it.
+static bool find_path(int nid, int target, int depth, HdaIn& in) {
     if (nid == target) return true;
     if (depth > 6 || nid <= 0 || nid >= 128) return false;
     Widget& w = widgets[nid];
     if (!w.valid || w.type == 0 || w.type == 4) return false;   // a DAC or another pin: dead end
     for (int i = 0; i < w.nconn; i++) {
-        if (!route_to_pin(cad, w.conn[i], target, depth + 1)) continue;
-        if (w.type != 2 && w.nconn > 1) verb(cad, nid, 0x701, i);   // connection select
-        if (w.caps & (1 << 1)) { unmute_in(cad, nid, i); if (i) unmute_in(cad, nid, 0); }
-        if (w.caps & (1 << 2)) unmute_out(cad, nid);
-        verb(cad, nid, 0x705, 0);
+        if (!find_path(w.conn[i], target, depth + 1, in)) continue;
+        if (in.nsteps < 8) in.steps[in.nsteps++] = PathStep{(uint8_t)nid, (uint8_t)i, w.type, w.nconn, w.caps};
         return true;
     }
     return false;
 }
 
-// Is pin n a better microphone than the one we have? Jack mic (plugged in
-// first), then internal mic, then line in.
-// relax: the codec has no mic by its configuration. Laptop headset (combo)
-// jacks often have their mic pin marked "not connected" (Linux fixes that
-// per model): then take an input pin with a mic bias (VREF) that isn't
-// configured as an output, a plugged-in one first.
+static bool pin_plugged(const HdaIn& in) {             // presence detect says something's in it
+    return (in.pcaps & (1 << 2)) && (verb(in.cad, in.pin, 0xF09, 0) & (1u << 31));
+}
+// Which to take on auto: something plugged in first (a mic jack before line
+// in), then a jack that can't tell, the internal mic, and last the empty
+// jacks.
+static int in_score(const HdaIn& in) {
+    int dev = (in.cfg >> 20) & 0xF;
+    bool sense = in.pcaps & (1 << 2);
+    int kind = in.relax ? 1 : dev == 0xA && (in.cfg >> 30) == 2 ? 2 : dev == 0xA ? 3 : 1;   // 3 jack, 2 internal, 1 line in
+    if (sense && kind != 2) return pin_plugged(in) ? 20 + kind : kind;
+    return 5 + kind;
+}
+static int in_best() {
+    int best = -1, bs = -1;
+    for (int i = 0; i < nins; i++) {
+        int s = in_score(ins[i]);
+        if (s > bs) { bs = s; best = i; }
+    }
+    return best;
+}
+// "mic jack, rear pink", "line in, front blue", "internal mic"
+static void in_name(const HdaIn& in, char* o, int cap) {
+    static const char* const colors[16] = {"", "black", "grey", "blue", "green", "red", "orange", "yellow",
+                                           "purple", "pink", "", "", "", "", "white", ""};
+    static const char* const places[8] = {"", "rear", "front", "left", "right", "top", "bottom", ""};
+    int dev = (in.cfg >> 20) & 0xF, loc = (in.cfg >> 24) & 0x3F, color = (in.cfg >> 12) & 0xF;
+    if (in.relax) { snprintf(o, cap, "headset mic? (pin %d)", in.pin); return; }
+    if (dev == 0xA && (in.cfg >> 30) == 2) { snprintf(o, cap, "internal mic"); return; }
+    const char* what = dev == 0x8 ? "line in" : dev == 0xA ? "mic jack" : "input";
+    const char* place = (loc >> 4) == 0 ? places[loc & 7] : "";
+    snprintf(o, cap, "%s%s%s%s%s", what, place[0] || colors[color][0] ? ", " : "", place,
+             place[0] && colors[color][0] ? " " : "", colors[color]);
+}
+
+static void amp_in(int cad, int nid, uint32_t wcaps, int index, bool mute) {
+    uint32_t gain = amp_caps(cad, nid, wcaps, false) & 0x7F;
+    verb4(cad, nid, 0x3, 0x7000 | (mute ? 0x80 : 0) | (index << 8) | (mute ? 0 : gain));
+}
+// Record from ins[i]: the path from its ADC set, the other inputs' mixer
+// entries on the way muted, the pin enabled with its mic bias and boost,
+// and the ADC on the input stream (the old one off it).
+static void in_apply(int i) {
+    HdaIn& in = ins[i];
+    for (int j = 0; j < nins; j++) {                   // a capture mixer sums: the others' entries muted
+        if (j == i) continue;
+        for (int a = 0; a < ins[j].nsteps; a++) {
+            const PathStep& o = ins[j].steps[a];
+            if (o.type != 2 || !(o.caps & (1 << 1)) || ins[j].cad != in.cad) continue;
+            bool mine = false;
+            for (int b = 0; b < in.nsteps; b++) if (in.steps[b].nid == o.nid && in.steps[b].idx == o.idx) mine = true;
+            if (!mine) amp_in(in.cad, o.nid, o.caps, o.idx, true);
+        }
+    }
+    for (int b = 0; b < in.nsteps; b++) {
+        const PathStep& s = in.steps[b];
+        if (s.type != 2 && s.nconn > 1) verb(in.cad, s.nid, 0x701, s.idx);   // connection select
+        if (s.caps & (1 << 1)) {
+            amp_in(in.cad, s.nid, s.caps, s.idx, false);
+            if (s.idx && s.type != 2) amp_in(in.cad, s.nid, s.caps, 0, false);   // a selector's one amp
+        }
+        if (s.caps & (1 << 2)) {
+            uint32_t gain = amp_caps(in.cad, s.nid, s.caps, true) & 0x7F;
+            verb4(in.cad, s.nid, 0x3, 0xB000 | gain);
+        }
+        verb(in.cad, s.nid, 0x705, 0);
+    }
+    int vref = (in.pcaps >> 8) & 0xFF;                 // 80% (bit 2), else 50% (bit 0)
+    verb(in.cad, in.pin, 0x707, 0x20 | ((vref & 0x04) ? 0x04 : (vref & 0x01) ? 0x01 : 0));
+    verb(in.cad, in.pin, 0x705, 0);
+    if (in.wcaps & (1 << 1)) {                         // mic boost, about +20 dB
+        uint32_t c = amp_caps(in.cad, in.pin, in.wcaps, false);
+        int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
+        int g = off + 80 / q;
+        if (g > steps) g = steps;
+        verb4(in.cad, in.pin, 0x3, 0x7000 | g);
+    }
+    if (cap_in >= 0 && (ins[cap_in].cad != in.cad || ins[cap_in].adc != in.adc))
+        verb(ins[cap_in].cad, ins[cap_in].adc, 0x706, 0);   // the old ADC off the stream
+    verb4(in.cad, in.adc, 0x2, cap_fmt);
+    verb(in.cad, in.adc, 0x706, cap_tag << 4);
+    verb(in.cad, in.adc, 0x705, 0);
+    cap_in = i;
+    cap_cad = in.cad; cap_adc = in.adc; cap_pin = in.pin; cap_pin_caps = in.wcaps;
+    cap_read = 0xFFFFFFFF;
+}
+
+// Pin n, if it takes input: an entry in ins[] for each... the first ADC
+// that reaches it. relax: the codec configures it as "not connected"
+// (laptop headset jacks often are: Linux fixes that per model); taken if
+// it has a mic bias (VREF) and isn't an output, and is plugged in or the
+// codec has no other input.
 static void consider_mic(int cad, int n, uint32_t pcaps, int start, int count, bool relax = false) {
     if (!(pcaps & (1 << 5))) return;                  // not input capable
     if (pcaps & ((1 << 7) | (1u << 24))) return;      // HDMI / DisplayPort
     uint32_t cfg = verb(cad, n, 0xF1C, 0);
     int conn = cfg >> 30, dev = (cfg >> 20) & 0xF;
-    int score = 0;
     if (relax) {
         if (conn != 1 || !((pcaps >> 8) & 0xFF)) return;   // configured (seen already), or no mic bias
-        score = 1;
-        if ((pcaps & (1 << 2)) && (verb(cad, n, 0xF09, 0) & (1u << 31))) score = 2;   // plugged in
     } else if (conn == 1) return;                     // nothing connected
-    else if (dev == 0xA && conn != 2) {
-        score = 3;
-        if ((pcaps & (1 << 2)) && (verb(cad, n, 0xF09, 0) & (1u << 31))) score = 4;   // plugged in
-    } else if (dev == 0xA) score = 2;
-    else if (dev == 0x8) score = 1;
-    if (score <= cap_score) return;
+    else if (dev != 0xA && dev != 0x8) return;        // not a mic or line in
+    if (nins >= MAX_INS) return;
+    HdaIn& in = ins[nins];
+    in = HdaIn{};
+    in.cad = (uint8_t)cad; in.pin = (uint8_t)n; in.pcaps = pcaps; in.wcaps = widgets[n].caps; in.cfg = cfg; in.relax = relax;
+    if (relax) {
+        bool others = false;
+        for (int j = 0; j < nins; j++) if (ins[j].cad == cad && !ins[j].relax) others = true;
+        if (others && !pin_plugged(in)) return;
+    }
     for (int a = start; a < start + count && a < 128; a++) {
         if (widgets[a].type != 1) continue;           // audio input (ADC)
-        if (!route_to_pin(cad, a, n, 0)) continue;
-        cap_cad = cad; cap_adc = a; cap_pin = n; cap_score = score;
-        int vref = (pcaps >> 8) & 0xFF;               // 80% (bit 2), else 50% (bit 0)
-        verb(cad, n, 0x707, 0x20 | ((vref & 0x04) ? 0x04 : (vref & 0x01) ? 0x01 : 0));
-        verb(cad, n, 0x705, 0);
-        cap_pin_caps = widgets[n].caps;
-        if (widgets[n].caps & (1 << 1)) {             // mic boost, about +20 dB
-            uint32_t c = amp_caps(cad, n, widgets[n].caps, false);
-            int off = c & 0x7F, steps = (c >> 8) & 0x7F, q = ((c >> 16) & 0x7F) + 1;
-            int g = off + 80 / q;
-            if (g > steps) g = steps;
-            verb4(cad, n, 0x3, 0x7000 | g);
-        }
+        in.nsteps = 0;
+        if (!find_path(a, n, 0, in)) continue;
+        in.adc = (uint8_t)a;
+        nins++;
         return;
     }
 }
@@ -607,7 +703,7 @@ static bool hda_setup_codec(int cad, uint8_t stream_tag, uint16_t fmt) {
                 verb(cad, n, 0x70C, (verb(cad, n, 0xF0C, 0) & 0xFF) | 0x02);   // EAPD on
             if (!is_analog_out(cad, n, pcaps)) consider_mic(cad, n, pcaps, start, count);
         }
-        if (cap_cad < 0 && hda_mode == HDA_ANALOG)                  // no mic configured: an unconfigured one
+        if (hda_mode == HDA_ANALOG)                                 // unconfigured ones (headset jacks)
             for (int n = start; n < start + count && n < 128; n++)
                 if (widgets[n].type == 4 && !is_analog_out(cad, n, pin_caps[n]))
                     consider_mic(cad, n, pin_caps[n], start, count, true);
@@ -860,7 +956,7 @@ static bool hda_try(const PciDevice& d, bool digital) {
     const uint8_t tag = 1;
     const uint16_t fmt = 0x0011;                      // 48 kHz, 16-bit, 2 channels
     hda_mode = digital ? HDA_DIGITAL : HDA_ANALOG;
-    cap_cad = -1; cap_score = 0; cap_on = false;
+    cap_cad = -1; cap_on = false; cap_in = -1; nins = 0;
     cap_dev = d;
     bool routed = false;
     for (int cad = 0; cad < 15 && !(digital && routed); cad++)
@@ -892,14 +988,18 @@ static bool hda_try(const PciDevice& d, bool digital) {
     w8(sd + 0x02, tag << 4);                          // stream number (CTL bits 23:20)
     w8(sd + 0x00, 0x02);                              // run
     if (!digital) {
-        if (cap_cad < 0) printf("HDA: no microphone input\n");
+        if (!nins) printf("HDA: no microphone input\n");
         else if (!hda_iss) printf("HDA: no input streams: no microphone\n");
         else {
-            const uint8_t ctag = 2;
             const uint32_t isd = 0x80;
-            verb4(cap_cad, cap_adc, 0x2, fmt);
-            verb(cap_cad, cap_adc, 0x706, ctag << 4);
-            verb(cap_cad, cap_adc, 0x705, 0);
+            for (int i = 0; i < nins; i++) {
+                char nm[48];
+                in_name(ins[i], nm, sizeof nm);
+                printf("HDA: input %d: codec %d pin %d -> ADC %d (%s%s)\n", i + 1, ins[i].cad, ins[i].pin, ins[i].adc, nm,
+                       pin_plugged(ins[i]) ? ", plugged in" : "");
+            }
+            int pick = hda_choice >= 0 && hda_choice < nins ? hda_choice : in_best();
+            in_apply(pick);
             w8(isd, r8(isd) | 1);
             for (int i = 0; i < 1000 && !(r8(isd) & 1); i++) io_delay(1);
             w8(isd, r8(isd) & ~1);
@@ -913,15 +1013,14 @@ static bool hda_try(const PciDevice& d, bool digital) {
             w32(isd + 0x1C, 0);
             w32(isd + 0x08, sizeof(cap_ring));
             w16(isd + 0x0C, RING_BUFS - 1);
-            w16(isd + 0x12, fmt);
-            w8(isd + 0x02, ctag << 4);
+            w16(isd + 0x12, cap_fmt);
+            w8(isd + 0x02, cap_tag << 4);
             w8(isd + 0x00, 0x02);
             cap_on = true;
             cap_read = 0xFFFFFFFF;
-            uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
-            int dev = (cfg >> 20) & 0xF;
-            printf("HDA: codec %d pin %d -> ADC %d (%s)\n", cap_cad, cap_pin, cap_adc,
-                   cfg >> 30 == 1 ? "unconfigured pin, headset mic?" : dev == 0x8 ? "line in" : cfg >> 30 == 2 ? "internal mic" : "mic jack");
+            char nm[48];
+            in_name(ins[cap_in], nm, sizeof nm);
+            printf("HDA: recording from input %d (%s)\n", cap_in + 1, nm);
         }
     }
     return true;
@@ -942,7 +1041,9 @@ static int mic_choice = -1;                            // -1 auto, else a MicSrc
 static int mic_cur = -1;                               // the one in use (cap_read is its)
 static uint32_t mic_usb_gen;
 static int usb_gain = 256;                             // USB mic: VMSB BOOST, 1/256ths
-static bool hda_mic_ok() { return cap_on && driver == AUDIO_HDA; }
+extern "C" volatile uint32_t ticks;                    // milliseconds (cpu.c)
+static uint32_t in_checked;                            // when the jacks were last looked at
+static bool hda_mic_ok() { return cap_on && driver == AUDIO_HDA && cap_in >= 0; }
 static bool usb_mic_ok() {
     uint32_t n = 0;
     return usb_mic_present() && usb_mic_ring(&n) && n == RING_FRAMES;
@@ -955,6 +1056,7 @@ static int mic_pick() {
     return u ? MIC_USB : h ? MIC_HDA : MIC_NONE;      // the one asked for isn't there: what is
 }
 // The microphone to read now; a different one than last time starts over.
+// HD Audio on auto: every half second, the input with something plugged in.
 static int mic_src() {
     int s = mic_pick();
     uint32_t g = usb_mic_gen();
@@ -963,6 +1065,16 @@ static int mic_src() {
             printf("Audio: microphone: %s\n", s == MIC_USB ? usb_mic_name() : s == MIC_HDA ? "HD Audio" : "none");
         mic_cur = s; mic_usb_gen = g;
         cap_read = 0xFFFFFFFF;
+    }
+    if (s == MIC_HDA && hda_choice < 0 && nins > 1 && ticks - in_checked >= 500) {
+        in_checked = ticks;
+        int b = in_best();
+        if (b >= 0 && b != cap_in) {
+            char nm[48];
+            in_name(ins[b], nm, sizeof nm);
+            printf("HDA: recording from input %d (%s)\n", b + 1, nm);
+            in_apply(b);
+        }
     }
     return s;
 }
@@ -1061,8 +1173,9 @@ extern "C" int audio_capture_stats(uint32_t* peak, uint32_t* clips, uint32_t* re
     cap_peak = 0; cap_clips = 0;
     if (mic_cur == MIC_USB) return 4;
     if (mic_cur != MIC_HDA) return 0;
-    uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
-    return ((cfg >> 20) & 0xF) == 0x8 ? 3 : cfg >> 30 == 2 ? 2 : 1;   // 1 jack, 2 internal, 3 line in, 4 USB
+    const HdaIn& in = ins[cap_in];
+    int dev = (in.cfg >> 20) & 0xF;
+    return in.relax ? 1 : dev == 0x8 ? 3 : in.cfg >> 30 == 2 ? 2 : 1;   // 1 jack, 2 internal, 3 line in, 4 USB
 }
 // VMSB BOOST n: the mic pin's boost, in dB (rounded to the codec's steps);
 // a USB mic's is applied to its samples (0-40 dB).
@@ -1086,26 +1199,40 @@ extern "C" int audio_capture_boost(int db) {
     return (g - off) * q / 4;
 }
 
-// VMMIC: the microphones there are (names[MIC_HDA], names[MIC_USB]; empty:
-// not there), the choice (-1 auto, else a MicSrc); returns the one in use.
-extern "C" int audio_mic_list(char names[3][64], int* choice) {
-    for (int i = 0; i < 3; i++) names[i][0] = 0;
-    if (hda_mic_ok()) {
-        uint32_t cfg = verb(cap_cad, cap_pin, 0xF1C, 0);
-        int dev = (cfg >> 20) & 0xF;
-        snprintf(names[MIC_HDA], 64, "HD Audio %s (%02x:%02x.%x)",
-                 cfg >> 30 == 1 ? "headset mic" : dev == 0x8 ? "line in" : cfg >> 30 == 2 ? "internal mic" : "mic jack",
-                 cap_dev.bus, cap_dev.dev, cap_dev.fn);
+// VMMIC: the microphones there are, numbered from 1: each HD Audio input
+// (while it plays through HD Audio analog), then a USB one. names[i] for
+// number i + 1; *n how many; *choice -1 auto, 0 off, else a number.
+// Returns the number recording (0: none).
+extern "C" int audio_mic_list(char names[MIC_LIST][64], int* n, int* choice) {
+    int s = mic_src();
+    int h = hda_mic_ok() ? nins : 0, k = 0;
+    for (int i = 0; i < h && k < MIC_LIST; i++, k++) {
+        char nm[48];
+        in_name(ins[i], nm, sizeof nm);
+        snprintf(names[k], 64, "HD Audio %s%s", nm, pin_plugged(ins[i]) ? " (plugged in)" : "");
     }
-    if (usb_mic_ok()) snprintf(names[MIC_USB], 64, "%s", usb_mic_name());
-    *choice = mic_choice;
-    return mic_src();
+    if (usb_mic_ok() && k < MIC_LIST) snprintf(names[k++], 64, "%s", usb_mic_name());
+    *n = k;
+    *choice = mic_choice == MIC_NONE ? 0 : mic_choice < 0 ? -1 :
+              mic_choice == MIC_USB ? h + 1 : hda_choice >= 0 ? hda_choice + 1 : -1;
+    return s == MIC_USB ? h + 1 : s == MIC_HDA ? cap_in + 1 : 0;
 }
-// VMMIC n / OFF / AUTO: -1 auto, else a MicSrc. False: that one isn't there.
+// VMMIC n / OFF / AUTO: -1 auto, 0 off, else a number as listed. False:
+// there's no such one.
 extern "C" int audio_mic_choose(int c) {
-    if (c == MIC_HDA && !hda_mic_ok()) return 0;
-    if (c == MIC_USB && !usb_mic_ok()) return 0;
-    mic_choice = c < MIC_NONE || c > MIC_USB ? -1 : c;
+    int h = hda_mic_ok() ? nins : 0;
+    if (c < 0) { mic_choice = -1; hda_choice = -1; in_checked = ticks - 1000; }
+    else if (c == 0) mic_choice = MIC_NONE;
+    else if (c <= h) {
+        mic_choice = MIC_HDA; hda_choice = c - 1;
+        if (cap_in != c - 1) {
+            char nm[48];
+            in_name(ins[c - 1], nm, sizeof nm);
+            printf("HDA: recording from input %d (%s), by VMMIC\n", c, nm);
+            in_apply(c - 1);
+        }
+    } else if (c == h + 1 && usb_mic_ok()) mic_choice = MIC_USB;
+    else return 0;
     mic_src();
     return 1;
 }
@@ -1547,7 +1674,6 @@ uint32_t audio_play_pos() {
 // real stall forces a jump.
 static uint32_t underruns;
 uint32_t audio_underruns() { return underruns; }
-extern "C" volatile uint32_t ticks;                    // milliseconds (cpu.c)
 extern "C" uint32_t usb_audio_underruns(void);
 extern "C" void usb_audio_stats(uint32_t* s);
 
