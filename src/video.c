@@ -2529,7 +2529,16 @@ static u32 video_port_in_(u16 port)
         atc_flip = 0;
         u32 t = vpit_clock();
         u8 v = 0;
-        if (t % vr_period < vr_len) v |= 0x09;    /* vertical retrace (70 Hz, or the VBE 3 timings' refresh) */
+        /* Vertical blanking is longer than the retrace in it, as on a real
+           VGA (mode 13h: lines 406-441 of 449 blank, retrace at 412-414):
+           bit 0 stays on, bit 3 off, for a stretch either side. Programs
+           that take "blank, no retrace, several reads in a row" as their
+           moment to flip (a page flip loop reading 3DAh 5 times) found it
+           only in the 7 us horizontal blanks, which a machine with slow
+           port I/O can't read 5 times in: they fell back to timer pacing. */
+        u32 ph = t % vr_period, pre = vr_period / 75, post = vr_period / 17;
+        if (ph < vr_len) v |= 0x09;               /* vertical retrace (70 Hz, or the VBE 3 timings' refresh) */
+        else if (ph < vr_len + post || ph >= vr_period - pre) v |= 0x01;   /* vertical blanking */
         else if (t % 38 < 8) v |= 0x01;           /* horizontal blanking */
         return v; }
     }

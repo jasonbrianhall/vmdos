@@ -244,6 +244,7 @@ static int apic_ok;                            /* lapic mapped (or x2APIC): the 
 static int ft_state;                           /* 0 untried, 1 usable, 2 being measured, -1 not */
 static u32 ft_per_k;                           /* APIC timer counts per 1024 PIT clocks */
 static u32 ft_p0, ft_c0;                       /* the measurement's start: PIT clock, APIC count */
+static u64 ft_t0;                              /* and TSC */
 
 static u32 apic_rd(u32 off) { return x2apic ? (u32)rdmsr(0x800 + (off >> 4)) : lapic[off / 4]; }
 static void apic_wr(u32 off, u32 v) { if (x2apic) wrmsr(0x800 + (off >> 4), v); else lapic[off / 4] = v; }
@@ -260,6 +261,7 @@ static int fast_timer_start(void)
     apic_wr(0x320, 0x10000 | FAST_TIMER_VEC);  /* masked, one-shot */
     apic_wr(0x3E0, 0xB);                       /* divide by 1 */
     apic_wr(0x380, 0xFFFFFFFFu);
+    ft_t0 = tsc_read();
     ft_p0 = pit_clock();
     ft_c0 = apic_rd(0x390);
     return 1;
@@ -276,8 +278,25 @@ static int fast_timer_measure(void)
 {
     u32 p1 = pit_clock(), c1 = apic_rd(0x390);
     if (p1 - ft_p0 < 20 * PIT_PER_TICK) return 0;
+    u64 dt = tsc_read() - ft_t0;
     apic_wr(0x380, 0);
     u64 r = (u64)(ft_c0 - c1) * 1024 / (p1 - ft_p0);
+    /* Host ticks lost while it was measured (interrupts off a long time:
+       USB set-up at boot) make the PIT clock fall behind and the rate come
+       out too high (1.1 GHz seen, for a 100 MHz bus clock): the fast PIT's
+       interrupts then came 10 times late. The TSC, timed against PIT
+       channel 2 without interrupts (lib.c), doesn't lose them: it times
+       the measurement when there is one. */
+    u32 khz = tsc_khz();
+    if (khz && dt) {
+        u64 akhz = (u64)(ft_c0 - c1) * khz / dt;          /* APIC timer kHz */
+        u64 rt = akhz * 1024 * 1000 / PIT_HZ;
+        u64 diff = rt > r ? rt - r : r - rt;
+        if (diff * 50 > rt)
+            kprintf("fast PIT: host ticks lost while measuring (%u kHz by the tick count): timed by the TSC\n",
+                    (u32)(r * (PIT_HZ / 1000) >> 10));
+        r = rt;
+    }
     if (c1 == 0 || r < 1024 || r > 0xFFFFFFFFull) {    /* ran out, too slow, absurd */
         kprintf("fast PIT: APIC timer unusable (%u counts in %u PIT clocks)\n", ft_c0 - c1, p1 - ft_p0);
         ft_state = -1;
