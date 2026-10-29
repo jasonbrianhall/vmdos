@@ -1,9 +1,8 @@
 # Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk;
 # boots on UEFI and legacy BIOS through GRUB)
-# and publishes it as a GitHub release:
-#   - push a tag v* (git tag v1.0 && git push origin v1.0): release "v1.0"
-#   - run it by hand (Actions > release > Run workflow): pre-release "latest",
-#     replaced each time
+# and publishes it as a GitHub release named by date (UTC): v20261029, and
+# v20261029a, v20261029b, ... for further releases the same day.
+# Runs from a tag are full releases; all others are pre-releases.
 name: release
 
 on:
@@ -47,6 +46,7 @@ permissions:
 jobs:
   image:
     runs-on: ubuntu-24.04
+    concurrency: release   # two runs on one day must not pick the same name
     env:
       ESP_MB: 2000          # FAT16 (32 KiB clusters): fits a 4 GB stick, room for games
     steps:
@@ -84,12 +84,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tag="$GITHUB_REF_NAME"; flags=""
-          else
-            tag=latest; flags="--prerelease"
-            gh release delete latest --cleanup-tag -y || true
-          fi
+          # every release is named by date (UTC): v20261029, then v20261029a, b, c, ...
+          base="v$(date -u +%Y%m%d)"
+          taken="$(git ls-remote --tags origin "refs/tags/${base}*" | sed 's#.*refs/tags/##; s#\^{}$##')
+          $(gh release list --limit 1000 --json tagName -q '.[].tagName')"
+          tag=""
+          for s in "" {a..z}; do
+            if ! grep -qxF "$base$s" <<<"$taken"; then tag="$base$s"; break; fi
+          done
+          [ -n "$tag" ] || { echo "no free release name left for $base"; exit 1; }
+          flags=""
+          [ "$GITHUB_REF_TYPE" = tag ] || flags="--prerelease"
+          echo "release: $tag"
           cat > notes.md <<EOF
           Bootable USB-stick image: vmdos with FreeDOS, no games (commit ${GITHUB_SHA::7}).
 
