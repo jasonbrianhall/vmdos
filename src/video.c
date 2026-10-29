@@ -2530,15 +2530,28 @@ static u32 video_port_in_(u16 port)
         u32 t = vpit_clock();
         u8 v = 0;
         /* Vertical blanking is longer than the retrace in it, as on a real
-           VGA (mode 13h: lines 406-441 of 449 blank, retrace at 412-414):
-           bit 0 stays on, bit 3 off, for a stretch either side. Programs
-           that take "blank, no retrace, several reads in a row" as their
-           moment to flip (a page flip loop reading 3DAh 5 times) found it
-           only in the 7 us horizontal blanks, which a machine with slow
-           port I/O can't read 5 times in: they fell back to timer pacing. */
-        u32 ph = t % vr_period, pre = vr_period / 75, post = vr_period / 17;
-        if (ph < vr_len) v |= 0x09;               /* vertical retrace (70 Hz, or the VBE 3 timings' refresh) */
-        else if (ph < vr_len + post || ph >= vr_period - pre) v |= 0x01;   /* vertical blanking */
+           VGA: bit 0 on, bit 3 off, for a stretch either side. A page flip
+           loop that waits for "blank, no retrace" on 5 reads in a row (and
+           after a retrace waits for the display again, so only the blank
+           before one counts) found it only in the 7 us horizontal blanks.
+           With a slow trap per read (CLI'd code is stepped jump to jump)
+           it never got 5 there and, with no timer of its own hooked yet,
+           hung on a black screen. So the blank before the retrace is long
+           (1/10 of the frame), and the retrace doesn't show until a program
+           reading through that blank has had VB_READS reads of it, however
+           slowly it reads. */
+#define VB_READS 8
+        static u32 vb_frame;                      /* the retrace the blank reads were before */
+        static u8 vb_reads;
+        u32 ph = t % vr_period, fr = t / vr_period, pre = vr_period / 10, post = vr_period / 17;
+        if (ph >= vr_period - pre) {              /* blank, the retrace next */
+            if (vb_frame != fr + 1) { vb_frame = fr + 1; vb_reads = 0; }
+            if (vb_reads < VB_READS) vb_reads++;
+            v |= 0x01;
+        } else if (ph < vr_len) {
+            if (vb_frame == fr && vb_reads && vb_reads < VB_READS) { vb_reads++; v |= 0x01; }   /* held back a few reads */
+            else { vb_reads = VB_READS; v |= 0x09; }   /* vertical retrace (70 Hz, or the VBE 3 timings' refresh) */
+        } else if (ph < vr_len + post) v |= 0x01;  /* vertical blanking */
         else if (t % 38 < 8) v |= 0x01;           /* horizontal blanking */
         return v; }
     }
