@@ -214,11 +214,21 @@ static u16 stubs(int slot) { return rd16(0xF0000 + slot); }
 #define S_MOUSECB 0x23A
 
 /* Run INT n in real mode through the stub: the monitor's INT handling
-   (XMS, DPMI and mouse answers, BIOS shortcuts) applies as for any INT. */
+   (XMS, DPMI and mouse answers, BIOS shortcuts) applies as for any INT.
+   There is one stub, and an excursion can still be parked on its INT when
+   another one patches it: INT 16h AH=10h through 0300h waits for a key by
+   running its INT again after an interrupt, and the keyboard IRQ, passed
+   on by the client's PM handler (DJGPP's Ctrl-C check), is reflected
+   through the same stub. It came back as INT 09h: the BIOS took the
+   key's byte from port 60h a second time, every key twice (Wolf3D's
+   SETUP skipped menu entries). So each excursion keeps its vector, and
+   the outer one's goes back in when an inner one returns. */
+static void intstub_note(int n);
 static struct regs *go_real_int(struct ctx *rm, int n)
 {
     u16 off = stubs(S_INTSTUB);
     wr8(0xF0000 + off + 1, (u8)n);
+    intstub_note(n);
     rm->cs = 0xF000; rm->eip = off;
     return resume(rm);
 }
@@ -273,7 +283,7 @@ static u32 pop(struct ctx *c, int wide)
 /* ---------------- nesting: excursions to real mode and visits to PM ---------------- */
 enum { X_REFLECT, X_REFLECT_HW, X_SIM, X_DOSALLOC, X_DOSFREE, X_DOSRESIZE, X_HW, X_CB, X_EXC, X_MOUSE };
 #define XDEPTH 64
-static struct xent { int kind; struct ctx saved; u32 a, b, lk, rms; } xs[XDEPTH];   /* rms: the real-mode stack an excursion was given */   /* lk: locked-stack ESP a PM visit started at */
+static struct xent { int kind; struct ctx saved; u32 a, b, lk, rms; int intn; } xs[XDEPTH];   /* intn: the vector it put in the INT stub (-1: none) */   /* rms: the real-mode stack an excursion was given */   /* lk: locked-stack ESP a PM visit started at */
 static int xdepth;
 
 static struct xent *xpush(int kind, struct ctx *saved)
@@ -300,7 +310,18 @@ static struct xent *xpush(int kind, struct ctx *saved)
     x->saved = *saved;
     x->lk = 0;
     x->rms = 0;
+    x->intn = -1;
     return x;
+}
+
+static void intstub_note(int n) { if (xdepth) xs[xdepth - 1].intn = n; }   /* every caller has just pushed its excursion */
+
+/* An excursion returned: the INT stub holds the vector of the innermost
+   one still out again (see go_real_int). */
+static void intstub_restore(void)
+{
+    for (int i = xdepth - 1; i >= 0; i--)
+        if (xs[i].intn >= 0) { wr8(0xF0000 + stubs(S_INTSTUB) + 1, (u8)xs[i].intn); return; }
 }
 
 #define RM_STACK_PARAS 0x200
@@ -837,6 +858,7 @@ static void nest_pop(void)
     memcpy(seg_cache, p->seg_cache, sizeof seg_cache); memcpy(cbs, p->cbs, sizeof cbs);
     memcpy(xs, p->xs, sizeof xs);
     xdepth = p->xdepth; client32 = p->client32; stepping = p->stepping;
+    intstub_restore();
     step_cs = p->step_cs; step_eip = p->step_eip; step_ss = p->step_ss; step_esp = p->step_esp;
     locked_stack = p->locked_stack;
     psp_seg = p->psp_seg; env_seg = p->env_seg; rm_stack_seg = p->rm_stack_seg;
@@ -1585,6 +1607,7 @@ int dpmi_rm_trap(struct regs *r, int id)
         if (!xdepth) return BIOS_CONT;
         struct xent *x = &xs[--xdepth];
         struct ctx pm = x->saved;
+        if (x->intn >= 0) intstub_restore();
         switch (x->kind) {
         case X_REFLECT:
             copy_back_rm(&pm, &c);
