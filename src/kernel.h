@@ -396,6 +396,8 @@ int bootcon_start(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp, u8 rpos, u8 gpos, 
 void log_to_bootcon(void);
 void bootcon_remap(u32 lin);
 void bootcon_stop(void);
+void bootcon_dos_started(void);               /* the log screen (video=vbe on another card): new title, keeps going */
+u64 boot_fb_phys(void);                       /* cpu.c: the boot framebuffer's physical address, 0: none */
 void bootcon_putc(char c);
 int video_fb_ready(void);                      /* video.c has a framebuffer to draw on */
 extern volatile int log_view_req;
@@ -431,6 +433,7 @@ void vga_native_bios(void);                   /* bios_init: the ROM at C000h, it
 u16 vga_native_rom_end(void);                 /* the paragraph after the card's ROM (UMBs start there) */
 u32 vga_native_lfb(u32 phys, u32 len);        /* [phys, +len) in the card's memory: the bytes to map (DPMI 0800h), else 0 */
 void vga_native_rom_module(u8 *p, u32 len);   /* vmdos.efi's vgarom module: the card's legacy BIOS (video=vbe on UEFI) */
+int vga_native_logscreen(void);                /* video=vbe: the boot log stays live on another card's framebuffer */
 int vga_native_post(void);                    /* display=: AX for the chosen card's BIOS init (bus, devfn), -1: none
                                               (the PC's BIOS started the card) */
 int vga_native_pci(int bus, int devfn);       /* 1: the card's own PCI function (its config writes go through) */

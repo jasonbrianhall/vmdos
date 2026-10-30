@@ -221,7 +221,28 @@ static int pick_card(int cur)
     return k - 1;
 }
 
-/* Legacy VGA (3B0h-3DFh, A0000h-BFFFFh) to card c only. */
+/* A bridge whose range holds bus b but not bus not_b: turning its VGA
+   Enable off keeps legacy VGA from b without touching b's own decoding. */
+static int bridge_cuts(int b, int not_b)
+{
+    for (int bus = 0; bus < 256; bus++)
+        for (int df = 0; df < 256; df++) {
+            u32 id = cfg_rd(bus, df, 0);
+            if ((id & 0xFFFF) == 0xFFFF) { if (!(df & 7)) df += 7; continue; }
+            u32 hdr = cfg_rd(bus, df, 0x0C);
+            if (((hdr >> 16) & 0x7F) == 1) {
+                u32 r = cfg_rd(bus, df, 0x18), sec = (r >> 8) & 0xFF, sub = (r >> 16) & 0xFF;
+                if ((u32)b >= sec && (u32)b <= sub && ((u32)not_b < sec || (u32)not_b > sub)) return 1;
+            }
+            if (!(df & 7) && !(hdr & 0x800000)) df += 7;
+        }
+    return 0;
+}
+
+/* Legacy VGA (3B0h-3DFh, A0000h-BFFFFh) to card c only: the VGA Enable bit
+   of the bridges above it, off on the others. A card those bridges already
+   cut off keeps its decoding (its framebuffer stays: the log screen); one
+   that shares the path to c gets I/O and memory decoding turned off. */
 static void route_vga(int c)
 {
     int tb = cards[c].bus;
@@ -242,8 +263,61 @@ static void route_vga(int c)
         }
     for (int i = 0; i < n_cards; i++) {
         u32 cmd = cfg_rd(cards[i].bus, cards[i].devfn, 4) & 0xFFFF;
-        cfg_wr(cards[i].bus, cards[i].devfn, 4, i == c ? cmd | 7 : cmd & ~3u);
+        if (i == c) cfg_wr(cards[i].bus, cards[i].devfn, 4, cmd | 7);
+        else if (!bridge_cuts(cards[i].bus, tb)) cfg_wr(cards[i].bus, cards[i].devfn, 4, cmd & ~3u);
     }
+}
+
+/* Card i's memory BARs hold physical address a (and it still decodes them). */
+static int card_holds(int i, u64 a)
+{
+    int bus = cards[i].bus, df = cards[i].devfn;
+    u32 cmd = cfg_rd(bus, df, 4) & 0xFFFF;
+    if (!(cmd & 2)) return 0;
+    int hit = 0;
+    for (int k = 0; k < 6 && !hit; k++) {
+        int reg = 0x10 + k * 4;
+        u32 v = cfg_rd(bus, df, reg);
+        if (!v || (v & 1)) continue;
+        int is64 = (v & 6) == 4 && k < 5;
+        u32 hi = is64 ? cfg_rd(bus, df, reg + 4) : 0;
+        u32 fl;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(fl));
+        cfg_wr(bus, df, 4, cmd & ~3u);
+        cfg_wr(bus, df, reg, 0xFFFFFFFFu);
+        u32 lo_sz = cfg_rd(bus, df, reg);
+        cfg_wr(bus, df, reg, v);
+        u32 hi_sz = 0xFFFFFFFFu;
+        if (is64) { cfg_wr(bus, df, reg + 4, 0xFFFFFFFFu); hi_sz = cfg_rd(bus, df, reg + 4); cfg_wr(bus, df, reg + 4, hi); }
+        cfg_wr(bus, df, 4, cmd);
+        if (fl & EFL_IF) sti();
+        u64 base = (u64)hi << 32 | (v & ~0xFu);
+        u64 size = ~((u64)hi_sz << 32 | (lo_sz & ~0xFu)) + 1;
+        if (!is64) size &= 0xFFFFFFFFu;
+        if (size && a >= base && a - base < size) hit = 1;
+        if (is64) k++;
+    }
+    return hit;
+}
+
+/* The log screen: the boot framebuffer (GOP) is on another card than the
+   one DOS gets, and that card still decodes it: the boot log stays on it,
+   live, while DOS runs on the VBE card. Not on the same card (its BIOS
+   reprograms it). */
+static int log_screen;
+int vga_native_logscreen(void) { return vga_native && log_screen; }
+
+static void find_log_screen(int c)
+{
+    u64 fbp = boot_fb_phys();
+    if (!fbp || !bootcon_on) return;
+    for (int i = 0; i < n_cards; i++)
+        if (i != c && card_holds(i, fbp)) {
+            log_screen = 1;
+            kprintf("video=vbe: the log stays on card %04x:%04x's screen (PCI %02x:%02x.%u)\n", cards[i].id & 0xFFFF,
+                    cards[i].id >> 16, cards[i].bus, cards[i].devfn >> 3, cards[i].devfn & 7);
+            return;
+        }
 }
 
 /* Card c's x86 option ROM into rom/rom_len. 0: none to be had. */
@@ -337,6 +411,7 @@ static void uefi_init(void)
     memset(rom, 0, rom_len);
     memcpy(rom, mod_rom, mod_rom_len);
     route_vga(c);
+    find_log_screen(c);
     gpu_bus = bus; gpu_devfn = dev << 3 | fn;
     rom_init = gpu_bus << 8 | gpu_devfn;
     uefi_rom = 1;
@@ -381,6 +456,7 @@ void vga_native_init(void)
     if (pick >= 0 && (cards[pick].bus != gpu_bus || cards[pick].devfn != gpu_devfn)) {
         if (card_rom(pick)) {
             route_vga(pick);
+            find_log_screen(pick);
             gpu_bus = cards[pick].bus; gpu_devfn = cards[pick].devfn;
             rom_init = gpu_bus << 8 | gpu_devfn;
             memset(ivt_ours, 0, sizeof ivt_ours);          /* the new card's BIOS sets its own vectors */
