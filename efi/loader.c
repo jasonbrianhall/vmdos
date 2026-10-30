@@ -525,6 +525,137 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
     return g;
 }
 
+// video=vbe on a UEFI boot: the card's own legacy BIOS (VBE), when its
+// option ROM has an x86 image (discrete cards usually carry one beside their
+// UEFI driver; Intel's integrated graphics have no ROM of their own). The
+// card: display=ask lists the PCI display controllers and asks, display=N
+// takes N, else the one this screen is on. Its image comes from the copy of
+// the ROM UEFI keeps (PciIo->RomImage: the ROM BAR itself may be gone) and
+// goes to the kernel as the module "vgarom", with vbecard=BB:DD.F; the
+// kernel routes legacy VGA to the card and its BIOS starts it before DOS.
+#define MAX_CARDS 8
+static struct { UINTN bus, dev, fn; UINT32 id; const UINT8* x86; UINT32 x86_len; int here; } vcards[MAX_CARDS];
+static void* vgarom;
+static UINT32 vgarom_len;
+
+static const UINT8* rom_x86(const UINT8* r, UINT64 size, UINT32* len) {
+    for (UINT64 off = 0; r && off + 0x1A < size; ) {
+        if (r[off] != 0x55 || r[off + 1] != 0xAA) break;
+        UINT64 p = off + (r[off + 0x18] | r[off + 0x19] << 8);
+        if (p + 0x18 > size || r[p] != 'P' || r[p + 1] != 'C' || r[p + 2] != 'I' || r[p + 3] != 'R') break;
+        UINT32 ilen = (r[p + 0x10] | r[p + 0x11] << 8) * 512u;
+        if (r[p + 0x14] == 0) {                       // code type 0: x86 (PC-AT)
+            UINT32 l = r[off + 2] * 512u;
+            if (!l || l > ilen) l = ilen;
+            if (off + l > size) l = (UINT32)(size - off);
+            *len = l > 0x20000 ? 0x20000 : l;
+            return r + off;
+        }
+        if ((r[p + 0x15] & 0x80) || !ilen) break;
+        off += ilen;
+    }
+    return NULL;
+}
+
+static void vbe_card(EFI_GRAPHICS_OUTPUT_PROTOCOL* cur, char* opts) {
+    EFI_GUID pg = EFI_PCI_IO_PROTOCOL_GUID, gg = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, dg = DEVICE_PATH_PROTOCOL;
+    connect_displays();
+    // The device path of the screen in use, to tell which card it is on.
+    CHAR16* here = NULL;
+    {
+        EFI_HANDLE* hb = NULL;
+        UINTN hn = 0;
+        if (!EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &gg, NULL, &hn, &hb)) && hb) {
+            for (UINTN i = 0; i < hn && !here; i++) {
+                EFI_GRAPHICS_OUTPUT_PROTOCOL* g = NULL;
+                EFI_DEVICE_PATH* dp = NULL;
+                if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &gg, (void**)&g)) || g != cur) continue;
+                if (!EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &dg, (void**)&dp)) && dp)
+                    here = DevicePathToStr(dp);
+            }
+            uefi_call_wrapper(ST_->BootServices->FreePool, 1, hb);
+        }
+    }
+    int n = 0;
+    EFI_HANDLE* hb = NULL;
+    UINTN hn = 0;
+    if (!EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &pg, NULL, &hn, &hb)) && hb) {
+        for (UINTN i = 0; i < hn && n < MAX_CARDS; i++) {
+            EFI_PCI_IO_PROTOCOL* pci = NULL;
+            UINT32 id = 0;
+            UINT8 cls[3];
+            UINTN seg;
+            if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &pg, (void**)&pci)) || !pci) continue;
+            if (EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint8, 0x09, 3, cls)) || cls[2] != 0x03) continue;
+            uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint32, 0, 1, &id);
+            uefi_call_wrapper(pci->GetLocation, 5, pci, &seg, &vcards[n].bus, &vcards[n].dev, &vcards[n].fn);
+            if (seg) continue;                           // the kernel sees segment 0 only
+            vcards[n].id = id;
+            vcards[n].x86_len = 0;
+            vcards[n].x86 = rom_x86(pci->RomImage, pci->RomSize, &vcards[n].x86_len);
+            vcards[n].here = 0;
+            EFI_DEVICE_PATH* dp = NULL;
+            if (here && !EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &dg, (void**)&dp)) && dp) {
+                CHAR16* s = DevicePathToStr(dp);
+                UINTN k = 0;
+                while (s && s[k] && here[k] == s[k]) k++;
+                vcards[n].here = s && !s[k];             // this screen's path starts with the card's
+            }
+            n++;
+        }
+        uefi_call_wrapper(ST_->BootServices->FreePool, 1, hb);
+    }
+    for (int i = 1; i < n; i++)                          // in PCI order, as the kernel lists them
+        for (int j = i; j > 0 && (vcards[j].bus << 8 | vcards[j].dev << 3 | vcards[j].fn) <
+                                 (vcards[j - 1].bus << 8 | vcards[j - 1].dev << 3 | vcards[j - 1].fn); j--) {
+            __typeof__(vcards[0]) t = vcards[j]; vcards[j] = vcards[j - 1]; vcards[j - 1] = t;
+        }
+    if (!n) { Print(L"  video=vbe: no PCI display controller found; the framebuffer (GOP) it is\r\n"); return; }
+    int pick = 0;
+    for (int i = 0; i < n; i++) if (vcards[i].here) pick = i;
+    const char* v = opt_value(opts, "display=");
+    if (v && v[0] == 'a' && v[1] == 's' && v[2] == 'k') {
+        Print(L"\r\nVideo cards (video=vbe; * = this screen):\r\n");
+        for (int i = 0; i < n; i++) {
+            Print(L" %c%d: %04x:%04x at PCI %02x:%02x.%d, ", i == pick ? L'*' : L' ', i + 1, vcards[i].id & 0xFFFF,
+                  vcards[i].id >> 16, vcards[i].bus, vcards[i].dev, vcards[i].fn);
+            if (vcards[i].x86) Print(L"legacy BIOS %d KiB\r\n", vcards[i].x86_len >> 10);
+            else Print(L"no legacy BIOS (UEFI only: the framebuffer)\r\n");
+        }
+        Print(L"Number, then Enter (Enter alone or 15 s: %d): ", pick + 1);
+        int k = read_mode_number();
+        if (k >= 1 && k <= n) pick = k - 1;
+    } else if (v && v[0] >= '1' && v[0] <= '9') {
+        int k = 0;
+        for (const char* p = v; *p >= '0' && *p <= '9' && k < 100; p++) k = k * 10 + (*p - '0');
+        if (k >= 1 && k <= n) pick = k - 1;
+        else Print(L"  display=%d: there are %d video cards (display=ask lists them)\r\n", k, n);
+    }
+    if (!vcards[pick].x86) {
+        Print(L"  video=vbe: card %d (%04x:%04x) has no legacy video BIOS; the framebuffer (GOP) it is\r\n",
+              pick + 1, vcards[pick].id & 0xFFFF, vcards[pick].id >> 16);
+        return;
+    }
+    vgarom = alloc_low(vcards[pick].x86_len);
+    if (!vgarom) return;
+    copy(vgarom, vcards[pick].x86, vcards[pick].x86_len);
+    vgarom_len = vcards[pick].x86_len;
+    UINTN e = 0;
+    while (opts[e]) e++;
+    if (e + 24 < 512) {
+        static const char hx[] = "0123456789abcdef";
+        char* o = opts + e;
+        const char* w = " vbecard=";
+        while (*w) *o++ = *w++;
+        *o++ = hx[(vcards[pick].bus >> 4) & 15]; *o++ = hx[vcards[pick].bus & 15]; *o++ = ':';
+        *o++ = hx[(vcards[pick].dev >> 4) & 15]; *o++ = hx[vcards[pick].dev & 15]; *o++ = '.';
+        *o++ = (char)('0' + vcards[pick].fn); *o = 0;
+    }
+    Print(L"  video=vbe:    card %d, %04x:%04x at PCI %02x:%02x.%d, its legacy BIOS (%d KiB) starts it\r\n", pick + 1,
+          vcards[pick].id & 0xFFFF, vcards[pick].id >> 16, vcards[pick].bus, vcards[pick].dev, vcards[pick].fn,
+          vgarom_len >> 10);
+}
+
 static int usable_after_exit(UINT32 t) {
     return t == EfiConventionalMemory || t == EfiBootServicesCode || t == EfiBootServicesData ||
            t == EfiLoaderCode || t == EfiLoaderData;
@@ -626,7 +757,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (cfg) Print(L"  options from  %s: %a\r\n", cfg_path, opts);
         else Print(L"  no %s (no options from it)\r\n", cfg_path);
     }
-    gop = choose_display(gop, opts);
+    if (has_word(opts, "video=vbe")) vbe_card(gop, opts);   // display= picks the card for it
+    else gop = choose_display(gop, opts);
     apply_vga(gop, opts);
     // C: is the partition vmdos.efi came from when it holds KERNEL.SYS
     // (the kernel's SATA or USB driver reads it); dos.img only for c=ram or else.
@@ -774,6 +906,14 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         mod[i + 1].string = (UINT32)(UINTN)nm;
     }
     mbi->mods_count = 1 + n_iso;
+    if (vgarom && mbi->mods_count < 8) {                 // video=vbe: the card's legacy BIOS
+        char* nm = modname + 32 * mbi->mods_count;
+        copy(nm, "vgarom", 7);
+        mod[mbi->mods_count].mod_start = (UINT32)(UINTN)vgarom;
+        mod[mbi->mods_count].mod_end = (UINT32)(UINTN)vgarom + vgarom_len;
+        mod[mbi->mods_count].string = (UINT32)(UINTN)nm;
+        mbi->mods_count++;
+    }
     mbi->mods_addr = (UINT32)(UINTN)mod;
     mbi->fb_addr = gop->Mode->FrameBufferBase;
     mbi->fb_width = gop->Mode->Info->HorizontalResolution;
