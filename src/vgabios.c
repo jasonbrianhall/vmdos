@@ -293,15 +293,68 @@ static int card_rom(int c)
 
 int vga_native_post(void) { return vga_native ? rom_init : -1; }
 
+/* ---- video=vbe on a UEFI boot ----
+   Nothing ran a VGA BIOS, but a card's option ROM often carries a legacy
+   x86 image next to its UEFI driver (discrete cards: both kinds of PC).
+   vmdos.efi picks the card (display=, as here), takes that image from the
+   copy UEFI keeps of the card's ROM, and passes it as the module "vgarom"
+   with vbecard=BB:DD.F; the card is then started as on a BIOS boot when the
+   card isn't the one the PC's BIOS started. No image (Intel's integrated
+   graphics have none of their own): the framebuffer (GOP), as before. */
+static u8 *mod_rom;
+static u32 mod_rom_len;
+static int uefi_rom;
+void vga_native_rom_module(u8 *p, u32 len) { mod_rom = p; mod_rom_len = len; }
+
+static int hexn(const char **p, int max)
+{
+    int v = 0, n = 0;
+    for (; n < 2; n++, (*p)++) {
+        char c = **p | 32;
+        if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+        else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+        else break;
+    }
+    return n && v <= max ? v : -1;
+}
+
+static void uefi_init(void)
+{
+    const char *b = strstr(cmdline, "vbecard=");
+    if (!mod_rom || !b) {
+        kprintf("video=vbe: UEFI boot, and vmdos.efi found no legacy video BIOS on the card; using the framebuffer (GOP)\n");
+        return;
+    }
+    b += 8;
+    int bus = hexn(&b, 255), dev = *b == ':' ? (b++, hexn(&b, 31)) : -1, fn = *b == '.' ? (b++, *b - '0') : -1;
+    if (bus < 0 || dev < 0 || fn < 0 || fn > 7) { kprintf("video=vbe: bad vbecard=\n"); return; }
+    scan_cards();
+    int c = -1;
+    for (int i = 0; i < n_cards; i++) if (cards[i].bus == bus && cards[i].devfn == (dev << 3 | fn)) c = i;
+    if (c < 0) { kprintf("video=vbe: no video card at PCI %02x:%02x.%u\n", bus, dev, fn); return; }
+    rom_len = (mod_rom_len + 2047) & ~2047u;
+    rom = phys_alloc(rom_len);
+    memset(rom, 0, rom_len);
+    memcpy(rom, mod_rom, mod_rom_len);
+    route_vga(c);
+    gpu_bus = bus; gpu_devfn = dev << 3 | fn;
+    rom_init = gpu_bus << 8 | gpu_devfn;
+    uefi_rom = 1;
+    u32 id = cards[c].id;
+    kprintf("video=vbe: UEFI boot: card %04x:%04x at PCI %02x:%02x.%u, its legacy BIOS (%u KiB) starts it before DOS\n",
+            id & 0xFFFF, id >> 16, bus, dev, fn, mod_rom_len >> 10);
+    card_bars();
+    io_allow(0x3B0, 0x30);
+    io_allow(0x1CE, 2);
+    vga_native = 1;
+}
+
 void vga_native_init(void)
 {
     const char *o = strstr(cmdline, "video=");
     if (!o || (o != cmdline && o[-1] != ' ') || strncmp(o + 6, "vbe", 3)) return;
-    if (!strncmp(cmdline, "vmdos.efi", 9)) {
-        kprintf("video=vbe: a UEFI boot has no VGA BIOS (VBE); using the framebuffer (GOP)\n");
-        return;
-    }
     if (strstr(cmdline, "voodoo3")) { kprintf("video=vbe: not with voodoo3\n"); return; }
+    if (!strncmp(cmdline, "vmdos.efi", 9)) { uefi_init(); return; }
     const u8 *r = phys_low(0xC0000);
     const u16 *ivt = phys_low(0);
     u32 i10 = LIN(ivt[0x10 * 2 + 1], ivt[0x10 * 2]);
@@ -358,6 +411,7 @@ void vga_native_bios(void)
     for (int v = 0; v < 256; v++)
         if (ivt_ours[v]) { wr16(v * 4, ivt_save[v][0]); wr16(v * 4 + 2, ivt_save[v][1]); }
     wr16(0x42 * 4, rd16(0xF0000 + 0xFF * 2)); wr16(0x42 * 4 + 2, 0xF000);   /* the BIOS's own INT 10h: an IRET */
+    if (uefi_rom) return;                                 /* no BIOS data from a UEFI boot: the card's BIOS sets it */
     for (u32 a = 0x49; a <= 0x66; a++) wr8(BDA + a, bda_save[a]);
     for (u32 a = 0x84; a <= 0x8A; a++) wr8(BDA + a, bda_save[a]);
     wr32(BDA + 0xA8, *(u32 *)&bda_save[0xA8]);            /* the video save pointer table (in the ROM) */

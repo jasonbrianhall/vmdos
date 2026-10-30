@@ -622,6 +622,7 @@ struct mb_info {
 
 struct mb_mod { u32 start, end, string, reserved; };
 static struct { u32 start, end; char name[64]; } cdmod[8];
+static u32 vgarom_start, vgarom_end;
 static int n_cdmod;
 
 void kmain(u32 magic, struct mb_info *mb)
@@ -658,6 +659,10 @@ void kmain(u32 magic, struct mb_info *mb)
         for (u32 i = 0; i < mb->mods_count && i < 8; i++) EXCL(m[i].start, m[i].end);
         /* the others are CD images: note them (names too) before anything is allocated */
         for (u32 i = 1; i < mb->mods_count && i < 8; i++) {
+            if (m[i].string && !strncmp((const char *)(uintptr_t)m[i].string, "vgarom", 7)) {   /* vmdos.efi: video=vbe's card BIOS */
+                vgarom_start = m[i].start; vgarom_end = m[i].end;
+                continue;
+            }
             cdmod[n_cdmod].start = m[i].start; cdmod[n_cdmod].end = m[i].end;
             const char *nm = m[i].string ? (const char *)(uintptr_t)m[i].string : "image.iso";
             for (const char *q = nm; *q && *q != ' '; q++) if (*q == '/' || *q == '\\') nm = q + 1;   /* file name only */
@@ -747,6 +752,11 @@ void kmain(u32 magic, struct mb_info *mb)
         }
         disk_image = (u8 *)(uintptr_t)mod_start;
         disk_size = mod_end - mod_start;
+    }
+    if (vgarom_end > vgarom_start && vgarom_end - vgarom_start <= 0x20000) {   /* the card's legacy BIOS (vgabios.c) */
+        u8 *p = phys_alloc(vgarom_end - vgarom_start);
+        memcpy(p, (void *)(uintptr_t)vgarom_start, vgarom_end - vgarom_start);
+        vga_native_rom_module(p, vgarom_end - vgarom_start);
     }
     {
         for (int i = 0; i < n_cdmod; i++) {
