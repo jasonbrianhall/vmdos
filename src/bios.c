@@ -635,6 +635,11 @@ static void v3_post(struct regs *r)
 {
     if (v3_on) { r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x236); }
     if (vga_native) { r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x238); }   /* video=vbe: mode 3 by the card's BIOS first */
+    if (vga_native_post() >= 0) {                        /* display=: a card the PC's BIOS didn't start: its init */
+        wr16(BIOS_LIN + rd16(BIOS_LIN + 0x23C), (u16)vga_native_post());
+        wr8(BIOS_LIN + rd16(BIOS_LIN + 0x23C) + 2, 1);
+        r->cs = BIOS_SEG; r->eip = rd16(BIOS_LIN + 0x236);
+    }
 }
 
 /* Start the guest from floppy drive d's boot sector, as a BIOS would:

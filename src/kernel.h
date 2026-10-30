@@ -430,6 +430,9 @@ void vga_native_init(void);                   /* video_init: decide, find the ca
 void vga_native_bios(void);                   /* bios_init: the ROM at C000h, its vectors and BIOS data */
 u16 vga_native_rom_end(void);                 /* the paragraph after the card's ROM (UMBs start there) */
 u32 vga_native_lfb(u32 phys, u32 len);        /* [phys, +len) in the card's memory: the bytes to map (DPMI 0800h), else 0 */
+void vga_native_rom_module(u8 *p, u32 len);   /* vmdos.efi's vgarom module: the card's legacy BIOS (video=vbe on UEFI) */
+int vga_native_post(void);                    /* display=: AX for the chosen card's BIOS init (bus, devfn), -1: none
+                                              (the PC's BIOS started the card) */
 int vga_native_pci(int bus, int devfn);       /* 1: the card's own PCI function (its config writes go through) */
 void video_native_sync(void);                 /* video.c: video_mode from the BIOS data area */
 void video_native_pointer(void);              /* video.c: the INT 33h text-mode pointer, drawn in video memory */
