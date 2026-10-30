@@ -377,11 +377,44 @@ static const CHAR16* type_name(int t) {
     }
 }
 
+// Every device that can hold a GOP: each PCI display controller (class 03h)
+// gets its drivers connected, recursively, before the GOP handles are
+// listed. Fast-boot firmware connects only the console's card, and a GOP
+// driver may make child handles only for the ports it was asked for, so a
+// second card or an unused HDMI/DP port can have no GOP handle until now.
+static int connect_displays(void) {
+    EFI_GUID pg = EFI_PCI_IO_PROTOCOL_GUID;
+    EFI_HANDLE* hb = NULL;
+    UINTN hn = 0;
+    int n = 0;
+    if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &pg, NULL, &hn, &hb)) || !hb)
+        return 0;
+    for (UINTN i = 0; i < hn; i++) {
+        EFI_PCI_IO_PROTOCOL* pci = NULL;
+        UINT8 cls[3];   // config 09h-0Bh: prog-if, subclass, base class
+        if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, hb[i], &pg, (void**)&pci)) || !pci) continue;
+        if (EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint8, 0x09, 3, cls)) || cls[2] != 0x03) continue;
+        uefi_call_wrapper(ST_->BootServices->ConnectController, 4, hb[i], NULL, NULL, TRUE);
+        n++;
+    }
+    uefi_call_wrapper(ST_->BootServices->FreePool, 1, hb);
+    return n;
+}
+
+// Lit: the output has a mode set (an unused port says EFI_NOT_STARTED).
+static int output_lit(EFI_GRAPHICS_OUTPUT_PROTOCOL* g) {
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
+    UINTN size;
+    if (!g->Mode->Info || !g->Mode->Info->HorizontalResolution) return 0;
+    return uefi_call_wrapper(g->QueryMode, 4, g, g->Mode->Mode, &size, &info) != EFI_NOT_STARTED;
+}
+
 static int list_outputs(struct Output* o) {
     EFI_GUID gg = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, dg = DEVICE_PATH_PROTOCOL;
     EFI_HANDLE* hb = NULL;
     UINTN hn = 0;
     int n = 0;
+    connect_displays();
     if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &gg, NULL, &hn, &hb)) || !hb)
         return 0;
     for (UINTN i = 0; i < hn && n < MAX_OUTS; i++) {
@@ -412,9 +445,15 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
     if (ask) {
         Print(L"\r\nDisplay outputs (* = this screen):\r\n");
         for (int i = 0; i < n; i++) {
-            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* in = o[i].gop->Mode->Info;
-            Print(L" %c%d: %s, %dx%d\r\n      %s\r\n", o[i].gop == cur ? L'*' : L' ', i + 1, type_name(o[i].type),
-                  in ? in->HorizontalResolution : 0, in ? in->VerticalResolution : 0, o[i].path ? o[i].path : L"?");
+            EFI_GRAPHICS_OUTPUT_PROTOCOL* g = o[i].gop;
+            Print(L" %c%d: %s, ", g == cur ? L'*' : L' ', i + 1, type_name(o[i].type));
+            if (output_lit(g))
+                Print(L"%dx%d, framebuffer 0x%lx (%ld KB)\r\n", g->Mode->Info->HorizontalResolution,
+                      g->Mode->Info->VerticalResolution, (UINT64)g->Mode->FrameBufferBase,
+                      (UINT64)g->Mode->FrameBufferSize / 1024);
+            else
+                Print(L"not lit (%d modes; picking it starts it)\r\n", g->Mode->MaxMode);
+            Print(L"      %s\r\n", o[i].path ? o[i].path : L"?");
         }
         if (n == 1) {
             Print(L"  only one output: nothing to choose (the firmware may drive the others itself)\r\n"
@@ -446,17 +485,14 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
     if (g == cur) return cur;
     // Light it up: an output the firmware wasn't showing may have no mode set
     // yet (QueryMode says EFI_NOT_STARTED); setting one starts it.
-    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info;
-    UINTN size;
-    if (uefi_call_wrapper(g->QueryMode, 4, g, g->Mode->Mode, &size, &info) == EFI_NOT_STARTED || !g->Mode->Info ||
-        !g->Mode->Info->HorizontalResolution)
+    if (!output_lit(g))
         uefi_call_wrapper(g->SetMode, 2, g, g->Mode->Mode < g->Mode->MaxMode ? g->Mode->Mode : 0);
     if (!fit_mode(g)) {
         Print(L"  output %d has no 32-bit mode of 640x400 or more; keeping this screen\r\n", pick + 1);
         return cur;
     }
-    Print(L"  display:      output %d, %s, %dx%d\r\n", pick + 1, type_name(o[pick].type),
-          g->Mode->Info->HorizontalResolution, g->Mode->Info->VerticalResolution);
+    Print(L"  display:      output %d, %s, %dx%d, framebuffer 0x%lx\r\n", pick + 1, type_name(o[pick].type),
+          g->Mode->Info->HorizontalResolution, g->Mode->Info->VerticalResolution, (UINT64)g->Mode->FrameBufferBase);
     return g;
 }
 
