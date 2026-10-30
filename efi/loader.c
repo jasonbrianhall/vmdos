@@ -349,7 +349,7 @@ static void apply_vga(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop, const char* opts) {
 // has none); an ACPI _ADR node in it, where the firmware gives one, says
 // what kind of connector it is (ACPI _DOD display type, bits 11-8).
 #define MAX_OUTS 8
-struct Output { EFI_GRAPHICS_OUTPUT_PROTOCOL* gop; CHAR16* path; int type; };
+struct Output { EFI_GRAPHICS_OUTPUT_PROTOCOL* gop; CHAR16* path; int type; EFI_HANDLE h; };
 enum { DT_OTHER = 0, DT_CRT = 1, DT_TV = 2, DT_EXTERNAL = 3, DT_PANEL = 4, DT_NONE = -1 };
 
 static int output_type(EFI_DEVICE_PATH* dp) {
@@ -409,12 +409,39 @@ static int output_lit(EFI_GRAPHICS_OUTPUT_PROTOCOL* g) {
     return uefi_call_wrapper(g->QueryMode, 4, g, g->Mode->Mode, &size, &info) != EFI_NOT_STARTED;
 }
 
+// The monitor on an output, from the EDID the GPU driver read over DDC and
+// put on the output's handle (Active: what it uses, Discovered: what it
+// read). EDID lives on GOP child handles, so it only says which outputs see
+// a monitor; it can't find a port that has no GOP handle.
+static void print_edid(EFI_HANDLE h) {
+    EFI_GUID ag = EFI_EDID_ACTIVE_PROTOCOL_GUID, dg = EFI_EDID_DISCOVERED_PROTOCOL_GUID;
+    EFI_EDID_ACTIVE_PROTOCOL* e = NULL;
+    if ((EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, h, &ag, (void**)&e)) || !e || e->SizeOfEdid < 128) &&
+        (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->HandleProtocol, 3, h, &dg, (void**)&e)) || !e || e->SizeOfEdid < 128)) {
+        Print(L"      monitor: none reported (no EDID)\r\n");
+        return;
+    }
+    const UINT8* d = e->Edid;
+    CHAR16 name[14];
+    int nn = 0;
+    for (int k = 54; k <= 108 && !nn; k += 18)      // display name descriptor (FCh)
+        if (!d[k] && !d[k + 1] && d[k + 3] == 0xFC)
+            for (int j = 5; j < 18 && d[k + j] != 0x0A && d[k + j] >= 32 && d[k + j] < 127; j++) name[nn++] = d[k + j];
+    while (nn && name[nn - 1] == L' ') nn--;
+    name[nn] = 0;
+    UINT16 mfg = (UINT16)(d[8] << 8 | d[9]);         // three 5-bit letters
+    Print(L"      monitor: %c%c%c %s, %dx%d preferred\r\n", L'@' + ((mfg >> 10) & 31), L'@' + ((mfg >> 5) & 31),
+          L'@' + (mfg & 31), nn ? name : L"(no name)", d[56] | (d[58] >> 4) << 8, d[59] | (d[61] >> 4) << 8);
+}
+
+static int n_gpus;
+
 static int list_outputs(struct Output* o) {
     EFI_GUID gg = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, dg = DEVICE_PATH_PROTOCOL;
     EFI_HANDLE* hb = NULL;
     UINTN hn = 0;
     int n = 0;
-    connect_displays();
+    n_gpus = connect_displays();
     if (EFI_ERROR(uefi_call_wrapper(ST_->BootServices->LocateHandleBuffer, 5, ByProtocol, &gg, NULL, &hn, &hb)) || !hb)
         return 0;
     for (UINTN i = 0; i < hn && n < MAX_OUTS; i++) {
@@ -425,6 +452,7 @@ static int list_outputs(struct Output* o) {
         o[n].gop = g;
         o[n].path = DevicePathToStr(dp);
         o[n].type = output_type(dp);
+        o[n].h = hb[i];
         n++;
     }
     uefi_call_wrapper(ST_->BootServices->FreePool, 1, hb);
@@ -443,7 +471,7 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
         return cur;
     }
     if (ask) {
-        Print(L"\r\nDisplay outputs (* = this screen):\r\n");
+        Print(L"\r\nDisplay outputs on %d display controller(s) (* = this screen):\r\n", n_gpus);
         for (int i = 0; i < n; i++) {
             EFI_GRAPHICS_OUTPUT_PROTOCOL* g = o[i].gop;
             Print(L" %c%d: %s, ", g == cur ? L'*' : L' ', i + 1, type_name(o[i].type));
@@ -454,6 +482,7 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL* choose_display(EFI_GRAPHICS_OUTPUT_PROTOCOL
             else
                 Print(L"not lit (%d modes; picking it starts it)\r\n", g->Mode->MaxMode);
             Print(L"      %s\r\n", o[i].path ? o[i].path : L"?");
+            print_edid(o[i].h);
         }
         if (n == 1) {
             Print(L"  only one output: nothing to choose (the firmware may drive the others itself)\r\n"
