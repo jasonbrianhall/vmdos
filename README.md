@@ -240,7 +240,9 @@ it the BIOS/CSM menu's default.
 
 Which screen (UEFI, before `vga=`): `display=ask` lists the display outputs
 the firmware has (a laptop's panel and its HDMI port, two graphics cards)
-with their kind and asks for a number, `display=N` takes output N,
+with their kind, size and framebuffer and asks for a number (it first
+connects every PCI display controller, so a second card or a port the
+firmware left off shows up too), `display=N` takes output N,
 `display=external` the first HDMI/DisplayPort/DVI/VGA one and
 `display=internal` the built-in panel. Without it vmdos uses the screen the
 firmware shows its console on. Some firmware gives the GPU only one output
