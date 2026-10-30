@@ -44,10 +44,13 @@ static void draw_row(int r)
     for (int c = 0; c < cols; c++) glyph(r, c, (u8)(text[r][c] ? text[r][c] : ' '), fg_of(r), bg_of(r));
 }
 
+static int dos_on_other;                      /* video=vbe on another card: DOS runs there, the log stays here */
+
 static void title(void)
 {
     char t[MAX_COLS + 1];
-    int n = snprintf(t, sizeof t, " vmdos %s starting: its log (also on the serial port)", VMDOS_VERSION);
+    int n = dos_on_other ? snprintf(t, sizeof t, " vmdos %s log: DOS is on the other screen (also on the serial port)", VMDOS_VERSION)
+                         : snprintf(t, sizeof t, " vmdos %s starting: its log (also on the serial port)", VMDOS_VERSION);
     if (n > cols) n = cols;
     memset(text[0], ' ', MAX_COLS);
     memcpy(text[0], t, (u32)n);
@@ -87,6 +90,13 @@ void bootcon_remap(u32 lin)
 
 void bootcon_stop(void) { bootcon_on = 0; }
 
+void bootcon_dos_started(void)
+{
+    if (!bootcon_on) return;
+    dos_on_other = 1;
+    title();
+}
+
 static void newline(void)
 {
     col = 0;
@@ -102,8 +112,7 @@ static void newline(void)
 
 void bootcon_putc(char c)
 {
-    if (!bootcon_on || busy) return;                  /* an interrupt's line while one is drawn: serial only */
-    busy = 1;
+    if (!bootcon_on || __atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;   /* another CPU's or an interrupt's line while one is drawn: serial only */
     if (c == '\n') newline();
     else if (c == '\r') col = 0;                      /* rewrite the line (a countdown) */
     else if (c >= 32 && c < 127) {
@@ -112,5 +121,5 @@ void bootcon_putc(char c)
         glyph(row, col, (u8)c, fg_of(row), bg_of(row));
         col++;
     }
-    busy = 0;
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
