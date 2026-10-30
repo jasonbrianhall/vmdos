@@ -240,7 +240,9 @@ cards usually do; Intel's integrated graphics have none): vmdos.efi takes it
 from the copy UEFI keeps of the ROM and the card is started with it as
 below; with no such image `video=vbe` is ignored (logged) and the framebuffer
 is used. `display=ask` / `display=N` pick the card there too (vmdos.efi
-asks). `make esp KARGS=video=vbe` makes
+asks). When the screen vmdos.efi started on (GOP) is on another card, one a
+bridge keeps apart from the VBE card, the boot log stays on it, live, while
+DOS runs on the VBE card; on the same card it stops as before. `make esp KARGS=video=vbe` makes
 it the BIOS/CSM menu's default. With more than one card, `display=ask` lists
 them on the text screen and asks (`display=N` takes card N): another card
 than the one the PC's BIOS started gets legacy VGA routed to it (the bridges'

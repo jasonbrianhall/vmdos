@@ -300,6 +300,7 @@ static int cpu_has_pae(void)
 
 static u64 fb_phys;
 static u32 fb_len, fb_lin;
+u64 boot_fb_phys(void) { return fb_len ? fb_phys : 0; }
 static u32 mod_lo, mod_hi;
 static u32 isa_dma_phys;              /* 64 KiB of RAM below 16 MiB for ISA DMA (a real Sound Blaster) */
 
@@ -803,7 +804,8 @@ void kmain(u32 magic, struct mb_info *mb)
     smp_start(tramp);
     perf_io_probe();
     kprintf("starting DOS\n");
-    bootcon_stop();
+    if (vga_native_logscreen()) bootcon_dos_started();   /* video=vbe on another card: the log stays here */
+    else bootcon_stop();
     smp_go();
     guest_start();
 }
