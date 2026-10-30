@@ -359,6 +359,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) voodoo3'; \
 	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos), video card'"'"'s own BIOS (VBE, if its ROM has one), pick the card" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(filter-out video=% display=%,$(KARGS_ALL)) video=vbe display=ask'; \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
@@ -389,6 +392,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos), video card'"'"'s own BIOS (VBE, no scaling)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(filter-out video=% vga=%,$(KARGS_ALL)) video=vbe'; \
+	   echo '    set gfxpayload=text'; \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS (vmdos), video card'"'"'s own BIOS (VBE), pick the card" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(filter-out video=% vga=% display=%,$(KARGS_ALL)) video=vbe display=ask'; \
 	   echo '    set gfxpayload=text'; \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
