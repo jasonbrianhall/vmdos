@@ -72,23 +72,32 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw rom_post                      ; 0236  voodoo3: the card's BIOS initialised, then the boot sector
         dw vga_post                      ; 0238  video=vbe: text mode by the card's BIOS, then the boot sector
         dw dpmi_mousecb                  ; 023A  INT 33h 0Ch/14h from PM: the driver calls this, it calls the PM handler
+        dw rom_post_ax                   ; 023C  rom_post's AX: the card's bus and device/function
 
 ; ---- stubs ----
 dummy:  iret
 
-; voodoo3: as a PC's BIOS before booting, the video card's own BIOS is run
-; (its init entry, C000:0003, AX = its bus and device/function: 00h, 08h);
+; voodoo3, and video=vbe on a card the PC's BIOS didn't start (display=):
+; as a PC's BIOS before booting, the video card's own BIOS is run (its init
+; entry, C000:0003, AX = its bus and device/function: the Voodoo's 00h, 08h);
 ; it takes INT 10h. Then the boot sector, with the registers it was given.
 rom_post:
         pushad
         push ds
         push es
-        mov ax, 0x0008
+        mov ax, [cs:rom_post_ax]
         call 0xC000:0x0003
+        cmp byte [cs:rom_post_ax + 2], 0 ; display=: text mode by it, as a BIOS sets after the
+        je .boot                         ; VGA BIOS's init (which doesn't itself)
+        mov ax, 0x0003
+        int 0x10
+.boot:
         pop es
         pop ds
         popad
         jmp 0x0000:0x7C00
+rom_post_ax: dw 0x0008
+        db 0                             ; +2: 1 = then mode 3 (display=)
 
 ; video=vbe: the PC's card has its own BIOS (initialised by the PC's); a
 ; clean text mode from it, as a BIOS leaves the screen at boot, then the

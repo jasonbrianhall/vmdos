@@ -236,7 +236,11 @@ write-combining. Modes are the card's own, unscaled; vmdos draws nothing
 mouse driver is drawn only in text modes; CTMOUSE draws its own), and VMHV
 won't start with it. A UEFI boot has no VGA BIOS, so `video=vbe` is ignored
 there (logged) and the framebuffer is used. `make esp KARGS=video=vbe` makes
-it the BIOS/CSM menu's default.
+it the BIOS/CSM menu's default. With more than one card, `display=ask` lists
+them on the text screen and asks (`display=N` takes card N): another card
+than the one the PC's BIOS started gets legacy VGA routed to it (the bridges'
+VGA Enable, decoding off on the others) and its own option ROM, copied from
+its expansion ROM and started as a BIOS does before the boot sector.
 
 Which screen (UEFI, before `vga=`): `display=ask` lists the display outputs
 the firmware has (a laptop's panel and its HDMI port, two graphics cards)

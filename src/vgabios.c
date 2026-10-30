@@ -98,6 +98,201 @@ static void card_bars(void)
     }
 }
 
+/* ---- display= with video=vbe: which card ----
+   The PC's BIOS starts one card (the one legacy VGA goes to) and leaves its
+   BIOS at C000h. display=ask lists every VGA-class card and asks,
+   display=N takes card N. Another card than the BIOS's gets legacy VGA
+   routed to it (the VGA Enable bit of the bridges above it, I/O and memory
+   decoding off on the other cards), its x86 option ROM copied from its
+   expansion ROM BAR, and that ROM's init entry run by the guest before the
+   boot sector (bios.asm rom_post), as a BIOS runs it. */
+#define MAX_CARDS 8
+static struct { int bus, devfn; u32 id, cls; } cards[MAX_CARDS];
+static int n_cards, rom_init = -1;    /* rom_init: AX for the ROM's init entry (bus, devfn), -1: none */
+
+static void scan_cards(void)
+{
+    for (int bus = 0; bus < 256; bus++)
+        for (int df = 0; df < 256; df++) {
+            u32 id = cfg_rd(bus, df, 0);
+            if ((id & 0xFFFF) == 0xFFFF) { if (!(df & 7)) df += 7; continue; }
+            u32 cls = cfg_rd(bus, df, 8) >> 8;
+            if ((cls >> 16) == 3 && n_cards < MAX_CARDS) {
+                cards[n_cards].bus = bus; cards[n_cards].devfn = df;
+                cards[n_cards].id = id; cards[n_cards].cls = cls;
+                n_cards++;
+            }
+            if (!(df & 7) && !(cfg_rd(bus, df, 0x0C) & 0x800000)) df += 7;
+        }
+}
+
+static const char *vendor_name(u16 v)
+{
+    switch (v) {
+    case 0x8086: return "Intel";
+    case 0x1002: return "AMD";
+    case 0x10DE: return "NVIDIA";
+    case 0x1234: return "QEMU/Bochs";
+    case 0x15AD: return "VMware";
+    case 0x1AF4: return "virtio";
+    case 0x80EE: return "VirtualBox";
+    case 0x121A: return "3dfx";
+    case 0x102B: return "Matrox";
+    case 0x5333: return "S3";
+    case 0x1013: return "Cirrus";
+    default: return "?";
+    }
+}
+
+/* The menu: on the text screen the PC's BIOS left (GRUB keeps text mode for
+   video=vbe) and the log. Keys from the PS/2 controller, polled (a USB
+   keyboard too, through the BIOS's legacy emulation: USB isn't ours yet). */
+static u16 *tscr;
+static int trow;
+static void tline(const char *s)
+{
+    if (!tscr || trow >= 25) return;
+    for (int c = 0; c < 80; c++) tscr[trow * 80 + c] = 0x0700 | (u8)(*s ? *s++ : ' ');
+    trow++;
+}
+
+static u16 pit_count(void) { outb(0x43, 0x00); u16 c = inb(0x40); return c | (u16)(inb(0x40) << 8); }
+static void sleep_ms(int ms)                     /* as disk.c: PIT channel 0 reloads once a millisecond */
+{
+    u16 prev = pit_count();
+    while (ms > 0) { u16 c = pit_count(); if (c > prev) ms--; prev = c; }
+}
+
+static int read_digit(int n, int secs)           /* 1..n, 0: Enter or time out */
+{
+    while (vkbd_take() >= 0) ;
+    for (int ms = secs * 1000; ms > 0; ms -= 10) {
+        u8 st = inb(0x64);
+        if ((st & 0x21) == 0x01) vkbd_real_scancode(inb(0x60));
+        int k;
+        while ((k = vkbd_take()) >= 0) {
+            if (k >= 0x02 && k <= 0x0A && k - 1 <= n) return k - 1;
+            if (k == 0x1C) return 0;
+        }
+        sleep_ms(10);
+    }
+    return 0;
+}
+
+static int pick_card(int cur)
+{
+    const char *v = strstr(cmdline, "display=");
+    if (!v || (v != cmdline && v[-1] != ' ')) return cur;
+    v += 8;
+    scan_cards();
+    for (int i = 0; i < n_cards; i++)
+        if (cards[i].bus == gpu_bus && cards[i].devfn == gpu_devfn) cur = i;
+    if (!strncmp(v, "ask", 3)) {
+        static char line[100];
+        tscr = phys_low(0xB8000);
+        trow = 0;
+        for (int r = 0; r < 25; r++) tline("");
+        trow = 0;
+        tline("vmdos: video cards (* = the one the PC's BIOS started)");
+        tline("");
+        kprintf("video=vbe: video cards (* = the one the PC's BIOS started)\n");
+        for (int i = 0; i < n_cards; i++) {
+            snprintf(line, sizeof line, " %c%d: %s %04x:%04x at PCI %02x:%02x.%u%s", i == cur ? '*' : ' ', i + 1,
+                      vendor_name(cards[i].id & 0xFFFF), cards[i].id & 0xFFFF, cards[i].id >> 16,
+                      cards[i].bus, cards[i].devfn >> 3, cards[i].devfn & 7,
+                      (cards[i].cls >> 8) == 0x0300 ? "" : " (not VGA-compatible)");
+            tline(line);
+            kprintf("%s\n", line);
+        }
+        if (n_cards < 2) { tline(""); tline("Only one card: nothing to choose."); kprintf("video=vbe: one card\n"); sleep_ms(2000); return cur; }
+        tline("");
+        snprintf(line, sizeof line, "Press 1-%d (Enter or 15 s: keep %d)", n_cards, cur + 1);
+        tline(line);
+        kprintf("%s\n", line);
+        int k = read_digit(n_cards, 15);
+        return k ? k - 1 : cur;
+    }
+    int k = 0;
+    for (; *v >= '0' && *v <= '9' && k < 100; v++) k = k * 10 + (*v - '0');
+    if (k < 1 || k > n_cards) {
+        if (k) kprintf("video=vbe: display=%d, but there are %d video cards (display=ask lists them)\n", k, n_cards);
+        return cur;
+    }
+    return k - 1;
+}
+
+/* Legacy VGA (3B0h-3DFh, A0000h-BFFFFh) to card c only. */
+static void route_vga(int c)
+{
+    int tb = cards[c].bus;
+    for (int bus = 0; bus < 256; bus++)
+        for (int df = 0; df < 256; df++) {
+            u32 id = cfg_rd(bus, df, 0);
+            if ((id & 0xFFFF) == 0xFFFF) { if (!(df & 7)) df += 7; continue; }
+            u32 hdr = cfg_rd(bus, df, 0x0C);
+            if (((hdr >> 16) & 0x7F) == 1) {                        /* a PCI-PCI bridge */
+                u32 b = cfg_rd(bus, df, 0x18), sec = (b >> 8) & 0xFF, sub = (b >> 16) & 0xFF;
+                u32 bc = cfg_rd(bus, df, 0x3C);
+                if ((u32)tb >= sec && (u32)tb <= sub) {
+                    cfg_wr(bus, df, 0x3C, bc | (8u << 16));       /* VGA Enable */
+                    cfg_wr(bus, df, 4, (cfg_rd(bus, df, 4) & 0xFFFF) | 7);
+                } else if (bc & (8u << 16)) cfg_wr(bus, df, 0x3C, bc & ~(8u << 16));
+            }
+            if (!(df & 7) && !(hdr & 0x800000)) df += 7;
+        }
+    for (int i = 0; i < n_cards; i++) {
+        u32 cmd = cfg_rd(cards[i].bus, cards[i].devfn, 4) & 0xFFFF;
+        cfg_wr(cards[i].bus, cards[i].devfn, 4, i == c ? cmd | 7 : cmd & ~3u);
+    }
+}
+
+/* Card c's x86 option ROM into rom/rom_len. 0: none to be had. */
+static int card_rom(int c)
+{
+    int bus = cards[c].bus, df = cards[c].devfn;
+    u32 v = cfg_rd(bus, df, 0x30), cmd = cfg_rd(bus, df, 4) & 0xFFFF;
+    cfg_wr(bus, df, 0x30, 0xFFFFF800u);
+    u32 sz = cfg_rd(bus, df, 0x30) & 0xFFFFF800u;
+    cfg_wr(bus, df, 0x30, v);
+    if (!sz) { kprintf("video=vbe: the card has no option ROM\n"); return 0; }
+    sz = ~sz + 1;
+    u32 base = v & 0xFFFFF800u;
+    if (!base) { kprintf("video=vbe: the PC's BIOS gave the card's option ROM no address\n"); return 0; }
+    if (sz > (1u << 20)) sz = 1u << 20;
+    const u8 *r = map_mmio64(base, sz);
+    if (!r) { kprintf("video=vbe: the option ROM at %x can't be mapped\n", base); return 0; }
+    cfg_wr(bus, df, 4, cmd | 2);
+    cfg_wr(bus, df, 0x30, base | 1);
+    int ok = 0;
+    for (u32 off = 0; off + 0x1A < sz; ) {                         /* the images: the x86 one (code type 0) */
+        if (r[off] != 0x55 || r[off + 1] != 0xAA) break;
+        u32 p = off + (r[off + 0x18] | r[off + 0x19] << 8);
+        if (p + 0x18 > sz || memcmp(r + p, "PCIR", 4)) break;
+        u32 ilen = (r[p + 0x10] | r[p + 0x11] << 8) * 512u;
+        if (r[p + 0x14] == 0) {
+            u32 len = r[off + 2] * 512u;
+            if (!len || len > ilen) len = ilen;
+            if (len > 0x20000) len = 0x20000;
+            if (rom) phys_release(rom, rom_len);
+            rom_len = (len + 2047) & ~2047u;
+            rom = phys_alloc(rom_len);
+            memset(rom, 0, rom_len);
+            memcpy(rom, r + off, len);
+            kprintf("video=vbe: the card's option ROM, %u KiB (at %x)\n", len >> 10, base + off);
+            ok = 1;
+            break;
+        }
+        if ((r[p + 0x15] & 0x80) || !ilen) break;
+        off += ilen;
+    }
+    cfg_wr(bus, df, 0x30, v);
+    cfg_wr(bus, df, 4, cmd);
+    if (!ok) kprintf("video=vbe: no x86 image in the card's option ROM\n");
+    return ok;
+}
+
+int vga_native_post(void) { return vga_native ? rom_init : -1; }
+
 void vga_native_init(void)
 {
     const char *o = strstr(cmdline, "video=");
@@ -127,7 +322,20 @@ void vga_native_init(void)
     memcpy(bda_save, phys_low(0x400), sizeof bda_save);
     u16 pcir = *(const u16 *)(r + 0x18);
     int named = pcir + 8u < len && !memcmp(r + pcir, "PCIR", 4);
-    if (find_card(named ? *(const u16 *)(r + pcir + 4) : 0xFFFF, named ? *(const u16 *)(r + pcir + 6) : 0xFFFF)) {
+    int found = find_card(named ? *(const u16 *)(r + pcir + 4) : 0xFFFF, named ? *(const u16 *)(r + pcir + 6) : 0xFFFF);
+    if (!found) gpu_bus = -1;
+    int pick = pick_card(-1);
+    if (pick >= 0 && (cards[pick].bus != gpu_bus || cards[pick].devfn != gpu_devfn)) {
+        if (card_rom(pick)) {
+            route_vga(pick);
+            gpu_bus = cards[pick].bus; gpu_devfn = cards[pick].devfn;
+            rom_init = gpu_bus << 8 | gpu_devfn;
+            memset(ivt_ours, 0, sizeof ivt_ours);          /* the new card's BIOS sets its own vectors */
+            found = 1;
+            kprintf("video=vbe: card %d chosen; its BIOS starts it before DOS\n", pick + 1);
+        } else kprintf("video=vbe: keeping the card the PC's BIOS started\n");
+    }
+    if (found) {
         u32 id = cfg_rd(gpu_bus, gpu_devfn, 0);
         kprintf("video=vbe: the card is %04x:%04x at PCI %02x:%02x.%u\n", id & 0xFFFF, id >> 16, gpu_bus, gpu_devfn >> 3, gpu_devfn & 7);
         card_bars();
@@ -135,8 +343,9 @@ void vga_native_init(void)
     io_allow(0x3B0, 0x30);                                /* the VGA */
     io_allow(0x1CE, 2);                                   /* Bochs / QEMU VBE (SeaVGABIOS) */
     vga_native = 1;
-    kprintf("video=vbe: the card's own BIOS (%u KiB at C000h, INT 10h %04x:%04x), mode %02x\n",
-            len >> 10, ivt[0x21], ivt[0x20], bda_save[0x49]);
+    if (rom_init < 0)
+        kprintf("video=vbe: the card's own BIOS (%u KiB at C000h, INT 10h %04x:%04x), mode %02x\n",
+                len >> 10, ivt[0x21], ivt[0x20], bda_save[0x49]);
 }
 
 /* bios_init: after vmdos's BIOS has set up the IVT and BIOS data. */
