@@ -68,6 +68,47 @@ void serial_irq(int irq)
         if (com_on[i] && com_irq[i] == irq) vpic_raise(irq);
 }
 
+/* FreeDOS's COM driver (kernel/serial.asm) answers a non-destructive read
+   by ending in the console's exit, CommonNdRdExit, which asks INT 16h about
+   the keyboard: a byte from the port is fetched and kept, but the request
+   says "busy" unless a key is waiting too. DOS polls stdin that way, so
+   after CTTY COM1 the first byte typed is swallowed and DOS waits on the
+   keyboard for good. Its jump is pointed one step on, at ConNdRd2, which
+   hands back the byte kept (in AL) and reports it ready. The driver's code
+   lies in segment 70h; nothing is changed unless all of it matches. */
+static void freedos_comndread_fix(void)
+{
+    static int tries;
+    if (tries >= 8) return;                          /* the kernel is long in place by then */
+    tries++;
+    static const short pat[] = {                       /* ComNdRead; -1: any byte */
+        0xE8, -1, -1, 0x8A, 0x07, -2, 0xC0, 0x75, -1,     /* call GetComStat; mov al,[bx]; or al,al; jnz ComNdRd1 */
+        0xE8, -1, -1, 0xF6, 0xC4, 0x01, 0x74, -1,         /* call ComRdStatus; test ah,1; jz ComNdRtn */
+        0xE8, -1, -1, 0xE8, -1, -1, 0x88, 0x07,           /* call BiosRdCom; call GetComStat; mov [bx],al */
+        0xE9, -1, -1 };                                   /* ComNdRd1: jmp CommonNdRdExit */
+    const u32 seg = 0x700, n = sizeof pat / sizeof pat[0];
+    for (u32 o = 0; o + n < 0x8000; o++) {
+        u32 k;
+        for (k = 0; k < n; k++) {
+            u8 b = rd8(seg + o + k);
+            if (pat[k] == -2 ? (b != 0x08 && b != 0x0A) : (pat[k] >= 0 && b != pat[k])) break;
+        }
+        if (k < n) continue;
+        u16 jend = (u16)(o + n);                      /* offset after the jmp */
+        u16 t = jend + rd16(seg + jend - 2);          /* CommonNdRdExit */
+        /* mov al,[cs:uScanCode]; or al,al; jnz ConNdRd2 -> lds bx,[cs:_ReqPktPtr] */
+        u8 o2 = rd8(seg + t + 4);
+        if (rd8(seg + t) != 0x2E || rd8(seg + t + 1) != 0xA0 || (o2 != 0x08 && o2 != 0x0A) ||
+            rd8(seg + t + 5) != 0xC0 || rd8(seg + t + 6) != 0x75) return;
+        u16 c = t + 8 + (signed char)rd8(seg + t + 7);
+        if (rd8(seg + c) != 0x2E || rd8(seg + c + 1) != 0xC5 || rd8(seg + c + 2) != 0x1E) return;
+        wr16(seg + jend - 2, (u16)(c - jend));
+        tries = 8;
+        kprintf("serial: FreeDOS COM driver: non-destructive read fixed (0070:%04x)\n", jend - 3);
+        return;
+    }
+}
+
 /* ---------------- INT 14h ---------------- */
 static int wait_lsr(u16 b, u8 bit)                 /* about a second, as a PC's BIOS */
 {
@@ -85,6 +126,7 @@ void serial_int14(struct regs *r)
     int ours = 0;
     for (int i = 0; i < 2; i++) ours |= com_on[i] && b == com_base[i];
     if (!ours) { AH(r) = 0x80; return; }           /* no such port (or one DOS moved elsewhere): time-out */
+    freedos_comndread_fix();
     switch (AH(r)) {
     case 0x00: {                                   /* initialise: AL = baud (7-5), parity (4-3), stop (2), length (1-0) */
         static const u16 div[8] = { 1047, 768, 384, 192, 96, 48, 24, 12 };   /* 110 ... 9600 */
