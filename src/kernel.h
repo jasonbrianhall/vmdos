@@ -147,6 +147,8 @@ void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
 void io_allow(u16 port, u32 n);               /* ports straight to the hardware for the guest (no trap) */
+u32 wc_flags(void);                           /* cpu.c: PTE bits for write-combining (PWT with the PAT), else PCD */
+int io_allowed(u16 port);                     /* cpu.c: a port io_allow gave to the guest (video=vbe: the card's) */
 void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */
 void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
 void usb_start(const char *cmdline);
@@ -439,6 +441,8 @@ void vga_native_rom_module(u8 *p, u32 len);   /* vmdos.efi's vgarom module: the 
 int vga_native_logscreen(void);                /* video=vbe: the boot log stays live on another card's framebuffer */
 int vga_native_post(void);                    /* display=: AX for the chosen card's BIOS init (bus, devfn), -1: none
                                               (the PC's BIOS started the card) */
+u32 vga_native_rom_len(void);                 /* VMHV: the card's ROM at C000h, bytes (0: no video=vbe) */
+int vga_native_bar(int i, u32 *base, u32 *len);   /* VMHV: the card's memory BAR i (below 4 GiB), 0: none */
 int vga_native_pci(int bus, int devfn);       /* 1: the card's own PCI function (its config writes go through) */
 void video_native_sync(void);                 /* video.c: video_mode from the BIOS data area */
 void video_native_pointer(void);              /* video.c: the INT 33h text-mode pointer, drawn in video memory */
