@@ -380,12 +380,17 @@ static void sleep_ms(int ms)
     }
 }
 
-/* ---- more than one disk with FreeDOS: ask ----
-   Every disk with a FAT partition holding DOS is noted; with two or
-   more, a menu on the boot log lets the user pick C: (1-9), the best guess
-   (the partition vmdos.efi started from, else a USB stick) after a
-   countdown or on Enter. cmenu=N: seconds (default 5), cmenu=0: no menu.
-   Shown on the boot log, so not with bootlog=off. */
+/* ---- what to boot: ask ----
+   Every disk with a FAT partition holding DOS is noted, and so are the
+   floppy images (*.IMG of a floppy's size) in \EFI\VMDOS on those and on
+   the partition vmdos.efi started from, and the built-in RAM disk
+   (floppy.img / dos.img). With two or more of these, a menu on the boot
+   log lets the user pick (1-9), the best guess (the partition vmdos.efi
+   started from, else a USB stick; with no DOS partition the RAM disk)
+   after a countdown or on Enter. A floppy image is read into RAM and DOS
+   boots from it as A:, with no C: (VMHD can still put a partition there);
+   changes to it are lost at power-off. cmenu=N: seconds (default 5),
+   cmenu=0: no menu. Shown on the boot log, so not with bootlog=off. */
 #define MAX_CANDS 9
 static struct { int d, q; u32 start, size; const char *os; } cands[MAX_CANDS];
 static int n_cands;
@@ -393,6 +398,70 @@ static int n_cands;
 static void note(int d, u32 start, u32 size, int q, const char *os)
 {
     if (n_cands < MAX_CANDS) { cands[n_cands].d = d; cands[n_cands].q = q; cands[n_cands].start = start; cands[n_cands].size = size; cands[n_cands].os = os; n_cands++; }
+}
+
+#define MAX_IMGS 9
+static struct { int d; u32 start, clus, size; char name[13]; } imgs[MAX_IMGS];
+static int n_imgs, img_d;
+static u32 img_start;
+
+static int fd_size(u32 size)                    /* a floppy's: 360K, 720K, 1.2M, 1.44M, 2.88M (and DMF 1.68M) */
+{
+    return size == 368640 || size == 737280 || size == 1228800 || size == 1474560 || size == 1720320 || size == 2949120;
+}
+
+static int img_found(void *ctx, const char *name, u32 clus, u32 size)
+{
+    (void)ctx;
+    int n = (int)strlen(name);
+    if (n < 5 || memcmp(name + n - 4, ".IMG", 4) || !fd_size(size) || clus < 2 || n_imgs >= MAX_IMGS) return n_imgs >= MAX_IMGS;
+    imgs[n_imgs].d = img_d; imgs[n_imgs].start = img_start; imgs[n_imgs].clus = clus; imgs[n_imgs].size = size;
+    memcpy(imgs[n_imgs].name, name, (u32)n + 1);
+    n_imgs++;
+    return 0;
+}
+
+/* The floppy images in \EFI\VMDOS on the FAT partition at start of disk d. */
+static void find_imgs(int d, u32 start)
+{
+    for (int i = 0; i < n_imgs; i++) if (imgs[i].d == d && imgs[i].start == start) return;
+    static int seen_d[MAX_CANDS + MAX_DEVS];
+    static u32 seen_s[MAX_CANDS + MAX_DEVS];
+    static int n_seen;
+    for (int i = 0; i < n_seen; i++) if (seen_d[i] == d && seen_s[i] == start) return;
+    if (n_seen < MAX_CANDS + MAX_DEVS) { seen_d[n_seen] = d; seen_s[n_seen] = start; n_seen++; }
+    static struct fatvol v;
+    probe_disk = d;
+    if (fat_mount(&v, probe_rd, start)) return;
+    img_d = d; img_start = start;
+    fat_dir(&v, "\\EFI\\VMDOS", img_found, 0);
+}
+
+/* Floppy image k into RAM as A:, booted from. 0, or -1 (and why, logged). */
+static int boot_img(int k)
+{
+    static struct fatvol v;
+    static struct extent ext[64];
+    probe_disk = imgs[k].d;
+    if (fat_mount(&v, probe_rd, imgs[k].start)) { kprintf("disk: %s: can't read its partition\n", imgs[k].name); return -1; }
+    int n = fat_extents(&v, imgs[k].clus, imgs[k].size, ext, 64);
+    if (n < 1) { kprintf("disk: %s: %s\n", imgs[k].name, n == -2 ? "in too many pieces (defragment it)" : "bad cluster chain"); return -1; }
+    u32 secs = 0;
+    for (int i = 0; i < n; i++) secs += ext[i].count;                 /* whole clusters: at least the file */
+    u8 *buf = phys_try_alloc(secs * 512);
+    if (!buf) { kprintf("disk: %s: not enough memory\n", imgs[k].name); return -1; }
+    u8 *p = buf;
+    for (int i = 0; i < n; i++) {
+        if (disk_dev_rw(imgs[k].d, ext[i].lba, ext[i].count, p, 0)) { kprintf("disk: %s: read error\n", imgs[k].name); return -1; }
+        p += ext[i].count * 512;
+    }
+    if (fd_ram(0, buf, imgs[k].size)) { kprintf("disk: %s: not a floppy image vmdos can use\n", imgs[k].name); return -1; }
+    disk_image = 0;
+    disk_on_a = 1;
+    disk_sectors = 0;
+    kprintf("disk: A: is %s (%u KiB) from %s disk %d, in RAM, booting from it; no C: (VMHD C: n puts a partition there); "
+            "changes are lost at power-off\n", imgs[k].name, imgs[k].size >> 10, dev_kind(imgs[k].d), dev[imgs[k].d].idx);
+    return 0;
 }
 
 static int poll_key(void)                       /* interrupts are off here: PS/2 polled, USB through usb_tick */
@@ -411,26 +480,44 @@ static int poll_key(void)                       /* interrupts are off here: PS/2
     return -1;
 }
 
+/* The menu: options 0..n_cands-1 the partitions, then the built-in RAM
+   disk (if there is one), then the floppy images. -1: no menu (the best
+   guess as before). */
+static int ram_opt(void) { return disk_image ? n_cands : -1; }
+static int img_opt(int k) { return n_cands + (disk_image ? 1 : 0) + k; }
+static int n_opts(void)
+{
+    int n = img_opt(n_imgs);
+    return n > 9 ? 9 : n;
+}
+
 static int choose(int bd, u32 bs)
 {
-    if (n_cands < 2 || !bootcon_on) return -1;    /* no boot log on the screen (bootlog=off, no framebuffer): nobody sees a menu */
+    int n = n_opts();
+    if (n < 2 || !bootcon_on) return -1;          /* no boot log on the screen (bootlog=off, no framebuffer): nobody sees a menu */
     const char *m = strstr(cmdline, "cmenu=");
     int secs = m ? m[6] - '0' : 5;
     if (secs <= 0 || secs > 9) return -1;
-    int def = 0;
+    int def = bd < 0 ? (disk_image ? ram_opt() : img_opt(0)) : 0;
     for (int i = 0; i < n_cands; i++) if (cands[i].d == bd && cands[i].start == bs) def = i;
-    kprintf("disk: more than one disk has DOS on it. C: is:\n");
-    for (int i = 0; i < n_cands; i++)
+    kprintf("disk: what to boot (C: or A:):\n");
+    for (int i = 0; i < n_cands && i < n; i++)
         kprintf("  %d. %s on %s disk %d (%s), partition at LBA %u, %u MiB%s\n", i + 1, cands[i].os, dev_kind(cands[i].d),
                 dev[cands[i].d].idx, dev[cands[i].d].name, cands[i].start, cands[i].size >> 11,
                 cands[i].q >= 8 ? " - vmdos started from here" : i == def ? " - the best guess" : "");
+    if (disk_image && ram_opt() < n)
+        kprintf("  %d. the built-in RAM disk (%s, %u KiB)%s\n", ram_opt() + 1, disk_size <= 2949120 ? "a floppy, as A:" : "dos.img, as C:",
+                disk_size >> 10, ram_opt() == def ? " - the best guess" : "");
+    for (int k = 0; k < n_imgs && img_opt(k) < n; k++)
+        kprintf("  %d. floppy image \\EFI\\VMDOS\\%s (%u KiB) on %s disk %d, as A: in RAM%s\n", img_opt(k) + 1, imgs[k].name,
+                imgs[k].size >> 10, dev_kind(imgs[k].d), dev[imgs[k].d].idx, img_opt(k) == def ? " - the best guess" : "");
     while (vkbd_take() >= 0) ;
     for (int ms = secs * 1000; ms > 0; ms -= 20) {
         if (ms % 1000 == 0 || ms == secs * 1000)
-            kprintf("\rPress 1-%d (Enter: %d), %d s ", n_cands, def + 1, (ms + 999) / 1000);
+            kprintf("\rPress 1-%d (Enter: %d), %d s ", n, def + 1, (ms + 999) / 1000);
         int k = poll_key();
         if (k == 0) break;
-        if (k >= 1 && k <= n_cands) { def = k - 1; break; }
+        if (k >= 1 && k <= n) { def = k - 1; break; }
         sleep_ms(20);
     }
     for (int ms = 0; ms < 200; ms += 2) {          /* the key's release and anything after it: not for the mouse setup */
@@ -506,13 +593,22 @@ void disk_init(void)
             sleep_ms(20);
             waited += 20;
         }
-        if (bd >= 0) {
-            int c = choose(bd, bs);
-            if (c >= 0) { bd = cands[c].d; bs = cands[c].start; bz = cands[c].size; }
+        for (int i = 0; i < n_cands; i++) find_imgs(cands[i].d, cands[i].start);
+        if (hint) for (int d = 0; d < n_dev; d++) find_imgs(d, hint);   /* the ESP vmdos.efi came from, DOS on it or not */
+        if (n_imgs) kprintf("disk: %d floppy image%s in \\EFI\\VMDOS\n", n_imgs, n_imgs == 1 ? "" : "s");
+        int c = choose(bd, bs);
+        if (c >= img_opt(0) && c < img_opt(n_imgs)) {
+            if (!boot_img(c - img_opt(0))) return;
+            c = -1;                                                 /* it failed: the best guess */
+        }
+        int ram_chosen = c >= 0 && c == ram_opt();
+        if (ram_chosen) bd = -1;                                    /* the RAM disk, below */
+        else if (bd >= 0) {
+            if (c >= 0 && c < n_cands) { bd = cands[c].d; bs = cands[c].start; bz = cands[c].size; }
             use(bd, bs, bz);
             return;
-        }
-        if (n_dev) kprintf("disk: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
+        } else if (!disk_image && n_imgs && !boot_img(0)) return;   /* nothing else to boot */
+        if (n_dev && !ram_chosen) kprintf("disk: no FAT partition with DOS (KERNEL.SYS, IO.SYS, IBMBIO.COM) on the %d disk%s found\n", n_dev, n_dev == 1 ? "" : "s");
     }
     if (disk_image && !fd_ram(0, disk_image, disk_size)) {
         disk_on_a = 1;
