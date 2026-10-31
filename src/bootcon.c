@@ -22,6 +22,9 @@ static u8 rpos, gpos, bpos;
 static int cols, rows, row, col, busy;
 int bootcon_on;
 static char text[MAX_ROWS][MAX_COLS];         /* what is on screen, for the jump */
+static int dos_on_other;                      /* video=vbe on another card: DOS runs there, the log stays here */
+static int hidden;                            /* that screen kept black (Ctrl+Shift+F10 shows it); text[] still kept */
+static volatile int want_shown = -1;          /* a show/hide not yet done (busy when asked) */
 
 static u32 rgb(u8 r, u8 g, u8 b) { return (u32)r << rpos | (u32)g << gpos | (u32)b << bpos; }
 
@@ -41,10 +44,9 @@ static u32 bg_of(int r) { return r == 0 ? rgb(0, 0, 170) : 0; }
 
 static void draw_row(int r)
 {
+    if (hidden) return;
     for (int c = 0; c < cols; c++) glyph(r, c, (u8)(text[r][c] ? text[r][c] : ' '), fg_of(r), bg_of(r));
 }
-
-static int dos_on_other;                      /* video=vbe on another card: DOS runs there, the log stays here */
 
 static void title(void)
 {
@@ -90,11 +92,47 @@ void bootcon_remap(u32 lin)
 
 void bootcon_stop(void) { bootcon_on = 0; }
 
+static void clear_fb(void)
+{
+    for (u32 y = 0; y < height; y++) {
+        volatile u32 *q = (volatile u32 *)(fb + y * pitch);
+        for (u32 x = 0; x < width; x++) q[x] = 0;
+    }
+}
+
+/* DOS has started on the other card: the log screen goes black, so it
+   doesn't draw the eye while a game runs; the log is still kept for it
+   and Ctrl+Shift+F10 shows it (bootcon_show), as the overlay elsewhere. */
 void bootcon_dos_started(void)
 {
     if (!bootcon_on) return;
     dos_on_other = 1;
     title();
+    hidden = 1;
+    clear_fb();
+}
+
+static void apply_show(void)                  /* with busy held */
+{
+    int w = want_shown;
+    if (w < 0) return;
+    want_shown = -1;
+    if (hidden == !w) return;
+    hidden = !w;
+    if (hidden) clear_fb();
+    else for (int r = 0; r < rows; r++) draw_row(r);
+}
+
+/* Ctrl+Shift+F10 with the log screen: shown (1) or black (0). Done now, or
+   by the line being drawn when it ends (another CPU's, or the one this
+   interrupt cut into). */
+void bootcon_show(int on)
+{
+    if (!bootcon_on || !dos_on_other) return;
+    want_shown = on;
+    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;
+    apply_show();
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
 
 static void newline(void)
@@ -118,8 +156,9 @@ void bootcon_putc(char c)
     else if (c >= 32 && c < 127) {
         if (col >= cols) newline();
         text[row][col] = c;
-        glyph(row, col, (u8)c, fg_of(row), bg_of(row));
+        if (!hidden) glyph(row, col, (u8)c, fg_of(row), bg_of(row));
         col++;
     }
+    apply_show();
     __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
