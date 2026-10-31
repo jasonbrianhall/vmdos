@@ -2092,7 +2092,7 @@ static char osd_msg[OSD_MAX + 1];
 static u32 osd_until;
 
 static void video_osd_(const char *msg);
-void video_osd(const char *msg) { rlock_take(&video_lock); video_osd_(msg); rlock_drop(&video_lock); }
+void video_osd(const char *msg) { rlock_take(&video_lock); video_osd_(msg); rlock_drop(&video_lock); bootcon_osd(msg); }   /* video=vbe: on the log screen too */
 static void video_osd_(const char *msg)
 {
     int i = 0;

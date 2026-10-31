@@ -243,7 +243,8 @@ is used. `display=ask` / `display=N` pick the card there too (vmdos.efi
 asks). When the screen vmdos.efi started on (GOP) is on another card, one a
 bridge keeps apart from the VBE card, the boot log stays on it while DOS
 runs on the VBE card, kept but blacked out (no distraction while gaming):
-Ctrl+Shift+F10 shows it, live, and hides it again; on the same card it stops as before. `make esp KARGS=video=vbe` makes
+Ctrl+Shift+F10 shows it, live, and hides it again, and the other
+Ctrl+Shift keys' messages (speed, volume, sound output ...) show there for 2 s; on the same card it stops as before. `make esp KARGS=video=vbe` makes
 it the BIOS/CSM menu's default. With more than one card, `display=ask` lists
 them on the text screen and asks (`display=N` takes card N): another card
 than the one the PC's BIOS started gets legacy VGA routed to it (the bridges'
