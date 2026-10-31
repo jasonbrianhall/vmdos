@@ -747,6 +747,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             bootcon_show(1);                      /* video=vbe: the log screen on the other card */
         }
     log_done:
+        if (irq == 0) bootcon_tick();
         if (irq == 0 && log_save_req && !in_usb && usb_quiet()) {             /* Ctrl+Shift+S in the log */
             log_save_req = 0;
             const char *e = log_save();

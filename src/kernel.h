@@ -397,6 +397,8 @@ void log_to_bootcon(void);
 void bootcon_remap(u32 lin);
 void bootcon_stop(void);
 void bootcon_dos_started(void);               /* the log screen (video=vbe on another card): new title, black till Ctrl+Shift+F10 */
+void bootcon_osd(const char *msg);            /* the log screen: a hotkey's message, 2 s in the middle */
+void bootcon_tick(void);                      /* the timer: takes the message down */
 void bootcon_show(int on);                    /* the log screen: Ctrl+Shift+F10 shows it (1) or blacks it out (0) */
 u64 boot_fb_phys(void);                       /* cpu.c: the boot framebuffer's physical address, 0: none */
 void bootcon_putc(char c);

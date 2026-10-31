@@ -39,6 +39,16 @@ static void glyph(int r, int c, u8 ch, u32 fg, u32 bg)
     }
 }
 
+static void glyph_px(u32 x0, u32 y0, u32 sc, u8 ch, u32 fg, u32 bg)
+{
+    const u8 *f = vga_font16 + ch * 16;
+    for (u32 y = 0; y < 16 * sc; y++) {
+        volatile u32 *p = (volatile u32 *)(fb + (y0 + y) * pitch) + x0;
+        u8 bits = f[y / sc];
+        for (u32 x = 0; x < 8 * sc; x++) p[x] = (bits & (0x80 >> (x / sc))) ? fg : bg;
+    }
+}
+
 static u32 fg_of(int r) { return r == 0 ? rgb(255, 255, 255) : rgb(200, 200, 200); }
 static u32 bg_of(int r) { return r == 0 ? rgb(0, 0, 170) : 0; }
 
@@ -112,15 +122,87 @@ void bootcon_dos_started(void)
     clear_fb();
 }
 
-static void apply_show(void)                  /* with busy held */
+/* The hotkeys' messages (speed, volume, sound output, log saved ...: what
+   video_osd shows over the picture with video=fb) in a box in the middle
+   of the log screen for 2 s, shown or hidden: vmdos draws nothing on the
+   VBE card. */
+#define OSD_LEN 64
+static char osd[OSD_LEN + 1];
+static volatile int osd_new;                  /* a message to draw */
+static int osd_up;                            /* one is drawn */
+static u32 osd_end, osd_x, osd_y, osd_w, osd_h;
+
+static void osd_erase(void)
+{
+    if (!osd_up) return;
+    osd_up = 0;
+    if (!hidden) { for (int r = 0; r < rows; r++) draw_row(r); return; }
+    for (u32 y = osd_y; y < osd_y + osd_h; y++) {
+        volatile u32 *q = (volatile u32 *)(fb + y * pitch) + osd_x;
+        for (u32 x = 0; x < osd_w; x++) q[x] = 0;
+    }
+}
+
+static void osd_draw(void)
+{
+    osd_erase();
+    int n = (int)strlen(osd);
+    if (!n) return;
+    u32 sc = scale * 2;
+    while (sc > 1 && (u32)(n + 2) * 8 * sc > width) sc--;
+    if ((u32)(n + 2) * 8 * sc > width) n = (int)(width / (8 * sc)) - 2;
+    if (n <= 0) return;
+    osd_w = (u32)(n + 2) * 8 * sc; osd_h = 16 * sc * 2;
+    osd_x = (width - osd_w) / 2; osd_y = (height - osd_h) / 2;
+    u32 bg = rgb(0, 0, 170), fg = rgb(255, 255, 85);
+    for (u32 y = osd_y; y < osd_y + osd_h; y++) {
+        volatile u32 *q = (volatile u32 *)(fb + y * pitch) + osd_x;
+        for (u32 x = 0; x < osd_w; x++) q[x] = bg;
+    }
+    for (int i = 0; i < n; i++)
+        glyph_px(osd_x + (u32)(i + 1) * 8 * sc, osd_y + 8 * sc, sc, (u8)osd[i], fg, bg);
+    osd_up = 1;
+}
+
+static void apply_show(void)                  /* with busy held: what the hotkeys asked for */
 {
     int w = want_shown;
-    if (w < 0) return;
-    want_shown = -1;
-    if (hidden == !w) return;
-    hidden = !w;
-    if (hidden) clear_fb();
-    else for (int r = 0; r < rows; r++) draw_row(r);
+    if (w >= 0) {
+        want_shown = -1;
+        if (hidden != !w) {
+            int had = osd_up;
+            osd_up = 0;
+            hidden = !w;
+            if (hidden) clear_fb();
+            else for (int r = 0; r < rows; r++) draw_row(r);
+            if (had) osd_draw();
+        }
+    }
+    if (osd_new) { osd_new = 0; osd_draw(); }
+    if (osd_up && (int32_t)(ticks - osd_end) >= 0) osd_erase();
+}
+
+static void apply_now(void)
+{
+    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;   /* the line being drawn does it when done */
+    apply_show();
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+}
+
+void bootcon_osd(const char *msg)
+{
+    if (!bootcon_on || !dos_on_other) return;
+    int i = 0;
+    for (; msg[i] && i < OSD_LEN; i++) osd[i] = msg[i] >= 32 && msg[i] < 127 ? msg[i] : ' ';
+    osd[i] = 0;
+    osd_end = ticks + 2000;
+    osd_new = 1;
+    apply_now();
+}
+
+void bootcon_tick(void)                       /* the timer: a message's 2 s are up */
+{
+    if (osd_up || osd_new || want_shown >= 0) apply_now();
 }
 
 /* Ctrl+Shift+F10 with the log screen: shown (1) or black (0). Done now, or
@@ -130,9 +212,7 @@ void bootcon_show(int on)
 {
     if (!bootcon_on || !dos_on_other) return;
     want_shown = on;
-    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;
-    apply_show();
-    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+    apply_now();
 }
 
 static void newline(void)
