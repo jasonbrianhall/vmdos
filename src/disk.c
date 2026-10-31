@@ -410,11 +410,32 @@ static int fd_size(u32 size)                    /* a floppy's: 360K, 720K, 1.2M,
     return size == 368640 || size == 737280 || size == 1228800 || size == 1474560 || size == 1720320 || size == 2949120;
 }
 
+/* The file is the built-in RAM disk itself (vmdos.efi's floppy.img next
+   to it, or a copy): it is on the menu already. */
+static int same_as_builtin(struct fatvol *v, u32 clus, u32 size)
+{
+    if (!disk_image || size != disk_size) return 0;
+    static struct extent ext[64];
+    static u8 buf[8 * 512];
+    int n = fat_extents(v, clus, size, ext, 64);
+    if (n < 1) return 0;
+    u32 off = 0;
+    for (int i = 0; i < n && off < size; i++)
+        for (u32 s = 0; s < ext[i].count && off < size; s += 8) {
+            u32 k = ext[i].count - s < 8 ? ext[i].count - s : 8;
+            if (disk_dev_rw(img_d, ext[i].lba + s, k, buf, 0)) return 0;
+            u32 len = k * 512 < size - off ? k * 512 : size - off;
+            if (memcmp(buf, disk_image + off, len)) return 0;
+            off += len;
+        }
+    return off == size;
+}
+
 static int img_found(void *ctx, const char *name, u32 clus, u32 size)
 {
-    (void)ctx;
     int n = (int)strlen(name);
     if (n < 5 || memcmp(name + n - 4, ".IMG", 4) || !fd_size(size) || clus < 2 || n_imgs >= MAX_IMGS) return n_imgs >= MAX_IMGS;
+    if (same_as_builtin(ctx, clus, size)) { kprintf("disk: \\EFI\\VMDOS\\%s is the built-in RAM disk\n", name); return 0; }
     imgs[n_imgs].d = img_d; imgs[n_imgs].start = img_start; imgs[n_imgs].clus = clus; imgs[n_imgs].size = size;
     memcpy(imgs[n_imgs].name, name, (u32)n + 1);
     n_imgs++;
@@ -434,7 +455,7 @@ static void find_imgs(int d, u32 start)
     probe_disk = d;
     if (fat_mount(&v, probe_rd, start)) return;
     img_d = d; img_start = start;
-    fat_dir(&v, "\\EFI\\VMDOS", img_found, 0);
+    fat_dir(&v, "\\EFI\\VMDOS", img_found, &v);
 }
 
 /* Floppy image k into RAM as A:, booted from. 0, or -1 (and why, logged). */
