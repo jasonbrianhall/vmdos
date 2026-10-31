@@ -31,6 +31,12 @@ void serial_dos_init(void)
         if (!uart_present(b)) { kprintf("serial: COM%d (%xh) not there\n", i + 1, b); continue; }
         outb(b + 1, 0);                            /* no interrupts until DOS asks */
         outb(b + 4, 0);                            /* OUT2 off: the IRQ line stays quiet */
+        /* FIFOs off, as after a PC's reset: UEFI firmware (and GRUB's serial
+           console) leave them on, often with a 14-byte trigger. Then a byte
+           interrupts only after 13 more or a timeout, and the IIR reads C4h
+           or CCh where DOS-era code written for an 8250/16450 compares
+           with 04h: it sees no received byte at all. */
+        outb(b + 2, 0x06); outb(b + 2, 0);
         (void)inb(b + 5); (void)inb(b + 6); (void)inb(b + 2); (void)inb(b);
         com_on[i] = 1;
         outb(0x21, inb(0x21) & ~(1u << com_irq[i]));   /* the real IRQ, raised on the guest's PIC */
@@ -151,6 +157,25 @@ void serial_int14(struct regs *r)
         AL(r) = inb(b);
         return; }
     case 0x03:                                     /* status: AH = line, AL = modem */
+        AH(r) = inb(b + 5); AL(r) = inb(b + 6);
+        return;
+    case 0x04: {                                   /* extended initialise (PS/2): up to 19200 baud */
+        /* AL break, BH parity (0 none, 1 odd, 2 even, 3 mark, 4 space),
+           BL stop bits (0: 1, 1: 2), CH length (0-3: 5-8 bits), CL baud (0-8: 110 ... 19200) */
+        static const u16 div[9] = { 1047, 768, 384, 192, 96, 48, 24, 12, 6 };
+        static const u8 par[5] = { 0x00, 0x08, 0x18, 0x28, 0x38 };
+        u8 bh = (u8)(r->ebx >> 8), bl = (u8)r->ebx, ch = (u8)(r->ecx >> 8), cl = (u8)r->ecx;
+        if (bh > 4 || bl > 1 || ch > 3 || cl > 8) { AH(r) = inb(b + 5) | 0x80; AL(r) = inb(b + 6); return; }
+        u8 lcr = ch | (bl << 2) | par[bh] | (AL(r) ? 0x40 : 0);
+        outb(b + 3, 0x80);
+        outb(b, (u8)div[cl]); outb(b + 1, div[cl] >> 8);
+        outb(b + 3, lcr);
+        outb(b + 1, 0);
+        AH(r) = inb(b + 5); AL(r) = inb(b + 6);
+        return; }
+    case 0x05:                                     /* extended control: AL 0 = read MCR into BL, 1 = write BL */
+        if (AL(r) == 1) outb(b + 4, (u8)r->ebx & 0x1F);
+        else if (AL(r) == 0) r->ebx = (r->ebx & ~0xFFu) | inb(b + 4);
         AH(r) = inb(b + 5); AL(r) = inb(b + 6);
         return;
     }
