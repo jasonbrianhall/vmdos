@@ -2,12 +2,14 @@
 # boots on UEFI and legacy BIOS through GRUB)
 # and publishes it as a GitHub release named by date (UTC): v20261029, and
 # v20261029a, v20261029b, ... for further releases the same day.
-# Runs from a tag are full releases; all others are pre-releases.
+# Pushing a tag (git tag v20261031d && git push origin v20261031d) makes a
+# full release under that tag's name; all other runs are pre-releases.
 name: release
 
 on:
   push:
     branches: [ main, dev ]
+    tags: [ 'v*' ]          # a full release (path filters don't apply to tags)
     paths:
       - '**.cpp'
       - '**.h'
@@ -84,6 +86,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"; flags="--latest"   # the pushed tag: a full release
+          else
           # every release is named by date (UTC): v20261029, then v20261029a, b, c, ...
           base="v$(date -u +%Y%m%d)"
           taken="$(git ls-remote --tags origin "refs/tags/${base}*" | sed 's#.*refs/tags/##; s#\^{}$##')
@@ -93,8 +98,8 @@ jobs:
             if ! grep -qxF "$base$s" <<<"$taken"; then tag="$base$s"; break; fi
           done
           [ -n "$tag" ] || { echo "no free release name left for $base"; exit 1; }
-          flags=""
-          [ "$GITHUB_REF_TYPE" = tag ] || flags="--prerelease"
+          flags="--prerelease"
+          fi
           echo "release: $tag"
           cat > notes.md <<EOF
           Bootable USB-stick image: vmdos with FreeDOS, no games (commit ${GITHUB_SHA::7}).
