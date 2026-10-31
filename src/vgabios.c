@@ -510,4 +510,14 @@ u32 vga_native_lfb(u32 phys, u32 len)
     return 0;
 }
 
+/* VMHV: the card's ROM at C000h (its length) and its memory BARs below
+   4 GiB (the LFB), for the VM's memory map. */
+u32 vga_native_rom_len(void) { return vga_native ? rom_len : 0; }
+int vga_native_bar(int i, u32 *base, u32 *len)
+{
+    if (!vga_native || i < 0 || i > 5 || !mem_bar[i].len) return 0;
+    *base = mem_bar[i].base; *len = mem_bar[i].len;
+    return 1;
+}
+
 int vga_native_pci(int bus, int devfn) { return vga_native && bus == gpu_bus && devfn == gpu_devfn; }

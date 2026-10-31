@@ -316,6 +316,7 @@ void *isa_dma_buffer(u32 *phys)
    uncached in the MTRRs, where every write is a separate bus transaction;
    WC (it wins over an MTRR's UC) sends them in bursts. nowc: don't. */
 static u32 pat_wc;
+u32 wc_flags(void) { return pat_wc ? pat_wc : 0x10; }   /* PTE bits: write-combining, else uncached */
 static void pat_init(void)
 {
     u32 a = 1, b, c, d;
@@ -492,6 +493,7 @@ void io_allow(u16 port, u32 n)
 {
     for (u32 p = port; p < (u32)port + n && p < 0x10000; p++) tss.iobitmap[p >> 3] &= (u8)~(1 << (p & 7));
 }
+int io_allowed(u16 p) { return !(tss.iobitmap[p >> 3] & (1 << (p & 7))); }   /* VMHV: straight to the hardware too */
 
 static void pic_init(void)
 {

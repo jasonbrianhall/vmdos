@@ -903,6 +903,7 @@ static void video_b000_map_(void);
 void video_b000_map(void) { rlock_take(&video_lock); video_b000_map_(); rlock_drop(&video_lock); }
 static void video_b000_map_(void)
 {
+    if (vga_native) return;                                   /* video=vbe: B000h is the card's */
     if (b_trap & 1) return;                                   /* the planes are there */
     u8 *hole = hv_hole_page();
     int empty = hole && video_mode != 7;

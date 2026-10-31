@@ -107,6 +107,7 @@
 static u32 vm_top = 9u << 20;         /* guest RAM: 0-640K, (UMB area), 1 MB up to here (vmmem=, MB) */
 #define VM_TOP    vm_top
 #define HV_LFB    0xE0000000u           /* the VESA framebuffer, as the VM sees it */
+#define HV_BAR_MAX (512u << 20)         /* video=vbe: at most this much of a card BAR in the VM */
 #define EXT_START 0x110000u           /* above the HMA, which is guest_ram's */
 
 static u8 *vmcb, *hsave, *hvsave, *iopm, *msrpm, *ext;
@@ -194,8 +195,16 @@ static int npt_init(void)
     for (u32 a = 10u << 20; a < VM_TOP; a += 4096)             /* RAM above 10 MB: not shared with the host */
         npt_pt(a)[(a >> 12) & 511] = ((u32)(uintptr_t)ext + (a - EXT_START)) | 7;
     u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at HV_LFB */
-    for (u32 a = 0; a < vsize; a += 4096)
-        npt_pt(HV_LFB + a)[((HV_LFB + a) >> 12) & 511] = (vbase + a) | 7;
+    if (!vga_native)
+        for (u32 a = 0; a < vsize; a += 4096)
+            npt_pt(HV_LFB + a)[((HV_LFB + a) >> 12) & 511] = (vbase + a) | 7;
+    for (int i = 0; i < 6; i++) {                               /* video=vbe: the card's memory where it is (its LFB) */
+        u32 base, len;
+        if (!vga_native_bar(i, &base, &len) || base < VM_TOP) continue;
+        if (len > HV_BAR_MAX) len = HV_BAR_MAX;
+        for (u32 a = 0; a < len && base + a >= base; a += 4096)
+            npt_pt(base + a)[((base + a) >> 12) & 511] = (base + a) | 7 | wc_flags();
+    }
     gview_pt = phys_alloc(4096);
     v3_hv_sync();
     return 0;
@@ -527,6 +536,30 @@ static int wrap_string(void)
 }
 
 /* ---------------- I/O ---------------- */
+/* video=vbe: the ports io_allow gave DOS (the VGA, the card's I/O BARs)
+   go straight to the card, as in V86 mode; the I/O permission map lets
+   them through without an exit (VT-x: its I/O bitmaps, if it has them),
+   and these catch the rest. */
+static u32 hv_port_in(u16 port, int sz)
+{
+    if (!io_allowed(port)) return port_in(port, sz);
+    return sz == 1 ? inb(port) : sz == 2 ? inw(port) : inl(port);
+}
+static void hv_port_out(u16 port, u32 v, int sz)
+{
+    if (!io_allowed(port)) { port_out(port, v, sz); return; }
+    if (sz == 1) outb(port, (u8)v); else if (sz == 2) outw(port, (u16)v); else outl(port, v);
+}
+/* Bits 0-65535 as AMD's IOPM and VT-x's I/O bitmaps A and B lay them out:
+   every port exits but the card's. */
+void hv_io_bitmap(u8 *bm)
+{
+    memset(bm, 0xFF, 8192);
+    if (!vga_native) return;
+    for (u32 p = 0; p < 0x10000; p++)
+        if (io_allowed((u16)p)) bm[p >> 3] &= (u8)~(1 << (p & 7));
+}
+
 static void io_exit(void)
 {
     u32 info = V32(C_INFO1), next = V32(C_INFO2);
@@ -535,8 +568,8 @@ static void io_exit(void)
     int sz = (info & 0x10) ? 1 : (info & 0x20) ? 2 : 4;
     if (!str) {
         u32 m = sz == 1 ? 0xFF : sz == 2 ? 0xFFFF : 0xFFFFFFFFu;
-        if (in) V32(S_RAX) = (V32(S_RAX) & ~m) | (port_in(port, sz) & m);
-        else port_out(port, V32(S_RAX) & m, sz);
+        if (in) V32(S_RAX) = (V32(S_RAX) & ~m) | (hv_port_in(port, sz) & m);
+        else hv_port_out(port, V32(S_RAX) & m, sz);
         V32(S_RIP) = next;
         return;
     }
@@ -549,13 +582,13 @@ static void io_exit(void)
     u32 count = rep ? (g[1] & am) : 1;
     for (; count; count--) {
         if (in) {
-            u32 v = port_in(port, sz);
+            u32 v = hv_port_in(port, sz);
             for (int i = 0; i < sz; i++) { u8 *p = glin(dbase + ((g[4] + i) & am)); if (p) *p = (u8)(v >> (8 * i)); }
             g[4] = (g[4] & ~am) | ((g[4] + step) & am);
         } else {
             u32 v = 0;
             for (int i = 0; i < sz; i++) { u8 *p = glin(sbase + ((g[3] + i) & am)); v |= (u32)(p ? *p : 0xFF) << (8 * i); }
-            port_out(port, v, sz);
+            hv_port_out(port, v, sz);
             g[3] = (g[3] & ~am) | ((g[3] + step) & am);
         }
         if (rep) g[1] = (g[1] & ~am) | ((g[1] - 1) & am);
@@ -675,6 +708,20 @@ static void npf_exit(void)
     u32 gpa = (u32)V64(C_INFO2);
     if (gpa >= 0xA0000 && gpa < 0xC0000 && vga16_window(gpa)) { emulate_at(gpa, 1); return; }
     if (v3_window(gpa)) { emulate_at(gpa, 1); return; }        /* the Voodoo 3 (voodoo3.h) */
+    if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2) && vga_native) {
+        /* video=vbe: the card's BIOS writing into the upper memory area,
+           where the PC's BIOS gave it room at POST (SeaBIOS's PMM: its extra
+           stack in E000h; in V86 mode that is RAM anyway): that page is
+           RAM from now on, for the card's BIOS to keep using. */
+        u32 lin = (u32)V64(S_CS + 8) + V32(S_RIP), rl = vga_native_rom_len();
+        if (lin >= HOLE_LO && lin < HOLE_LO + rl && gpa >= HOLE_LO + rl) {
+            u32 pg = gpa & ~0xFFFu;
+            map_page(pg, guest_phys(pg), 7);
+            tlb_flush();
+            kprintf("VMHV: video=vbe: the card's BIOS uses %05x-%05x, RAM there now\n", pg, pg + 0xFFF);
+            return;                                               /* the write again, onto RAM */
+        }
+    }
     if (gpa >= HOLE_LO && gpa < HOLE_HI && (V32(C_INFO1) & 2)) {
         static int holelog = -1, n;
         if (holelog < 0) holelog = strstr(cmdline, "holelog") != 0;
@@ -754,7 +801,6 @@ void vmx_run(u8 *shadow, u32 *g);
 
 static int hv_setup(void)
 {
-    if (vga_native) return 10;
     int e = svm_check();
     if (e == 5) { e = vmx_check(); vmx = !e; }
     if (e) return e;
@@ -780,7 +826,8 @@ static int hv_setup(void)
     }
     vmcb = phys_alloc(4096); hsave = phys_alloc(4096); hvsave = phys_alloc(4096);
     iopm = phys_alloc(12288); msrpm = phys_alloc(8192);
-    memset(iopm, 0xFF, 12288);                                    /* every port exits */
+    memset(iopm, 0xFF, 12288);                                    /* every port exits ... */
+    hv_io_bitmap(iopm);                                           /* ... but video=vbe's card's */
     memset(msrpm, 0xFF, 8192);                                    /* every MSR exits */
     npt_init();
     u32 lo, hi;
@@ -900,9 +947,11 @@ int hv_start(int key)
     /* A video BIOS ROM at C000h (32 KB), as on any PC with a VGA card: the
        55AAh signature, a checksum, and INT 10h entering it (a far jump to
        vmdos's INT 10h stub). Windows' display code expects one there. */
-    u32 v3len;
-    if (v3_rom(&v3len)) {                                         /* voodoo3: the card's own BIOS there (bios_init copied it) */
-        for (u32 a = 0; a < v3len; a += 4096) map_page(HOLE_LO + a, guest_phys(HOLE_LO + a), 5);
+    u32 v3len = 0;
+    if (!v3_rom(&v3len) && vga_native) v3len = vga_native_rom_len();   /* video=vbe: likewise, the card's BIOS (vga_native_bios) */
+    if (v3len && (v3_on || vga_native)) {                         /* voodoo3: the card's own BIOS there (bios_init copied it) */
+        for (u32 a = 0; a < v3len; a += 4096)                    /* video=vbe: writable, as shadow RAM while its init runs again */
+            map_page(HOLE_LO + a, guest_phys(HOLE_LO + a), vga_native ? 7 : 5);
     } else {
     if (!vrom) {
         vrom = phys_alloc(VROM_SIZE);
