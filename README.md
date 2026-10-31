@@ -106,9 +106,14 @@ with 512-byte sectors) and USB
 sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
 Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature);
-when more than one disk has such a partition, the boot log lists them and
+when there is more than one thing to boot, the boot log lists them and
 waits 5 s for a number (Enter or the countdown: the preferred one;
-`cmenu=N` seconds, `cmenu=0` no menu). FreeDOS boots through vmdos's
+`cmenu=N` seconds, `cmenu=0` no menu): each such partition, the built-in
+RAM disk (floppy.img / dos.img, when there is one) and every floppy image
+(`*.IMG` of a floppy's size: 360 KB to 2.88 MB) in `\EFI\vmdos` on those
+partitions and on the one vmdos.efi started from. A floppy image is read
+into RAM and DOS boots from it as A:, with no C: (`VMHD C: n` puts a
+partition there); changes to it are lost at power-off. FreeDOS boots through vmdos's
 own boot code; other DOSes through the partition's boot sector (`SYS C:`;
 MS-DOS 6.22 needs FAT12/FAT16 of at most 2 GB); other
 partitions are only touched when you put one in a VMHD drive (below; DOS
