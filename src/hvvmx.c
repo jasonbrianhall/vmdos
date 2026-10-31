@@ -71,7 +71,7 @@ static u8 *sh;
 enum {
     G_ES_SEL = 0x800, H_ES_SEL = 0xC00, H_CS_SEL = 0xC02, H_SS_SEL = 0xC04, H_DS_SEL = 0xC06,
     H_FS_SEL = 0xC08, H_GS_SEL = 0xC0A, H_TR_SEL = 0xC0C,
-    LINK_PTR = 0x2800, G_DEBUGCTL = 0x2802, EPT_PTR = 0x201A, GPA = 0x2400,
+    IO_BITMAP_A = 0x2000, IO_BITMAP_B = 0x2002, LINK_PTR = 0x2800, G_DEBUGCTL = 0x2802, EPT_PTR = 0x201A, GPA = 0x2400,
     PIN_CTL = 0x4000, PROC_CTL = 0x4002, EXC_BITMAP = 0x4004, CR3_TGT_COUNT = 0x400A,
     EXIT_CTL = 0x400C, EXIT_MSR_STORE = 0x400E, EXIT_MSR_LOAD = 0x4010, ENTRY_CTL = 0x4012,
     ENTRY_MSR_LOAD = 0x4014, ENTRY_INTR = 0x4016, ENTRY_EXC_ERR = 0x4018, ENTRY_LEN = 0x401A,
@@ -119,6 +119,7 @@ extern volatile int hv_tlb_dirty;
 extern void (*hv_map_hook)(u32 lin);
 u64 hv_host_pte(u32 lin);
 u32 video_vram_base(u32 *size);
+void hv_io_bitmap(u8 *bm);                     /* hv.c: every port exits but video=vbe's card's */
 
 static u8 *vmxon_region, *vmcs;
 static u64 *ept_pml4, *ept_pdpt, *ept_pd[4];
@@ -131,6 +132,8 @@ static u32 exit_len, exit_rip;
 /* ---------------- EPT ---------------- */
 #define EPT_RWX 7u
 #define EPT_WB  (6u << 3 | 1u << 6)       /* write-back, ignore the guest's PAT */
+#define EPT_UC  0u                        /* uncached (video=vbe: the card's VGA memory) */
+#define EPT_WC  (1u << 3)                 /* write-combining (with the guest's PAT: the card's LFB) */
 
 static u64 *ept_pt(u32 gpa)
 {
@@ -145,7 +148,7 @@ static void ept_sync(u32 lin)
 {
     u64 h = hv_host_pte(lin);
     u64 e = 0;
-    if (h & 1) e = (h & 0x000FFFFFFFFFF000ull) | 5 | ((h & 2) ? 2 : 0) | EPT_WB;   /* R X, W if writable */
+    if (h & 1) e = (h & 0x000FFFFFFFFFF000ull) | 5 | ((h & 2) ? 2 : 0) | ((h & 0x10) ? EPT_UC : EPT_WB);   /* R X, W if writable; the host's uncached pages (the card's) uncached */
     ept_pt(lin)[(lin >> 12) & 511] = e;
 }
 
@@ -168,7 +171,15 @@ static void ept_init(void)
     for (u32 a = 10u << 20; a < hv_vm_top(); a += 4096)         /* RAM above 10 MB: straight to its block */
         ept_pt(a)[(a >> 12) & 511] = (u32)(uintptr_t)hv_gpa_ptr(a) | EPT_RWX | EPT_WB;
     u32 vsize, vbase = video_vram_base(&vsize);                 /* the VBE framebuffer, at hv_lfb() */
-    for (u32 a = 0; a < vsize; a += 4096) ept_pt(hv_lfb() + a)[((hv_lfb() + a) >> 12) & 511] = (vbase + a) | EPT_RWX | EPT_WB;
+    if (!vga_native)
+        for (u32 a = 0; a < vsize; a += 4096) ept_pt(hv_lfb() + a)[((hv_lfb() + a) >> 12) & 511] = (vbase + a) | EPT_RWX | EPT_WB;
+    for (int i = 0; i < 6; i++) {                               /* video=vbe: the card's memory where it is (its LFB) */
+        u32 base, len;
+        if (!vga_native_bar(i, &base, &len) || base < hv_vm_top()) continue;
+        if (len > (512u << 20)) len = 512u << 20;
+        for (u32 a = 0; a < len && base + a >= base; a += 4096)
+            ept_pt(base + a)[((base + a) >> 12) & 511] = (base + a) | EPT_RWX | EPT_WC;
+    }
     eptp = (u32)(uintptr_t)ept_pml4 | 6 | 3 << 3;                /* write-back, 4-level walk */
     hv_map_hook = ept_sync;
     hv_ept_map = ept_map;
@@ -244,6 +255,17 @@ int vmx_setup(u8 *shadow)
     int missing = 0;
     vmwrite(PIN_CTL, adjust(1u << 0 | 1u << 3, true_ctls ? 0x48D : 0x481, &missing));   /* external interrupts, NMI */
     proc_ctl = adjust(1u << 7 | 1u << 24 | 1u << 31, true_ctls ? 0x48E : 0x482, &missing); /* HLT, all I/O, secondary */
+    if (vga_native) {                                           /* video=vbe: I/O bitmaps, the card's ports not exiting */
+        int nobm = 0;
+        u32 c = adjust(1u << 7 | 1u << 25 | 1u << 31, true_ctls ? 0x48E : 0x482, &nobm);
+        if (!nobm && !(c & (1u << 24))) {
+            u8 *bm = phys_alloc(8192);
+            hv_io_bitmap(bm);
+            vmwrite64(IO_BITMAP_A, (u32)(uintptr_t)bm);
+            vmwrite64(IO_BITMAP_B, (u32)(uintptr_t)bm + 4096);
+            proc_ctl = c;
+        }                                                       /* else every port exits; hv.c sends the card's on */
+    }
     vmwrite(PROC_CTL, proc_ctl);
     vmwrite(PROC_CTL2, adjust(1u << 1 | 1u << 7, 0x48B, &missing));                      /* EPT, unrestricted guest */
     vmwrite(EXIT_CTL, adjust(0, true_ctls ? 0x48F : 0x483, 0));                          /* 32-bit host */

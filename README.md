@@ -233,8 +233,9 @@ hardware, A0000h-BFFFFh on the card's memory, its PCI configuration space
 (and the PCI BIOS), and DPMI 0800h maps its linear framebuffer
 write-combining. Modes are the card's own, unscaled; vmdos draws nothing
 (no scaling, log overlay or screenshots; the INT 33h pointer of vmdos's
-mouse driver is drawn only in text modes; CTMOUSE draws its own), and VMHV
-won't start with it. On a UEFI boot nothing ran a VGA BIOS, but a card's
+mouse driver is drawn only in text modes; CTMOUSE draws its own). VMHV
+gives the VM the card the same way: its BIOS at C000h, A0000h-BFFFFh, the
+VGA ports and its I/O (no exit), its LFB where its BAR is. On a UEFI boot nothing ran a VGA BIOS, but a card's
 option ROM often carries a legacy x86 image beside its UEFI driver (discrete
 cards usually do; Intel's integrated graphics have none): vmdos.efi takes it
 from the copy UEFI keeps of the ROM and the card is started with it as
@@ -661,7 +662,10 @@ command line for another size in MB, halved until it fits) and nothing else at
 C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
 EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
 vmdos's: the BIOS stubs and every I/O port exit to the same code as in
-V86 mode.
+V86 mode. With `video=vbe` the card is the VM's own: its BIOS at C000h
+(a page of upper memory it writes into, where the PC's BIOS gave it room,
+becomes RAM), A0000h-BFFFFh, its ports without an exit, and its linear
+framebuffer at the BAR's address (write-combining).
 
     VMHV            restart DOS in the VM; pick at FDCONFIG.SYS's menu,
                     or let the countdown run out for the VMHV choice
