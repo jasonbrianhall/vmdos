@@ -728,7 +728,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
         if (irq == 0 && log_view_req) {                                       /* Ctrl+Shift+F10 */
             extern int vif;
             log_view_req = 0;
-            if (video_log_on()) { video_log_toggle(); goto log_done; }        /* closing it */
+            if (video_log_on()) { video_log_toggle(); bootcon_show(0); goto log_done; }   /* closing it */
             if (from_v86) {                       /* where a hung DOS is stuck */
                 u32 a = r->cs * 16 + (r->eip & 0xFFFF);
                 kprintf("log: guest at %04x:%04x (V86, IF %u), code %02x %02x %02x %02x %02x %02x\n", r->cs, r->eip, vif,
@@ -744,6 +744,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                         b1, b2, stat_irq0, stat_vec8, stat_pmirq, stat_reflirq, stat_rmirq);
             }
             video_log_toggle();
+            bootcon_show(1);                      /* video=vbe: the log screen on the other card */
         }
     log_done:
         if (irq == 0 && log_save_req && !in_usb && usb_quiet()) {             /* Ctrl+Shift+S in the log */
