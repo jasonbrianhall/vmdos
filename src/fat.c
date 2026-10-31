@@ -113,6 +113,51 @@ int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size)
     return 0;
 }
 
+/* The files in folder dir ("\EFI\VMDOS"): fn(ctx, "NAME.EXT", first
+   cluster, size) for each (not folders, labels or deleted entries); fn
+   returning nonzero stops. 0, or -1 if there is no such folder. */
+int fat_dir(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx)
+{
+    u32 c = 0, size;
+    int isdir = 1;
+    if (dir[0] && dir[1] == ':') dir += 2;
+    while (*dir) {                                               /* down to the folder */
+        while (*dir == '\\' || *dir == '/') dir++;
+        if (!*dir) break;
+        int n = 0;
+        while (dir[n] && dir[n] != '\\' && dir[n] != '/') n++;
+        u8 nm[11];
+        if (name83(dir, n, nm) || dir_find(v, c, nm, &c, &size, &isdir) || !isdir) return -1;
+        dir += n;
+    }
+    u32 nsec = (c == 0 && v->type != 32) ? v->root_secs : v->spc;
+    if (c == 0 && v->type == 32) c = v->root_clus;
+    for (int guard = 0; guard < 65536; guard++) {
+        u32 lba = (c == 0) ? v->root_start : clus_lba(v, c);
+        for (u32 s = 0; s < nsec; s++) {
+            if (vol_read(v, lba + s, v->sec)) return 0;
+            for (int e = 0; e < 512; e += 32) {
+                u8 d[32];
+                memcpy(d, v->sec + e, 32);                       /* fn may read the disk (v->sec) */
+                if (d[0] == 0) return 0;
+                if (d[0] == 0xE5 || d[0] == '.' || d[11] == 0x0F || (d[11] & 0x18)) continue;
+                char name[13];
+                int k = 0;
+                for (int i = 0; i < 8 && d[i] != ' '; i++) name[k++] = (char)d[i];
+                if (d[8] != ' ') { name[k++] = '.'; for (int i = 8; i < 11 && d[i] != ' '; i++) name[k++] = (char)d[i]; }
+                name[k] = 0;
+                u32 fc = *(u16 *)(d + 26) | (v->type == 32 ? (u32)*(u16 *)(d + 20) << 16 : 0);
+                if (fn(ctx, name, fc, *(u32 *)(d + 28))) return 0;
+                if (vol_read(v, lba + s, v->sec)) return 0;      /* (fn may have used it) */
+            }
+        }
+        if (c == 0) return 0;
+        c = fat_next(v, c);
+        if (c == 0x0FFFFFFF) return 0;
+    }
+    return 0;
+}
+
 /* The disk sectors (absolute LBAs) of a file's first 'bytes' bytes as runs
    (ext NULL: just count them). */
 int fat_extents(struct fatvol *v, u32 clus, u32 bytes, struct extent *ext, int max)
