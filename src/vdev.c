@@ -574,9 +574,18 @@ void vkbd_refill(void)
        10-16 kHz). Handed over the moment the last one is acknowledged, the
        next byte's IRQ 12 hit LSL7's handler right at its STI before IRETD,
        every byte: handlers nested until "DPMI: nesting too deep", and the
-       sound stuttered meanwhile. */
+       sound stuttered meanwhile.
+       Nor while IRQ 1 is in service: a keyboard handler that keeps some
+       keys for itself and chains the rest to the BIOS reads port 60h a
+       second time when it chains (Westwood's, in Command & Conquer and Red
+       Alert, passes Shift/Ctrl/Alt and every E0 prefix on). A mouse byte
+       put there in between was read by the BIOS as a scan code: garbage
+       keys until "keyboard buffer full", Caps/Num Lock and Ctrl flipped in
+       the BDA under the game, and that mouse packet a byte short. On a PC
+       the 8042 has no time to do that; the IRQ 12 couldn't be taken before
+       the keyboard's EOI anyway. */
     static u32 aux_last;
-    if (mq_head != mq_tail && !vpic_in_service(12) && (u32)(pit_clock() - aux_last) >= 1193) {
+    if (mq_head != mq_tail && !vpic_in_service(12) && !vpic_in_service(1) && (u32)(pit_clock() - aux_last) >= 1193) {
         aux_last = pit_clock();
         kbd_obuf = mq[mq_head];
         mq_head = (mq_head + 1) % sizeof mq;

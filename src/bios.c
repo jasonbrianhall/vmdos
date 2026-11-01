@@ -64,16 +64,23 @@ static int kbuf_get(u16 *w, int remove)
     return 1;
 }
 
+/* "The last byte was E0h" is bit 1 of 40:96h, as in a PC's BIOS, not a
+   variable of ours: a program's own INT 9 handler that keeps the byte
+   after an E0 for itself (Westwood's) clears that bit, so the BIOS doesn't
+   take the next byte it is passed as an extended key. */
 static void keyboard_irq(u8 sc)
 {
-    static int e0, skip;
+    static int skip;
     if (skip) { skip--; return; }
-    if (sc == 0xE0) { e0 = 1; return; }
+    if (sc == 0xE0) { wr8(BDA + 0x96, rd8(BDA + 0x96) | 2); return; }
     if (sc == 0xE1) { skip = 5; return; }               /* Pause */
     if (sc == 0xFA || sc == 0xFE || sc == 0xEE || sc == 0 || sc == 0xFF) return;   /* AAh is also LShift release */
-    int ext = e0; e0 = 0;
+    u8 f3 = rd8(BDA + 0x96);
+    int ext = (f3 & 2) != 0;
+    f3 &= ~2;
+    wr8(BDA + 0x96, f3);
     int rel = sc & 0x80, code = sc & 0x7F;
-    u8 f = rd8(BDA + 0x17), f2 = rd8(BDA + 0x18), f3 = rd8(BDA + 0x96);
+    u8 f = rd8(BDA + 0x17), f2 = rd8(BDA + 0x18);
 
     /* modifiers */
     u8 bit = 0, bit2 = 0, bit3 = 0;
@@ -91,7 +98,7 @@ static void keyboard_irq(u8 sc)
             int held = bit == 4 ? ((f2 & 1) || (f3 & 4)) : ((f2 & 2) || (f3 & 8));
             if (held) f |= bit; else f &= ~bit;
         }
-        wr8(BDA + 0x17, f); wr8(BDA + 0x18, f2); wr8(BDA + 0x96, (f3 & ~2) | 0x10 | (ext ? 2 : 0));
+        wr8(BDA + 0x17, f); wr8(BDA + 0x18, f2); wr8(BDA + 0x96, f3 | 0x10);
         return;
     }
     u8 lockbit = code == 0x3A ? 0x40 : code == 0x45 && !ext ? 0x20 : code == 0x46 && !ext ? 0x10 : 0;
@@ -164,7 +171,10 @@ static void keyboard_irq(u8 sc)
         } else if (shift && code == 0x0F) w = 0x0F00;
         else w = (u16)(code << 8 | (u8)c);
     } else return;
-    if (!kbuf_put(w)) dbg(1, "keyboard buffer full\n");
+    if (!kbuf_put(w)) {                                 /* a PC beeps; nobody reads INT 16h: say so a few times, not every key */
+        static int told;
+        if (told < 3) { told++; dbg(1, "keyboard buffer full (key %04x dropped)%s\n", w, told == 3 ? "; not logged again" : ""); }
+    }
 }
 
 static int int16(struct regs *r)
