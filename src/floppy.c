@@ -378,6 +378,7 @@ void fd_api(struct regs *r)
     case 3: {                                                           /* restart into drive CL */
         int bios_restart_floppy(struct regs *r, int d);
         if (d >= FD_DRIVES) { AX(r) = 5; return; }
+        if (hv_active) { if (hv_restart_floppy(d)) AX(r) = 1; return; }   /* VMHV: the VM restarts (hv.c) */
         if (bios_restart_floppy(r, d)) AX(r) = 1;                       /* empty: back to VMFD */
         return; }
     }

@@ -36,7 +36,7 @@
         mov bx, 4
         mov cl, [drive]
         mov di, buf
-        int 2Fh
+        call vmapi
         cmp ax, 5647h
         je novm
         or ax, ax
@@ -77,7 +77,7 @@ attach: call flush
         mov dl, [part]
         mov dh, [flags]
         mov di, buf
-        int 2Fh
+        call vmapi
 result: cmp ax, 5647h
         je novm
         or ax, ax
@@ -127,7 +127,7 @@ ask:    mov dx, msg_w1
 list:   mov ax, 5647h
         mov bx, 2
         mov di, buf
-        int 2Fh
+        call vmapi
         cmp ax, 5647h
         je novm
         mov dx, buf
@@ -186,4 +186,6 @@ msg_w1   db 'Please check first:', 13, 10, '$'
 msg_w2   db 13, 10, 'Put it in anyway (Y/N)? $'
 msg_yes  db 'Y', 13, 10, '$'
 msg_no   db 'N', 13, 10, 'Nothing was done.', 13, 10, '$'
+%include "vmapi.inc"                   ; vmdos's INT 2Fh stub, directly (VMHV)
+
 buf:

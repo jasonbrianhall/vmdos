@@ -41,13 +41,13 @@
         mov ax, 5646h
         mov bx, 2
         mov cl, [unit]
-        int 2Fh
+        call vmapi
         cmp ax, 5646h
         je novm
 list:   mov ax, 5646h
         xor bx, bx
         mov di, buf
-        int 2Fh
+        call vmapi
         cmp ax, 5646h
         je novm
         mov dx, buf
@@ -102,7 +102,7 @@ path:   mov di, pbuf                    ; token -> ASCIIZ
         mov dl, [ro]
         mov ax, 5646h
         mov bx, 1
-        int 2Fh
+        call vmapi
         cmp ax, 5646h
         je novm
         or ax, ax
@@ -125,7 +125,7 @@ boot:   mov dx, msg_boot
         mov ax, 5646h
         mov bx, 3
         mov cl, [unit]
-        int 2Fh                         ; returns only when the drive is empty
+        call vmapi                      ; returns only when the drive is empty
         cmp ax, 5646h
         je novm
         mov dx, msg_empty
@@ -157,4 +157,6 @@ msg_e6   db 'VMFD: out of memory', 13, 10, '$'
 msg_e7   db 'VMFD: disk error reading C:', 13, 10, '$'
 pbuf:    times 128 db 0
 tbuf:    times 128 db 0
+%include "vmapi.inc"                   ; vmdos's INT 2Fh stub, directly (VMHV)
+
 buf:
