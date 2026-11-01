@@ -356,6 +356,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   $(foreach v,ask max $(GRUB_RES),echo '    menuentry "$(or $(VGA_TITLE_$(v)),$(v))" {'; \
 	     echo '      chainloader /EFI/vmdos/vmdos.efi vga=$(v) $(KARGS_ALL)'; echo '    }';) \
 	   echo '  }'; \
+           echo '  menuentry "FreeDOS (vmdos) vmhv mode (for games and operating systems that insist on owning memory [aka Windows 98])" {'; \
+           echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) vmhv'; \
+           echo '  }'; \
 	   echo '  menuentry "FreeDOS (vmdos) with Voodoo 3" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) voodoo3'; \
 	   echo '  }'; \
