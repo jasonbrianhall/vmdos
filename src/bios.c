@@ -556,6 +556,8 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
         else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
+        else if (AX(r) == 0x5646) fd_api(r);                    /* VMFD.COM: likewise (VMHV reaches only this way) */
+        else if (AX(r) == 0x5647) hd_api(r);                    /* VMHD.SYS / VMHD.COM: likewise */
         else if (xms_hidden) ;                                  /* noxms: none here */
         else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
         else if (AX(r) == 0x4310) { r->v86_es = BIOS_SEG; BX(r) = rd16(BIOS_LIN + 0x206); }
@@ -664,6 +666,8 @@ static int boot_floppy(struct regs *r, int d)
     kprintf("booting floppy %c:%s\n", 'A' + d, sec[510] == 0x55 && sec[511] == 0xAA ? "" : " (no 55AA signature; started anyway)");
     return 0;
 }
+
+int bios_boot_floppy(struct regs *r, int d) { return boot_floppy(r, d); }   /* hv.c: VMFD /BOOT in the VM */
 
 /* VMFD A: /BOOT: restart the guest into a floppy, without DOS: the
    virtual hardware and the BIOS go back to how they are at power-on

@@ -454,6 +454,7 @@ static int buffer_fault(struct regs *r, int id)
 }
 
 /* "HLT; db id" at F000:xxxx? Then run the service. 1 if it was one. */
+static int hv_reset_done;              /* hv_restart_floppy: the VM restarted inside a BIOS call */
 static int bios_stub(void)
 {
     if (V32(S_CS + 8) != 0xF0000u || (V32(S_RIP) & 0xFFFF) >= 0x8000 || !real_or_v86()) return 0;
@@ -485,6 +486,7 @@ static int bios_stub(void)
     }
     if (buffer_fault(&r, id)) return 1;                           /* the guest maps the page, then INT 13h again */
     int res = bios_service(&r, id, 1);
+    if (hv_reset_done) { hv_reset_done = 0; return 1; }       /* VMFD /BOOT: the VM restarted, its registers are new */
     switch (res) {
     case BIOS_DONE: iret16(&r, 0); break;
     case BIOS_DONEF: iret16(&r, EFL_CF | EFL_ZF); break;
@@ -922,12 +924,11 @@ void sb_out_stop(void);
 void gus_stop(void);
 extern int xms_hidden;
 
-int hv_start(int key)
+/* The VM's machine as at power-on: vmdos's devices and BIOS reset, its
+   extended memory cleared, the upper memory area empty and the video ROM
+   at C000h as the VM has them. */
+static void vm_reset_machine(void)
 {
-    int e = hv_setup();
-    if (e) { kprintf("VMHV: %s\n", hv_err[e]); return e; }
-    kprintf("VMHV: restarting DOS in a virtual machine (%s, 640 KB + %u KB)\n", vmx ? "Intel VT-x" : "AMD-V", (VM_TOP >> 10) - 1024);
-    smp_park();                                                   /* VMHV on the boot CPU alone */
     disk_flush();
     rlock_take(&sound_lock);                     /* the helper CPU's render */
     cdaudio_stop();
@@ -969,6 +970,41 @@ int hv_start(int key)
     wr16(0x10 * 4, 0x0004); wr16(0x10 * 4 + 2, 0xC000);     /* INT 10h into the ROM */
     }
     tlb_flush();
+}
+
+/* Into the VM at r0's registers (real mode). */
+static void vm_go(struct regs *r0)
+{
+    vmcb_init(r0);
+    if (vmx) vmx_guest_init();
+    hv_active = 1;
+    video_b000_map();                                             /* B000h: empty bus, as on a colour VGA */
+}
+
+/* VMFD A: /BOOT in the VM: it restarts from the floppy, on a machine as at
+   power-on (VMHV's, not V86 mode's). -1: the drive is empty (nothing
+   changed). The BIOS stub leaves the new registers alone (hv_reset_done). */
+int hv_restart_floppy(int d)
+{
+    static u8 sec[512];
+    static struct regs r0;
+    if (!hv_active || fd_boot_sector(d, sec)) return -1;
+    kprintf("VMHV: restarting the VM from floppy %c:\n", 'A' + d);
+    vm_reset_machine();
+    memset(&r0, 0, sizeof r0);
+    if (bios_boot_floppy(&r0, d)) return -1;
+    vm_go(&r0);
+    hv_reset_done = 1;
+    return 0;
+}
+
+int hv_start(int key)
+{
+    int e = hv_setup();
+    if (e) { kprintf("VMHV: %s\n", hv_err[e]); return e; }
+    kprintf("VMHV: restarting DOS in a virtual machine (%s, 640 KB + %u KB)\n", vmx ? "Intel VT-x" : "AMD-V", (VM_TOP >> 10) - 1024);
+    smp_park();                                                   /* VMHV on the boot CPU alone */
+    vm_reset_machine();
     menu_wait = !key;
     menu_t0 = 0;
     if (!key) key = menu_choice();
@@ -977,10 +1013,7 @@ int hv_start(int key)
     static struct regs r0;
     memset(&r0, 0, sizeof r0);
     bios_boot(&r0);
-    vmcb_init(&r0);
-    if (vmx) vmx_guest_init();
-    hv_active = 1;
-    video_b000_map();                                             /* B000h: empty bus, as on a colour VGA */
+    vm_go(&r0);
 
     for (;;) {
         if (hv_force) force_exit();

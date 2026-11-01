@@ -33,7 +33,7 @@ interrupt:
         mov bx, 1
         mov dx, cs
         mov si, bpbs                    ; the monitor puts each drive's BPB here
-        int 2Fh
+        call vmapi
 done:   pop es
         pop di
         pop si
@@ -42,6 +42,7 @@ done:   pop es
         pop bx
         pop ax
         retf
+%include "vmapi.inc"                   ; vmdos's INT 2Fh stub, directly (VMHV)
 
 bpbptr: times 8 dw 0                    ; init's BPB array
 bpbs:   times 8 * 64 db 0               ; a BPB a drive
@@ -86,7 +87,7 @@ init:   push ds
         mov [first], dl
         mov ax, 5647h
         xor bx, bx
-        int 2Fh
+        call vmapi
         cmp ax, 5647h                   ; unchanged: not vmdos
         je .none
         or ax, ax

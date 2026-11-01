@@ -180,14 +180,14 @@ $(BUILD)/VMNIC.COM: dos/vmnic.asm dos/vmapi.inc | $(BUILD)
 $(BUILD)/VMIPX.COM: dos/vmipx.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-$(BUILD)/VMFD.COM: dos/vmfd.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/VMFD.COM: dos/vmfd.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
-$(BUILD)/VMHD.SYS: dos/vmhd.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/VMHD.SYS: dos/vmhd.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
-$(BUILD)/VMHD.COM: dos/vmhdtool.asm | $(BUILD)
-	nasm -f bin $< -o $@
+$(BUILD)/VMHD.COM: dos/vmhdtool.asm dos/vmapi.inc | $(BUILD)
+	nasm -f bin -i dos/ $< -o $@
 
 $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 	nasm -O9 -w-all -Di8086 -i third_party/shsucd/ $< -o $@   # 8086 build: assembles with any NASM

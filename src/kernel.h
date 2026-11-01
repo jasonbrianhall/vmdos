@@ -307,6 +307,9 @@ void dpmi_espfix(struct regs *r);
 
 /* ---- hv.c: VMHV, DOS in an AMD-V virtual machine ---- */
 extern int hv_active;
+int hv_restart_floppy(int d);                 /* VMFD /BOOT in VMHV: the VM restarts from floppy d; -1 empty */
+int bios_boot_floppy(struct regs *r, int d);  /* bios.c: r set to boot floppy d's boot sector; -1 empty */
+int fd_boot_sector(int d, u8 *out);           /* floppy.c: drive d's boot sector; nonzero: empty */
 u8 *hv_hole_page(void);
 void bios_disklog_fault(u32 lin, int write);  /* disklog: a disk buffer page faulted to the guest */
 u32 hv_lfb(void);                             /* VMHV: the VESA framebuffer's guest-physical address */
