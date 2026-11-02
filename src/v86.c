@@ -255,10 +255,18 @@ static void ovl_check_return(struct regs *r)
     if (!(r->eflags & EFL_CF) && ovl_seg < 0x1000) exepack_find(ovl_seg);
 }
 
-/* A HLT: the one in front of an EXEPACK unpacker? */
+/* A HLT: the one in front of an EXEPACK unpacker? Either where it was put,
+   or (for a loader that moves the image after making its PSP, see
+   AH=26h in do_int) anywhere the unpacker's code follows it. */
 static int exepack_hlt(struct regs *r, u16 ip0)
 {
-    if (!xp_at || LIN(r->cs, ip0) != xp_at || rd8(xp_at) != 0xF4) return 0;
+    u32 at = LIN(r->cs, ip0);
+    if (!xp_at || rd8(at) != 0xF4) return 0;
+    if (at != xp_at) {
+        for (int i = 1; i < (int)sizeof exepack_code; i++)
+            if (rd8(at + i) != exepack_code[i]) return 0;
+        xp_at = at; xp_byte = exepack_code[0];
+    }
     wr8(xp_at, xp_byte);
     xp_at = 0;
     xms_exec_a20_off();
@@ -286,6 +294,11 @@ static void do_int(struct regs *r, int n, u16 ip0)
         ovl_pending = 1; ovl_cs = (u16)r->cs; ovl_ip = IP(r); ovl_sp = SP(r);
         ovl_seg = rd16(LIN(r->v86_es, BX(r)));                          /* the parameter block: load segment */
     }
+    /* Create PSP: a loader of its own (Sierra's LOADER v3.0 for Thexder
+       reads, decrypts and relocates an EXEPACKed MAIN itself, makes its
+       PSP here, moves the image down and jumps in) never goes through
+       AX=4B00h, so A20 stays on. The image is in memory already. */
+    if (n == 0x21 && AH(r) == 0x26 && DX(r) < 0x1000 && !xms_hidden) exepack_find(DX(r));
     if (n == 0x28) guest_idle_poll();                                    /* DOS idle (then the vector, for TSRs) */
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AH(r) == 0x11 && fs9p_redir(r)) return;           /* DOS's redirector call for a 9p drive */
