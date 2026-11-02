@@ -269,7 +269,9 @@ int fd_int13(struct regs *r)
                 f->ro = 1; st = 0x03; AL(r) = 0; break;
             }
         }
-        st = img_io(f, lba, n, gptr(buf), fn == 0x03);
+        if (vga_span(buf, n * 512))                         /* into the screen (vga_span, video.c) */
+            VGA_BOUNCED_IO(st, lba, n, 512, buf, fn == 0x03, img_io(f, lba_, cnt_, p_, fn == 0x03));
+        else st = img_io(f, lba, n, gptr(buf), fn == 0x03);
         if (!st && fn == 0x02 && lba == 0 && f->nodos) dos_bpb(f, gptr(buf));
         if (!st && fn == 0x03 && lba < 64) {               /* boot sector / FAT rewritten (FORMAT, SYS): look again */
             static u8 b0[512];

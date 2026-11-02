@@ -430,6 +430,26 @@ int mem_emulate_more(struct emu_cpu *e);         /* go on emulating a window loo
 int vga16_window(u32 lin);                    /* video.c: 16-color planar window */
 u8 vga16_read(u32 lin);
 void vga16_write(u32 lin, u8 v);
+int vga_span(u32 lin, u32 n);                 /* video.c: guest range touches a trapped window */
+void vga_put(u32 lin, const void *src, u32 n);/* kernel -> guest, through the window's emulation */
+void vga_get(u32 lin, void *dst, u32 n);      /* guest -> kernel, the same */
+/* Sector I/O to guest memory at buf, bounced through vga_put/vga_get when
+   the range touches a trapped VGA window: io(lba, count, ptr) does
+   the transfer, the macro gives its first non-zero result (0: done). */
+#define VGA_BOUNCED_IO(ret, lba, n, secsz, buf, write, io)                     \
+    do {                                                                        \
+        static u8 vb_[4096];                                                    \
+        u32 per_ = sizeof vb_ / (secsz), l_ = (lba), b_ = (buf);                \
+        (ret) = 0;                                                              \
+        for (u32 i_ = 0; i_ < (n) && !(ret); i_ += per_) {                      \
+            u32 k_ = (n) - i_ < per_ ? (n) - i_ : per_;                         \
+            u32 at_ = b_ + i_ * (secsz);                                        \
+            if (write) vga_get(at_, vb_, k_ * (secsz));                         \
+            u32 lba_ = l_ + i_, cnt_ = k_; u8 *p_ = vb_;                        \
+            (ret) = (io);                                                       \
+            if (!(ret) && !(write)) vga_put(at_, vb_, k_ * (secsz));            \
+        }                                                                       \
+    } while (0)
 int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
 int video_gfx_height(void);                   /* graphics mode height (200 in text modes) */
 void video_puts(const char *s);

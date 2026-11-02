@@ -210,6 +210,12 @@ static u8 disk_status;
 static int disk_rw(u32 lba, u32 count, u32 buf, int write)
 {
     if (buf + count * 512 > GUEST_TOP) return 0x09;
+    if (vga_span(buf, count * 512)) {
+        int st;
+        VGA_BOUNCED_IO(st, lba, count, 512, buf, write,
+                       write ? disk_write(lba_, cnt_, p_) : disk_read(lba_, cnt_, p_));
+        return st;
+    }
     return write ? disk_write(lba, count, gptr(buf)) : disk_read(lba, count, gptr(buf));
 }
 

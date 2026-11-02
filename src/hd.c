@@ -417,6 +417,11 @@ static int bios_rw(int dev, u32 lba, u32 n, u32 buf, int write)
     if (!n) return 0;
     if (lba >= total || n > total - lba) return 0x04;
     if (buf + n * 512 > GUEST_TOP) return 0x09;
+    if (vga_span(buf, n * 512)) {
+        int e;
+        VGA_BOUNCED_IO(e, lba, n, 512, buf, write, disk_dev_rw(dev, lba_, cnt_, p_, write));
+        return e ? (write ? 0x03 : 0x04) : 0;
+    }
     return disk_dev_rw(dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
 }
 
@@ -596,7 +601,11 @@ static void request(struct regs *r)
         if (write && t->ro) { st = ST_ERR(0); break; }
         if (s >= t->p.size || n > t->p.size - s) { st = ST_ERR(8); break; }
         if (buf + n * 512 > GUEST_TOP) { st = ST_ERR(0xC); break; }
-        if (disk_dev_rw(t->p.dev, t->p.start + s, n, gptr(buf), write)) { st = ST_ERR(write ? 0xA : 0xB); break; }
+        int e;
+        if (vga_span(buf, n * 512))                                 /* into the screen (vga_span, video.c) */
+            VGA_BOUNCED_IO(e, t->p.start + s, n, 512, buf, write, disk_dev_rw(t->p.dev, lba_, cnt_, p_, write));
+        else e = disk_dev_rw(t->p.dev, t->p.start + s, n, gptr(buf), write);
+        if (e) { st = ST_ERR(write ? 0xA : 0xB); break; }
         if (write && s == 0) t->changed = 1;                        /* a new boot sector (FORMAT): DOS reads the BPB again */
         wr16(rh + 18, (u16)n);
         break; }

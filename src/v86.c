@@ -804,6 +804,21 @@ static struct regs *isr_dispatch_inner(struct regs *r)
     if (!from_v86) {
         u32 cr2;
         __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
+        /* Who called: return addresses on the interrupted stack (a ring-0
+           fault pushes no ESP/SS, so it goes on right after EFLAGS). Look
+           them up with addr2line -f -e vmdos.elf. */
+        extern u8 __kernel_start[], __text_end[];
+        kprintf("kernel exception %u at %x: EAX %x EBX %x ECX %x EDX %x ESI %x EDI %x EBP %x\n",
+                vec, r->eip, r->eax, r->ebx, r->ecx, r->edx, r->esi, r->edi, r->ebp);
+        const u32 *sp = &r->esp;
+        int shown = 0;
+        for (int i = 0; i < 128 && shown < 12; i++) {
+            u32 v = sp[i];
+            if (v > (u32)(uintptr_t)__kernel_start && v < (u32)(uintptr_t)__text_end) {
+                kprintf("  stack +%03x: %x\n", i * 4, v);
+                shown++;
+            }
+        }
         panic("kernel exception %u, error %x, EIP %x, CR2 %x", vec, r->err, r->eip, cr2);
     }
 

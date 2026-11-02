@@ -889,7 +889,9 @@ static u16 read_long(int unit, u32 rh)
         if (!ph[d].present) phys_poll(d, unit);
         if (!ph[d].present) return ST_ERR(2);
         if (start + n > ph[d].sectors || start + n < start) return ST_ERR(8);
-        int e = phys_read(d, start, n, gptr(buf), 0);
+        int e;
+        if (vga_span(buf, n * 2048)) VGA_BOUNCED_IO(e, start, n, 2048, buf, 0, phys_read(d, lba_, cnt_, p_, 0));
+        else e = phys_read(d, start, n, gptr(buf), 0);
         if (e == 6 || e == 2) {                                         /* disc changed or taken out */
             ph[d].present = 0;
             phys_poll(d, unit);
@@ -901,7 +903,10 @@ static u16 read_long(int unit, u32 rh)
     int im = unit_img[unit];
     if (im < 0) return ST_ERR(2);
     if (start + n > img[im].sectors || start + n < start) return ST_ERR(8);
-    if (img_read(im, start, n, gptr(buf))) return ST_ERR(0xB);          /* read fault */
+    int e;
+    if (vga_span(buf, n * 2048)) VGA_BOUNCED_IO(e, start, n, 2048, buf, 0, img_read(im, lba_, cnt_, p_));
+    else e = img_read(im, start, n, gptr(buf));
+    if (e) return ST_ERR(0xB);                                          /* read fault */
     return ST_DONE;
 }
 
