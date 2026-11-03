@@ -1042,23 +1042,50 @@ int vga16_fault(struct emu_cpu *e, u32 cr2)
    to A000:0000 (Thexder's EGA screens). With the window trapped the
    kernel's own copy there would fault, so those go through here a byte at
    a time, as the guest's own MOVs would. 1: [lin, lin + n) touches it. */
+/* Which way a byte of the window goes: 1 the Voodoo 3 (the VGA is the
+   card's, voodoo3.h), 2 the planar emulation, 3 nowhere (the page isn't
+   present for some other reason: dropped rather than faulting), 0 plain
+   memory. */
+static int vga_way(u32 lin)
+{
+    if (lin < 0xA0000 || lin >= 0xC0000) return 0;
+    if (v3_window(lin)) return 1;
+    if (vga16_window(lin)) return 2;
+    return page_phys(lin & ~0xFFFu) ? 0 : 3;
+}
 int vga_span(u32 lin, u32 n)
 {
     if (!n || lin + n <= 0xA0000 || lin >= 0xC0000) return 0;
     for (u32 a = lin, end = lin + n; a < end; a = (a & ~0xFFFu) + 0x1000)
-        if (vga16_window(a)) return 1;
+        if (vga_way(a)) return 1;
     return 0;
+}
+static void vga_dropped(u32 lin)
+{
+    static int told;
+    if (!told++) kprintf("video: kernel copy to %05x with the window unmapped: dropped\n", lin);
 }
 void vga_put(u32 lin, const void *src, u32 n)
 {
     const u8 *s = (const u8 *)src;
     for (u32 i = 0; i < n; i++)
-        if (vga16_window(lin + i)) vga16_write(lin + i, s[i]); else wr8(lin + i, s[i]);
+        switch (vga_way(lin + i)) {
+        case 1: v3_mmio_write(lin + i, s[i], 1); break;
+        case 2: vga16_write(lin + i, s[i]); break;
+        case 3: vga_dropped(lin + i); break;
+        default: wr8(lin + i, s[i]);
+        }
 }
 void vga_get(u32 lin, void *dst, u32 n)
 {
     u8 *d = (u8 *)dst;
-    for (u32 i = 0; i < n; i++) d[i] = vga16_window(lin + i) ? vga16_read(lin + i) : rd8(lin + i);
+    for (u32 i = 0; i < n; i++)
+        switch (vga_way(lin + i)) {
+        case 1: d[i] = (u8)v3_mmio_read(lin + i, 1); break;
+        case 2: d[i] = vga16_read(lin + i); break;
+        case 3: d[i] = 0xFF; break;
+        default: d[i] = rd8(lin + i);
+        }
 }
 
 static int ega_bpr(void) { return video_mode == 0x0D ? 40 : 80; }   /* BIOS drawing: bytes per row */
