@@ -73,6 +73,8 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vga_post                      ; 0238  video=vbe: text mode by the card's BIOS, then the boot sector
         dw dpmi_mousecb                  ; 023A  INT 33h 0Ch/14h from PM: the driver calls this, it calls the PM handler
         dw rom_post_ax                   ; 023C  rom_post's AX: the card's bus and device/function
+        dw redir_hook                    ; 023E  VMHV: INT 2Fh while a 9p drive is mounted (fs9p.cpp)
+        dw redir_old                     ; 0240  its next handler (DOS's)
 
 ; ---- stubs ----
 dummy:  iret
@@ -219,6 +221,17 @@ lfn_open:
         int 21h
         TRAP 0x5A
         iret
+
+; VMHV: DOS's network redirector calls (INT 2Fh AH=11h) stay in the virtual
+; machine, so the 9p drive's mount points INT 2Fh here: AH=11h to the
+; monitor (fs9p_redir), which IRETs for a call that was its drive's and
+; comes back after the trap for one that wasn't; everything else to DOS.
+redir_hook:
+        cmp ah, 11h
+        jne .chain
+        TRAP 0x5C
+.chain: jmp far [cs:redir_old]
+redir_old: dd 0
 
 int33:  TRAP 0x33                ; mouse driver (in the monitor)
         iret

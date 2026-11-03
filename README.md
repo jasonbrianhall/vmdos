@@ -45,7 +45,11 @@ Plug it in, pick the stick in the PC's boot menu (UEFI or legacy BIOS). The stic
 C: (vmdos reads it through its own USB driver: xHCI, EHCI, UHCI or OHCI, bulk-only mass
 storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
 Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
-Afterwards the stick can be mounted on Linux to add games (it's FAT).
+Afterwards the stick can be mounted on Linux to add games (it's FAT32).
+The image's C: is 2000 MiB; to use the rest of a bigger stick, grow the
+partition and its file system together (GParted's Resize/Move does both;
+`fatresize` from the command line). `ESP_FAT=16` builds FAT16 instead (at
+most ~4 GB; for MS-DOS 6.22 booting from C:).
 
 ### Boot menu (UEFI and legacy BIOS)
 
@@ -190,9 +194,10 @@ or `make iso EXTRA=games` rebuild C: and the image that carries it (esp.img and
 vmdos.iso hold their own copy of dos.img). By hand: `mcopy -s -i dos.img@@1M POP ::/`.
 
 Options: `EXTRA=dir` copies a directory's contents into C:\, `DISK_MB=` sets
-the size of C: (8 or more; FAT16 with 8 KB clusters up to 2 GB, since
+the size of the RAM disk C: (8 or more; FAT16 with 8 KB clusters up to 2 GB, since
 FreeDOS walks the cluster chain on every seek and DOOM's WAD on 512-byte
-FAT32 clusters took minutes to load), `FREEDOS=dir` uses your own KERNEL.SYS and
+FAT32 clusters took minutes to load; esp.img is FAT32 with clusters of up
+to 32 KiB for the same reason, `ESP_FAT=16` for FAT16), `FREEDOS=dir` uses your own KERNEL.SYS and
 COMMAND.COM. Kernel command line `debug=2` or `debug=3` logs ports and
 interrupts to COM1.
 
