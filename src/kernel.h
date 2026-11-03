@@ -99,6 +99,7 @@ extern int perf_on;
 void perf_io_probe(void);
 extern u32 perf_ports[1024];                  /* guest port accesses by port (vdev.c) */
 int serial_mode_dos(void);
+int serial_mode_off(void);                    /* serial=off: no log, COM1 untouched */
 void serial_dos_init(void);                   /* serial.c: serial=dos, COM1-COM4 (and PCI cards) for DOS */
 u16 serial_dos_port(int n);                   /* DOS's n-th serial port's base, or 0 */
 int serial_port(u16 port, int write, u8 *v);  /* a guest access to a DOS-owned UART (serial=dos,trap) */
