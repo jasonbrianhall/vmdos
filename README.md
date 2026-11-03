@@ -327,12 +327,23 @@ kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
 Serial ports: by default COM1 carries vmdos's log and DOS sees no serial
 port. `serial=dos` on the kernel command line keeps the log off it and gives
-DOS the PC's own COM1 (3F8h, IRQ 4) and COM2 (2F8h, IRQ 3), whichever are
-there: the program drives the UART directly, its interrupts reach DOS, and
-INT 14h and the BIOS data area know the ports, so null-modem links, terminal
-programs and serial mice work. Only those two legacy ports: a motherboard's
-COM header usually is COM1, but a USB-to-serial adapter or a PCIe card at
-another address isn't seen. `serial=off` only turns the log off.
+DOS every UART that's there: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3), COM3
+(3E8h, IRQ 4), COM4 (2E8h, IRQ 3), then the 16550 UARTs of PCI and PCIe
+serial cards (I/O-port ones: MosChip, ASIX, WCH and most others; not
+memory-mapped-only cards), at their own address with the IRQ the firmware
+routed, up to four in all. The UARTs' ports go straight to the chip: no
+trap, the guest's IN and OUT reach the hardware as on a PC, so programs
+that take full control of the port work: terminal programs and file
+transfer at 115200 baud, null-modem links, serial mice, and PIC / EPROM /
+AVR programmers that bit-bang DTR, RTS and TxD and read CTS and DSR. Their
+interrupts reach DOS (a PCI card's level-triggered one is held masked until
+DOS's handler sends its EOI), and INT 14h and the BIOS data area know the
+ports. `comN=base[,irq]` (hex base, decimal IRQ, 0 for none) puts a UART in
+slot N by hand (a card the scan guesses wrong, or one whose IRQ the firmware
+didn't route) and implies `serial=dos`; `serial=dos,trap` traps every access
+as before (slower, for debugging). A USB-to-serial adapter isn't seen.
+`C:\VMDOS\SERTEST` checks each port (loopback data, modem lines, which IRQ
+it interrupts on). `serial=off` only turns the log off.
 
 Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
 DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),

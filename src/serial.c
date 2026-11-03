@@ -1,17 +1,33 @@
-/* serial=dos: the PC's own COM1 and COM2 for DOS.
+/* serial=dos: the PC's own serial ports for DOS.
 
    By default COM1 carries vmdos's log and DOS sees no serial port. With
    serial=dos on the command line the log stays off the port, and each
-   UART that's there (3F8h with IRQ 4, 2F8h with IRQ 3) is DOS's: its
-   eight ports go straight to the chip, its interrupt is raised on the
-   guest's PIC, the BIOS data area lists it and INT 14h drives it. So
-   null-modem links, terminal programs and serial mice work as on a PC.
-   (serial=off: just no log on COM1.) */
+   UART that's there is DOS's: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3),
+   COM3 (3E8h, IRQ 4), COM4 (2E8h, IRQ 3), then the 16550 UARTs of PCI and
+   PCIe serial cards (at their own I/O addresses, with the IRQ their
+   firmware routed), up to four in all. comN=base[,irq] (hex base, decimal
+   IRQ, 0: none) puts a UART in slot N by hand and implies serial=dos.
+
+   A port of DOS's goes straight to the chip: the TSS's I/O bitmap (and
+   VMHV's) lets the guest's IN and OUT through, so a program that bit-bangs
+   the modem lines (a PIC or EPROM programmer driving DTR/RTS/TxD and
+   reading CTS/DSR), polls the LSR at 115200 baud or reprograms the FIFOs
+   sees the hardware with no trap in between, as on a PC. serial=dos,trap
+   keeps the old path: every access trapped and done by the kernel.
+
+   Its interrupt is raised on the guest's PIC and the BIOS data area lists
+   it; INT 14h drives it. (serial=off: just no log on COM1.) */
 #include "kernel.h"
 
-static const u16 com_base[2] = { 0x3F8, 0x2F8 };
-static const u8 com_irq[2] = { 4, 3 };
-static int com_on[2];
+#define NSLOT 4
+struct com { u16 base; u8 irq; u8 pci; };          /* irq 0: none (polled) */
+static struct com slot[NSLOT];
+static int trap_mode;
+static u16 level_masked;                           /* level-triggered IRQs masked on the PIC until the guest's EOI */
+static u16 elcr;                                   /* the chipset's edge/level register (4D0h/4D1h) */
+
+static const u16 legacy_base[4] = { 0x3F8, 0x2F8, 0x3E8, 0x2E8 };
+static const u8 legacy_irq[4] = { 4, 3, 4, 3 };
 
 static int uart_present(u16 b)
 {
@@ -22,13 +38,142 @@ static int uart_present(u16 b)
     return inb(b + 7) == 0xA5;
 }
 
+static int irq_usable(int irq)                     /* not the kernel's own (timer, keyboard, cascade, RTC, mouse, FPU) */
+{
+    return irq >= 3 && irq <= 15 && irq != 8 && irq != 12 && irq != 13;
+}
+
+static void real_irq_mask(int irq, int on)
+{
+    u16 p = irq < 8 ? 0x21 : 0xA1;
+    u8 bit = 1u << (irq & 7);
+    outb(p, on ? inb(p) | bit : inb(p) & ~bit);
+}
+
+static int slot_of(u16 base)
+{
+    for (int i = 0; i < NSLOT; i++) if (slot[i].base == base) return i;
+    return -1;
+}
+
+static int add_uart(int want, u16 base, int irq, int pci)   /* want: a slot, or -1 for the first free */
+{
+    if (slot_of(base) >= 0) return 0;
+    if (want < 0) for (int i = 0; i < NSLOT && want < 0; i++) if (!slot[i].base) want = i;
+    if (want < 0 || slot[want].base) return 0;
+    slot[want].base = base; slot[want].irq = irq_usable(irq) ? irq : 0; slot[want].pci = pci;
+    return 1;
+}
+
+/* ---- PCI and PCIe serial cards (class 07h, subclass 00h: 16450/16550 and up) ---- */
+static u32 pcfg(int bus, int dev, int fn, int off)
+{
+    outl(0xCF8, 0x80000000u | bus << 16 | dev << 11 | fn << 8 | (off & 0xFC));
+    return inl(0xCFC);
+}
+static void pcfg_w(int bus, int dev, int fn, int off, u32 v)
+{
+    outl(0xCF8, 0x80000000u | bus << 16 | dev << 11 | fn << 8 | (off & 0xFC));
+    outl(0xCFC, v);
+}
+
+static void pci_card(int bus, int dev, int fn)
+{
+    u32 id = pcfg(bus, dev, fn, 0), cmd = pcfg(bus, dev, fn, 4);
+    u32 intr = pcfg(bus, dev, fn, 0x3C);
+    int irq = (intr >> 8) & 0xFF ? (int)(intr & 0xFF) : 0;          /* no INTx pin: no IRQ */
+    u16 bar[6], len[6];
+    int nio = 0;
+    pcfg_w(bus, dev, fn, 4, cmd & ~3u);                              /* decoding off while sizing */
+    for (int i = 0; i < 6; i++) {
+        u32 v = pcfg(bus, dev, fn, 0x10 + i * 4);
+        bar[i] = len[i] = 0;
+        if (!(v & 1)) { if ((v & 6) == 4) i++; continue; }          /* memory BAR (a 64-bit one takes two) */
+        pcfg_w(bus, dev, fn, 0x10 + i * 4, 0xFFFFFFFF);
+        u32 m = pcfg(bus, dev, fn, 0x10 + i * 4);
+        pcfg_w(bus, dev, fn, 0x10 + i * 4, v);
+        if ((v & 0xFFFC) && (m & 0xFFFC)) { bar[i] = v & 0xFFFC; len[i] = (u16)(~(m & 0xFFFC) + 1); nio++; }
+    }
+    /* I/O on, INTx enabled (bit 10 off); UEFI leaves a card no driver claimed undecoded */
+    pcfg_w(bus, dev, fn, 4, (cmd | 1) & ~0x400u);
+    kprintf("serial: PCI %02x:%02x.%x (%04x:%04x), %d I/O range(s), IRQ %d\n",
+            bus, dev, fn, id & 0xFFFF, id >> 16, nio, irq);
+    if (!nio) { kprintf("serial:   only memory-mapped: DOS can't use it\n"); return; }
+
+    u16 cand[8]; int nc = 0;
+    u16 ven = id & 0xFFFF, did = id >> 16;
+    if (ven == 0x1C00 && bar[0] && len[0] >= 0x100) {               /* WCH CH382/CH384: UARTs from BAR0 + C0h */
+        int n = did == 0x3470 ? 4 : did == 0x3253 || did == 0x3250 ? 2 : 1;
+        for (int k = 0; k < n; k++) cand[nc++] = bar[0] + 0xC0 + k * 8;
+    } else {
+        for (int i = 0; i < 6 && nc < 8; i++) {
+            if (!bar[i]) continue;
+            if (len[i] == 8) cand[nc++] = bar[i];                    /* one UART a range (MosChip, ASIX, most) */
+            else if (len[i] >= 16 && len[i] <= 64 && nio == 1)       /* one range, UARTs 8 apart */
+                for (int k = 0; k < len[i] / 8 && nc < 8; k++) cand[nc++] = bar[i] + k * 8;
+        }
+    }
+    for (int k = 0; k < nc; k++) {
+        if (slot_of(cand[k]) >= 0 || !uart_present(cand[k])) continue;   /* (comN= took it already) */
+        if (!add_uart(-1, cand[k], irq, 1)) { kprintf("serial:   UART at %xh: no COM slot left\n", cand[k]); continue; }
+        if (!irq_usable(irq)) kprintf("serial:   UART at %xh: no legacy IRQ routed, polled only\n", cand[k]);
+    }
+}
+
+static void pci_scan(void)
+{
+    for (int bus = 0; bus < 256; bus++)
+        for (int dev = 0; dev < 32; dev++)
+            for (int fn = 0; fn < 8; fn++) {
+                u32 id = pcfg(bus, dev, fn, 0);
+                if ((id & 0xFFFF) == 0xFFFF) { if (!fn) break; continue; }
+                u32 cls = pcfg(bus, dev, fn, 8) >> 8;
+                if ((cls >> 8) == 0x0700 && (cls & 0xFF) >= 1 && (cls & 0xFF) <= 6) pci_card(bus, dev, fn);
+                if (!fn && !(pcfg(bus, dev, fn, 0x0C) & 0x800000)) break;
+            }
+}
+
+static u32 hexnum(const char **p)
+{
+    u32 v = 0; const char *s = *p;
+    for (;; s++) {
+        char c = *s;
+        if (c >= '0' && c <= '9') v = v * 16 + c - '0';
+        else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') v = v * 16 + (c | 0x20) - 'a' + 10;
+        else break;
+    }
+    *p = s; return v;
+}
+
 void serial_dos_init(void)
 {
     if (!serial_mode_dos()) return;
+    const char *s = strstr(cmdline, "serial=dos");
+    trap_mode = s && !strncmp(s + 10, ",trap", 5);
+
+    /* comN=base[,irq] first: they take their slot */
+    for (int n = 0; n < NSLOT; n++) {
+        char key[6] = { 'c', 'o', 'm', (char)('1' + n), '=', 0 };
+        const char *p = strstr(cmdline, key);
+        if (!p || (p != cmdline && p[-1] != ' ')) continue;
+        p += 5;
+        u16 b = (u16)hexnum(&p);
+        int irq = 0;
+        if (*p == ',') { p++; while (*p >= '0' && *p <= '9') irq = irq * 10 + *p++ - '0'; }
+        if (b < 0x100 || !uart_present(b)) { kprintf("serial: com%d=%xh: no UART there\n", n + 1, b); continue; }
+        add_uart(n, b, irq, 0);
+    }
+    for (int i = 0; i < 4; i++)
+        if (slot_of(legacy_base[i]) < 0 && uart_present(legacy_base[i])) add_uart(-1, legacy_base[i], legacy_irq[i], 0);
+    pci_scan();
+
+    elcr = inb(0x4D0) | inb(0x4D1) << 8;
+    if ((elcr & 0x0107) || elcr == 0xFFFF) elcr = 0;    /* IRQ 0-2 and 8 are always edge: no ELCR here */
+
     int n = 0;
-    for (int i = 0; i < 2; i++) {
-        u16 b = com_base[i];
-        if (!uart_present(b)) { kprintf("serial: COM%d (%xh) not there\n", i + 1, b); continue; }
+    for (int i = 0; i < NSLOT; i++) {
+        u16 b = slot[i].base;
+        if (!b) continue;
         outb(b + 1, 0);                            /* no interrupts until DOS asks */
         outb(b + 4, 0);                            /* OUT2 off: the IRQ line stays quiet */
         /* FIFOs off, as after a PC's reset: UEFI firmware (and GRUB's serial
@@ -38,40 +183,55 @@ void serial_dos_init(void)
            with 04h: it sees no received byte at all. */
         outb(b + 2, 0x06); outb(b + 2, 0);
         (void)inb(b + 5); (void)inb(b + 6); (void)inb(b + 2); (void)inb(b);
-        com_on[i] = 1;
-        outb(0x21, inb(0x21) & ~(1u << com_irq[i]));   /* the real IRQ, raised on the guest's PIC */
-        kprintf("serial: COM%d at %xh, IRQ %d, for DOS\n", i + 1, b, com_irq[i]);
+        if (!trap_mode) io_allow(b, 8);            /* straight to the chip: no trap */
+        if (slot[i].irq) real_irq_mask(slot[i].irq, 0);   /* the real IRQ, raised on the guest's PIC */
+        kprintf("serial: COM%d at %xh, IRQ %d%s, for DOS%s\n", i + 1, b, slot[i].irq,
+                slot[i].irq && (elcr >> slot[i].irq & 1) ? " (level)" : "", trap_mode ? " (trapped)" : "");
         n++;
     }
-    if (!n) kprintf("serial: serial=dos, but no COM1 or COM2 on this PC\n");
+    if (!n) kprintf("serial: serial=dos, but no serial port on this PC\n");
 }
 
-/* The base of DOS's n-th serial port (BDA order: those present, packed), or 0. */
-u16 serial_dos_port(int n)
-{
-    for (int i = 0; i < 2; i++)
-        if (com_on[i] && n-- == 0) return com_base[i];
-    return 0;
-}
+/* The base of DOS's n-th serial port (BDA slot n), or 0. */
+u16 serial_dos_port(int n) { return n >= 0 && n < NSLOT ? slot[n].base : 0; }
 
-/* A guest port access: 1 if it's a DOS-owned UART's (done on the chip). */
+/* A guest port access: 1 if it's a DOS-owned UART's (done on the chip).
+   Only serial=dos,trap (or an instruction the kernel emulates) gets here. */
 int serial_port(u16 port, int write, u8 *v)
 {
-    for (int i = 0; i < 2; i++) {
-        if (!com_on[i] || port < com_base[i] || port > com_base[i] + 7) continue;
+    for (int i = 0; i < NSLOT; i++) {
+        if (!slot[i].base || port < slot[i].base || port > slot[i].base + 7) continue;
         if (write) outb(port, *v); else *v = inb(port);
         return 1;
     }
     return 0;
 }
 
-/* The real IRQ 3 or 4 (the PIC is acknowledged by the caller). The UART
-   keeps its line up until the guest's handler reads it, so the PIC's
-   edge comes again only for a new event, as on a PC. */
-void serial_irq(int irq)
+/* A real IRQ (the PIC is acknowledged by the caller): 1 if it's a UART's.
+   An edge-triggered line: the UART keeps it up until the guest's handler
+   reads it, so the PIC's edge comes again only for a new event, as on a
+   PC. A level-triggered one (a PCI card's, ELCR set): masked on the PIC
+   until the guest's EOI, else it would fire again before the guest's
+   handler ran. */
+int serial_irq(int irq)
 {
-    for (int i = 0; i < 2; i++)
-        if (com_on[i] && com_irq[i] == irq) vpic_raise(irq);
+    int ours = 0;
+    for (int i = 0; i < NSLOT; i++) ours |= slot[i].base && slot[i].irq == irq;
+    if (!ours) return 0;
+    if (elcr >> irq & 1) { real_irq_mask(irq, 1); level_masked |= 1u << irq; }
+    vpic_raise(irq);
+    return 1;
+}
+
+/* The guest wrote an EOI to its PIC: open the level-triggered lines it's done with. */
+void serial_guest_eoi(void)
+{
+    if (!level_masked) return;
+    for (int irq = 3; irq < 16; irq++)
+        if ((level_masked >> irq & 1) && !vpic_busy(irq)) {
+            level_masked &= ~(1u << irq);
+            real_irq_mask(irq, 0);
+        }
 }
 
 /* FreeDOS's COM driver (kernel/serial.asm) answers a non-destructive read
@@ -129,9 +289,7 @@ static int wait_lsr(u16 b, u8 bit)                 /* about a second, as a PC's 
 void serial_int14(struct regs *r)
 {
     u16 b = DX(r) < 4 ? rd16(BDA + DX(r) * 2) : 0;
-    int ours = 0;
-    for (int i = 0; i < 2; i++) ours |= com_on[i] && b == com_base[i];
-    if (!ours) { AH(r) = 0x80; return; }           /* no such port (or one DOS moved elsewhere): time-out */
+    if (!b || slot_of(b) < 0) { AH(r) = 0x80; return; }   /* no such port (or one DOS moved elsewhere): time-out */
     freedos_comndread_fix();
     switch (AH(r)) {
     case 0x00: {                                   /* initialise: AL = baud (7-5), parity (4-3), stop (2), length (1-0) */

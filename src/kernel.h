@@ -99,10 +99,11 @@ extern int perf_on;
 void perf_io_probe(void);
 extern u32 perf_ports[1024];                  /* guest port accesses by port (vdev.c) */
 int serial_mode_dos(void);
-void serial_dos_init(void);                   /* serial.c: serial=dos, COM1/COM2 for DOS */
+void serial_dos_init(void);                   /* serial.c: serial=dos, COM1-COM4 (and PCI cards) for DOS */
 u16 serial_dos_port(int n);                   /* DOS's n-th serial port's base, or 0 */
-int serial_port(u16 port, int write, u8 *v);  /* a guest access to a DOS-owned UART */
-void serial_irq(int irq);                     /* the real IRQ 3 or 4 */
+int serial_port(u16 port, int write, u8 *v);  /* a guest access to a DOS-owned UART (serial=dos,trap) */
+int serial_irq(int irq);                      /* a real IRQ: 1 if a DOS-owned UART's */
+void serial_guest_eoi(void);                  /* the guest's PIC got an EOI (level-triggered UART IRQs) */
 struct regs;
 void serial_int14(struct regs *r);
 void kprintf(const char *fmt, ...);
@@ -178,6 +179,7 @@ void vpic_lower(int irq);                     /* take back a request not yet del
 void vpic_ack(int vec);                       /* mark in service */
 void vpic_eoi_master(void);
 void vpic_eoi_irq(int irq);
+int vpic_busy(int irq);                       /* requested or in service on the guest's PIC */
 u32 port_in(u16 port, int size);
 void port_out(u16 port, u32 val, int size);
 void vdev_tick(void);                         /* from the real timer IRQ */

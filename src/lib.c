@@ -216,6 +216,11 @@ void serial_init(const char *cmd)
         if (!strncmp(s + 7, "dos", 3)) serial_mode = 2;
         else if (!strncmp(s + 7, "off", 3)) serial_mode = 1;
     }
+    for (int n = 0; cmd && n < 4; n++) {            /* comN=base[,irq]: a UART for DOS by hand (serial.c) */
+        char key[6] = { 'c', 'o', 'm', (char)('1' + n), '=', 0 };
+        const char *c = strstr(cmd, key);
+        if (c && (c == cmd || c[-1] == ' ')) serial_mode = 2;
+    }
     tsc_calibrate();                             /* kdelay_us needs it even with logtime=off */
     if (!tsc_per_ms) p80_calibrate();
     log_times = !(cmd && strstr(cmd, "logtime=off"));

@@ -726,12 +726,10 @@ static struct regs *isr_dispatch_inner(struct regs *r)
         } else if (irq == 1) {
             kbc_irqs++;
             vkbd_real_scancode(inb(0x60));
-        } else if (irq == 3 || irq == 4) {
-            serial_irq(irq);                         /* serial=dos: the UART's, for the guest */
         } else if (irq == 12) {
             kbc_irqs++;
             mouse_ps2_byte(inb(0x60));
-        }
+        } else serial_irq(irq);                      /* serial=dos: a UART's, for the guest */
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
         static int in_usb;

@@ -81,13 +81,20 @@ void vpic_eoi_irq(int irq)
     else { ps.isr &= ~(1 << (irq - 8)); if (!ps.isr) pm.isr &= ~4; }
 }
 
+int vpic_busy(int irq)
+{
+    struct pic *p = irq < 8 ? &pm : &ps;
+    return ((p->isr | p->irr) >> (irq & 7)) & 1;
+}
+
 static void pic_out(struct pic *p, int a0, u8 v)
 {
     if (!a0) {
-        if (v & 0x10) { p->init = 1; p->icw4 = v & 1; p->imr = 0; p->isr = 0; p->irr = 0; return; }
+        if (v & 0x10) { p->init = 1; p->icw4 = v & 1; p->imr = 0; p->isr = 0; p->irr = 0; serial_guest_eoi(); return; }
         if (v & 0x08) { if ((v & 3) == 2) p->read_isr = 0; else if ((v & 3) == 3) p->read_isr = 1; return; }
         if ((v & 0xE0) == 0x20) pic_eoi(p);                          /* non-specific EOI */
         else if ((v & 0xE0) == 0x60) p->isr &= ~(1 << (v & 7));      /* specific EOI */
+        serial_guest_eoi();                                          /* serial=dos: a level-triggered UART's line */
         return;
     }
     switch (p->init) {
