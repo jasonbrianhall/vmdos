@@ -325,8 +325,9 @@ Slowdown for games that time themselves by the CPU (as MoSlo does):
 faster while a program runs (shown at the top right), and `speed=N` on the
 kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
 
-Serial ports: by default COM1 carries vmdos's log and DOS sees no serial
-port. `serial=dos` on the kernel command line keeps the log off it and gives
+Serial ports: by default COM1 carries vmdos's log and DOS gets every other
+UART (COM2 stays DOS's COM2; COM1 is left out of the BIOS data area).
+`serial=dos` on the kernel command line keeps the log off COM1 and gives
 DOS every UART that's there: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3), COM3
 (3E8h, IRQ 4), COM4 (2E8h, IRQ 3), then the 16550 UARTs of PCI and PCIe
 serial cards (I/O-port ones: MosChip, ASIX, WCH and most others; not

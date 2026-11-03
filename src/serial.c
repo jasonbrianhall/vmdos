@@ -1,8 +1,8 @@
 /* serial=dos: the PC's own serial ports for DOS.
 
-   By default COM1 carries vmdos's log and DOS sees no serial port. With
-   serial=dos on the command line the log stays off the port, and each
-   UART that's there is DOS's: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3),
+   By default COM1 carries vmdos's log and DOS gets the other UARTs (COM2
+   stays COM2). With serial=dos on the command line the log stays off
+   COM1, and each UART that's there is DOS's: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3),
    COM3 (3E8h, IRQ 4), COM4 (2E8h, IRQ 3), then the 16550 UARTs of PCI and
    PCIe serial cards (at their own I/O addresses, with the IRQ their
    firmware routed), up to four in all. comN=base[,irq] (hex base, decimal
@@ -23,6 +23,7 @@
 struct com { u16 base; u8 irq; u8 pci; };          /* irq 0: none (polled) */
 static struct com slot[NSLOT];
 static int trap_mode;
+static int first_auto;                             /* the first slot found ports fill: 1 when COM1 is the log's */
 static u16 level_masked;                           /* level-triggered IRQs masked on the PIC until the guest's EOI */
 static u16 elcr;                                   /* the chipset's edge/level register (4D0h/4D1h) */
 
@@ -59,7 +60,7 @@ static int slot_of(u16 base)
 static int add_uart(int want, u16 base, int irq, int pci)   /* want: a slot, or -1 for the first free */
 {
     if (slot_of(base) >= 0) return 0;
-    if (want < 0) for (int i = 0; i < NSLOT && want < 0; i++) if (!slot[i].base) want = i;
+    if (want < 0) for (int i = first_auto; i < NSLOT && want < 0; i++) if (!slot[i].base) want = i;
     if (want < 0 || slot[want].base) return 0;
     slot[want].base = base; slot[want].irq = irq_usable(irq) ? irq : 0; slot[want].pci = pci;
     return 1;
@@ -147,7 +148,10 @@ static u32 hexnum(const char **p)
 
 void serial_dos_init(void)
 {
-    if (!serial_mode_dos()) return;
+    /* Without serial=dos, COM1 is the log's (or, serial=off, left alone)
+       and DOS gets the rest, each in its own slot: COM2 stays COM2. */
+    int all = serial_mode_dos();
+    first_auto = !all;
     const char *s = strstr(cmdline, "serial=dos");
     trap_mode = s && !strncmp(s + 10, ",trap", 5);
 
@@ -163,8 +167,9 @@ void serial_dos_init(void)
         if (b < 0x100 || !uart_present(b)) { kprintf("serial: com%d=%xh: no UART there\n", n + 1, b); continue; }
         add_uart(n, b, irq, 0);
     }
-    for (int i = 0; i < 4; i++)
-        if (slot_of(legacy_base[i]) < 0 && uart_present(legacy_base[i])) add_uart(-1, legacy_base[i], legacy_irq[i], 0);
+    for (int i = all ? 0 : 1; i < 4; i++)
+        if (slot_of(legacy_base[i]) < 0 && uart_present(legacy_base[i]))
+            add_uart(all ? -1 : i, legacy_base[i], legacy_irq[i], 0);
     pci_scan();
 
     elcr = inb(0x4D0) | inb(0x4D1) << 8;
@@ -189,7 +194,8 @@ void serial_dos_init(void)
                 slot[i].irq && (elcr >> slot[i].irq & 1) ? " (level)" : "", trap_mode ? " (trapped)" : "");
         n++;
     }
-    if (!n) kprintf("serial: serial=dos, but no serial port on this PC\n");
+    if (!n && all) kprintf("serial: serial=dos, but no serial port on this PC\n");
+    if (!all && inb(0x3FD) != 0xFF) kprintf("serial: COM1 is %s (serial=dos gives it to DOS too)\n", serial_mode_off() ? "left alone" : "vmdos's log");
 }
 
 /* The base of DOS's n-th serial port (BDA slot n), or 0. */

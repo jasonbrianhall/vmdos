@@ -794,7 +794,7 @@ void kmain(u32 magic, struct mb_info *mb)
     disk_init();
     vdev_init();
     speed_init();
-    serial_dos_init();                            /* serial=dos: before the BIOS lists the ports */
+    serial_dos_init();                            /* DOS's UARTs: before the BIOS lists the ports */
     bios_init();
     sound_init();
     net_init();

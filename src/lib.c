@@ -208,6 +208,7 @@ static u32 ms_since_reset(void)
     return q;
 }
 int serial_mode_dos(void) { return serial_mode == 2; }
+int serial_mode_off(void) { return serial_mode == 1; }
 
 void serial_init(const char *cmd)
 {
