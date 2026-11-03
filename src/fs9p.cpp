@@ -995,6 +995,19 @@ u8* wb_get()
     return 0;
 }
 
+// n bytes to dst, which may be guest memory (gptr: linear = address):
+// the screen's through its emulation, judged when the bytes are there (a
+// read over the network waits, and the window can change meanwhile).
+static void to_dst(u8* dst, const u8* src, u32 n)
+{
+    u32 lin = (u32)(uintptr_t)dst;
+    if (vga_span(lin, n)) {
+        static int told;
+        if (!told++) kprintf("9p: read into the screen at %05x: through the VGA emulation\n", lin);
+        vga_put(lin, src, n);
+    } else memcpy(dst, src, n);
+}
+
 // n bytes at pos of an open file (fid) into dst, through the block cache:
 // bytes read, or -errno. *last_end: where the previous read ended (read-ahead).
 long cread(u8 dv, u32 fid, u64 qpath, u32 ver, u32* last_end, u32 pos, u32 n, u8* dst)
@@ -1007,7 +1020,7 @@ long cread(u8 dv, u32 fid, u64 qpath, u32 ver, u32* last_end, u32 pos, u32 n, u8
         if (!b && nblk < 8) {                  // no cache: straight in
             long r = p_read(d, fid, p, n - done);
             if (r < 0) return done ? (long)done : r;
-            memcpy(dst + done, d.brx + 11, (u32)r);
+            to_dst(dst + done, d.brx + 11, (u32)r);
             done += (u32)r;
             if (!r) break;
             continue;
@@ -1031,7 +1044,7 @@ long cread(u8 dv, u32 fid, u64 qpath, u32 ver, u32* last_end, u32 pos, u32 n, u8
         if (in >= b->len) break;               // the end of the file
         u32 c = b->len - in;
         if (c > n - done) c = n - done;
-        memcpy(dst + done, blk_data(b) + in, c);
+        to_dst(dst + done, blk_data(b) + in, c);
         done += c;
         if (b->len < BLK) break;
     }
@@ -1046,6 +1059,13 @@ long file_read(OFile& f, u32 pos, u32 n, u32 lin)
     return cread(mnts[f.drive].dev, f.fid, f.qpath, f.ver, &f.last_end, pos, n, gptr(lin));
 }
 
+// n bytes of guest memory at lin, the screen's through its emulation
+static void from_guest(void* dst, u32 lin, u32 n)
+{
+    if (vga_span(lin, n)) vga_get(lin, dst, n);
+    else memcpy(dst, gptr(lin), n);
+}
+
 // n bytes from guest memory at lin to pos: bytes written, or -errno
 long file_write(OFile& f, u32 pos, u32 n, u32 lin)
 {
@@ -1058,7 +1078,7 @@ long file_write(OFile& f, u32 pos, u32 n, u32 lin)
         if (f.wb) {
             if (f.wb_len && (pos != f.wb_off + f.wb_len || f.wb_len + n > WBSZ)) wb_flush(f);
             if (!f.wb_len) { f.wb_off = pos; f.wb_at = ticks; }
-            memcpy(f.wb + f.wb_len, gptr(lin), n);
+            from_guest(f.wb + f.wb_len, lin, n);
             f.wb_len += n;
             if (pos + n > f.size) f.size = pos + n;
             return n;
@@ -1069,7 +1089,7 @@ long file_write(OFile& f, u32 pos, u32 n, u32 lin)
     while (done < n) {
         u32 c = n - done;
         if (c > d.msize - 23) c = d.msize - 23;
-        memcpy(d.btx + 23, gptr(lin + done), c);
+        from_guest(d.btx + 23, lin + done, c);
         long w = p_write(d, f.fid, pos + done, c);
         if (w < 0) { if (!done) return w; break; }
         if (!w) break;
