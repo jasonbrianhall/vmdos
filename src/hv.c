@@ -553,11 +553,10 @@ static void hv_port_out(u16 port, u32 v, int sz)
     if (sz == 1) outb(port, (u8)v); else if (sz == 2) outw(port, (u16)v); else outl(port, v);
 }
 /* Bits 0-65535 as AMD's IOPM and VT-x's I/O bitmaps A and B lay them out:
-   every port exits but the card's. */
+   every port exits but those io_allow opened (video=vbe's card, serial=dos's UARTs). */
 void hv_io_bitmap(u8 *bm)
 {
     memset(bm, 0xFF, 8192);
-    if (!vga_native) return;
     for (u32 p = 0; p < 0x10000; p++)
         if (io_allowed((u16)p)) bm[p >> 3] &= (u8)~(1 << (p & 7));
 }
@@ -829,7 +828,7 @@ static int hv_setup(void)
     vmcb = phys_alloc(4096); hsave = phys_alloc(4096); hvsave = phys_alloc(4096);
     iopm = phys_alloc(12288); msrpm = phys_alloc(8192);
     memset(iopm, 0xFF, 12288);                                    /* every port exits ... */
-    hv_io_bitmap(iopm);                                           /* ... but video=vbe's card's */
+    hv_io_bitmap(iopm);                                           /* ... but video=vbe's card's, serial=dos's UARTs */
     memset(msrpm, 0xFF, 8192);                                    /* every MSR exits */
     npt_init();
     u32 lo, hi;

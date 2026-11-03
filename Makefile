@@ -172,6 +172,9 @@ $(BUILD)/VMPKT.COM: dos/vmpkt.asm dos/vmapi.inc | $(BUILD)
 $(BUILD)/PKTTEST.COM: tests/pkttest.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/SERTEST.COM: tests/sertest.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/IPXTEST.COM: tests/ipxtest.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -201,7 +204,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMMIC.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SHSUCDX.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMMIC.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SERTEST.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
