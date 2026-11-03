@@ -119,7 +119,7 @@ extern volatile int hv_tlb_dirty;
 extern void (*hv_map_hook)(u32 lin);
 u64 hv_host_pte(u32 lin);
 u32 video_vram_base(u32 *size);
-void hv_io_bitmap(u8 *bm);                     /* hv.c: every port exits but video=vbe's card's */
+void hv_io_bitmap(u8 *bm);                     /* hv.c: every port exits but those io_allow opened */
 
 static u8 *vmxon_region, *vmcs;
 static u64 *ept_pml4, *ept_pdpt, *ept_pd[4];
@@ -255,7 +255,9 @@ int vmx_setup(u8 *shadow)
     int missing = 0;
     vmwrite(PIN_CTL, adjust(1u << 0 | 1u << 3, true_ctls ? 0x48D : 0x481, &missing));   /* external interrupts, NMI */
     proc_ctl = adjust(1u << 7 | 1u << 24 | 1u << 31, true_ctls ? 0x48E : 0x482, &missing); /* HLT, all I/O, secondary */
-    if (vga_native) {                                           /* video=vbe: I/O bitmaps, the card's ports not exiting */
+    int open_io = vga_native;                                   /* video=vbe's card, serial=dos's UARTs: I/O bitmaps */
+    for (int i = 0; i < 4; i++) open_io |= serial_dos_port(i) != 0;
+    if (open_io) {                                              /* ... those ports not exiting */
         int nobm = 0;
         u32 c = adjust(1u << 7 | 1u << 25 | 1u << 31, true_ctls ? 0x48E : 0x482, &nobm);
         if (!nobm && !(c & (1u << 24))) {
