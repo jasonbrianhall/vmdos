@@ -24,6 +24,7 @@
 #include <time.h>
 
 #include "vmnet.h"
+#include "vmapi.h"
 #include "arp.h"
 #include "eth.h"
 #include "ip.h"
@@ -71,7 +72,7 @@ static bool vmdosHere( void ) {
   segread( &sr );
   static uint8_t mac[6];
   sr.es = FP_SEG( (void __far *)mac ); r.x.di = FP_OFF( (void __far *)mac );
-  int86x( 0x2f, &r, &r, &sr );
+  vmapi( &r, &sr );
   return r.x.bx == 0x564d;
 }
 
@@ -81,7 +82,7 @@ static int api( uint8_t fn, void *buf ) {
   segread( &sr );
   r.x.ax = 0x564e; r.h.bl = fn;
   sr.es = FP_SEG( (void __far *)buf ); r.x.di = FP_OFF( (void __far *)buf );
-  int86x( 0x2f, &r, &r, &sr );
+  vmapi( &r, &sr );
   return r.x.ax;
 }
 
