@@ -33,6 +33,7 @@
 #include <time.h>
 
 #include "vmnet.h"
+#include "vmapi.h"
 #include "arp.h"
 #include "eth.h"
 #include "ip.h"
@@ -76,7 +77,7 @@ static uint16_t api( uint16_t fn, void __far *buf, uint8_t dl, uint16_t *bxOut )
   segread( &sr );
   r.x.ax = 0x5652; r.x.bx = fn; r.h.dl = dl;
   sr.es = FP_SEG( buf ); r.x.di = FP_OFF( buf );
-  int86x( 0x2f, &r, &r, &sr );
+  vmapi( &r, &sr );
   if ( bxOut ) *bxOut = r.x.bx;
   return r.x.ax;
 }

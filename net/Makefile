@@ -68,9 +68,9 @@ $(N)/ping.obj: ping/ping.cpp lib/vmnet.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
 $(N)/nslookup.obj: nslookup/nslookup.cpp lib/vmnet.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
-$(N)/vmipxbox.obj: vmipxbox/vmipxbox.cpp lib/vmnet.h | $(N)
+$(N)/vmipxbox.obj: vmipxbox/vmipxbox.cpp lib/vmnet.h lib/vmapi.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
-$(N)/vmdosnet.obj: vmdosnet/vmdosnet.cpp lib/vmnet.h | $(N)
+$(N)/vmdosnet.obj: vmdosnet/vmdosnet.cpp lib/vmnet.h lib/vmapi.h | $(N)
 	$(WPP) $(COPTS) $(NETCFG) -fo=$@ $<
 $(D)/dhcp.obj: dhcp/dhcp.cpp dhcp/dhcp.h lib/vmnet.h dhcp/dhcp.cfg | $(D)
 	$(WPP) $(COPTS) $(DHCPCFG) -fo=$@ $<
