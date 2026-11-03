@@ -50,7 +50,8 @@ jobs:
     runs-on: ubuntu-24.04
     concurrency: release   # two runs on one day must not pick the same name
     env:
-      ESP_MB: 2000          # FAT16 (32 KiB clusters): fits a 4 GB stick, room for games
+      ESP_MB: 2000          # fits a 4 GB stick, room for games
+      ESP_FAT: 32           # FAT32 (16 KiB clusters): can be grown to fill a bigger stick (fatresize, GParted)
     steps:
       - uses: actions/checkout@v5
         with:
@@ -64,7 +65,10 @@ jobs:
 
       - name: Build esp.img (no EXTRA, no RAMDISK)
         run: |
-          make -j"$(nproc)" esp FRESH=1 ESP_MB=$ESP_MB EXTRA= RAMDISK= ISO=
+          make -j"$(nproc)" esp FRESH=1 ESP_MB=$ESP_MB ESP_FAT=$ESP_FAT EXTRA= RAMDISK= ISO=
+          # the file system asked for (the boot sector's type string)
+          fs=$(dd if=esp.img bs=1 skip=$((1048576 + (ESP_FAT == 32 ? 0x52 : 0x36))) count=5 2>/dev/null)
+          [ "$fs" = "FAT$ESP_FAT" ] || { echo "esp.img is not FAT$ESP_FAT (boot sector says '$fs')"; exit 1; }
           # what's on it, and that there's no RAM disk
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS

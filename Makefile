@@ -7,7 +7,8 @@
 #   make run-efi         QEMU, UEFI (OVMF), from the ISO
 #   make efi             vmdos.efi: run straight from UEFI (no GRUB);
 #                        both go in the same folder of the EFI system partition
-#   make esp             esp.img: the EFI disk, also C: (EFI/BOOT/BOOTX64.EFI + FreeDOS)
+#   make esp             esp.img: the EFI disk, also C: (EFI/BOOT/BOOTX64.EFI + FreeDOS),
+#                        FAT32 (ESP_FAT=16: FAT16)
 #   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img (SATA)
 #   make run-usb         QEMU, UEFI (OVMF), booting esp.img as a USB stick
 #   make run-bios        QEMU, legacy BIOS (SeaBIOS), booting esp.img (GRUB in the MBR)
@@ -295,6 +296,11 @@ vmdos.efi: efi/loader.c efi/tramp.S efi/image.S $(BUILD)/efi/kernel.bin $(BUILD)
 # never overwritten; with it, the menu waits 5 s). GRUB=0 (or no GRUB tools):
 # UEFI only, vmdos.efi as BOOTX64.EFI. Updated in place unless FRESH=1.
 ESP_FREE ?= 256
+# ESP_FAT=32 (default): esp.img's partition is FAT32, its clusters as big as
+# its size allows (16 KiB at 2000 MB), so it can be grown to fill a big USB
+# stick and hold files past 2 GiB. ESP_FAT=16: FAT16 (at most ~4 GB), as
+# before, for DOSes that don't know FAT32 (MS-DOS 6.22 booting from C:).
+ESP_FAT  ?= 32
 EXTRA_MB := $(if $(EXTRA),$(shell du -sm "$(EXTRA)" | cut -f1),0)
 ESP_MB   ?= $(shell echo $$(( $(DISK_MB) + $(EXTRA_MB) + $(ISO_MB) + $(ESP_FREE) )))
 GRUB_MKIMAGE ?= $(firstword $(shell command -v grub-mkimage grub2-mkimage 2>/dev/null))
@@ -306,7 +312,7 @@ GRUB_MODS := part_msdos part_gpt fat normal configfile search search_fs_file tes
 VMDOS_EFI_DIR := $(if $(filter 1,$(GRUB)),EFI/vmdos,EFI/BOOT)
 # Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list, GRUB).
 $(BUILD)/esp.opts: FORCE | $(BUILD)
-	@echo '$(USE_RAM) $(ISO_C) $(GRUB)' > $@.new
+	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
@@ -412,7 +418,7 @@ ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BO
 esp: esp.img
 esp.img: vmdos.efi $(RAM_IMG) $(FLOPPY) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
 	$(if $(filter 1,$(GRUB)),,@echo "esp.img: UEFI only (GRUB=0, or grub-mkimage / GRUB's i386-pc and x86_64-efi modules not found)")
-	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF --boot16=$(BUILD)/fat16.bin $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
+	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF $(if $(filter 16,$(ESP_FAT)),--boot16=$(BUILD)/fat16.bin) $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
 	    $(DOS_FILES) vmdos.efi=$(VMDOS_EFI_DIR)/$(if $(filter 1,$(GRUB)),vmdos.efi,BOOTX64.EFI) \
 	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(FLOPPY)=$(VMDOS_EFI_DIR)/floppy.img $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
 	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")

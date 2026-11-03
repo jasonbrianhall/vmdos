@@ -587,6 +587,11 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x74: ps2_irq(r); return BIOS_CONT;
     case 0x67: ems_int67(r); return BIOS_DONE;
     case 0x5A: fs9p_lfn_done(r); return BIOS_DONEF;           /* after a long-name open (fs9p.cpp) */
+    case 0x5C: {                                              /* VMHV: DOS's redirector call (bios.asm redir_hook) */
+        SP(r) += 6;                                           /* the caller's stack, as the INT found it */
+        int ours = fs9p_redir(r);                             /* ([SS:SP]: open mode, create attribute) */
+        SP(r) -= 6;
+        return ours ? BIOS_DONEF : BIOS_CONT; }
     }
     if (id >= 0x60 && id < 0x70) return dpmi_rm_trap(r, id);   /* DPMI real-mode callbacks */
     return BIOS_DONE;

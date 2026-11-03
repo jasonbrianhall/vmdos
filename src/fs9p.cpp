@@ -2294,6 +2294,24 @@ bool dev_in_use(int dv)
 //   13 db tag (32, ASCIIZ: virtio: the mount tag, "": the first; TCP: the name shown)
 //   33 Tcp9pCfg (TCP: the addresses VMDOSNET.EXE found); then db aname (128: the export)
 const u32 MB_KIND = 0x0E, MB_UID = 0x0F, MB_TAG = 0x13, MB_NET = 0x33, MB_ANAME = MB_NET + sizeof(Tcp9pCfg);
+// VMHV: DOS's redirector calls (INT 2Fh AH=11h) stay in the virtual machine,
+// where nothing takes them off the chain before DOS's own handler ends it.
+// INT 2Fh goes to vmdos's BIOS (bios.asm redir_hook: AH=11h by a trap to
+// fs9p_redir, the rest on to the handler that was there). Long names
+// (INT 21h AH=71h) don't come either: a drive mounted /LFN has short ones.
+bool hv_hook()
+{
+    const u32 BIOS = 0xF0000u;
+    u16 hook = rd16(BIOS + 0x23E), next = rd16(BIOS + 0x240);
+    if (!hook || !next || rd8(BIOS + hook) != 0x80) return false;   // CMP AH, 11h: this BIOS has it
+    u32 v = rd32(0x2F * 4);
+    if (v == (0xF000u << 16 | hook)) return true;      // in already
+    wr32(BIOS + next, v);
+    wr32(0x2F * 4, 0xF000u << 16 | hook);
+    kprintf("9p: VMHV: INT 2Fh (was %04x:%04x) through vmdos's BIOS for the redirector\n", v >> 16, v & 0xFFFF);
+    return true;
+}
+
 int mount(struct regs* r)
 {
     u32 pb = LIN(r->v86_es, DI(r));
@@ -2303,7 +2321,11 @@ int mount(struct regs* r)
     u32 kb = rd16(pb + 10), ttl = rd16(pb + 12);
     char tag[64];
     gstr(pb + MB_TAG, tag, 32);
-    if (hv_active) return 9;                   // VMHV: DOS's INT 2Fh calls don't come here
+    if (hv_active && !hv_hook()) return 9;     // VMHV: DOS's INT 2Fh calls come by the BIOS's hook
+    if (hv_active && (flags & MF_LFN)) {
+        kprintf("9p: VMHV: no long names (INT 21h AH=71h stays in the VM); %c: has short ones\n", 'A' + dr);
+        flags &= (u8)~MF_LFN;
+    }
     if (dr < 2 || dr >= 26 || dr >= rd8(lol + 0x21)) return 3;
     u32 cds = LIN(rd16(lol + 0x18), rd16(lol + 0x16)) + dr * 0x58;
     u16 cf = rd16(cds + 0x43);

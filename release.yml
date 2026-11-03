@@ -1,0 +1,123 @@
+# Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk;
+# boots on UEFI and legacy BIOS through GRUB)
+# and publishes it as a GitHub release named by date (UTC): v20261029, and
+# v20261029a, v20261029b, ... for further releases the same day.
+# Pushing a tag (git tag v20261031d && git push origin v20261031d) makes a
+# full release under that tag's name; all other runs are pre-releases.
+name: release
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ 'v*' ]          # a full release (path filters don't apply to tags)
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - 'Makefile'
+      - '**/Makefile'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - 'vcpkg.json'
+      - '**.yml'
+      - '**.yaml'
+      - '**.hpp'
+      - '**.S'
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - 'Makefile'
+      - '**/Makefile'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - 'vcpkg.json'
+      - '**.yml'
+      - '**.yaml'
+      - '**.hpp'
+      - '**.S'
+
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    concurrency: release   # two runs on one day must not pick the same name
+    env:
+      ESP_MB: 2000          # fits a 4 GB stick, room for games
+      ESP_FAT: 32           # FAT32 (16 KiB clusters): can be grown to fill a bigger stick (fatresize, GParted)
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # tags, for the version vmdos shows (git describe)
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
+            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin
+
+      - name: Build esp.img (no EXTRA, no RAMDISK)
+        run: |
+          make -j"$(nproc)" esp FRESH=1 ESP_MB=$ESP_MB ESP_FAT=$ESP_FAT EXTRA= RAMDISK= ISO=
+          # the file system asked for (the boot sector's type string)
+          fs=$(dd if=esp.img bs=1 skip=$((1048576 + (ESP_FAT == 32 ? 0x52 : 0x36))) count=5 2>/dev/null)
+          [ "$fs" = "FAT$ESP_FAT" ] || { echo "esp.img is not FAT$ESP_FAT (boot sector says '$fs')"; exit 1; }
+          # what's on it, and that there's no RAM disk
+          MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/
+          MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos ::/boot ::/boot/grub
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/boot/vmdos.elf ::/EFI/vmdos/vmdos.efi   # both boot paths there
+          head -c 440 esp.img | grep -aq GRUB || { echo 'no GRUB boot code in the MBR'; exit 1; }
+          if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
+
+      - name: Package
+        run: |
+          mkdir -p out
+          mv esp.img out/vmdos-usb.img
+          xz -T0 -6 out/vmdos-usb.img
+          cp vmdos.efi out/
+          (cd out && sha256sum * > SHA256SUMS)
+          ls -l out
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"; flags="--latest"   # the pushed tag: a full release
+          else
+          # every release is named by date (UTC): v20261029, then v20261029a, b, c, ...
+          base="v$(date -u +%Y%m%d)"
+          taken="$(git ls-remote --tags origin "refs/tags/${base}*" | sed 's#.*refs/tags/##; s#\^{}$##')
+          $(gh release list --limit 1000 --json tagName -q '.[].tagName')"
+          tag=""
+          for s in "" {a..z}; do
+            if ! grep -qxF "$base$s" <<<"$taken"; then tag="$base$s"; break; fi
+          done
+          [ -n "$tag" ] || { echo "no free release name left for $base"; exit 1; }
+          flags="--prerelease"
+          fi
+          echo "release: $tag"
+          cat > notes.md <<EOF
+          Bootable USB-stick image: vmdos with FreeDOS, no games (commit ${GITHUB_SHA::7}).
+
+          **Write it to a USB stick (4 GB or larger; everything on the stick is replaced):**
+          - Linux: \`xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync\` (find sdX with \`lsblk\`)
+          - Windows / macOS: balenaEtcher or Rufus (DD mode) with vmdos-usb.img.xz
+
+          Then pick the stick in the PC's boot menu, UEFI (Secure Boot off) or legacy BIOS. The stick is drive C:
+          (a 2000 MiB FAT partition; changes are kept). Add games by copying them onto the stick
+          from any computer, and ISO files (e.g. to C:\\ISOS) for \`VMCD D: C:\\ISOS\\GAME.ISO\`.
+
+          Your own boot-menu entries go in /boot/grub/custom.cfg on the stick (both modes).
+
+          vmdos.efi alone: for an existing EFI system partition (see the README).
+          EOF
+          gh release create "$tag" out/* --title "vmdos $tag" --notes-file notes.md --target "$GITHUB_SHA" $flags

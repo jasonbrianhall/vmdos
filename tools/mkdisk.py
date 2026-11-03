@@ -10,9 +10,12 @@ everything inside DIR to the root. BOOTSECTOR "-" leaves the
 mkfs.fat boot code; --type sets the partition type (EF: EFI system partition).
 
 With --boot16, disks up to 2 GiB are FAT16 with 8-32 KiB clusters and that
-boot sector: FreeDOS walks a file's cluster chain on every seek, which with
-FAT32's 512-byte clusters (all a small FAT32 disk can have) makes seeking in
-a big file (DOOM's WAD) very slow. Otherwise FAT32 with BOOTSECTOR.
+boot sector. Otherwise FAT32 with BOOTSECTOR, its clusters as big as the
+size allows (up to 32 KiB: FAT32 needs at least 65525 of them): FreeDOS
+walks a file's cluster chain on every seek, which with 512-byte clusters
+(all a FAT32 disk under ~66 MiB can have) makes seeking in a big file
+(DOOM's WAD) very slow. FAT32 can be grown afterwards (to fill a big USB
+stick: fatresize, GParted) and holds files and disks past FAT16's 2-4 GiB.
 
 --bios=BOOT.img,CORE.img: GRUB's i386-pc boot code for legacy BIOS boot:
 BOOT.img's code goes into the MBR (the partition table and disk signature
@@ -48,6 +51,14 @@ def main():
         else: sys.exit("mkdisk: unknown option " + a)
     out, size_mb, bootbin, files = args[0], int(args[1]), args[2], args[3:]
     if update and os.path.exists(out):
+        with open(out, "rb") as f:
+            f.seek(START * 512)
+            bs = f.read(512)
+        have = 32 if bs[0x52:0x57] == b"FAT32" else 16 if bs[0x36:0x3B] == b"FAT16" else 0
+        want = 16 if boot16 is not None and (int(args[1]) * 2048 - START) < 4 * 1024 * 1024 - 8192 else 32
+        if have and have != want:
+            print("mkdisk: %s is FAT%d, kept (updated in place); FRESH=1 makes it anew as FAT%d" % (out, have, want),
+                  file=sys.stderr)
         copy_files(out, files, True)
         if bios: bios_boot(out, *bios)
         return
@@ -66,7 +77,7 @@ def main():
         if plen < 66600 * 1:          # FAT32 wants >= 65525 clusters
             sys.exit("mkdisk: %d MiB is too small for FAT32 (use 34 or more)" % size_mb)
         spc = 1
-        while spc < 64 and plen // (spc * 2) >= 66600 and spc < 8: spc *= 2   # up to 4 KiB clusters
+        while spc < 64 and plen // (spc * 2) >= 66600: spc *= 2   # up to 32 KiB clusters
         if ptype is None: ptype = 0x0C
         spc_fat, bpb_end = ["-F", "32", "-s", str(spc)], 0x5A
     with open(out, "wb") as f:
