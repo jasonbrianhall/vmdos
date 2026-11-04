@@ -1,16 +1,27 @@
-/* An ISA NE2000 (National DP8390 + 32 KB of buffer RAM) for drivers that
-   want real hardware: Windows 95/98/ME's "NE2000 Compatible", NE2000
-   packet drivers, ODI/NDIS drivers for Windows 3.x. Its frames come from
-   and go to the PC's real card (net.cpp), with the address DOS has there.
+/* An NE2000 (National DP8390 + 32 KB of buffer RAM) for drivers that
+   want real hardware: Windows 95/98/ME, NE2000 packet drivers, ODI/NDIS
+   drivers for Windows 3.x. Its frames come from and go to the PC's real
+   card (net.cpp), with the address DOS has there.
+
+   It is a PCI card, a Realtek RTL8029 (10ECh:8029h, the PCI NE2000) at
+   00:03.0 on the guest's bus (vpci.c), so Windows' Plug and Play finds it
+   and installs its RTL8029 driver by itself; its I/O BAR starts at the
+   ISA card's address and IRQ, so NE2000 drivers that don't look at PCI
+   find it there just the same. Windows may move the BAR; the ports
+   follow. ne2k=isa: the plain ISA card, as before (Windows' "NE2000
+   Compatible", added by hand).
 
    Ports base..base+0Fh are the 8390's registers (three pages), base+10h-17h
    the data port for remote DMA, base+18h-1Fh reset. Kernel option
-   ne2k=300,11 (hex base, IRQ; these are the default), ne2k=off.
+   ne2k=300,11 (hex base, IRQ; these are the default; ne2k=isa,300,11 for
+   the ISA card), ne2k=off.
 
    Modelled on QEMU's ne2000.c, which drivers have long been tested
    against: the same memory map (PROM at 0, RAM at 4000h-BFFFh), PROM
-   contents and register behaviour. The interrupt line is the 8390's INT
-   (ISR & IMR) and raises the IRQ on its rising edge, as on the ISA bus. */
+   contents and register behaviour (QEMU's ne2k_pci is this RTL8029 too).
+   The interrupt line is the 8390's INT (ISR & IMR) and raises the IRQ on
+   its rising edge, as on the ISA bus; as a PCI card's level-triggered
+   line, again if it stays up unserviced. */
 #include "kernel.h"
 
 /* net.cpp */
@@ -43,8 +54,11 @@ extern int net_ready;
 #define MEM_SIZE PMEM_END
 
 static u8 mem[MEM_SIZE];
-static u16 base = 0x300;
-static int irq = 11, enabled;
+static u16 base = 0x300, def_base = 0x300;
+static int irq = 11, def_irq = 11, enabled;
+static int pci = 1;                              /* the RTL8029 on the guest's PCI bus (ne2k=isa: 0) */
+static u8 pcmd = 1, platency;                    /* PCI command (I/O space on), latency timer */
+static int stuck;
 static u8 cmd, isr, imr, rcr, tcr, dcr, tsr, rsr, boundary, curpag, tpsr;
 static u16 start, stop, tcnt, rsar, rcnt;
 static u8 par[6], mult[8];
@@ -125,6 +139,8 @@ int ne2k_running(void) { return enabled && !(cmd & CR_STP) && (cmd & CR_STA); }
 void ne2k_tick(void)
 {
     static u8 f[1536];
+    if (pci && line) { if (++stuck >= 50) { stuck = 0; vpic_raise(irq); } }   /* the level line, not serviced */
+    else stuck = 0;
     if (!ne2k_running() || (tcr & 0x06)) return;          /* loopback: nothing from the wire */
     while (net_peek_len() && !buffer_full()) {
         int n = net_take(f, sizeof f);
@@ -259,7 +275,7 @@ static u8 reg_read(int r)
 /* 1 if port is the NE2000's (val in/out). */
 int ne2k_port(u16 port, int size, int write, u32 *val)
 {
-    if (!enabled || port < base || port >= base + 0x20) return 0;
+    if (!enabled || (pci && !(pcmd & 1)) || port < base || port >= base + 0x20u) return 0;
     int off = port - base;
     if (off < 0x10) {                            /* registers: a byte at a time */
         for (int i = 0; i < size && off + i < 0x10; i++) {
@@ -277,11 +293,68 @@ int ne2k_port(u16 port, int size, int write, u32 *val)
     return 1;
 }
 
+/* ---- the RTL8029's PCI configuration space (vpci.c) ---- */
+
+int ne2k_pci_on(void) { return enabled && pci; }
+
+/* bios_init (boot, restarts): as a PC's BIOS leaves it. */
+void ne2k_pci_reset(void)
+{
+    if (!enabled || !pci) return;
+    base = def_base;
+    irq = def_irq;
+    pcmd = 1;
+    platency = 0;
+}
+
+static u8 cfg_byte(int r)
+{
+    switch (r) {
+    case 0x00: return 0xEC; case 0x01: return 0x10;   /* Realtek */
+    case 0x02: return 0x29; case 0x03: return 0x80;   /* RTL8029 */
+    case 0x04: return pcmd;
+    case 0x07: return 0x02;                           /* medium DEVSEL# */
+    case 0x0B: return 0x02;                           /* network, Ethernet */
+    case 0x0D: return platency;
+    case 0x10: return (u8)(base & 0xE0) | 0x01;       /* I/O, 32 bytes */
+    case 0x11: return (u8)(base >> 8);
+    case 0x2C: return 0xEC; case 0x2D: return 0x10;   /* subsystem 10ECh:8029h */
+    case 0x2E: return 0x29; case 0x2F: return 0x80;
+    case 0x3C: return (u8)irq;
+    case 0x3D: return 0x01;                           /* INTA# */
+    }
+    return 0;
+}
+
+u32 ne2k_cfg_read(int reg, int size)
+{
+    u32 v = 0;
+    for (int i = 0; i < size; i++) v |= (u32)cfg_byte((reg + i) & 0xFF) << (8 * i);
+    return v;
+}
+
+void ne2k_cfg_write(int reg, u32 val, int size)
+{
+    for (int i = 0; i < size; i++) {
+        u8 b = (u8)(val >> (8 * i));
+        switch ((reg + i) & 0xFF) {
+        case 0x04: pcmd = b & 0x01; break;
+        case 0x0D: platency = b; break;
+        case 0x10: base = (base & 0xFF00) | (b & 0xE0); break;
+        case 0x11: base = (base & 0x00E0) | (u16)b << 8; break;
+        case 0x3C: if (b >= 1 && b <= 15 && b != 2) irq = b; break;
+        }
+    }
+}
+
+void vpci_bios32(void);
+
 void ne2k_init(void)
 {
     const char *p = strstr(cmdline, "ne2k=");
     if (!net_ready) return;
     if (p && !strncmp(p + 5, "off", 3)) return;
+    if (p && !strncmp(p + 5, "isa", 3)) { pci = 0; p += 3; if (p[5] == ',') p++; else p = 0; }
     if (p) {
         u32 b = 0, n = 0;
         p += 5;
@@ -290,7 +363,12 @@ void ne2k_init(void)
         if (b >= 0x200 && b <= 0x3E0) base = (u16)b;
         if (*p == ',') { for (p++; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0'); if (n >= 2 && n <= 15) irq = n; }
     }
+    def_base = base;
+    def_irq = irq;
     enabled = 1;
     reset(0);
-    kprintf("net: NE2000 at %xh, IRQ %d\n", base, irq);
+    if (pci) {
+        vpci_bios32();                               /* the PCI BIOS for Windows, now there's a bus */
+        kprintf("net: NE2000 (Realtek RTL8029, PCI 00:03.0) at %xh, IRQ %d\n", base, irq);
+    } else kprintf("net: NE2000 (ISA) at %xh, IRQ %d\n", base, irq);
 }
