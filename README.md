@@ -613,10 +613,17 @@ the firmware having set up the PHY (`debug=1` logs what vmdos found); the
 Broadcom 5700-5704's fiber (TBI) ports aren't driven, and a 5701 A0 wants a
 firmware patch vmdos doesn't have.
 
-vmdos also shows DOS an ISA NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
+vmdos also shows DOS an NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
 `ne2k=off` removes it) on the same card and address, for drivers that want
-hardware: Windows 95/98/ME's "NE2000 Compatible" (under VMHV), NE2000 packet
-drivers, ODI/NDIS drivers for Windows 3.x. Use it or VMPKT, not both.
+hardware: Windows 95/98/ME (under VMHV), NE2000 packet drivers, ODI/NDIS
+drivers for Windows 3.x. Use it or VMPKT, not both. It is a PCI card, a
+Realtek RTL8029 (the PCI NE2000, 10ECh:8029h) at 00:03.0 on the guest's
+bus, so Windows' Plug and Play finds it and installs its RTL8029 driver;
+its I/O starts at 300h, IRQ 11, so NE2000 drivers that don't look for PCI
+find it there too (Windows may move it; the ports follow). `ne2k=isa` (or
+`ne2k=isa,320,10`) makes it the plain ISA card again, Windows' "NE2000
+Compatible" added by hand; remove that one from Device Manager when going
+to the PCI card. Tests: `tests/ne2ktest.asm`, `tests/rtl8029.asm`.
 
 IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
 PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.

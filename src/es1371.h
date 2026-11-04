@@ -7,6 +7,7 @@
 #define ES_DEVFN (2 << 3)                     /* 00:02.0 */
 
 extern int es_on;
+int es_present(void);                          /* es_on, for vpci.c's table */
 void es_boot(void);                            /* boot and restarts: on (unless es1371=off), reset */
 uint32_t es_cfg_read(int reg, int size);       /* PCI configuration space */
 void es_cfg_write(int reg, uint32_t val, int size);
