@@ -1,16 +1,21 @@
 /* The PCI bus the DOS guest sees, when there is something on it (the
-   emulated Voodoo 3, voodoo3 on the command line): a host bridge at 00:00.0
-   and the card at 00:01.0, through configuration mechanism 1 (ports CF8h
+   emulated Voodoo 3, voodoo3 on the command line; the Ensoniq AudioPCI,
+   on unless es1371=off): a host bridge at 00:00.0, the Voodoo at 00:01.0 and the
+   AudioPCI at 00:02.0 (es1371.c), through configuration mechanism 1 (ports CF8h
    and CFCh-CFFh) and the PCI BIOS (INT 1Ah AX=B1xxh). Without it the ports
    read FFh as before: no PCI. video=vbe (vgabios.c): the PC's real bus
    instead, read-only except for the video card's own function, for its
-   VESA BIOS, which finds its BARs there. */
+   VESA BIOS, which finds its BARs there; es1371 adds the AudioPCI to it
+   at 00:02.0 (or the first free device on bus 0). */
 #include "kernel.h"
 #include "voodoo3.h"
+#include "es1371.h"
 
 #define V3_DEVFN (1 << 3)                      /* device 1, function 0 */
 
 static u32 cf8;
+
+static int bus_on(void) { return v3_on || vga_native || es_on; }
 
 /* video=vbe: the real bus, through the real ports (interrupts off: the
    kernel's drivers use them too). */
@@ -27,15 +32,32 @@ static u32 real_cfg(int bus, int devfn, int reg, int size, int write, u32 val)
     return v;
 }
 
+/* video=vbe: the AudioPCI on the real bus 0, in a device number nothing
+   there answers to (from 02h up). */
+static int es_devfn(void)
+{
+    static int d = -1;
+    if (!vga_native) return ES_DEVFN;
+    if (d < 0) {
+        d = ES_DEVFN;
+        for (int dev = 2; dev < 32; dev++)
+            if ((real_cfg(0, dev << 3, 0, 2, 0, 0) & 0xFFFF) == 0xFFFF) { d = dev << 3; break; }
+    }
+    return d;
+}
+static int is_es(int bus, int devfn) { return es_on && bus == 0 && devfn == es_devfn(); }
+
 /* Configuration space of bus devfn, -1 if nothing is there. */
 static int present(int bus, int devfn)
 {
+    if (is_es(bus, devfn)) return 1;
     if (vga_native) return (real_cfg(bus, devfn, 0, 2, 0, 0) & 0xFFFF) != 0xFFFF;
-    return bus == 0 && (devfn == 0 || devfn == V3_DEVFN);
+    return bus == 0 && (devfn == 0 || (v3_on && devfn == V3_DEVFN));
 }
 
 static u32 cfg_read(int bus, int devfn, int reg, int size)
 {
+    if (is_es(bus, devfn)) return es_cfg_read(reg, size);
     if (vga_native) return real_cfg(bus, devfn, reg, size, 0, 0);
     if (devfn == V3_DEVFN) return v3_cfg_read(reg, size);
     /* the host bridge: an Intel 440FX, nothing to set */
@@ -47,13 +69,14 @@ static u32 cfg_read(int bus, int devfn, int reg, int size)
 
 static void cfg_write(int bus, int devfn, int reg, u32 val, int size)
 {
+    if (is_es(bus, devfn)) { es_cfg_write(reg, val, size); return; }
     if (vga_native) { if (vga_native_pci(bus, devfn)) real_cfg(bus, devfn, reg, size, 1, val); return; }
     if (devfn == V3_DEVFN) v3_cfg_write(reg, val, size);
 }
 
 int vpci_port(u16 port, int size, int write, u32 *val)
 {
-    if (!v3_on && !vga_native) return 0;
+    if (!bus_on()) return 0;
     if (port >= 0xCF8 && port <= 0xCFB) {
         if (port != 0xCF8 || size != 4) {      /* mechanism 2's byte ports: not here */
             if (!write) *val = 0xFFFFFFFFu;
@@ -73,7 +96,8 @@ int vpci_port(u16 port, int size, int write, u32 *val)
         else *val = cfg_read(bus, devfn, reg, size);
         return 1;
     }
-    return v3_io(port, size, write, val);
+    if (es_io(port, size, write, val)) return 1;
+    return v3_on ? v3_io(port, size, write, val) : 0;
 }
 
 /* The BIOS32 service directory in the BIOS image (bios.asm): turned on, so
@@ -81,13 +105,15 @@ int vpci_port(u16 port, int size, int write, u32 *val)
    only; the BIOS image is copied anew at times, so bios_init calls this too. */
 void vpci_bios_patch(void)
 {
-    if (!v3_on) return;
+    es_boot();                                           /* es1371: on, and reset at each restart */
+    if (!v3_on && !es_on) return;
     u32 d = 0xF0000u + rd16(0xF0234);
     wr8(d + 2, '2');
     wr8(d + 10, 0);
     u8 sum = 0;
     for (int i = 0; i < 16; i++) sum += rd8(d + i);
     wr8(d + 10, (u8)-sum);
+    if (!v3_on) return;
     u32 n;
     const u8 *rom = v3_rom(&n);                          /* and the card's BIOS at C000h, as a PC's BIOS copies it */
     memcpy(gptr(0xC0000), rom, n);
@@ -101,7 +127,7 @@ static void done(struct regs *r, u8 ah)
 
 int vpci_int1a(struct regs *r)
 {
-    if ((!v3_on && !vga_native) || AH(r) != 0xB1) return 0;
+    if (!bus_on() || AH(r) != 0xB1) return 0;
     int bus = BH(r), devfn = BL(r), reg = DI(r) & 0xFF;
     switch (AL(r)) {
     case 0x01:                                    /* installation check */

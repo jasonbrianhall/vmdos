@@ -11,6 +11,7 @@
 #include "sb/opl.h"
 #include "sb/mpu.h"
 #include "gus.h"
+#include "es1371.h"
 
 int audio_start(const char *cmdline);
 int audio_wanted(int nominal);
@@ -62,6 +63,7 @@ static void check_irq(void)
 {
     if (sb_take_irq()) vpic_raise(sb_irq_line());
     if (gus_take_irq()) vpic_raise(gus_irq_line());
+    if (es_take_irq()) vpic_raise(es_irq_line());   /* the AudioPCI (es1371.c) */
 }
 
 static int sound_port_(u16 port, int write, u8 *v)
@@ -171,6 +173,7 @@ void sound_tick(void)
     if (n > 0) {
         sb_render_span((last - el) * PIT_PER_TICK, last * PIT_PER_TICK);   /* direct DAC timing */
         sb_render(buf, n);
+        es_render(buf, n);
         cdaudio_mix(buf, n);
     }
     if (!smp_on_ap()) check_irq();
