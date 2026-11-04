@@ -569,6 +569,14 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   DMX, ULTRAMID) load Gravis's patches from `%ULTRADIR%\MIDI`, which aren't
   included. `gus=off` takes it away, `gus=2X0` moves it (210h-260h).
   Recording isn't emulated. Test: `tests/gustest.asm`.
+  Ensoniq AudioPCI 97 (ES1371, `es1371` on the command line; `src/es1371.c`):
+  a PCI card on the guest's bus at 00:02.0, I/O D500h, IRQ 9 (`es1371=N`
+  for IRQ N), for Windows 9x's built-in "Creative AudioPCI (ES1371,ES1373)"
+  driver. Both playback channels (bus-master DMA, 8/16-bit mono/stereo,
+  the sample rate converter), the AC'97 codec's volumes, sample-count
+  interrupts and MIDI out (to the GM synth); recording returns silence; no
+  legacy SB traps (the Sound Blaster at 220h is still there). Test:
+  `tests/estest.asm`.
 - Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
   A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
 - Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
@@ -772,6 +780,7 @@ untested.
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
 | `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 |
+| `src/es1371.c` | the Ensoniq AudioPCI 97 (`es1371`) on the guest's PCI bus |
 | `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
