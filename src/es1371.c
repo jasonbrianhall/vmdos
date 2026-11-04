@@ -425,7 +425,9 @@ static void reg_write(int off, u32 v, u32 m)         /* m: the bytes written */
 static void chip_reset(void)
 {
     es.ctrl = 0xFCFF0000u;
-    es.status = 0x7FFFFEC0u;
+    es.status = 0x7FFFDEC0u;                         /* bit 13 off: the real ES1371 reads 1 there (reserved),
+                                                        but Creative's 5.12.01 WDM driver takes it for the
+                                                        ES1373's GPIO interrupt and crashes on a null DPC */
     es.uart_status = UST_TXRDY;
     es.uart_ctrl = 0;
     es.uart_res = 0;
