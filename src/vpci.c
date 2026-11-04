@@ -1,6 +1,6 @@
 /* The PCI bus the DOS guest sees, when there is something on it (the
    emulated Voodoo 3, voodoo3 on the command line; the Ensoniq AudioPCI,
-   es1371): a host bridge at 00:00.0, the Voodoo at 00:01.0 and the
+   on unless es1371=off): a host bridge at 00:00.0, the Voodoo at 00:01.0 and the
    AudioPCI at 00:02.0 (es1371.c), through configuration mechanism 1 (ports CF8h
    and CFCh-CFFh) and the PCI BIOS (INT 1Ah AX=B1xxh). Without it the ports
    read FFh as before: no PCI. video=vbe (vgabios.c): the PC's real bus

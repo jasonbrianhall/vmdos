@@ -1,5 +1,5 @@
-/* Ensoniq AudioPCI 97 (ES1371), es1371 on the command line (es1371=N: on
-   IRQ N, default 9): a PCI sound card on the guest's bus (vpci.c) at
+/* Ensoniq AudioPCI 97 (ES1371), on by default (es1371=off: not there,
+   es1371=N: on IRQ N, default 9): a PCI sound card on the guest's bus (vpci.c) at
    00:02.0, I/O at D500h (64 bytes), for Windows 9x's "Creative AudioPCI
    (ES1371,ES1373) (WDM)" driver and others written for the chip (Linux's
    snd-ens1371, the BeOS and NT drivers).
@@ -514,14 +514,14 @@ void es_cfg_write(int reg, u32 val, int size)
     }
 }
 
-/* Boot and every restart (bios_init through vpci_bios_patch): on from the
-   command line, the card as a PC's BIOS leaves it (I/O on, BAR and IRQ set). */
+/* Boot and every restart (bios_init through vpci_bios_patch): on unless
+   es1371=off, the card as a PC's BIOS leaves it (I/O on, BAR and IRQ set). */
 void es_boot(void)
 {
     static int said;
     const char *p = strstr(cmdline, "es1371");
-    if (!p) return;
-    if (p[6] == '=' && p[7] >= '1' && p[7] <= '9') {
+    if (p && !strncmp(p + 6, "=off", 4)) return;
+    if (p && p[6] == '=' && p[7] >= '1' && p[7] <= '9') {
         int n = p[7] - '0';
         if (p[8] >= '0' && p[8] <= '5' && n == 1) n = 10 + (p[8] - '0');
         if (n != 2) es_irq_default = n;

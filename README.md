@@ -569,10 +569,13 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   DMX, ULTRAMID) load Gravis's patches from `%ULTRADIR%\MIDI`, which aren't
   included. `gus=off` takes it away, `gus=2X0` moves it (210h-260h).
   Recording isn't emulated. Test: `tests/gustest.asm`.
-  Ensoniq AudioPCI 97 (ES1371, `es1371` on the command line; `src/es1371.c`):
+  Ensoniq AudioPCI 97 (ES1371; `src/es1371.c`), on by default (`es1371=off`
+  removes it, and with it the guest's PCI bus unless `voodoo3` is on):
   a PCI card on the guest's bus at 00:02.0, I/O D500h, IRQ 9 (`es1371=N`
-  for IRQ N), for Windows 9x's built-in "Creative AudioPCI (ES1371,ES1373)"
-  driver. Both playback channels (bus-master DMA, 8/16-bit mono/stereo,
+  for IRQ N), for Creative's "AudioPCI (ES1371,ES1373)" drivers for
+  Windows 9x (the 5.12.01 WDM driver for 98 SE/Me, the VxD one for 95/98).
+  Under Windows, remove the Sound Blaster from Device Manager if it was
+  set up there, so the AudioPCI is the one Windows uses. Both playback channels (bus-master DMA, 8/16-bit mono/stereo,
   the sample rate converter), the AC'97 codec's volumes, sample-count
   interrupts and MIDI out (to the GM synth); recording returns silence; no
   legacy SB traps (the Sound Blaster at 220h is still there). Test:

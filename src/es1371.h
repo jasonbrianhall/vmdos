@@ -2,12 +2,12 @@
 #define ES1371_H
 #include <stdint.h>
 
-/* The emulated Ensoniq AudioPCI 97 (ES1371), es1371 on the command line
+/* The emulated Ensoniq AudioPCI 97 (ES1371), on unless es1371=off
    (es1371.c): on the guest's PCI bus (vpci.c), mixed into sound.c's output. */
 #define ES_DEVFN (2 << 3)                     /* 00:02.0 */
 
 extern int es_on;
-void es_boot(void);                            /* boot and restarts: on from the command line, reset */
+void es_boot(void);                            /* boot and restarts: on (unless es1371=off), reset */
 uint32_t es_cfg_read(int reg, int size);       /* PCI configuration space */
 void es_cfg_write(int reg, uint32_t val, int size);
 int es_io(uint16_t port, int size, int write, uint32_t *val);   /* its I/O BAR: 1 handled */
