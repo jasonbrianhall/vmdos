@@ -1,21 +1,47 @@
 /* The PCI bus the DOS guest sees, when there is something on it (the
    emulated Voodoo 3, voodoo3 on the command line; the Ensoniq AudioPCI,
-   on unless es1371=off): a host bridge at 00:00.0, the Voodoo at 00:01.0 and the
-   AudioPCI at 00:02.0 (es1371.c), through configuration mechanism 1 (ports CF8h
+   on unless es1371=off; the NE2000 as a Realtek RTL8029, unless ne2k=isa):
+   a host bridge at 00:00.0, the Voodoo at 00:01.0, the AudioPCI at
+   00:02.0 (es1371.c) and the RTL8029 at 00:03.0 (ne2k.c), through configuration mechanism 1 (ports CF8h
    and CFCh-CFFh) and the PCI BIOS (INT 1Ah AX=B1xxh). Without it the ports
    read FFh as before: no PCI. video=vbe (vgabios.c): the PC's real bus
    instead, read-only except for the video card's own function, for its
-   VESA BIOS, which finds its BARs there; es1371 adds the AudioPCI to it
-   at 00:02.0 (or the first free device on bus 0). */
+   VESA BIOS, which finds its BARs there; the AudioPCI and the RTL8029
+   are added to it in device numbers nothing there answers to. */
 #include "kernel.h"
 #include "voodoo3.h"
 #include "es1371.h"
+
+/* ne2k.c */
+#define NE2K_DEVFN (3 << 3)                    /* 00:03.0 */
+int ne2k_pci_on(void);
+u32 ne2k_cfg_read(int reg, int size);
+void ne2k_cfg_write(int reg, u32 val, int size);
+void ne2k_pci_reset(void);
 
 #define V3_DEVFN (1 << 3)                      /* device 1, function 0 */
 
 static u32 cf8;
 
-static int bus_on(void) { return v3_on || vga_native || es_on; }
+/* The emulated devices besides the Voodoo: their own configuration
+   space, and where they are (devfn) on bus 0. */
+static struct vfn {
+    int (*on)(void);
+    u32 (*rd)(int reg, int size);
+    void (*wr)(int reg, u32 val, int size);
+    int devfn;
+} vfns[] = {
+    { es_present, es_cfg_read, es_cfg_write, ES_DEVFN },
+    { ne2k_pci_on, ne2k_cfg_read, ne2k_cfg_write, NE2K_DEVFN },
+};
+#define NVFN (int)(sizeof vfns / sizeof vfns[0])
+
+static int any_vfn(void)
+{
+    for (int i = 0; i < NVFN; i++) if (vfns[i].on()) return 1;
+    return 0;
+}
+static int bus_on(void) { return v3_on || vga_native || any_vfn(); }
 
 /* video=vbe: the real bus, through the real ports (interrupts off: the
    kernel's drivers use them too). */
@@ -32,32 +58,39 @@ static u32 real_cfg(int bus, int devfn, int reg, int size, int write, u32 val)
     return v;
 }
 
-/* video=vbe: the AudioPCI on the real bus 0, in a device number nothing
-   there answers to (from 02h up). */
-static int es_devfn(void)
+/* video=vbe: the emulated devices on the real bus 0, each in a device
+   number nothing there answers to (from 02h up), found once. */
+static void place(void)
 {
-    static int d = -1;
-    if (!vga_native) return ES_DEVFN;
-    if (d < 0) {
-        d = ES_DEVFN;
-        for (int dev = 2; dev < 32; dev++)
-            if ((real_cfg(0, dev << 3, 0, 2, 0, 0) & 0xFFFF) == 0xFFFF) { d = dev << 3; break; }
+    static int done;
+    if (!vga_native || done) return;
+    done = 1;
+    int dev = 2;
+    for (int i = 0; i < NVFN; i++) {
+        while (dev < 32 && (real_cfg(0, dev << 3, 0, 2, 0, 0) & 0xFFFF) != 0xFFFF) dev++;
+        if (dev < 32) vfns[i].devfn = dev++ << 3;
     }
-    return d;
 }
-static int is_es(int bus, int devfn) { return es_on && bus == 0 && devfn == es_devfn(); }
+static struct vfn *vfn_at(int bus, int devfn)
+{
+    if (bus) return 0;
+    place();
+    for (int i = 0; i < NVFN; i++) if (vfns[i].devfn == devfn && vfns[i].on()) return &vfns[i];
+    return 0;
+}
 
 /* Configuration space of bus devfn, -1 if nothing is there. */
 static int present(int bus, int devfn)
 {
-    if (is_es(bus, devfn)) return 1;
+    if (vfn_at(bus, devfn)) return 1;
     if (vga_native) return (real_cfg(bus, devfn, 0, 2, 0, 0) & 0xFFFF) != 0xFFFF;
     return bus == 0 && (devfn == 0 || (v3_on && devfn == V3_DEVFN));
 }
 
 static u32 cfg_read(int bus, int devfn, int reg, int size)
 {
-    if (is_es(bus, devfn)) return es_cfg_read(reg, size);
+    struct vfn *f = vfn_at(bus, devfn);
+    if (f) return f->rd(reg, size);
     if (vga_native) return real_cfg(bus, devfn, reg, size, 0, 0);
     if (devfn == V3_DEVFN) return v3_cfg_read(reg, size);
     /* the host bridge: an Intel 440FX, nothing to set */
@@ -69,7 +102,8 @@ static u32 cfg_read(int bus, int devfn, int reg, int size)
 
 static void cfg_write(int bus, int devfn, int reg, u32 val, int size)
 {
-    if (is_es(bus, devfn)) { es_cfg_write(reg, val, size); return; }
+    struct vfn *f = vfn_at(bus, devfn);
+    if (f) { f->wr(reg, val, size); return; }
     if (vga_native) { if (vga_native_pci(bus, devfn)) real_cfg(bus, devfn, reg, size, 1, val); return; }
     if (devfn == V3_DEVFN) v3_cfg_write(reg, val, size);
 }
@@ -102,17 +136,26 @@ int vpci_port(u16 port, int size, int write, u32 *val)
 
 /* The BIOS32 service directory in the BIOS image (bios.asm): turned on, so
    32-bit code (Windows' PCI.VXD) finds the PCI BIOS. With a bus to show
-   only; the BIOS image is copied anew at times, so bios_init calls this too. */
-void vpci_bios_patch(void)
+   only; the BIOS image is copied anew at times, so bios_init calls this too
+   (and ne2k_init, which comes after it at boot). */
+void vpci_bios32(void)
 {
-    es_boot();                                           /* es1371: on, and reset at each restart */
-    if (!v3_on && !es_on) return;
+    if (!v3_on && !any_vfn()) return;
     u32 d = 0xF0000u + rd16(0xF0234);
     wr8(d + 2, '2');
     wr8(d + 10, 0);
     u8 sum = 0;
     for (int i = 0; i < 16; i++) sum += rd8(d + i);
     wr8(d + 10, (u8)-sum);
+}
+
+/* bios_init (boot, restarts): the emulated cards as a PC's BIOS leaves
+   them, the BIOS32 directory, the Voodoo's BIOS. */
+void vpci_bios_patch(void)
+{
+    es_boot();                                           /* es1371: on, and reset at each restart */
+    ne2k_pci_reset();
+    vpci_bios32();
     if (!v3_on) return;
     u32 n;
     const u8 *rom = v3_rom(&n);                          /* and the card's BIOS at C000h, as a PC's BIOS copies it */

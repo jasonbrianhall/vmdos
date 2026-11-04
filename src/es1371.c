@@ -27,6 +27,7 @@
 #include "sb/gmsynth.h"
 
 int es_on;
+int es_present(void) { return es_on; }
 static int es_irq_default = 9;
 
 #define ES_IO_DEFAULT 0xD500           /* 10-bit ISA aliases 100h-13Fh: nothing there (see V3_IO_BASE) */
