@@ -399,8 +399,9 @@ CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
 ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
 it, the master being VMCD's drive 1 and the slave its drive 2 (an image or a
 real drive, the same discs). The Plug and Play BIOS reports it, so Windows
-finds a "Standard IDE/ESDI Hard Disk Controller" (Add New Hardware, or at
-the next start), drives it with its own IDE driver and reads the discs with
+finds a "Standard IDE/ESDI Hard Disk Controller" (PNP0603, which MSHDC.INF
+installs as a good IDE controller; PNP0600 it installs as BAD_IDE, and its
+driver then refuses it: Code 10), drives it with its own IDE driver and reads the discs with
 its CDFS: long file names (Joliet), which DOS's CD layer only shows as 8.3
 names (installers then can't find their files), and autoplay. The drives
 DOS gave letters to stay too (8.3 names). `atapi=off` leaves the channel

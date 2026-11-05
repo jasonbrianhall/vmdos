@@ -204,7 +204,10 @@ static void pnp_bios(void)
         pn_end();
     }
     if (atapi_on()) {
-        pn_begin(0x0600, 0x01, 0x01, 0x00);            /* the IDE channel with CD drives (atapi.c): secondary */
+        pn_begin(0x0603, 0x01, 0x01, 0x00);            /* the IDE channel with CD drives (atapi.c): secondary. PNP0603,
+                                                          not PNP0600: Windows 98's MSHDC.INF installs *PNP0600 as
+                                                          BAD_IDE (ESDI_506 then fails its init, Code 10), *PNP0603
+                                                          as GOOD_IDE */
         pn_io(0x170, 8); pn_io(0x376, 1); pn_irq(15);
         pn_end();
     }
