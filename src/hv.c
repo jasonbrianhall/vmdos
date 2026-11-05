@@ -336,8 +336,28 @@ static int guest_fault_log(const char *what, u32 err, u32 cr2)
     if (n <= 3) hv_dump_here(what);
     return 1;
 }
+/* faultlog: an invalid opcode or general protection fault in the VM's
+   protected-mode code at any privilege level (a program or a driver dying:
+   Windows closes it, often without a word): each place once, the first
+   300 places, the first few with their code and stack. Not V86 mode: WIN386 uses #UD (ARPL) there. */
+static int faultlog;
+static void prog_fault_log(const char *what, u32 err)
+{
+    static int n;
+    static u32 seen[512];                                         /* CS:EIP already logged: Windows' own #GPs */
+    static int nseen;                                             /* (16-bit drivers' port I/O) repeat endlessly */
+    if (!faultlog || real_or_v86()) return;
+    u32 key = (u32)V16(S_CS) << 20 ^ V32(S_RIP);
+    for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
+    if (nseen >= 512 || n++ >= 300) return;
+    seen[nseen++] = key;
+    kprintf("guest %s err %x at %04x:%08x (ring %u) eax %08x ecx %08x edx %08x ebx %08x esi %08x edi %08x esp %08x\n",
+            what, err, V16(S_CS), V32(S_RIP), V8(S_CPL), V32(S_RAX), g[1], g[2], g[0], g[3], g[4], V32(S_RSP));
+    if (n <= 6) hv_dump_here(what);
+}
 /* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
 u32 hv_guest_cr0(void) { return hv_active ? V32(S_CR0) : 0; }   /* mememu.c: TS and EM before running its x87 */
+u32 hv_guest_cr4(void) { return hv_active ? V32(S_CR4) : 0; }   /* mememu.c: OSFXSR before running its SSE */
 int hv_guest_pm(u16 *cs, u32 *eip)
 {
     if (!hv_active || real_or_v86()) return 0;
@@ -697,8 +717,16 @@ static void emulate_at(u32 gpa, int vga)
     struct emu_cpu e = { { &r[0], &r[1], &r[2], &r[3], &r[4], &r[5], &r[6], &r[7] }, &rip, &fl,
                          { (u32)V64(S_ES + 8), csb, (u32)V64(S_SS + 8), (u32)V64(S_DS + 8),
                            (u32)V64(S_FS + 8), (u32)V64(S_GS + 8) }, code32 };
-    if (!(vga ? vga16_fault(&e, gpa) : mem_emulate(&e)))
-        hv_stop("an access the emulator can't do, address %x", gpa);
+    if (!(vga ? vga16_fault(&e, gpa) : mem_emulate(&e))) {
+        u32 a = csb + (code32 ? eip : (eip & 0xFFFF));
+        u8 b[8];
+        for (int i = 0; i < 8; i++) {
+            u32 ga;
+            b[i] = !gwalk(a + i, &ga) && v3_window(ga) ? (u8)v3_mmio_read(ga, 1) : hv_emu_rd8(a + i);
+        }
+        hv_stop("an access the emulator can't do, address %x: %02x %02x %02x %02x %02x %02x %02x %02x (%d-bit)",
+                gpa, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], code32 ? 32 : 16);
+    }
     V32(S_RAX) = r[0]; g[1] = r[1]; g[2] = r[2]; g[0] = r[3]; V32(S_RSP) = r[4];
     g[5] = r[5]; g[3] = r[6]; g[4] = r[7];
     V32(S_RIP) = rip; V32(S_RFLAGS) = fl;
@@ -843,6 +871,8 @@ static void vmcb_init(struct regs *r)
     memset(vmcb, 0, 4096);
     V32(C_EXC) = 1u << 13;                                        /* #GP: HLT in v86 mode (BIOS stubs) */
     if (strstr(cmdline, "vgalog")) V32(C_EXC) |= 1u << 0 | 1u << 6 | 1u << 14;   /* vgalog: the guest's ring-0 faults, logged */
+    faultlog = strstr(cmdline, "faultlog") != 0;
+    if (faultlog) V32(C_EXC) |= 1u << 6;                          /* faultlog: #UD and #GP in protected mode, logged */
     V32(C_MISC1) = I1_INTR | I1_HLT | I1_IOIO | I1_MSR | I1_SHUTDOWN;
     V32(C_MISC2) = I2_SVM;
     V64(C_IOPM) = (u32)(uintptr_t)iopm;
@@ -1074,6 +1104,7 @@ int hv_start(int key)
             if ((V32(S_RFLAGS) & EFL_VM) ? bios_stub() : vbe_pm_stub()) break;
             if (real_or_v86() && wrap_string()) break;
             if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log("#GP", (u32)V64(C_INFO1), 0);
+            else prog_fault_log("#GP", (u32)V64(C_INFO1));
             if (debug_level >= 2) {
                 static int shown;
                 if (shown++ < 8) {
@@ -1096,7 +1127,8 @@ int hv_start(int key)
             break;
         case X_NPF: npf_exit(); break;
         case X_EXC(0): case X_EXC(6):                             /* vgalog: logged, then the guest's own */
-            if (!real_or_v86() && V8(S_CPL) == 0) guest_fault_log(code == X_EXC(0) ? "#DE" : "#UD", 0, 0);
+            if (!real_or_v86() && V8(S_CPL) == 0 && !faultlog) guest_fault_log(code == X_EXC(0) ? "#DE" : "#UD", 0, 0);
+            else if (code == X_EXC(6)) prog_fault_log("#UD", 0);
             V64(C_EVENT) = (u32)(code - X_EXC(0)) | EV_EXC | EV_VALID;
             break;
         case X_EXC(14):

@@ -1,6 +1,6 @@
 /* Ensoniq AudioPCI 97 (ES1371), on by default (es1371=off: not there,
    es1371=N: on IRQ N, default 9): a PCI sound card on the guest's bus (vpci.c) at
-   00:02.0, I/O at D500h (64 bytes), for Windows 9x's "Creative AudioPCI
+   00:02.0, I/O at D280h (64 bytes), for Windows 9x's "Creative AudioPCI
    (ES1371,ES1373) (WDM)" driver and others written for the chip (Linux's
    snd-ens1371, the BeOS and NT drivers).
 
@@ -30,7 +30,9 @@ int es_on;
 int es_present(void) { return es_on; }
 static int es_irq_default = 9;
 
-#define ES_IO_DEFAULT 0xD500           /* 10-bit ISA aliases 100h-13Fh: nothing there (see V3_IO_BASE) */
+#define ES_IO_DEFAULT 0xD280           /* 10-bit ISA aliases 280h-2BFh: nothing there. Not D500h: its aliases
+                                          100h-13Fh are the Voodoo 3's D100h's (100h-1FFh), and Windows 9x,
+                                          taking PCI I/O as 10-bit too, then had no range left for it (Code 12) */
 
 /* Interrupt/chip select control (00h) */
 #define CTL_ADC_EN    (1u << 4)
