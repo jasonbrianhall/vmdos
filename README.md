@@ -301,9 +301,40 @@ code) running the card's own BIOS, as 86Box does. The BIOS is built into
 vmdos from `roms/voodoo3/3k12sd.rom` (86Box's file); a build without it
 leaves `voodoo3` off. The VGA, its modes and VESA are then the card's BIOS's,
 and Windows finds a Voodoo 3. Needs a Pentium Pro or later and about 60 MB of
-RAM. VGA memory, register and command FIFO accesses are trapped and emulated;
-the frame buffer is mapped straight onto the card's memory (`v3trap` traps it
-too; `tests/voodoo` has the tests).
+RAM. VGA memory, register and command FIFO accesses are trapped and emulated
+(x87, MMX and SSE stores and loads included, as Glide and the Direct3D and
+DirectDraw drivers make them into the command FIFO, the tiled back buffers
+and the texture port); the frame buffer is mapped straight onto the card's
+memory (`v3trap` traps it too), the command FIFOs in it included: what
+the driver wrote there is handed to the card whenever vmdos looks at it
+(an access to the card, the timer tick), so a Direct3D driver's frame of
+commands costs no VM exit a word (`v3fifotrap` traps the FIFOs as before). The card's vertical retrace interrupt goes to
+the IRQ in its PCI configuration (10), and BARs Windows moves are followed
+(trapped there). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
+emulation).
+
+With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
+BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
+leaves it out): its device nodes give Windows 9x the board's devices (PIC,
+timer, PS/2 mouse, RTC, speaker, FPU, POST and A20 ports, system memory) as
+16-bit decoders; not the PCI bus, keyboard or DMA controllers, which an
+installed Windows keeps as it detected them (two of each otherwise). Without one, Windows detects them itself and
+takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
+256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
+Windows installed before needs Add New Hardware (let it search) to find
+the "Plug and Play BIOS"; after a restart the old system devices are
+replaced. Remove an ET4000 Windows found too (it holds the VGA's ports). The
+card shows no expansion ROM BAR (its BIOS is at C0000h already): Windows
+found no 64 KB for one and rejected the card's whole configuration.
+Test: `tests/pnpbios.asm`. What the guest writes to the Voodoo's command
+register and BARs is logged (`voodoo3: guest config write`; Ctrl+Shift+F10
+shows it, Ctrl+Shift+S saves it). `v3log` logs the first 4000 accesses to
+the card's I/O registers and configuration space (the card's BIOS takes about
+2000); `v3log=N` the first N, to follow a driver further on the serial log.
+`v3trace` (`v3trace=N` lines, default 30000) logs the guest's accesses to
+the card's init, command FIFO and 3D registers through BAR0 (not the 2D
+engine's or pixels), a run of the same access as one line with a count:
+what a Direct3D or Glide driver asks of the card and reads back.
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
@@ -363,6 +394,17 @@ its own controls if you want). With the log showing, Ctrl+Shift with the
 arrow keys, PgUp/PgDn or Home/End scrolls it, and Ctrl+Shift+S saves it
 to C:\VMDOS\VMDOS.LOG (made by `DMESG /K`). The "vmdos stopped" screen
 shows the same log.
+
+CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
+ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
+it, the master being VMCD's drive 1 and the slave its drive 2 (an image or a
+real drive, the same discs). The Plug and Play BIOS reports it, so Windows
+finds a "Standard IDE/ESDI Hard Disk Controller" (Add New Hardware, or at
+the next start), drives it with its own IDE driver and reads the discs with
+its CDFS: long file names (Joliet), which DOS's CD layer only shows as 8.3
+names (installers then can't find their files), and autoplay. The drives
+DOS gave letters to stay too (8.3 names). `atapi=off` leaves the channel
+out. Test: `tests/atapitest.asm`.
 
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
@@ -571,7 +613,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   Recording isn't emulated. Test: `tests/gustest.asm`.
   Ensoniq AudioPCI 97 (ES1371; `src/es1371.c`), on by default (`es1371=off`
   removes it, and with it the guest's PCI bus unless `voodoo3` is on):
-  a PCI card on the guest's bus at 00:02.0, I/O D500h, IRQ 9 (`es1371=N`
+  a PCI card on the guest's bus at 00:02.0, I/O D280h, IRQ 9 (`es1371=N`
   for IRQ N), for Creative's "AudioPCI (ES1371,ES1373)" drivers for
   Windows 9x (the 5.12.01 WDM driver for 98 SE/Me, the VxD one for 95/98).
   Under Windows, remove the Sound Blaster from Device Manager if it was
@@ -752,6 +794,12 @@ the host's mappings of the VM's memory. Tested in Bochs 3.1 (built with
 JEMM386 and DOS/32A over VCPI run in the VM; `debug=3` writes the text
 screen to the log every 20 s.
 
+`faultlog` on the kernel command line logs the VM's invalid-opcode (#UD)
+and general-protection (#GP) faults in protected mode, at any privilege
+level (each faulting address once, up to 300; the first few with code and
+stack): a Windows program
+or driver that dies quietly shows there.
+
 Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
 PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
 untested.
@@ -789,12 +837,13 @@ untested.
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
-| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 |
+| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 (x87, MMX, SSE moves) |
 | `src/es1371.c` | the Ensoniq AudioPCI 97 (`es1371`) on the guest's PCI bus |
 | `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
+| `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 

@@ -273,7 +273,7 @@ int vmx_setup(u8 *shadow)
     vmwrite(EXIT_CTL, adjust(0, true_ctls ? 0x48F : 0x483, 0));                          /* 32-bit host */
     vmwrite(ENTRY_CTL, adjust(0, true_ctls ? 0x490 : 0x484, 0));
     if (missing) { kprintf("VMHV: VT-x controls not available\n"); return 8; }
-    vmwrite(EXC_BITMAP, 1u << 13);                              /* #GP: HLT in v86 mode, segment wrap */
+    vmwrite(EXC_BITMAP, 1u << 13 | (strstr(cmdline, "faultlog") ? 1u << 6 : 0));   /* #GP: HLT in v86 mode, segment wrap; faultlog: #UD */
     vmwrite(CR3_TGT_COUNT, 0);
     vmwrite(EXIT_MSR_STORE, 0); vmwrite(EXIT_MSR_LOAD, 0); vmwrite(ENTRY_MSR_LOAD, 0);
     vmwrite64(LINK_PTR, ~0ull);
