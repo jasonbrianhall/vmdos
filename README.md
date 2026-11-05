@@ -313,8 +313,9 @@ emulation).
 With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
 BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
 leaves it out): its device nodes give Windows 9x the board's devices (PIC,
-timer, DMA, keyboard, PS/2 mouse, RTC, speaker, FPU, the PCI bus, system
-memory) as 16-bit decoders. Without one, Windows detects them itself and
+timer, PS/2 mouse, RTC, speaker, FPU, POST and A20 ports, system memory) as
+16-bit decoders; not the PCI bus, keyboard or DMA controllers, which an
+installed Windows keeps as it detected them (two of each otherwise). Without one, Windows detects them itself and
 takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
 256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
 Windows installed before needs Add New Hardware (let it search) to find
@@ -322,7 +323,9 @@ the "Plug and Play BIOS"; after a restart the old system devices are
 replaced. Remove an ET4000 Windows found too (it holds the VGA's ports). The
 card's expansion ROM BAR gets an address of its own (off), as its other
 BARs do: left at 0 it would overlap the RAM the PnP BIOS reports.
-Test: `tests/pnpbios.asm`.
+Test: `tests/pnpbios.asm`. What the guest writes to the Voodoo's command
+register and BARs is logged (`voodoo3: guest config write`; Ctrl+Shift+F10
+shows it, Ctrl+Shift+S saves it).
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so

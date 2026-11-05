@@ -581,9 +581,15 @@ u32 v3_cfg_read(int reg, int size)
     return v;
 }
 
+/* What the guest writes to the card's command register and BARs: always
+   logged once it has booted (few writes; Windows sizing, moving or
+   switching off the card shows here, for Ctrl+Shift+F10). */
+static int cfg_booted;
 void v3_cfg_write(int reg, u32 val, int size)
 {
     acc_log("cfg wr", reg, val);
+    if (cfg_booted && !v3_log_on && (reg == 0x04 || (reg >= 0x10 && reg < 0x1C) || (reg >= 0x30 && reg < 0x34)))
+        kprintf("voodoo3: guest config write %02x/%d %08x\n", reg, size, val);
     v3_enter();
     for (int i = 0; i < size; i++) pci_wr(0, reg + i, 1, (u8)(val >> (8 * i)), pci_priv);
     int on = v3_card_mem_on(card);             /* while sizing them (all 1s written), memory decode is off */
@@ -680,6 +686,7 @@ void v3_init(void)
     legacy_remap(1);                           /* the VGA's memory: the card's */
     vpci_bios_patch();                         /* the PCI BIOS for 32-bit code, its BIOS at C000h (bios_init: again at each restart) */
     lfb_remap(1);
+    cfg_booted = 1;
     v3_leave();
     kprintf("voodoo3: Voodoo 3 3000 (86Box), 16 MB, its BIOS %u KB; registers at %x, frame buffer at %x, I/O at %x, ROM BAR %x\n",
             v3_rom_start[2] / 2u, bar0_lin, bar1_lin, V3_IO_BASE, rom_lin);
