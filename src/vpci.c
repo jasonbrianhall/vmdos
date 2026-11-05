@@ -203,6 +203,11 @@ static void pnp_bios(void)
         pn_io(0xF0, 16); pn_irq(13);
         pn_end();
     }
+    if (atapi_on()) {
+        pn_begin(0x0600, 0x01, 0x01, 0x00);            /* the IDE channel with CD drives (atapi.c): secondary */
+        pn_io(0x170, 8); pn_io(0x376, 1); pn_irq(15);
+        pn_end();
+    }
     pn_begin(0x0C02, 0x08, 0x80, 0x00);                /* the board's other ports: POST, A20 */
     pn_io(0x80, 1); pn_io(0x92, 1);
     pn_end();

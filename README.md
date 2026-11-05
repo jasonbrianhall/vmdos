@@ -395,6 +395,17 @@ arrow keys, PgUp/PgDn or Home/End scrolls it, and Ctrl+Shift+S saves it
 to C:\VMDOS\VMDOS.LOG (made by `DMESG /K`). The "vmdos stopped" screen
 shows the same log.
 
+CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
+ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
+it, the master being VMCD's drive 1 and the slave its drive 2 (an image or a
+real drive, the same discs). The Plug and Play BIOS reports it, so Windows
+finds a "Standard IDE/ESDI Hard Disk Controller" (Add New Hardware, or at
+the next start), drives it with its own IDE driver and reads the discs with
+its CDFS: long file names (Joliet), which DOS's CD layer only shows as 8.3
+names (installers then can't find their files), and autoplay. The drives
+DOS gave letters to stay too (8.3 names). `atapi=off` leaves the channel
+out. Test: `tests/atapitest.asm`.
+
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
 names). It is read straight from the disk, nothing is copied to RAM; `VMCD`
@@ -832,6 +843,7 @@ untested.
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
+| `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
