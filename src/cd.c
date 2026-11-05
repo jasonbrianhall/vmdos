@@ -88,6 +88,8 @@ static struct {
 static int n_img, n_units = -1;
 static int unit_img[MAX_UNITS] = { -1, -1, -1, -1 };
 static u8 changed[MAX_UNITS + MAX_PHYS];
+static u32 change_gen[MAX_UNITS + MAX_PHYS];   /* counts media changes: the ATAPI drives' unit attention (atapi.c) */
+#define CHANGED(u) (changed[u] = 1, change_gen[u]++)
 static int n_mod;                        /* boot-module images, first in img[] */
 static u8 *xbuf;                         /* 64 KiB, identity-mapped: DMA and raw reads */
 
@@ -420,7 +422,7 @@ static int mount_file(int u, const char *path)
     set_name(slot, path);
     if (slot == n_img) n_img++;
     unit_img[u] = slot;
-    changed[u] = 1;
+    CHANGED(u);
     struct toc *t = &img[slot].toc;
     int audio = 0;
     for (int i = t->first; i <= t->last; i++) audio += !(t->ctl[i] & 4);
@@ -471,7 +473,7 @@ static void phys_poll(int d, int unit)
     int k = -1, waited = 0, empty = 0;
     for (int tries = 0; tries < 8; tries++) {
         k = packet(d, 0x00, 0, 0, 0, 0, 0);
-        if (k == 6) { changed[unit] = 1; ph[d].present = 0; continue; }
+        if (k == 6) { CHANGED(unit); ph[d].present = 0; continue; }
         if (k != 2) break;
         int asc = pkt_asc(d);
         if (asc == 0x04 && waited < 10000) {
@@ -481,7 +483,7 @@ static void phys_poll(int d, int unit)
         if (asc != 0x3A || ++empty > 1) break;
     }
     if (k) {
-        if (ph[d].present) { changed[unit] = 1; audio_unit_gone(unit); }
+        if (ph[d].present) { CHANGED(unit); audio_unit_gone(unit); }
         ph[d].present = 0;
         return;
     }
@@ -505,7 +507,7 @@ static void phys_poll(int d, int unit)
         }
     }
     ph[d].present = 1;
-    changed[unit] = 1;
+    CHANGED(unit);
     int audio = 0;
     for (int i = t->first; i <= t->last; i++) audio += !(t->ctl[i] & 4);
     kprintf("cd: drive %d (%s): disc in, %u KiB, tracks %d-%d, %d audio\n", unit + 1, pmodel(d),
@@ -865,11 +867,11 @@ static u16 ioctl_out(int unit, u32 cb)
             u8 cdb[12] = { 0x1B, 0, 0, 0, rd8(cb) ? 3 : 2 };            /* START STOP UNIT, LoEj */
             pkt(d, cdb, 0, 0);
         }
-        ph[d].present = 0; changed[unit] = 1;
+        ph[d].present = 0; CHANGED(unit);
         return ST_DONE;
     case 2:
         audio_unit_gone(unit);
-        if (d >= 0) { ph[d].present = 0; changed[unit] = 1; }
+        if (d >= 0) { ph[d].present = 0; CHANGED(unit); }
         return ST_DONE;
     case 3:
         for (int i = 0; i < 8; i++) chan[i] = rd8(cb + 1 + i);
@@ -895,7 +897,7 @@ static u16 read_long(int unit, u32 rh)
         if (e == 6 || e == 2) {                                         /* disc changed or taken out */
             ph[d].present = 0;
             phys_poll(d, unit);
-            changed[unit] = 1;
+            CHANGED(unit);
             return ST_ERR(ph[d].present ? 0xF : 2);                     /* invalid disk change / not ready */
         }
         return e ? ST_ERR(0xB) : ST_DONE;
@@ -992,7 +994,7 @@ void cd_api(struct regs *r)
         if (u < 0 || u >= n_units || i < -1 || i >= n_mod) { AX(r) = 1; return; }
         audio_unit_gone(u);
         unit_img[u] = i;
-        changed[u] = 1;
+        CHANGED(u);
         kprintf("cd: drive %d now holds %s\n", u + 1, i >= 0 ? img[i].name : "nothing");
         AX(r) = 0;
         return; }
@@ -1009,4 +1011,74 @@ void cd_api(struct regs *r)
         return; }
     }
     AX(r) = 0xFFFF;
+}
+
+/* ---------------- for the emulated ATAPI drives (atapi.c) ----------------
+   Units as VMCD.SYS numbers them (images first, then the real drives).
+   Each call is what a SCSI command needs; reads are cooked (2048 bytes). */
+int cd_unit_count(void) { units_init(); return n_units + n_phys; }
+u32 cd_unit_gen(int unit) { return change_gen[unit]; }
+/* Is a disc in? (A real drive is asked: a change shows up here.) */
+int cd_unit_present(int unit)
+{
+    int d = phys_of(unit);
+    if (d >= 0) phys_poll(d, unit);
+    return unit_toc(unit) != 0;
+}
+u32 cd_unit_sectors(int unit)
+{
+    int d = phys_of(unit);
+    if (!unit_toc(unit)) return 0;
+    return d >= 0 ? ph[d].sectors : img[unit_img[unit]].sectors;
+}
+/* first/last track, track starts (lead-out at [last + 1]), ADR/CONTROL bytes. */
+int cd_unit_toc(int unit, int *first, int *last, u32 *start, u8 *ctl)
+{
+    struct toc *t = unit_toc(unit);
+    if (!t) return -1;
+    *first = t->first; *last = t->last;
+    for (int i = t->first; i <= t->last + 1; i++) start[i] = t->start[i];
+    for (int i = t->first; i <= t->last; i++) ctl[i] = t->ctl[i];
+    return 0;
+}
+/* n sectors from lba into buf: 0, or a sense key (2 not ready, 6 changed,
+   3 medium error ...), or -1. */
+int cd_unit_read(int unit, u32 lba, u32 n, u8 *buf)
+{
+    int d = phys_of(unit);
+    if (d >= 0) {
+        if (!ph[d].present) phys_poll(d, unit);
+        if (!ph[d].present) return 2;
+        if (lba + n > ph[d].sectors || lba + n < lba) return 5;
+        int e = 0;
+        for (int tries = 0; tries < 3; tries++) {                      /* a real drive: a bad read again */
+            e = phys_read(d, lba, n, buf, 0);
+            if (!e || e == 2 || e == 6 || e == 5) break;
+        }
+        if (e == 6 || e == 2) { ph[d].present = 0; phys_poll(d, unit); CHANGED(unit); }
+        if (e) kprintf("cd: drive %d: read of %u sectors at %u failed (sense key %d)\n", unit + 1, n, lba, e);
+        return e;
+    }
+    int im = unit_img[unit];
+    if (im < 0) return 2;
+    if (lba + n > img[im].sectors || lba + n < lba) return 5;
+    return img_read(im, lba, n, buf) ? 3 : 0;
+}
+/* CD audio, as MSCDEX's requests do it. */
+int cd_unit_play(int unit, u32 start, u32 end) { return play(unit, start, end) & 0x8000 ? -1 : 0; }
+void cd_unit_pause(int unit)
+{
+    rlock_take(&sound_lock);
+    if (pl.unit == unit && pl.state == 1) stop_audio(unit);
+    rlock_drop(&sound_lock);
+}
+void cd_unit_resume(int unit) { rlock_take(&sound_lock); resume_audio(unit); rlock_drop(&sound_lock); }
+void cd_unit_stop(int unit) { if (pl.unit == unit) cdaudio_stop(); }
+/* 1 playing, 2 paused, 0 neither (3: just finished); *pos where it is. */
+int cd_unit_audio(int unit, u32 *pos)
+{
+    if (pl.unit != unit) { *pos = 0; return 0; }
+    int p = playing(unit);
+    *pos = pl.state ? play_pos() : pl.end;
+    return p ? 1 : pl.state == 2 ? 2 : 0;
 }
