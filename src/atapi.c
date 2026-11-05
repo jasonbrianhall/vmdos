@@ -10,7 +10,7 @@
    PIO only (no bus master DMA): the guest's REP INSW is one exit for a
    whole transfer in VMHV. Commands finish at once (BSY is never seen);
    each data block and the end raise IRQ 15 unless nIEN. atapi=off: no
-   channel. */
+   channel; atapilog logs the commands and how they ended. */
 #include "kernel.h"
 
 int cd_unit_count(void);
@@ -59,6 +59,8 @@ static int ata_pio;                      /* a plain ATA PIO data-in (IDENTIFY PA
 #define BUFSZ 65536
 
 static struct dev *cur(void) { return &dv[(dh >> 4) & 1]; }
+static int alog;                         /* atapilog: commands and their results, the first 3000 */
+#define ALOG(...) do { if (alog > 0) { alog--; kprintf(__VA_ARGS__); } } while (0)
 static void irq(void) { if (!(dctl & 2)) vpic_raise(IRQ); }
 
 static void signature(void)
@@ -71,6 +73,7 @@ static void decide(void)
     if (on >= 0) return;
     on = !strstr(cmdline, "atapi=off");
     if (!on) return;
+    if (strstr(cmdline, "atapilog")) alog = 3000;
     buf = phys_try_alloc(BUFSZ + 4096);
     if (!buf) { on = 0; return; }
     int n = cd_unit_count();
@@ -86,6 +89,7 @@ int atapi_on(void) { return !strstr(cmdline, "atapi=off"); }   /* (vpci.c's PnP 
 /* ---------------- phases ---------------- */
 static void done(void)                   /* command complete: status, IRQ */
 {
+    ALOG("atapi: %s: done\n", (dh & 0x10) ? "slave" : "master");
     phase = PH_IDLE;
     nsect = 3;                           /* I/O, C/D: status */
     status = ST_DRDY | ST_DSC;
@@ -96,6 +100,7 @@ static void done(void)                   /* command complete: status, IRQ */
 static void fail(u8 key, u8 asc, u8 ascq)
 {
     struct dev *d = cur();
+    ALOG("atapi: %s: failed, sense %x/%02x/%02x\n", (dh & 0x10) ? "slave" : "master", key, asc, ascq);
     d->key = key; d->asc = asc; d->ascq = ascq;
     phase = PH_IDLE;
     nsect = 3;
@@ -179,6 +184,8 @@ static void packet(void)
     struct dev *d = cur();
     int u = d->unit;
     u8 op = cdb[0];
+    ALOG("atapi: %s: SCSI %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (bcl %x)\n", (dh & 0x10) ? "slave" : "master",
+         cdb[0], cdb[1], cdb[2], cdb[3], cdb[4], cdb[5], cdb[6], cdb[7], cdb[8], cdb[9], bcl);
     memset(buf, 0, 256);
     int media = op == 0x00 || op == 0x25 || op == 0x28 || op == 0xA8 || op == 0x43 || op == 0x45 ||
                 op == 0x47 || op == 0xA5 || op == 0x2B || op == 0xBE;
@@ -346,6 +353,7 @@ static void id_string(u16 *w, int at, int words, const char *s)
 static void command(u8 c)
 {
     struct dev *d = cur();
+    ALOG("atapi: %s: ATA %02x (feat %02x, %s)\n", (dh & 0x10) ? "slave" : "master", c, feat, d->unit < 0 ? "no drive" : "drive");
     if (d->unit < 0) return;                                       /* no device there */
     err = 0;
     switch (c) {
@@ -454,6 +462,7 @@ int atapi_port(u16 port, int size, int write, u32 *val)
         case BASE + 6: dh = v | 0xA0; break;
         case BASE + 7: command(v); break;
         case CTRL:
+            if ((dctl & 4) && !(v & 4)) ALOG("atapi: soft reset\n");
             if ((dctl & 4) && !(v & 4)) {                           /* SRST ends: both reset */
                 phase = PH_IDLE; signature(); err = 1; status = 0; dh = 0xA0;
             }

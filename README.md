@@ -404,7 +404,8 @@ the next start), drives it with its own IDE driver and reads the discs with
 its CDFS: long file names (Joliet), which DOS's CD layer only shows as 8.3
 names (installers then can't find their files), and autoplay. The drives
 DOS gave letters to stay too (8.3 names). `atapi=off` leaves the channel
-out. Test: `tests/atapitest.asm`.
+out; `atapilog` logs the commands it gets and how they ended. Test:
+`tests/atapitest.asm`.
 
 CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
 and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
