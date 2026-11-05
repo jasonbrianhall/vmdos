@@ -123,7 +123,7 @@ static int pcilog(void)
             kprintf("pci: bus %s: host bridge 00:00.0%s, AudioPCI %s, RTL8029 %s, PnP BIOS %s\n",
                     bus_on() ? "on" : "off", v3_on ? ", Voodoo 3 00:01.0" : "",
                     es_present() ? "00:02.0" : "off", ne2k_pci_on() ? "00:03.0" : "off",
-                    strstr(cmdline, "nopnp") ? "off" : strstr(cmdline, "pnpfull") ? "full" : "on");
+                    strstr(cmdline, "nopnp") ? "off" : strstr(cmdline, "pnpmin") ? "without the PCI bus (pnpmin)" : "on");
         }
     }
     return pcilog_left > 0;
@@ -209,13 +209,13 @@ static void pnp_bios(void)
     extern u32 fpu_present;
     u32 top = hv_vm_top();
 
-    /* The PCI bus, the keyboard and the DMA controllers only with pnpfull,
-       as a PC's PnP BIOS lists them: a Windows installed with the PnP BIOS
-       there may find the PCI bus (and so the cards on it) only through its
-       node. A Windows installed without a PnP BIOS keeps the ones it
-       detected itself (the PCI bus can't be removed at all) and the BIOS's
-       copies stay yellow beside them, so by default they're left out. */
-    int full = strstr(cmdline, "pnpfull") != 0;
+    /* The PCI bus, the keyboard and the DMA controllers, as a PC's PnP
+       BIOS lists them: a Windows installed with the PnP BIOS there finds
+       the PCI bus, and so the cards on it, through its node. pnpmin leaves
+       them out, for a Windows installed without a PnP BIOS: it keeps the
+       ones it detected itself (the PCI bus can't be removed at all) and
+       the BIOS's copies would stay yellow beside them. */
+    int full = !strstr(cmdline, "pnpmin");
     pn_begin(0x0C01, 0x05, 0x00, 0x00);                /* system board: its memory */
     pn_mem(0, 0xA0000, 1);
     pn_mem(0xF0000, 0x10000, 0);
