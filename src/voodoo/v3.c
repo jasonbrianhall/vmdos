@@ -341,7 +341,23 @@ void pci_add_card(uint8_t type, uint8_t (*read)(int, int, int, void *), void (*w
     pci_rd = read; pci_wr = write; pci_priv = priv;
     if (slot) *slot = 1;
 }
-void pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state) { (void)slot; (void)pci_int; (void)level; (void)set; (void)irq_state; }
+/* INTA#: the card's vertical retrace interrupt (pciInit0 bit 18 with the
+   VGA's CRTC 11h enabling it), which a driver may wait on for a flip. A
+   level line on the guest's edge-triggered PIC: raised when it goes up,
+   and again now and then while nobody clears it (v3_tick). */
+void vpic_raise(int irq);
+static int irq_level, irq_stuck;
+static int irq_line(void)
+{
+    int l = pci_rd ? pci_rd(0, 0x3C, 1, pci_priv) : 0;
+    return l > 0 && l < 16 ? l : 10;
+}
+void pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state)
+{
+    (void)slot; (void)pci_int; (void)level; (void)irq_state;
+    if (set && !irq_level) { vpic_raise(irq_line()); irq_stuck = 0; }
+    irq_level = set;
+}
 
 /* ---------------- the BIOS ROM ---------------- */
 static rom_t *the_rom;
@@ -487,10 +503,20 @@ static void keep_cb(void *p) { (void)p; timer_advance_u64(&keep_timer, TIMER_USE
 /* ---------------- what the kernel calls ---------------- */
 static int legacy(u32 a) { return a - 0xA0000 < 0x20000; }   /* the VGA's memory */
 
+/* Where the guest has the BARs now: Windows' PCI code may move them off
+   where vmdos put them (bar0_lin, bar1_lin). Accesses there are the
+   card's too (trapped, in VMHV's guest-physical space above its RAM). */
+static u32 cur_bar0, cur_bar1;
+static int moved(u32 phys)
+{
+    return (cur_bar0 >= (64u << 20) && phys - cur_bar0 < (32u << 20)) ||
+           (cur_bar1 >= (64u << 20) && phys - cur_bar1 < (32u << 20));
+}
+
 int v3_window(u32 phys)
 {
     if (!v3_on) return 0;
-    return legacy(phys) || phys - bar0_lin < (64u << 20);   /* the VGA's memory, BAR0, BAR1 */
+    return legacy(phys) || phys - bar0_lin < (64u << 20) || moved(phys);   /* the VGA's memory, BAR0, BAR1 */
 }
 
 int v3_range(u32 phys, u32 len)
@@ -559,6 +585,11 @@ void v3_cfg_write(int reg, u32 val, int size)
     acc_log("cfg wr", reg, val);
     v3_enter();
     for (int i = 0; i < size; i++) pci_wr(0, reg + i, 1, (u8)(val >> (8 * i)), pci_priv);
+    int on = v3_card_mem_on(card);             /* while sizing them (all 1s written), memory decode is off */
+    u32 b0 = on ? v3_card_bar(card, 0) : 0, b1 = on ? v3_card_bar(card, 1) : 0;
+    if ((b0 != cur_bar0 || b1 != cur_bar1) && (b0 | b1) && (b0 != bar0_lin || b1 != bar1_lin))
+        kprintf("voodoo3: the guest moved its BARs: registers at %x, frame buffer at %x (trapped there)\n", b0, b1);
+    cur_bar0 = b0; cur_bar1 = b1;
     catch_up();
     v3_leave();
 }
@@ -568,6 +599,7 @@ void v3_tick(void)
     if (!v3_on || depth) return;
     v3_enter();
     catch_up();
+    if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; vpic_raise(irq_line()); }   /* the level line, not serviced */
     if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
         svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
     v3_leave();
