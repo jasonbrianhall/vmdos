@@ -245,6 +245,8 @@ void ems_int67(struct regs *r);
 void ems_query(struct regs *r);
 int ems_present(void);   /* cd.c: a CD-ROM image */
 void cd_api(struct regs *r);                  /* INT 2Fh AX=5644h */
+int atapi_port(u16 port, int size, int write, u32 *val);   /* atapi.c: the guest's IDE channel (170h, 376h) */
+int atapi_on(void);
 void guest_idle_poll(void);                   /* v86.c: a "nothing to do" poll; sleeps when spinning */
 int fd_int13(struct regs *r);                 /* floppy.c: INT 13h, DL < 80h */
 int fd_ram(int d, u8 *image, u32 size);       /* a floppy-sized RAM disk in drive d: 0, or 3 not a floppy */
