@@ -776,6 +776,11 @@ the host's mappings of the VM's memory. Tested in Bochs 3.1 (built with
 JEMM386 and DOS/32A over VCPI run in the VM; `debug=3` writes the text
 screen to the log every 20 s.
 
+`faultlog` on the kernel command line logs the VM's invalid-opcode (#UD)
+and general-protection (#GP) faults in protected mode, at any privilege
+level (the first 100, the first few with code and stack): a Windows program
+or driver that dies quietly shows there.
+
 Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
 PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
 untested.
