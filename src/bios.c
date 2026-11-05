@@ -518,6 +518,7 @@ static int int1a(struct regs *r)
     return BIOS_DONEF;
 }
 
+extern int bios_restarted;
 int bios_service(struct regs *r, int id, int via_stub)
 {
     (void)via_stub;
@@ -572,7 +573,11 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
         else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
-        else if (AX(r) == 0x5646) fd_api(r);                    /* VMFD.COM: likewise (VMHV reaches only this way) */
+        else if (AX(r) == 0x5646) {                             /* VMFD.COM: likewise (VMHV reaches only this way) */
+            bios_restarted = 0;
+            fd_api(r);
+            if (bios_restarted) { bios_restarted = 0; return BIOS_SWITCH; }   /* /BOOT: new registers, no IRET */
+        }
         else if (AX(r) == 0x5647) hd_api(r);                    /* VMHD.SYS / VMHD.COM: likewise */
         else if (xms_hidden) ;                                  /* noxms: none here */
         else if (AX(r) == 0x4300) AL(r) = 0x80;                /* XMS driver installed */
@@ -703,6 +708,7 @@ void cdaudio_stop(void);
 void sb_out_stop(void);
 void gus_stop(void);
 extern int vif;
+int bios_restarted;                              /* set by bios_restart_floppy: the caller's frame is gone */
 int bios_restart_floppy(struct regs *r, int d)
 {
     static u8 sec[512];
@@ -722,6 +728,7 @@ int bios_restart_floppy(struct regs *r, int d)
     boot_floppy(r, d);
     r->eflags = EFL_VM | EFL_IF | 2;
     vif = 1;
+    bios_restarted = 1;
     return 0;
 }
 
