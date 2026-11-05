@@ -75,10 +75,12 @@ static void decide(void)
     if (!on) return;
     if (strstr(cmdline, "atapilog")) alog = 3000;
     buf = phys_try_alloc(BUFSZ + 4096);
-    if (!buf) { on = 0; return; }
+    if (!buf) { on = 0; kprintf("atapi: no memory for the IDE channel: off\n"); return; }
     int n = cd_unit_count();
     dv[0].unit = n > 0 ? 0 : -1;
     dv[1].unit = n > 1 ? 1 : -1;
+    kprintf("atapi: the guest touched the IDE channel at 170h: master %s, slave %s\n",
+            n > 0 ? "CD drive 1" : "none", n > 1 ? "CD drive 2" : "none");   /* (once: the first access) */
     for (int i = 0; i < 2; i++) if (dv[i].unit >= 0) dv[i].gen = cd_unit_gen(dv[i].unit);
     signature();
     err = 1; status = 0; dh = 0xA0;
