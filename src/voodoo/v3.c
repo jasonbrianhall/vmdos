@@ -660,6 +660,8 @@ void v3_init(void)
         return;
     }
     v3_log_on = strstr(cmdline, "v3log") ? 2 : 0;
+    const char *ln = strstr(cmdline, "v3log=");       /* v3log=N: the first N accesses (default 4000; the BIOS takes ~2000) */
+    if (ln) { int n = 0; for (ln += 6; *ln >= '0' && *ln <= '9'; ln++) n = n * 10 + (*ln - '0'); if (n) acc_left = n; }
     lfb_direct = !strstr(cmdline, "v3trap");
     bar0_lin = linear_hole(64u << 20, 32u << 20);
     if (!bar0_lin) { kprintf("voodoo3: no linear space for its BARs, off\n"); return; }

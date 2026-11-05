@@ -325,7 +325,9 @@ card shows no expansion ROM BAR (its BIOS is at C0000h already): Windows
 found no 64 KB for one and rejected the card's whole configuration.
 Test: `tests/pnpbios.asm`. What the guest writes to the Voodoo's command
 register and BARs is logged (`voodoo3: guest config write`; Ctrl+Shift+F10
-shows it, Ctrl+Shift+S saves it).
+shows it, Ctrl+Shift+S saves it). `v3log` logs the first 4000 accesses to
+the card's I/O registers and configuration space (the card's BIOS takes about
+2000); `v3log=N` the first N, to follow a driver further on the serial log.
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
