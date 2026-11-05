@@ -134,6 +134,87 @@ int vpci_port(u16 port, int size, int write, u32 *val)
     return v3_on ? v3_io(port, size, write, val) : 0;
 }
 
+/* ---------------- the Plug and Play BIOS (bios.asm pnp_entry) ----------------
+   Its device nodes: the board's devices with their resources, every I/O
+   range a 16-bit decoder. Windows 9x without a PnP BIOS takes the devices
+   it detects itself (PIC, keyboard ...) as 10-bit ISA decoders, aliased
+   every 400h, and then finds no free I/O range for a PCI card's 256 bytes
+   (the Voodoo 3: Code 12); with these it keeps the PCI BIOS's assignments.
+   An installed Windows switches to them through Add New Hardware (it
+   detects "Plug and Play BIOS"). nopnp on the command line: none. */
+static u8 *pn, *pn_node, pn_handle;
+static void pn_w16(u32 v) { *pn++ = (u8)v; *pn++ = (u8)(v >> 8); }
+static void pn_w32(u32 v) { pn_w16(v); pn_w16(v >> 16); }
+static void pn_begin(u16 id, u8 base, u8 sub, u8 itf)  /* PNPxxxx (EISA-compressed), its type code */
+{
+    pn_node = pn;
+    pn += 2;                                           /* size, at the end */
+    *pn++ = pn_handle++;
+    *pn++ = 0x41; *pn++ = 0xD0;                        /* "PNP" */
+    *pn++ = (u8)(id >> 8); *pn++ = (u8)id;
+    *pn++ = base; *pn++ = sub; *pn++ = itf;
+    pn_w16(0x0003);                                    /* can't be disabled, not configurable */
+}
+static void pn_io(u16 base, u8 len) { *pn++ = 0x47; *pn++ = 1; pn_w16(base); pn_w16(base); *pn++ = 1; *pn++ = len; }   /* 16-bit decode */
+static void pn_irq(int n) { *pn++ = 0x22; pn_w16(1u << n); }
+static void pn_mem(u32 base, u32 len, int rw) { *pn++ = 0x86; pn_w16(9); *pn++ = (u8)rw; pn_w32(base); pn_w32(len); }
+static void pn_end(void)
+{
+    for (int i = 0; i < 3; i++) { *pn++ = 0x79; *pn++ = 0; }   /* allocated, possible, compatible IDs: each ended */
+    u32 n = (u32)(pn - pn_node);
+    pn_node[0] = (u8)n; pn_node[1] = (u8)(n >> 8);
+}
+
+static void pnp_bios(void)
+{
+    if (strstr(cmdline, "nopnp")) return;
+    u32 hdr = 0xF0000u + rd16(0xF0242);
+    pn = gptr(0xF0000u + rd16(0xF0244));
+    pn_handle = 0;
+    extern u32 fpu_present;
+    u32 top = hv_vm_top();
+
+    /* Not the PCI bus, the keyboard or the DMA controllers: a Windows
+       installed without a PnP BIOS keeps the ones it detected (the PCI bus
+       can't be removed at all) and the BIOS's copies stay yellow beside
+       them; they are found without it as before. */
+    pn_begin(0x0C01, 0x05, 0x00, 0x00);                /* system board: its memory */
+    pn_mem(0, 0xA0000, 1);
+    pn_mem(0xF0000, 0x10000, 0);
+    if (top > 0x100000) pn_mem(0x100000, top - 0x100000, 1);
+    pn_end();
+    pn_begin(0x0000, 0x08, 0x00, 0x01);                /* AT interrupt controllers */
+    pn_io(0x20, 2); pn_io(0xA0, 2); pn_irq(2);
+    pn_end();
+    pn_begin(0x0100, 0x08, 0x02, 0x01);                /* AT timer */
+    pn_io(0x40, 4); pn_irq(0);
+    pn_end();
+    pn_begin(0x0B00, 0x08, 0x03, 0x01);                /* AT real-time clock */
+    pn_io(0x70, 2); pn_irq(8);
+    pn_end();
+    pn_begin(0x0F13, 0x09, 0x02, 0x00);                /* PS/2 mouse */
+    pn_irq(12);
+    pn_end();
+    pn_begin(0x0800, 0x04, 0x01, 0x00);                /* speaker */
+    pn_io(0x61, 1);
+    pn_end();
+    if (fpu_present) {
+        pn_begin(0x0C04, 0x0B, 0x40, 0x00);            /* math coprocessor */
+        pn_io(0xF0, 16); pn_irq(13);
+        pn_end();
+    }
+    pn_begin(0x0C02, 0x08, 0x80, 0x00);                /* the board's other ports: POST, A20 */
+    pn_io(0x80, 1); pn_io(0x92, 1);
+    pn_end();
+    pn_w16(0);                                         /* the end */
+
+    wr8(hdr + 3, 'P');
+    wr8(hdr + 8, 0);
+    u8 sum = 0;
+    for (int i = 0; i < 0x21; i++) sum += rd8(hdr + i);
+    wr8(hdr + 8, (u8)-sum);
+}
+
 /* The BIOS32 service directory in the BIOS image (bios.asm): turned on, so
    32-bit code (Windows' PCI.VXD) finds the PCI BIOS. With a bus to show
    only; the BIOS image is copied anew at times, so bios_init calls this too
@@ -147,6 +228,7 @@ void vpci_bios32(void)
     u8 sum = 0;
     for (int i = 0; i < 16; i++) sum += rd8(d + i);
     wr8(d + 10, (u8)-sum);
+    pnp_bios();                                          /* and the Plug and Play BIOS */
 }
 
 /* bios_init (boot, restarts): the emulated cards as a PC's BIOS leaves

@@ -272,6 +272,7 @@ int page_dirty(u32 lin, int clear)
    (CR4.OSXMMEXCPT); without, every one is an invalid opcode (AdvanceMAME's
    SSE2 blitters died with SIGILL). vmdos has one guest context and never
    switches FPU state, so that's all there is to it. */
+int host_osfxsr;
 static void sse_on(void)
 {
     u32 a, b;
@@ -284,6 +285,7 @@ static void sse_on(void)
     u32 cr4;
     __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
     __asm__ volatile("mov %0,%%cr4" ::"r"(cr4 | (1u << 9) | (1u << 10)));
+    host_osfxsr = 1;
     kprintf("SSE on (%s)\n", ecx & 1 ? "SSE3" : edx & (1u << 26) ? "SSE2" : "SSE");
 }
 
