@@ -157,6 +157,7 @@ static void pn_begin(u16 id, u8 base, u8 sub, u8 itf)  /* PNPxxxx (EISA-compress
 }
 static void pn_io(u16 base, u8 len) { *pn++ = 0x47; *pn++ = 1; pn_w16(base); pn_w16(base); *pn++ = 1; *pn++ = len; }   /* 16-bit decode */
 static void pn_irq(int n) { *pn++ = 0x22; pn_w16(1u << n); }
+static void pn_dma(int n) { *pn++ = 0x2A; *pn++ = (u8)(1u << n); *pn++ = 0x01; }
 static void pn_mem(u32 base, u32 len, int rw) { *pn++ = 0x86; pn_w16(9); *pn++ = (u8)rw; pn_w32(base); pn_w32(len); }
 static void pn_end(void)
 {
@@ -174,15 +175,29 @@ static void pnp_bios(void)
     extern u32 fpu_present;
     u32 top = hv_vm_top();
 
-    /* Not the PCI bus, the keyboard or the DMA controllers: a Windows
-       installed without a PnP BIOS keeps the ones it detected (the PCI bus
-       can't be removed at all) and the BIOS's copies stay yellow beside
-       them; they are found without it as before. */
+    /* The PCI bus, the keyboard and the DMA controllers only with pnpfull,
+       as a PC's PnP BIOS lists them: a Windows installed with the PnP BIOS
+       there may find the PCI bus (and so the cards on it) only through its
+       node. A Windows installed without a PnP BIOS keeps the ones it
+       detected itself (the PCI bus can't be removed at all) and the BIOS's
+       copies stay yellow beside them, so by default they're left out. */
+    int full = strstr(cmdline, "pnpfull") != 0;
     pn_begin(0x0C01, 0x05, 0x00, 0x00);                /* system board: its memory */
     pn_mem(0, 0xA0000, 1);
     pn_mem(0xF0000, 0x10000, 0);
     if (top > 0x100000) pn_mem(0x100000, top - 0x100000, 1);
     pn_end();
+    if (full) {
+        pn_begin(0x0A03, 0x06, 0x00, 0x00);            /* the PCI bus (host bridge) */
+        pn_io(0xCF8, 8);
+        pn_end();
+        pn_begin(0x0200, 0x08, 0x01, 0x01);            /* DMA controllers */
+        pn_io(0x00, 16); pn_io(0x81, 15); pn_io(0xC0, 32); pn_dma(4);
+        pn_end();
+        pn_begin(0x0303, 0x09, 0x00, 0x00);            /* 101/102-key keyboard */
+        pn_io(0x60, 1); pn_io(0x64, 1); pn_irq(1);
+        pn_end();
+    }
     pn_begin(0x0000, 0x08, 0x00, 0x01);                /* AT interrupt controllers */
     pn_io(0x20, 2); pn_io(0xA0, 2); pn_irq(2);
     pn_end();
