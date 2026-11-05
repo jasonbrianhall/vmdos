@@ -338,6 +338,7 @@ static int guest_fault_log(const char *what, u32 err, u32 cr2)
 }
 /* For vgalog: the VM is in protected mode (not v86); its CS:EIP. */
 u32 hv_guest_cr0(void) { return hv_active ? V32(S_CR0) : 0; }   /* mememu.c: TS and EM before running its x87 */
+u32 hv_guest_cr4(void) { return hv_active ? V32(S_CR4) : 0; }   /* mememu.c: OSFXSR before running its SSE */
 int hv_guest_pm(u16 *cs, u32 *eip)
 {
     if (!hv_active || real_or_v86()) return 0;
