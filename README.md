@@ -321,7 +321,9 @@ timer, PS/2 mouse, RTC, speaker, FPU, POST and A20 ports, system memory) as
 installed Windows keeps as it detected them (two of each otherwise);
 `pnpfull` lists those too, as a PC's PnP BIOS does, for a Windows installed
 with the PnP BIOS there that shows no PCI bus (and so no PCI cards) in
-System devices. Without one, Windows detects them itself and
+System devices. `pcilog[=N]` logs the guest's first N (300) PCI
+configuration accesses and PCI BIOS calls (`pci:` lines), to see whether
+Windows looks at a card at all. Without one, Windows detects them itself and
 takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
 256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
 Windows installed before needs Add New Hardware (let it search) to find
