@@ -12,3 +12,4 @@ tools/t/
 .watcom
 tests/voodoo/obj/
 tests/voodoo/hosttest
+tests/voodoo/emutest
