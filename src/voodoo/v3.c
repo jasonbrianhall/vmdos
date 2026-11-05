@@ -568,16 +568,24 @@ void v3_hv_sync(void)
 }
 
 /* Whatever the card does between two looks: its timers (scan lines,
-   retraces, the FIFO thread's wake-up), the FIFO and render threads. */
-static void catch_up(void)
+   retraces, the FIFO thread's wake-up), the FIFO and render threads, for
+   at most a slice of time (v3sched.c v3_run_for): a guest access gives it
+   2 ms, the timer tick 0.3 ms of each 1 ms. What's left goes on at the
+   next look; the card reads busy meanwhile, as a real one does while it
+   draws, and the guest's driver polls it. */
+void v3_run_for(uint32_t us);
+#define SLICE_ACCESS 2000
+#define SLICE_TICK 300
+static void catch_up_for(uint32_t us)
 {
     lfb_remap(0);
     legacy_remap(0);
     v3_poll_timers();
     fifo_feed();
-    v3_run();
+    v3_run_for(us);
     fifo_mark();
 }
+static void catch_up(void) { catch_up_for(SLICE_ACCESS); }
 
 /* A timer that is always there: timer.c's list mustn't run empty. */
 static pc_timer_t keep_timer;
@@ -728,7 +736,7 @@ void v3_tick(void)
 {
     if (!v3_on || depth) return;
     v3_enter();
-    catch_up();
+    catch_up_for(SLICE_TICK);
     static u32 tr_tick;
     if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
     if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; irq_raise("still up, raised again"); }   /* the level line, not serviced */
