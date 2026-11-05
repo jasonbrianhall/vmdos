@@ -4,11 +4,12 @@
 ; (DPMI 0800h) and writes them: a 640x480 16-bit screen, a fill, a Gouraud
 ; triangle through the setup unit (its vertices stored with FSTP, as
 ; compiled Glide code does), a white band written into the frame buffer
-; directly, then the command FIFO in the frame buffer
+; directly, then the command FIFO in the frame buffer (written with MOVQ,
+; MOVUPS and MOVD where the CPU has MMX and SSE, as a Direct3D driver does)
 ; filling the back buffer, shown through the overlay after a swap. Waits
 ; about 10 seconds (time for a screenshot), sets text mode and exits.
 ;   nasm -f bin -o V3TEST.COM v3test.asm
-        cpu 686
+        cpu katmai                      ; 686 + MMX + SSE (used only if CPUID says so)
         bits 16
         org 100h
 
@@ -49,6 +50,16 @@ start:  mov bx, (progend - start + 100h + 15) / 16 + 1
         mov dx, msg_found
         mov ah, 9
         int 21h
+        mov eax, 1                              ; MMX and SSE (vmdos turns SSE on)?
+        cpuid
+        and edx, 1 << 23 | 1 << 25
+        cmp edx, 1 << 23 | 1 << 25
+        jne .nosimd
+        mov byte [simd], 1
+        mov dx, msg_simd
+        mov ah, 9
+        int 21h
+.nosimd:
         mov ax, 4F02h                   ; 640x480, 16 bits, through the card's own VESA BIOS
         mov bx, 0111h
         int 10h
@@ -170,14 +181,33 @@ pm:     xor ax, ax                      ; a flat 4 GB data selector
         mov dword [fs:edx + 24h], 15 | 1 << 8   ; 64 KB, on
         mov ebx, [lin1]
         add ebx, FIFO
-        mov dword [fs:ebx], 1 | (1ECh >> 2) << 3 | 1 << 15 | 2 << 16   ; packet 1: colBuffer, 2 words
-        mov dword [fs:ebx + 4], BACK
-        mov dword [fs:ebx + 8], STRIDE
-        mov dword [fs:ebx + 12], 1 | (148h >> 2) << 3 | 1 << 16       ; color1
-        mov dword [fs:ebx + 16], 0000FF00h
-        mov dword [fs:ebx + 20], 1 | (124h >> 2) << 3 | 1 << 16       ; fastfillCMD
-        mov dword [fs:ebx + 24], 0
-        call idle
+        cmp byte [simd], 0                      ; MMX and SSE: written as a Direct3D
+        je .plain                               ; driver would, MOVQ, MOVUPS, MOVD
+        lea edx, [esi + 80000h]
+        movq mm0, [fifodat]
+        movq [fs:ebx], mm0
+        movups xmm0, [fifodat + 8]
+        movups [fs:ebx + 8], xmm0
+        movd mm1, [fifodat + 24]
+        movd [fs:ebx + 24], mm1
+        emms
+        jmp short .sent
+.plain: lea edx, [esi + 80000h]
+        mov eax, [fifodat]
+        mov [fs:ebx], eax
+        mov eax, [fifodat + 4]
+        mov [fs:ebx + 4], eax
+        mov eax, [fifodat + 8]
+        mov [fs:ebx + 8], eax
+        mov eax, [fifodat + 12]
+        mov [fs:ebx + 12], eax
+        mov eax, [fifodat + 16]
+        mov [fs:ebx + 16], eax
+        mov eax, [fifodat + 20]
+        mov [fs:ebx + 20], eax
+        mov eax, [fifodat + 24]
+        mov [fs:ebx + 24], eax
+.sent:  call idle
 
         mov dword [fs:esi + 9Ch], 0                      ; overlay: the whole screen
         mov dword [fs:esi + 0A0h], (W - 1) | (H - 1) << 12
@@ -247,6 +277,14 @@ lin1    dd 0
 entry   dd 0
 devfn   dw 0
 flat    dw 0
+simd    db 0
+fifodat dd 1 | (1ECh >> 2) << 3 | 1 << 15 | 2 << 16   ; packet 1: colBuffer, 2 words
+        dd BACK, STRIDE
+        dd 1 | (148h >> 2) << 3 | 1 << 16       ; color1
+        dd 0000FF00h
+        dd 1 | (124h >> 2) << 3 | 1 << 16       ; fastfillCMD
+        dd 0
+msg_simd   db 'V3TEST: the command FIFO through MMX and SSE', 13, 10, '$'
 msg_found  db 'V3TEST: Voodoo 3 found, drawing', 13, 10, '$'
 msg_nomode db 'V3TEST: the BIOS has no 640x480x16 (VESA 111h)', 13, 10, '$'
 msg_nopci  db 'V3TEST: no PCI BIOS (vmdos voodoo3?)', 13, 10, '$'
