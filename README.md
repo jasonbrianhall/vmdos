@@ -319,7 +319,9 @@ takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
 256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
 Windows installed before needs Add New Hardware (let it search) to find
 the "Plug and Play BIOS"; after a restart the old system devices are
-replaced. Remove an ET4000 Windows found too (it holds the VGA's ports).
+replaced. Remove an ET4000 Windows found too (it holds the VGA's ports). The
+card's expansion ROM BAR gets an address of its own (off), as its other
+BARs do: left at 0 it would overlap the RAM the PnP BIOS reports.
 Test: `tests/pnpbios.asm`.
 
 On a PC with more than one core, a second core (found in the ACPI MADT)

@@ -506,11 +506,12 @@ static int legacy(u32 a) { return a - 0xA0000 < 0x20000; }   /* the VGA's memory
 /* Where the guest has the BARs now: Windows' PCI code may move them off
    where vmdos put them (bar0_lin, bar1_lin). Accesses there are the
    card's too (trapped, in VMHV's guest-physical space above its RAM). */
-static u32 cur_bar0, cur_bar1;
+static u32 cur_bar0, cur_bar1, cur_rom;
 static int moved(u32 phys)
 {
     return (cur_bar0 >= (64u << 20) && phys - cur_bar0 < (32u << 20)) ||
-           (cur_bar1 >= (64u << 20) && phys - cur_bar1 < (32u << 20));
+           (cur_bar1 >= (64u << 20) && phys - cur_bar1 < (32u << 20)) ||
+           (cur_rom >= (64u << 20) && phys - cur_rom < 0x10000);   /* its expansion ROM (on or off: reads FFh off) */
 }
 
 int v3_window(u32 phys)
@@ -590,6 +591,7 @@ void v3_cfg_write(int reg, u32 val, int size)
     if ((b0 != cur_bar0 || b1 != cur_bar1) && (b0 | b1) && (b0 != bar0_lin || b1 != bar1_lin))
         kprintf("voodoo3: the guest moved its BARs: registers at %x, frame buffer at %x (trapped there)\n", b0, b1);
     cur_bar0 = b0; cur_bar1 = b1;
+    cur_rom = (u32)pci_rd(0, 0x32, 1, pci_priv) << 16 | (u32)pci_rd(0, 0x33, 1, pci_priv) << 24;
     catch_up();
     v3_leave();
 }
@@ -649,6 +651,7 @@ void v3_init(void)
     bar0_lin = linear_hole(64u << 20, 32u << 20);
     if (!bar0_lin) { kprintf("voodoo3: no linear space for its BARs, off\n"); return; }
     bar1_lin = bar0_lin + (32u << 20);
+    u32 rom_lin = linear_hole(0x10000, 0x10000);   /* its expansion ROM BAR: an address of its own, off */
 
     v3_enter();
     cpuclock = v3_sched_init();
@@ -669,6 +672,8 @@ void v3_init(void)
     v3_cfg_write(0x10, bar0_lin, 4);
     v3_cfg_write(0x14, bar1_lin, 4);
     v3_cfg_write(0x18, V3_IO_BASE, 4);
+    if (rom_lin) v3_cfg_write(0x30, rom_lin, 4);   /* at 0 it overlaps the RAM the PnP BIOS reports: Windows 9x then */
+                                               /* rejects the card's whole configuration and finds none (Code 12) */
     v3_cfg_write(0x3C, 10, 1);
     v3_cfg_write(0x04, 3, 1);
     v3_on = 1;
@@ -676,7 +681,7 @@ void v3_init(void)
     vpci_bios_patch();                         /* the PCI BIOS for 32-bit code, its BIOS at C000h (bios_init: again at each restart) */
     lfb_remap(1);
     v3_leave();
-    kprintf("voodoo3: Voodoo 3 3000 (86Box), 16 MB, its BIOS %u KB; registers at %x, frame buffer at %x, I/O at %x\n",
-            v3_rom_start[2] / 2u, bar0_lin, bar1_lin, V3_IO_BASE);
+    kprintf("voodoo3: Voodoo 3 3000 (86Box), 16 MB, its BIOS %u KB; registers at %x, frame buffer at %x, I/O at %x, ROM BAR %x\n",
+            v3_rom_start[2] / 2u, bar0_lin, bar1_lin, V3_IO_BASE, rom_lin);
 }
 
