@@ -108,6 +108,38 @@ static void cfg_write(int bus, int devfn, int reg, u32 val, int size)
     if (devfn == V3_DEVFN) v3_cfg_write(reg, val, size);
 }
 
+/* pcilog[=N]: the guest's first N (300) PCI configuration accesses and
+   PCI BIOS calls, a run of the same one once: whether Windows looks at a
+   device at all, and what it reads. */
+static int pcilog_left = -1;
+static int pcilog(void)
+{
+    if (pcilog_left < 0) {
+        const char *p = strstr(cmdline, "pcilog");
+        pcilog_left = 0;
+        if (p) {
+            pcilog_left = 300;
+            if (p[6] == '=') { int n = 0; for (p += 7; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0'); if (n) pcilog_left = n; }
+            kprintf("pci: bus %s: host bridge 00:00.0%s, AudioPCI %s, RTL8029 %s, PnP BIOS %s\n",
+                    bus_on() ? "on" : "off", v3_on ? ", Voodoo 3 00:01.0" : "",
+                    es_present() ? "00:02.0" : "off", ne2k_pci_on() ? "00:03.0" : "off",
+                    strstr(cmdline, "nopnp") ? "off" : strstr(cmdline, "pnpfull") ? "full" : "on");
+        }
+    }
+    return pcilog_left > 0;
+}
+static void pcilog_cfg(int bus, int devfn, int reg, int size, int write, u32 v, int there)
+{
+    static u32 last; static int rep;
+    if (!pcilog()) return;
+    u32 key = (u32)bus << 24 | (u32)devfn << 16 | (u32)reg << 8 | (u32)size << 1 | (u32)write;
+    if (key == last && !write) { if (rep++ == 0) kprintf("pci: (again ...)\n"); return; }
+    last = key; rep = 0;
+    pcilog_left--;
+    kprintf("pci: cfg %s %02x:%02x.%d reg %02x/%d %s %x%s\n", write ? "wr" : "rd", bus, devfn >> 3, devfn & 7,
+            reg, size, write ? "<-" : "->", v, there ? "" : " (nothing there)");
+}
+
 int vpci_port(u16 port, int size, int write, u32 *val)
 {
     if (!bus_on()) return 0;
@@ -124,10 +156,12 @@ int vpci_port(u16 port, int size, int write, u32 *val)
         int bus = (cf8 >> 16) & 0xFF, devfn = (cf8 >> 8) & 0xFF, reg = (cf8 & 0xFC) + (port & 3);
         if (!(cf8 & 0x80000000u) || !present(bus, devfn)) {
             if (!write) *val = 0xFFFFFFFFu;
+            if (cf8 & 0x80000000u) pcilog_cfg(bus, devfn, reg, size, write, *val, 0);
             return 1;
         }
         if (write) cfg_write(bus, devfn, reg, *val, size);
         else *val = cfg_read(bus, devfn, reg, size);
+        pcilog_cfg(bus, devfn, reg, size, write, *val, 1);
         return 1;
     }
     if (es_io(port, size, write, val)) return 1;
@@ -277,6 +311,7 @@ int vpci_int1a(struct regs *r)
 {
     if (!bus_on() || AH(r) != 0xB1) return 0;
     int bus = BH(r), devfn = BL(r), reg = DI(r) & 0xFF;
+    if (pcilog()) { pcilog_left--; kprintf("pci: BIOS AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x\n", (u16)r->eax, (u16)r->ebx, (u16)r->ecx, (u16)r->edx, SI(r), DI(r)); }
     switch (AL(r)) {
     case 0x01:                                    /* installation check */
         r->edx = 0x20494350;                      /* "PCI " */
