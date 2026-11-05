@@ -323,6 +323,8 @@ void video_b000_map(void);
 void video_vgalog_giveup(void);              /* vgalog: dump the VGA VxD's code now (Windows quitting) */                    /* video.c: B0000h-B7FFFh as the VGA decodes it */
 int hv_guest_pm(u16 *cs, u32 *eip);
 u32 hv_guest_cr0(void);                       /* the VM's CR0 (0 outside VMHV) */
+u32 hv_guest_cr4(void);                       /* the VM's CR4 (0 outside VMHV) */
+extern int host_osfxsr;                       /* cpu.c: vmdos turned SSE on (CR4.OSFXSR) */
 void hv_dump_here(const char *why);
 void hv_dump_lin(u32 a, u32 len);           /* VMHV: code and stack at the guest's CS:EIP, for vgalog */           /* VMHV: the guest is in protected mode, at CS:EIP */
 int hv_start(int key);                        /* only returns on failure: an error code */
