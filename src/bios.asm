@@ -75,6 +75,8 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw rom_post_ax                   ; 023C  rom_post's AX: the card's bus and device/function
         dw redir_hook                    ; 023E  VMHV: INT 2Fh while a 9p drive is mounted (fs9p.cpp)
         dw redir_old                     ; 0240  its next handler (DOS's)
+        dw pnp_hdr                       ; 0242  Plug and Play BIOS header (vpci.c turns it on)
+        dw pnp_nodes                     ; 0244  its device nodes (vpci.c writes them)
 
 ; ---- stubs ----
 dummy:  iret
@@ -552,6 +554,133 @@ pci32:  cmp ah, 0B1h
         stc
         retf
         bits 16
+
+; ---- Plug and Play BIOS (1.0A) ----
+; Windows 9x takes the board's devices (PIC, timer, keyboard ...) from these
+; nodes, as 16-bit decoders; without a PnP BIOS it detects them itself and
+; takes them as 10-bit ISA decoders, whose aliases (every 400h) leave no
+; room for a PCI card's I/O range (the Voodoo 3's 256 bytes: Code 12). The
+; signature is "$Pn?" here: vpci.c makes it "$PnP" (and the checksum right)
+; and writes the nodes into pnp_nodes (each: its size word first; a size of
+; 0 ends them). One entry for real and 16-bit protected mode (code base
+; F0000h): only CS-relative reads and the caller's far pointers.
+        align 16
+pnp_hdr:
+        db '$Pn?'
+        db 10h                           ; version 1.0
+        db 21h                           ; length
+        dw 0                             ; control: no event notification
+        db 0                             ; checksum (vpci.c)
+        dd 0F0000h + pnp_event           ; event flag
+        dw pnp_entry, 0F000h             ; real-mode entry
+        dw pnp_entry                     ; 16-bit protected-mode entry: offset,
+        dd 0F0000h                       ;   code segment base
+        dd 0                             ; OEM device ID
+        dw 0F000h                        ; real-mode data segment
+        dd 0F0000h                       ; protected-mode data segment base
+pnp_event: db 0
+
+; Far call, C convention: [bp+6] function, then its arguments. AX: result.
+pnp_entry:
+        push bp
+        mov bp, sp
+        push ds
+        push es
+        push si
+        push di
+        push bx
+        push cx
+        push dx
+        mov ax, [bp + 6]
+        test ax, ax
+        jz .count
+        cmp ax, 1
+        je .get
+        cmp ax, 3
+        je .noevent
+        cmp ax, 4
+        je .ok                           ; send message: taken
+        cmp ax, 5
+        je .nodock
+        cmp ax, 40h
+        je .isa
+        mov ax, 82h                      ; FUNCTION_NOT_SUPPORTED (set node, ESCD ...)
+        jmp .ret
+.noevent:
+        mov ax, 86h                      ; EVENTS_NOT_PENDING
+        jmp .ret
+.nodock:
+        mov ax, 87h                      ; SYSTEM_NOT_DOCKED
+        jmp .ret
+
+.count:                                  ; 00h: (NumNodes far *, NodeSize far *, BiosSelector)
+        xor cx, cx
+        xor dx, dx
+        mov si, pnp_nodes
+.c1:    mov ax, [cs:si]
+        test ax, ax
+        jz .c2
+        inc cx
+        cmp ax, dx
+        jbe .c3
+        mov dx, ax
+.c3:    add si, ax
+        jmp .c1
+.c2:    les di, [bp + 8]
+        mov [es:di], cl
+        les di, [bp + 12]
+        mov [es:di], dx
+        jmp .ok
+
+.get:                                    ; 01h: (Node far *, devNodeBuffer far *, Control, BiosSelector)
+        les di, [bp + 8]
+        mov bl, [es:di]                  ; the handle wanted
+        mov si, pnp_nodes
+.g1:    mov cx, [cs:si]
+        test cx, cx
+        jz .badh
+        cmp [cs:si + 2], bl
+        je .g2
+        add si, cx
+        jmp .g1
+.g2:    les di, [bp + 12]
+        push si
+        push cs
+        pop ds
+        cld
+        rep movsb
+        pop si
+        add si, [cs:si]                  ; the next node's handle, FFh after the last
+        mov al, 0FFh
+        cmp word [cs:si], 0
+        je .g3
+        mov al, [cs:si + 2]
+.g3:    les di, [bp + 8]
+        mov [es:di], al
+        jmp .ok
+.badh:  mov ax, 83h                      ; INVALID_HANDLE
+        jmp .ret
+
+.isa:                                    ; 40h: no ISA Plug and Play cards
+        les di, [bp + 8]
+        mov byte [es:di], 1              ; revision
+        mov byte [es:di + 1], 0          ; card select numbers
+        mov word [es:di + 2], 0          ; read data port
+        jmp .ok
+
+.ok:    xor ax, ax
+.ret:   pop dx
+        pop cx
+        pop bx
+        pop di
+        pop si
+        pop es
+        pop ds
+        pop bp
+        retf
+
+pnp_nodes:
+        times 1024 db 0
 
 config_table:                    ; INT 15h AH=C0h
         dw 8
