@@ -1031,9 +1031,16 @@ int vga16_fault(struct emu_cpu *e, u32 cr2)
 {
     if (!vga16_window(cr2) && !v3_window(cr2)) return 0;   /* the Voodoo 3's BARs (voodoo3.h) the same way */
     if (mem_emulate(e)) { if (hv_active || v3_window(cr2)) mem_emulate_more(e); return 1; }
+    /* The instruction's bytes for the log, read the way the guest sees
+       them: under the hypervisor a is the guest's linear address (its own
+       page tables), and here the window it may sit in is the card's or
+       unmapped, so a plain rd8 would fault in vmdos itself. */
     u32 a = e->seg_base[1] + *e->eip;
-    kprintf("vga16: can't emulate %02x %02x %02x %02x %02x at %x (address %x)\n",
-            rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), a, cr2);
+    u8 b[6];
+    if (hv_active) for (int i = 0; i < 6; i++) b[i] = hv_emu_rd8(a + i);
+    else vga_get(a, b, 6);
+    kprintf("vga16: can't emulate %02x %02x %02x %02x %02x %02x at %x (CS base %x, %d-bit, address %x)\n",
+            b[0], b[1], b[2], b[3], b[4], b[5], a, e->seg_base[1], e->code32 ? 32 : 16, cr2);
     return 0;
 }
 

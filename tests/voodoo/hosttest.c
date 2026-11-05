@@ -5,7 +5,9 @@
    frame buffer, a swap to the overlay) and writes what the video processor
    shows to a .ppm, comparing a few pixels with what they must be.
 
-   make -C tests/voodoo   (needs gcc-multilib), then ./hosttest out.ppm */
+   make -C tests/voodoo   (needs gcc-multilib), then ./hosttest out.ppm, and
+   ./hosttest out.ppm direct: the FIFO written straight into the card's memory
+   (as through vmdos's mapped pages) instead of through the trap. */
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -37,6 +39,7 @@ void map_page(u32 lin, u32 phys, u32 flags) { (void)lin; (void)phys; (void)flags
 void tlb_flush_range(u32 lin, u32 len) { (void)lin; (void)len; }                   /* every access traps */
 void hv_map_gpa(u32 gpa, u32 host) { (void)gpa; (void)host; }
 void vpci_bios_patch(void) { }
+void vpic_raise(int irq) { (void)irq; }
 int v3_map_own;
 uint64_t tsc_read(void) { return 0; }
 uint32_t tsc_khz(void) { return 0; }                /* no TSC rate: the card's clock is pit_clock */
@@ -50,7 +53,13 @@ static void cmd(u32 reg, u32 v) { v3_mmio_write(BAR0 + 0x80000 + reg, v, 4); }
 static void r3d(u32 reg, u32 v) { v3_mmio_write(BAR0 + 0x200000 + reg, v, 4); }
 static u32 r3d_read(u32 reg) { return v3_mmio_read(BAR0 + 0x200000 + reg, 4); }
 static u32 f2u(float f) { u32 u; memcpy(&u, &f, 4); return u; }
-static void lfb(u32 a, u32 v) { v3_mmio_write(BAR1 + a, v, 4); }
+uint8_t *v3_test_vram(void);
+static int direct;                            /* "direct": FIFO writes straight into vram, as through */
+static void lfb(u32 a, u32 v)                 /* vmdos's mapped pages (v3.c fifo_feed finds them) */
+{
+    if (direct && a >= 0x400000 && a < 0x410000) *(u32 *)(v3_test_vram() + a) = v;
+    else v3_mmio_write(BAR1 + a, v, 4);
+}
 
 static void idle(void)                        /* as grSstIdle: until the status says not busy */
 {
@@ -100,6 +109,7 @@ int main(int argc, char **argv)
 {
     int bad = 0;
     shot = calloc(W * H, 4);
+    direct = argc > 2 && !strcmp(argv[2], "direct");
     v3_init();
     if (!v3_on) return 1;
 
@@ -184,6 +194,21 @@ int main(int argc, char **argv)
     idle();
     grab();
     bad += !check("overlay after the swap: green", 100, 100, 0x00FF00);
+
+    /* the FIFO again: a jump back to its base, then red into BACK from there */
+    lfb(a, (u32)FIFO << 4 | 3 << 3); a += 4;              /* packet 0: JMP to the base */
+    a = FIFO;
+    lfb(a, 1 | (0x148 >> 2) << 3 | 1 << 16); a += 4;       /* packet 1: color1 */
+    lfb(a, 0x00FF0000); a += 4;
+    lfb(a, 1 | (0x124 >> 2) << 3 | 1 << 16); a += 4;      /* packet 1: fastfillCMD */
+    lfb(a, 0); a += 4;
+    idle();
+    r3d(0x128, 1);                                         /* swapbufferCMD: shown anew */
+    for (int i = 0; i < 5; i++) { fake_clock += 17045; v3_tick(); }
+    idle();
+    printf("command FIFO again: read pointer %x (wrote up to %x)\n", v3_mmio_read(BAR0 + 0x8002c, 4), a);
+    grab();
+    bad += !check("FIFO from its base again: red", 100, 100, 0xFF0000);
 
     if (argc > 1) {
         FILE *f = fopen(argv[1], "wb");

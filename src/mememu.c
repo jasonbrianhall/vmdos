@@ -3,9 +3,11 @@
    every access goes through the VGA's latches and write logic). Handles
    what programs use on video memory: MOV, MOVZX/MOVSX, the ALU group,
    TEST, XCHG, INC/DEC, NOT/NEG, shifts/rotates by 1/CL/imm, and the string
-   instructions MOVS/STOS/LODS (with REP, all iterations at once), in 16- and
-   32-bit code. Memory outside the window is accessed directly (the guest
-   and the kernel share the address space). */
+   instructions MOVS/STOS/LODS (with REP, all iterations at once), SETcc,
+   and for the Voodoo 3 x87, MMX and SSE loads and stores (Glide and
+   Direct3D drivers, DirectDraw surface copies), in 16- and 32-bit code.
+   Memory outside the window is accessed directly (the guest and the kernel
+   share the address space). */
 #include "kernel.h"
 
 static struct emu_cpu *E;
@@ -28,11 +30,14 @@ static int probe_check(u32 a, int write)
     return page_user(a, write);
 }
 
+static int v3_at(u32 a, u32 *p);
 static u8 fetch8(void)
 {
     u32 a = E->seg_base[CS] + (E->code32 ? ip : (ip & 0xFFFF));
     ip++;
     if (probe && probe_check(a, 0) != 1) { probe_bad = 1; return 0x90; }
+    u32 p;
+    if (v3_at(a, &p)) return (u8)v3_mmio_read(p, 1);   /* code in the card's memory (the VGA window) */
     return hv_active ? hv_emu_rd8(a) : rd8(a);
 }
 static u16 fetch16(void) { u16 v = fetch8(); return v | (u16)(fetch8() << 8); }
@@ -359,13 +364,149 @@ static int x87_op(u8 op)
     return 1;
 }
 
+/* ---------------- MMX and SSE ----------------
+   The same for MMX and SSE moves into or out of trapped memory: a Direct3D
+   driver writing its command FIFO or textures with MOVQ, a DirectDraw
+   surface copied with MOVQ/MOVNTQ/MOVAPS/MOVDQA into the Voodoo's tiled
+   memory, a texture read back. The guest's MMX and XMM registers are live
+   in the CPU as its x87 state is (vmdos's own code uses neither), so the
+   instruction runs here with its memory operand moved to x87_buf. Only
+   when the guest would run it itself: not under CR0.EM (#UD) or CR0.TS
+   (#NM), SSE only with the guest's CR4.OSFXSR, and only what this CPU has
+   (a batch, mem_emulate_more, may come to code the guest never ran). */
+static u32 cpu_feat;                                /* CPUID 1 EDX, once */
+#define F_MMX (1u << 23)
+#define F_SSE (1u << 25)
+#define F_SSE2 (1u << 26)
+
+static int simd_can(u32 need, int xmm)
+{
+    if (!v3_on) return 0;
+    if (!cpu_feat) {
+        u32 a = 1, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+        cpu_feat = d | 1;
+    }
+    if ((cpu_feat & need) != need) return 0;
+    if (hv_guest_cr0() & 0xC) return 0;             /* EM, TS */
+    if (xmm) {
+        if (!host_osfxsr) return 0;                 /* this CPU won't run it */
+        if (hv_active && !(hv_guest_cr4() & 0x200)) return 0;   /* nor the guest's (no OSFXSR: #UD there) */
+    }
+    return 1;
+}
+
+/* Run c (the instruction with its operand at x87_buf, then RET). */
+static void simd_run(int n)
+{
+    x87_code[n] = 0xC3;
+    __asm__ volatile("call *%0" :: "r"(x87_code) : "memory", "cc");
+}
+
+/* op2 after 0F, pfx the mandatory prefix (0, 66h, F2h, F3h). 1: done. */
+static int simd_op(u8 op2, int pfx)
+{
+    int n = 0, rd = 0, wr = 0, xmm = 0, align = 0, gpr = 0;   /* bytes of memory; gpr: MOVD's other side is a GPR */
+    u32 need = F_MMX;
+    switch (op2) {
+    case 0x10: case 0x11:                           /* MOVUPS MOVSS MOVUPD MOVSD */
+        n = pfx == 0xF3 ? 4 : pfx == 0xF2 ? 8 : 16;
+        need = pfx == 0x66 || pfx == 0xF2 ? F_SSE2 : F_SSE; xmm = 1;
+        rd = op2 == 0x10; wr = !rd;
+        break;
+    case 0x12: case 0x13: case 0x16: case 0x17:     /* MOVLPS MOVHPS (MOVLPD MOVHPD); reg-reg: MOVHLPS MOVLHPS */
+        if (pfx & 0xF0) return 0;                   /* SSE3's MOVDDUP MOVSLDUP MOVSHDUP */
+        if (mod_ == 3 && (pfx || (op2 & 1))) return 0;   /* no such instruction */
+        n = 8; need = pfx ? F_SSE2 : F_SSE; xmm = 1;
+        rd = !(op2 & 1); wr = op2 & 1;
+        break;
+    case 0x28: case 0x29: case 0x2B:                /* MOVAPS MOVAPD, MOVNTPS MOVNTPD */
+        if (pfx & 0xF0) return 0;
+        n = 16; need = pfx ? F_SSE2 : F_SSE; xmm = 1; align = 1;
+        rd = op2 == 0x28; wr = !rd;
+        if (op2 == 0x2B && mod_ == 3) return 0;
+        break;
+    case 0x6E: case 0x7E:                           /* MOVD mm/xmm,r/m32  r/m32,mm/xmm; F3 0F 7E: MOVQ xmm,m64 */
+        if (pfx == 0xF2) return 0;
+        if (pfx == 0xF3) {
+            if (op2 == 0x6E) return 0;
+            n = 8; rd = 1; need = F_SSE2; xmm = 1;
+            break;
+        }
+        n = 4; gpr = 1; rd = op2 == 0x6E; wr = !rd;
+        if (pfx == 0x66) { need = F_SSE2; xmm = 1; }
+        break;
+    case 0x6F: case 0x7F:                           /* MOVQ mm; MOVDQA (66) MOVDQU (F3) */
+        if (pfx == 0xF2) return 0;
+        n = pfx ? 16 : 8; rd = op2 == 0x6F; wr = !rd;
+        if (pfx) { need = F_SSE2; xmm = 1; align = pfx == 0x66; }
+        break;
+    case 0xD6:                                      /* MOVQ m64,xmm */
+        if (pfx != 0x66) return 0;
+        n = 8; wr = 1; need = F_SSE2; xmm = 1;
+        break;
+    case 0xE7:                                      /* MOVNTQ, MOVNTDQ (66) */
+        if (pfx & 0xF0) return 0;
+        n = pfx ? 16 : 8; wr = 1; need = pfx ? F_SSE2 : F_SSE; xmm = pfx != 0; align = pfx != 0;
+        if (mod_ == 3) return 0;
+        break;
+    case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
+    case 0x68: case 0x69: case 0x6A: case 0x6B: case 0x6C: case 0x6D:
+    case 0x74: case 0x75: case 0x76:
+    case 0xD1: case 0xD2: case 0xD3: case 0xD5: case 0xD8: case 0xD9: case 0xDB: case 0xDC: case 0xDD: case 0xDF:
+    case 0xE1: case 0xE2: case 0xE5: case 0xE8: case 0xE9: case 0xEB: case 0xEC: case 0xED: case 0xEF:
+    case 0xF1: case 0xF2: case 0xF3: case 0xF5: case 0xF8: case 0xF9: case 0xFA: case 0xFC: case 0xFD: case 0xFE:
+        /* MMX arithmetic, packing and logic: mm,mm/m64 (66: xmm,xmm/m128, SSE2) */
+        if (pfx & 0xF0) return 0;
+        if ((op2 == 0x6C || op2 == 0x6D) && !pfx) return 0;
+        n = pfx ? 16 : 8; rd = 1;
+        if (pfx) { need = F_SSE2; xmm = 1; align = 1; }
+        break;
+    default:
+        return 0;
+    }
+    if (!simd_can(need, xmm)) return 0;
+    u8 *c = x87_code;
+    int k = 0;
+    if (pfx) c[k++] = (u8)pfx;
+    c[k++] = 0x0F; c[k++] = op2;
+    if (mod_ == 3) {
+        if (!gpr) {                                 /* registers only: as it is */
+            if (probe) return 1;
+            c[k++] = modrm_byte;
+            simd_run(k);
+            return 1;
+        }
+        if (probe) return 1;                        /* MOVD with a GPR: through the buffer */
+        if (rd) *(u32 *)x87_buf = rget(rm_, 4);
+    } else {
+        if (align && (ea & 15)) return 0;           /* #GP in the guest */
+        if (rd) {
+            u32 i = 0;
+            for (; i + 4 <= (u32)n; i += 4) *(u32 *)(x87_buf + i) = mrd(ea + i, 4);
+        } else if (probe) {
+            for (u32 i = 0; i < (u32)n; i += 4) mwr(ea + i, 0, 4);   /* the dry run: is it all the window */
+        }
+        if (probe) return 1;
+    }
+    u32 b = (u32)(uintptr_t)x87_buf;
+    c[k++] = (u8)(reg_ << 3 | 5);                   /* [disp32]: the buffer */
+    c[k++] = (u8)b; c[k++] = (u8)(b >> 8); c[k++] = (u8)(b >> 16); c[k++] = (u8)(b >> 24);
+    simd_run(k);
+    if (wr) {
+        if (mod_ == 3) rset(rm_, *(u32 *)x87_buf, 4);
+        else for (u32 i = 0; i < (u32)n; i += 4) mwr(ea + i, *(u32 *)(x87_buf + i), 4);
+    }
+    return 1;
+}
+
 /* ---------------- one instruction ---------------- */
 int mem_emulate(struct emu_cpu *e)
 {
     E = e;
     ip = *e->eip;
     seg_ovr = -1;
-    int opsz32 = e->code32, adsz32 = e->code32, rep = 0;
+    int opsz32 = e->code32, adsz32 = e->code32, rep = 0, has66 = 0, repfx = 0;
     u8 op;
     for (int n = 0;; n++) {
         if (n > 14) return 0;
@@ -377,10 +518,10 @@ int mem_emulate(struct emu_cpu *e)
         case 0x3E: seg_ovr = DS; continue;
         case 0x64: seg_ovr = FS; continue;
         case 0x65: seg_ovr = GS; continue;
-        case 0x66: opsz32 = !e->code32; continue;
+        case 0x66: opsz32 = !e->code32; has66 = 1; continue;
         case 0x67: adsz32 = !e->code32; continue;
         case 0xF0: continue;
-        case 0xF2: case 0xF3: rep = 1; continue;
+        case 0xF2: case 0xF3: rep = 1; repfx = op; continue;
         }
         break;
     }
@@ -499,7 +640,30 @@ int mem_emulate(struct emu_cpu *e)
             rset(reg_, v, osz);
             break;
         }
-        return 0; }
+        if (op2 >= 0x90 && op2 <= 0x9F) {               /* SETcc r/m8 */
+            modrm();
+            rm_set(cond(op2 & 15), 1);
+            break;
+        }
+        if (op2 == 0xC3) {                              /* MOVNTI m32,r32 */
+            modrm();
+            if (mod_ == 3 || !simd_can(F_SSE2, 0)) return 0;
+            mwr(ea, rget(reg_, 4), 4);
+            break;
+        }
+        if (op2 == 0x18 || op2 == 0x0D || op2 == 0x1F) {   /* PREFETCHh, 3DNow!'s PREFETCH(W), NOP r/m: no access */
+            modrm();
+            if (op2 == 0x18 && mod_ == 3) return 0;
+            break;
+        }
+        if (op2 == 0x77) {                              /* EMMS: the end of an MMX copy loop */
+            if (!simd_can(F_MMX, 0)) return 0;
+            if (!probe) { x87_code[0] = 0x0F; x87_code[1] = 0x77; simd_run(2); }
+            break;
+        }
+        modrm();
+        if (!simd_op(op2, repfx ? repfx : has66 ? 0x66 : 0)) return 0;
+        break; }
     default:
         return 0;
     }

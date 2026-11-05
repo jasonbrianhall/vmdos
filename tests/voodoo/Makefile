@@ -12,6 +12,10 @@ VOBJS := $(patsubst $(SRC)/%.c,obj/%.o,$(VSRC))
 
 ROM   := $(firstword $(wildcard ../../roms/voodoo3/3k12sd.rom))
 
+# mememu.c's MMX/SSE emulation (emutest.c says what it does)
+emutest: emutest.c ../../src/mememu.c ../../src/kernel.h
+	gcc -m32 -march=i686 -O1 -g -no-pie -mgeneral-regs-only -fno-strict-aliasing -I../../src -w -o $@ emutest.c
+
 hosttest: hosttest.c $(VOBJS) obj/v3rom.o
 	gcc -m32 -O1 -g -no-pie -o $@ hosttest.c $(VOBJS) obj/v3rom.o -lm
 
@@ -24,4 +28,4 @@ obj/%.o: $(SRC)/%.c
 	gcc $(VFLAGS) -c $< -o $@
 
 clean:
-	rm -rf obj hosttest
+	rm -rf obj hosttest emutest
