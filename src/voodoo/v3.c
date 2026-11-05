@@ -352,10 +352,22 @@ static int irq_line(void)
     int l = pci_rd ? pci_rd(0, 0x3C, 1, pci_priv) : 0;
     return l > 0 && l < 16 ? l : 10;
 }
+/* v3noirq: the card never interrupts. The first raise and every
+   re-raise of a line left up are logged (the first 20). */
+static int irq_off = -1, irq_said;
+static void irq_raise(const char *why)
+{
+    if (irq_off < 0) irq_off = strstr(cmdline, "v3noirq") != 0;
+    if (irq_said < 20) {
+        irq_said++;
+        kprintf("voodoo3: retrace interrupt %s on IRQ %d%s\n", why, irq_line(), irq_off ? " (v3noirq: not sent)" : "");
+    }
+    if (!irq_off) vpic_raise(irq_line());
+}
 void pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state)
 {
     (void)slot; (void)pci_int; (void)level; (void)irq_state;
-    if (set && !irq_level) { vpic_raise(irq_line()); irq_stuck = 0; }
+    if (set && !irq_level) { irq_raise("raised"); irq_stuck = 0; }
     irq_level = set;
 }
 
@@ -556,16 +568,24 @@ void v3_hv_sync(void)
 }
 
 /* Whatever the card does between two looks: its timers (scan lines,
-   retraces, the FIFO thread's wake-up), the FIFO and render threads. */
-static void catch_up(void)
+   retraces, the FIFO thread's wake-up), the FIFO and render threads, for
+   at most a slice of time (v3sched.c v3_run_for): a guest access gives it
+   2 ms, the timer tick 0.3 ms of each 1 ms. What's left goes on at the
+   next look; the card reads busy meanwhile, as a real one does while it
+   draws, and the guest's driver polls it. */
+void v3_run_for(uint32_t us);
+#define SLICE_ACCESS 2000
+#define SLICE_TICK 300
+static void catch_up_for(uint32_t us)
 {
     lfb_remap(0);
     legacy_remap(0);
     v3_poll_timers();
     fifo_feed();
-    v3_run();
+    v3_run_for(us);
     fifo_mark();
 }
+static void catch_up(void) { catch_up_for(SLICE_ACCESS); }
 
 /* A timer that is always there: timer.c's list mustn't run empty. */
 static pc_timer_t keep_timer;
@@ -716,10 +736,10 @@ void v3_tick(void)
 {
     if (!v3_on || depth) return;
     v3_enter();
-    catch_up();
+    catch_up_for(SLICE_TICK);
     static u32 tr_tick;
     if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
-    if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; vpic_raise(irq_line()); }   /* the level line, not serviced */
+    if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; irq_raise("still up, raised again"); }   /* the level line, not serviced */
     if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
         svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
     v3_leave();

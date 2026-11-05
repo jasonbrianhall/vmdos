@@ -309,8 +309,13 @@ memory (`v3trap` traps it too), the command FIFOs in it included: what
 the driver wrote there is handed to the card whenever vmdos looks at it
 (an access to the card, the timer tick), so a Direct3D driver's frame of
 commands costs no VM exit a word (`v3fifotrap` traps the FIFOs as before). The card's vertical retrace interrupt goes to
-the IRQ in its PCI configuration (10), and BARs Windows moves are followed
-(trapped there). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
+the IRQ in its PCI configuration (10; each raise is logged, the first 20,
+and `v3noirq` never sends it), and BARs Windows moves are followed
+(trapped there). The card's work (the FIFO and render threads) runs in
+time slices, 2 ms an access and 0.3 ms a timer tick, the rest at the next
+look, so a frame of triangles never holds up the screen, the sound and
+the keyboard (in VMHV it runs inside a VM exit, with the host's
+interrupts off). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
 emulation).
 
 With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
