@@ -30,11 +30,14 @@ static int probe_check(u32 a, int write)
     return page_user(a, write);
 }
 
+static int v3_at(u32 a, u32 *p);
 static u8 fetch8(void)
 {
     u32 a = E->seg_base[CS] + (E->code32 ? ip : (ip & 0xFFFF));
     ip++;
     if (probe && probe_check(a, 0) != 1) { probe_bad = 1; return 0x90; }
+    u32 p;
+    if (v3_at(a, &p)) return (u8)v3_mmio_read(p, 1);   /* code in the card's memory (the VGA window) */
     return hv_active ? hv_emu_rd8(a) : rd8(a);
 }
 static u16 fetch16(void) { u16 v = fetch8(); return v | (u16)(fetch8() << 8); }
