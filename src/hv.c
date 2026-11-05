@@ -717,8 +717,16 @@ static void emulate_at(u32 gpa, int vga)
     struct emu_cpu e = { { &r[0], &r[1], &r[2], &r[3], &r[4], &r[5], &r[6], &r[7] }, &rip, &fl,
                          { (u32)V64(S_ES + 8), csb, (u32)V64(S_SS + 8), (u32)V64(S_DS + 8),
                            (u32)V64(S_FS + 8), (u32)V64(S_GS + 8) }, code32 };
-    if (!(vga ? vga16_fault(&e, gpa) : mem_emulate(&e)))
-        hv_stop("an access the emulator can't do, address %x", gpa);
+    if (!(vga ? vga16_fault(&e, gpa) : mem_emulate(&e))) {
+        u32 a = csb + (code32 ? eip : (eip & 0xFFFF));
+        u8 b[8];
+        for (int i = 0; i < 8; i++) {
+            u32 ga;
+            b[i] = !gwalk(a + i, &ga) && v3_window(ga) ? (u8)v3_mmio_read(ga, 1) : hv_emu_rd8(a + i);
+        }
+        hv_stop("an access the emulator can't do, address %x: %02x %02x %02x %02x %02x %02x %02x %02x (%d-bit)",
+                gpa, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], code32 ? 32 : 16);
+    }
     V32(S_RAX) = r[0]; g[1] = r[1]; g[2] = r[2]; g[0] = r[3]; V32(S_RSP) = r[4];
     g[5] = r[5]; g[3] = r[6]; g[4] = r[7];
     V32(S_RIP) = rip; V32(S_RFLAGS) = fl;
