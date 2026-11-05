@@ -310,6 +310,18 @@ the IRQ in its PCI configuration (10), and BARs Windows moves are followed
 (trapped there). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
 emulation).
 
+With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
+BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
+leaves it out): its device nodes give Windows 9x the board's devices (PIC,
+timer, DMA, keyboard, PS/2 mouse, RTC, speaker, FPU, the PCI bus, system
+memory) as 16-bit decoders. Without one, Windows detects them itself and
+takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
+256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
+Windows installed before needs Add New Hardware (let it search) to find
+the "Plug and Play BIOS"; after a restart the old system devices are
+replaced. Remove an ET4000 Windows found too (it holds the VGA's ports).
+Test: `tests/pnpbios.asm`.
+
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
 neither takes time from the game (the log says `smp: ...`). Between frames
