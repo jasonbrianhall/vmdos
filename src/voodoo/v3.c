@@ -399,10 +399,7 @@ static void v3_leave(void)
 
 /* ---------------- the card ---------------- */
 int v3_on;
-static void *card;
-static voodoo_t *vdo;
-static svga_t *svga;
-static u32 bar0_lin, bar1_lin;                 /* where the BARs were put: unmapped linear space */
+static u32 bar0_lin;                 /* where the BARs were put: unmapped linear space */
 #define V3_IO_BASE 0xD100   /* not D000h: Windows 9x without a PnP BIOS takes the board's devices at 00h-FFh as 10-bit ISA decoders, whose aliases cover D000h-D0FFh */
 
 /* BAR1 pages mapped straight onto vram where the card needn't see the
@@ -410,6 +407,77 @@ static u32 bar0_lin, bar1_lin;                 /* where the BARs were put: unmap
    tile_base, not past the end of vram. Every frame is then drawn anew (the
    card's dirty-page marks miss these writes). In VMHV the same pages go
    into the VM's nested page tables. v3trap: none. */
+/* The command FIFOs in the frame buffer, mapped straight onto vram too
+   (v3fifotrap: trapped as before, every dword). The card counts what the
+   driver writes there (in order: depth + 1 a dword, from amax + 4 or
+   anew from the base); with the pages mapped it can't see the writes, so
+   every dword not yet written holds FIFO_EMPTY, and each time vmdos looks
+   at the card (a trapped access, the tick) fifo_feed hands it what was
+   written since, in order, through its own write path, up to the first
+   dword still FIFO_EMPTY. What the card has read (rp) is marked empty
+   again (fifo_mark), before the guest can learn of it from a register
+   and write there. A driver writing whole frames into the FIFO then costs
+   a scan, not a VM exit a dword. */
+#define FIFO_EMPTY 0x7FA1C35Eu                 /* a NaN as a float, unlikely as a command or a vertex */
+static int fifo_direct;
+struct fifo_v { volatile int *en; int *in_sub, *hole, *rp; u32 *base, *end, *amax; u32 last_rp; int on, base_free; };
+static struct fifo_v fv[2];
+static voodoo_t *vdo;
+static svga_t *svga;
+static u32 bar1_lin;
+static void *card;
+static u32 *vw(u32 a) { return (u32 *)(svga->vram + (a & svga->vram_mask)); }
+static void fifo_fill(u32 a, u32 b) { for (a &= ~3u; a < b; a += 4) *vw(a) = FIFO_EMPTY; }
+static void fifo_reset(void)
+{
+    for (int i = 0; fifo_direct && i < 2; i++) {
+        struct fifo_v *f = &fv[i];
+        f->on = *f->en && *f->end > *f->base && *f->end <= (u32)svga->vram_max;
+        if (!f->on) continue;
+        fifo_fill(*f->base, *f->end);
+        f->last_rp = (u32)*f->rp;
+        f->base_free = 1;
+    }
+}
+/* What the card has read since: empty again (not while in a subroutine,
+   where rp is outside the FIFO). */
+static void fifo_mark(void)
+{
+    for (int i = 0; fifo_direct && i < 2; i++) {
+        struct fifo_v *f = &fv[i];
+        if (!f->on || *f->in_sub) continue;
+        u32 rp = (u32)*f->rp, b = *f->base, e = *f->end, l = f->last_rp;
+        if (rp == l || rp < b || rp > e) continue;
+        if (l < b || l > e) l = rp;
+        if (rp > l) { fifo_fill(l, rp); if (l == b) f->base_free = 1; }
+        else { fifo_fill(l, e); fifo_fill(b, rp); if (rp > b) f->base_free = 1; }   /* wrapped (a jump back to the base) */
+        f->last_rp = rp;
+    }
+}
+/* What the driver has written since: to the card, in order. */
+static void fifo_feed(void)
+{
+    for (int i = 0; fifo_direct && i < 2; i++) {
+        struct fifo_v *f = &fv[i];
+        if (!f->on || !*f->en || *f->hole) continue;
+        u32 b = *f->base, e = *f->end, bar = v3_card_bar(card, 1);
+        for (int n = 0; n < (1 << 20); n++) {
+            u32 a = *f->amax + 4;
+            if (a < b || a >= e || *vw(a) == FIFO_EMPTY) {
+                /* nothing new after the last; or the driver went on from
+                   the base (a jump there), once the card has read what
+                   was there before (base_free: marked empty since) */
+                if (a == b || !f->base_free || *vw(b) == FIFO_EMPTY) break;
+                a = b;
+            }
+            if (a == b) f->base_free = 0;
+            u32 v = *vw(a);
+            map_write(bar + a, v, 4);                              /* the card's own write path: counts it */
+            if (*f->amax != a) break;                              /* it didn't take it in order: stop */
+        }
+    }
+}
+
 static u8 *lfb_mapped;
 static int lfb_direct, lfb_pages;
 static u32 redraw_n;
@@ -421,12 +489,13 @@ static void lfb_remap(int all)
                    vdo->cmdfifo_enabled_2 ? vdo->cmdfifo_base_2 : 1, vdo->cmdfifo_enabled_2 ? vdo->cmdfifo_end_2 : 1, 0 };
     if (!all && !memcmp(key, lfb_key, sizeof key)) return;
     memcpy(lfb_key, key, sizeof key);
+    fifo_reset();                              /* the FIFOs' places changed: marked empty again */
     int ok = lfb_direct && key[1] && key[0] == bar1_lin;
     u32 lo = ~0u, hi = 0, n = 0;
     for (u32 a = 0; a < (u32)svga->vram_max; a += 4096) {
         int want = ok && a + 4096 <= vdo->tile_base &&
-                   !(vdo->cmdfifo_enabled && a < vdo->cmdfifo_end && a + 4096 > vdo->cmdfifo_base) &&
-                   !(vdo->cmdfifo_enabled_2 && a < vdo->cmdfifo_end_2 && a + 4096 > vdo->cmdfifo_base_2);
+                   (fifo_direct || (!(vdo->cmdfifo_enabled && a < vdo->cmdfifo_end && a + 4096 > vdo->cmdfifo_base) &&
+                                    !(vdo->cmdfifo_enabled_2 && a < vdo->cmdfifo_end_2 && a + 4096 > vdo->cmdfifo_base_2)));
         if (!all && want == lfb_mapped[a >> 12]) continue;
         lfb_mapped[a >> 12] = (u8)want;
         u32 host = want ? (u32)(uintptr_t)svga->vram + a : 0;
@@ -493,7 +562,9 @@ static void catch_up(void)
     lfb_remap(0);
     legacy_remap(0);
     v3_poll_timers();
+    fifo_feed();
     v3_run();
+    fifo_mark();
 }
 
 /* A timer that is always there: timer.c's list mustn't run empty. */
@@ -567,6 +638,8 @@ void v3_mmio_write(u32 phys, u32 val, int size)
 {
     v3_enter();
     trace(phys, val, size, 1);
+    for (int i = 0; i < 2; i++)                /* a FIFO's base written through the trap (unmapped yet, v3trap's */
+        if (fv[i].on && phys - v3_card_bar(card, 1) == *fv[i].base) fv[i].base_free = 0;   /* tests): counted already */
     map_write(phys, val, size);
     catch_up();
     v3_leave();
@@ -674,6 +747,10 @@ void v3_row(u32 y, u32 *out)
     for (u32 x = 0; x < w; x++) out[x] = src[x] & 0xffffff;
 }
 
+/* tests/voodoo/hosttest: the card's memory, to write a FIFO as the guest
+   does through the mapped pages. */
+uint8_t *v3_test_vram(void) { return svga ? svga->vram : 0; }
+
 /* The BIOS image, for the guest's C000h. */
 const u8 *v3_rom(u32 *len)
 {
@@ -716,6 +793,12 @@ void v3_init(void)
     svga = v3_card_svga(card);
 
     lfb_mapped = calloc(1, svga->vram_max >> 12);
+    fifo_direct = lfb_direct && !strstr(cmdline, "v3fifotrap");
+    struct fifo_v f0 = { &vdo->cmdfifo_enabled, &vdo->cmdfifo_in_sub, &vdo->cmdfifo_holecount, &vdo->cmdfifo_rp,
+                         &vdo->cmdfifo_base, &vdo->cmdfifo_end, &vdo->cmdfifo_amax, 0, 0, 0 };
+    struct fifo_v f1 = { &vdo->cmdfifo_enabled_2, &vdo->cmdfifo_in_sub_2, &vdo->cmdfifo_holecount_2, &vdo->cmdfifo_rp_2,
+                         &vdo->cmdfifo_base_2, &vdo->cmdfifo_end_2, &vdo->cmdfifo_amax_2, 0, 0, 0 };
+    fv[0] = f0; fv[1] = f1;
     /* as the PC's BIOS leaves a PCI card: its BARs, I/O and memory on */
     v3_cfg_write(0x10, bar0_lin, 4);
     v3_cfg_write(0x14, bar1_lin, 4);

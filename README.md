@@ -305,7 +305,10 @@ RAM. VGA memory, register and command FIFO accesses are trapped and emulated
 (x87, MMX and SSE stores and loads included, as Glide and the Direct3D and
 DirectDraw drivers make them into the command FIFO, the tiled back buffers
 and the texture port); the frame buffer is mapped straight onto the card's
-memory (`v3trap` traps it too). The card's vertical retrace interrupt goes to
+memory (`v3trap` traps it too), the command FIFOs in it included: what
+the driver wrote there is handed to the card whenever vmdos looks at it
+(an access to the card, the timer tick), so a Direct3D driver's frame of
+commands costs no VM exit a word (`v3fifotrap` traps the FIFOs as before). The card's vertical retrace interrupt goes to
 the IRQ in its PCI configuration (10), and BARs Windows moves are followed
 (trapped there). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
 emulation).
