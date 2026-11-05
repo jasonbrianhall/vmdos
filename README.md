@@ -301,9 +301,14 @@ code) running the card's own BIOS, as 86Box does. The BIOS is built into
 vmdos from `roms/voodoo3/3k12sd.rom` (86Box's file); a build without it
 leaves `voodoo3` off. The VGA, its modes and VESA are then the card's BIOS's,
 and Windows finds a Voodoo 3. Needs a Pentium Pro or later and about 60 MB of
-RAM. VGA memory, register and command FIFO accesses are trapped and emulated;
-the frame buffer is mapped straight onto the card's memory (`v3trap` traps it
-too; `tests/voodoo` has the tests).
+RAM. VGA memory, register and command FIFO accesses are trapped and emulated
+(x87, MMX and SSE stores and loads included, as Glide and the Direct3D and
+DirectDraw drivers make them into the command FIFO, the tiled back buffers
+and the texture port); the frame buffer is mapped straight onto the card's
+memory (`v3trap` traps it too). The card's vertical retrace interrupt goes to
+the IRQ in its PCI configuration (10), and BARs Windows moves are followed
+(trapped there). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
+emulation).
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
@@ -789,7 +794,7 @@ untested.
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
-| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 |
+| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 (x87, MMX, SSE moves) |
 | `src/es1371.c` | the Ensoniq AudioPCI 97 (`es1371`) on the guest's PCI bus |
 | `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
