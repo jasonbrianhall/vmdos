@@ -10,7 +10,7 @@
    PIO only (no bus master DMA): the guest's REP INSW is one exit for a
    whole transfer in VMHV. Commands finish at once (BSY is never seen);
    each data block and the end raise IRQ 15 unless nIEN. atapi=off: no
-   channel; atapilog logs the commands and how they ended. */
+   channel; atapilog logs the commands and how they ended, and register accesses. */
 #include "kernel.h"
 
 int cd_unit_count(void);
@@ -441,6 +441,17 @@ int atapi_port(u16 port, int size, int write, u32 *val)
     if (!on) return 0;
     struct dev *d = cur();
     int present = d->unit >= 0;
+    if (alog > 0 && port != BASE) {                                 /* the registers too (not data), a run once */
+        static u16 lp; static u32 lv; static int lw, rep;
+        u32 v = write ? *val : 0;
+        if (port == lp && write == lw && (!write || v == lv)) rep++;
+        else {
+            if (rep) ALOG("atapi:   (x%d)\n", rep + 1);
+            rep = 0; lp = port; lw = write; lv = v;
+            if (write) ALOG("atapi:   out %03x <- %02x\n", port, v & 0xFF);
+            else ALOG("atapi:   in  %03x\n", port);
+        }
+    }
     if (port == BASE) {
         if (write) data_out(*val, size); else *val = data_in(size);
         return 1;
