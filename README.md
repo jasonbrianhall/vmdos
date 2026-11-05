@@ -778,7 +778,8 @@ screen to the log every 20 s.
 
 `faultlog` on the kernel command line logs the VM's invalid-opcode (#UD)
 and general-protection (#GP) faults in protected mode, at any privilege
-level (the first 100, the first few with code and stack): a Windows program
+level (each faulting address once, up to 300; the first few with code and
+stack): a Windows program
 or driver that dies quietly shows there.
 
 Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a

@@ -338,13 +338,19 @@ static int guest_fault_log(const char *what, u32 err, u32 cr2)
 }
 /* faultlog: an invalid opcode or general protection fault in the VM's
    protected-mode code at any privilege level (a program or a driver dying:
-   Windows closes it, often without a word), the first 100, the first few
-   with their code and stack. Not V86 mode: WIN386 uses #UD (ARPL) there. */
+   Windows closes it, often without a word): each place once, the first
+   300 places, the first few with their code and stack. Not V86 mode: WIN386 uses #UD (ARPL) there. */
 static int faultlog;
 static void prog_fault_log(const char *what, u32 err)
 {
     static int n;
-    if (!faultlog || real_or_v86() || n++ >= 100) return;
+    static u32 seen[512];                                         /* CS:EIP already logged: Windows' own #GPs */
+    static int nseen;                                             /* (16-bit drivers' port I/O) repeat endlessly */
+    if (!faultlog || real_or_v86()) return;
+    u32 key = (u32)V16(S_CS) << 20 ^ V32(S_RIP);
+    for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
+    if (nseen >= 512 || n++ >= 300) return;
+    seen[nseen++] = key;
     kprintf("guest %s err %x at %04x:%08x (ring %u) eax %08x ecx %08x edx %08x ebx %08x esi %08x edi %08x esp %08x\n",
             what, err, V16(S_CS), V32(S_RIP), V8(S_CPL), V32(S_RAX), g[1], g[2], g[0], g[3], g[4], V32(S_RSP));
     if (n <= 6) hv_dump_here(what);
