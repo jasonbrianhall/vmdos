@@ -525,11 +525,40 @@ int v3_range(u32 phys, u32 len)
     return phys - bar0_lin < (64u << 20) && len <= (64u << 20) - (phys - bar0_lin);   /* inside BAR0 and BAR1 */
 }
 
+/* v3trace (v3trace=N lines, default 30000): the guest's accesses to the
+   card's registers through BAR0, but for the 2D engine's (the desktop's)
+   and the 3D LFB and texture memory (pixels): the init registers (00h-FFh),
+   the command FIFO's (80000h-80FFFh), the 3D engine's (200000h-5FFFFFh).
+   A run of the same access is one line with its count. To see what a
+   Direct3D or Glide driver does with the card, and what it reads back. */
+static int trace_left;
+static u32 tr_off, tr_val, tr_n;
+static int tr_size, tr_wr;
+static void trace_flush(void)
+{
+    if (!tr_n) return;
+    if (trace_left > 0 && !--trace_left) kprintf("voodoo3: trace full\n");
+    else if (tr_n > 1) kprintf("voodoo3: %s %06x/%d %08x x%u\n", tr_wr ? "W" : "R", tr_off, tr_size, tr_val, tr_n);
+    else kprintf("voodoo3: %s %06x/%d %08x\n", tr_wr ? "W" : "R", tr_off, tr_size, tr_val);
+    tr_n = 0;
+}
+static void trace(u32 phys, u32 val, int size, int wr)
+{
+    if (trace_left <= 0) return;
+    u32 b0 = cur_bar0 ? cur_bar0 : bar0_lin, off = phys - b0;
+    if (off >= (32u << 20)) return;
+    if (!(off < 0x100 || (off >= 0x80000 && off < 0x81000) || (off >= 0x200000 && off < 0x600000))) return;
+    if (tr_n && off == tr_off && val == tr_val && size == tr_size && wr == tr_wr) { tr_n++; return; }
+    trace_flush();
+    tr_off = off; tr_val = val; tr_size = size; tr_wr = wr; tr_n = 1;
+}
+
 u32 v3_mmio_read(u32 phys, int size)
 {
     v3_enter();
     catch_up();
     u32 v = map_read(phys, size);
+    trace(phys, v, size, 0);
     v3_leave();
     return v;
 }
@@ -537,6 +566,7 @@ u32 v3_mmio_read(u32 phys, int size)
 void v3_mmio_write(u32 phys, u32 val, int size)
 {
     v3_enter();
+    trace(phys, val, size, 1);
     map_write(phys, val, size);
     catch_up();
     v3_leave();
@@ -614,6 +644,8 @@ void v3_tick(void)
     if (!v3_on || depth) return;
     v3_enter();
     catch_up();
+    static u32 tr_tick;
+    if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
     if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; vpic_raise(irq_line()); }   /* the level line, not serviced */
     if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
         svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
@@ -662,6 +694,8 @@ void v3_init(void)
     v3_log_on = strstr(cmdline, "v3log") ? 2 : 0;
     const char *ln = strstr(cmdline, "v3log=");       /* v3log=N: the first N accesses (default 4000; the BIOS takes ~2000) */
     if (ln) { int n = 0; for (ln += 6; *ln >= '0' && *ln <= '9'; ln++) n = n * 10 + (*ln - '0'); if (n) acc_left = n; }
+    const char *tn = strstr(cmdline, "v3trace");      /* v3trace[=N]: the guest's register accesses, N lines */
+    if (tn) { int n = 0; if (tn[7] == '=') for (tn += 8; *tn >= '0' && *tn <= '9'; tn++) n = n * 10 + (*tn - '0'); trace_left = n ? n : 30000; }
     lfb_direct = !strstr(cmdline, "v3trap");
     bar0_lin = linear_hole(64u << 20, 32u << 20);
     if (!bar0_lin) { kprintf("voodoo3: no linear space for its BARs, off\n"); return; }

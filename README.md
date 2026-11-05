@@ -328,6 +328,10 @@ register and BARs is logged (`voodoo3: guest config write`; Ctrl+Shift+F10
 shows it, Ctrl+Shift+S saves it). `v3log` logs the first 4000 accesses to
 the card's I/O registers and configuration space (the card's BIOS takes about
 2000); `v3log=N` the first N, to follow a driver further on the serial log.
+`v3trace` (`v3trace=N` lines, default 30000) logs the guest's accesses to
+the card's init, command FIFO and 3D registers through BAR0 (not the 2D
+engine's or pixels), a run of the same access as one line with a count:
+what a Direct3D or Glide driver asks of the card and reads back.
 
 On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
