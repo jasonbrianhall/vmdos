@@ -317,11 +317,13 @@ With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
 BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
 leaves it out): its device nodes give Windows 9x the board's devices (PIC,
 timer, PS/2 mouse, RTC, speaker, FPU, POST and A20 ports, system memory) as
-16-bit decoders; not the PCI bus, keyboard or DMA controllers, which an
-installed Windows keeps as it detected them (two of each otherwise);
-`pnpfull` lists those too, as a PC's PnP BIOS does, for a Windows installed
-with the PnP BIOS there that shows no PCI bus (and so no PCI cards) in
-System devices. Without one, Windows detects them itself and
+16-bit decoders, and the PCI bus, keyboard and DMA controllers, as a PC's
+PnP BIOS lists them. `pnpmin` leaves those three out, for a Windows
+installed before the PnP BIOS was there: it keeps the ones it detected
+itself, and the BIOS's copies stay yellow beside them (the second PCI bus
+can't be removed). `pcilog[=N]` logs the guest's first N (300) PCI
+configuration accesses and PCI BIOS calls (`pci:` lines), to see whether
+Windows looks at a card at all. Without one, Windows detects them itself and
 takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
 256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
 Windows installed before needs Add New Hardware (let it search) to find
