@@ -352,10 +352,22 @@ static int irq_line(void)
     int l = pci_rd ? pci_rd(0, 0x3C, 1, pci_priv) : 0;
     return l > 0 && l < 16 ? l : 10;
 }
+/* v3noirq: the card never interrupts. The first raise and every
+   re-raise of a line left up are logged (the first 20). */
+static int irq_off = -1, irq_said;
+static void irq_raise(const char *why)
+{
+    if (irq_off < 0) irq_off = strstr(cmdline, "v3noirq") != 0;
+    if (irq_said < 20) {
+        irq_said++;
+        kprintf("voodoo3: retrace interrupt %s on IRQ %d%s\n", why, irq_line(), irq_off ? " (v3noirq: not sent)" : "");
+    }
+    if (!irq_off) vpic_raise(irq_line());
+}
 void pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state)
 {
     (void)slot; (void)pci_int; (void)level; (void)irq_state;
-    if (set && !irq_level) { vpic_raise(irq_line()); irq_stuck = 0; }
+    if (set && !irq_level) { irq_raise("raised"); irq_stuck = 0; }
     irq_level = set;
 }
 
@@ -719,7 +731,7 @@ void v3_tick(void)
     catch_up();
     static u32 tr_tick;
     if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
-    if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; vpic_raise(irq_line()); }   /* the level line, not serviced */
+    if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; irq_raise("still up, raised again"); }   /* the level line, not serviced */
     if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
         svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
     v3_leave();
