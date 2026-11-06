@@ -91,7 +91,7 @@ $(BUILD)/sb/%.o: src/sb/%.cpp | $(BUILD)
 # The Voodoo code uses the x87 (v3.c saves the guest's state around it) and
 # needs a Pentium Pro or later (CMOV); its own <string.h> etc. are voodoo/libc.
 VOODOO_FLAGS := $(filter-out -march=i386 -mtune=i486 -Wall -Wextra,$(FPFLAGS)) -march=i686 -mtune=generic \
-              -DNO_CODEGEN -DTEX_CACHE_MAX=16 -Isrc/voodoo/libc -Isrc/voodoo -w
+              -DV3_CODEGEN -DVMDOS_V3 -DTEX_CACHE_MAX=16 -Isrc/voodoo/libc -Isrc/voodoo -w
 $(BUILD)/voodoo/%.o: src/voodoo/%.c | $(BUILD)
 	@mkdir -p $(BUILD)/voodoo
 	$(CC) $(VOODOO_FLAGS) -c $< -o $@

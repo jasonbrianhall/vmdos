@@ -315,8 +315,13 @@ and `v3noirq` never sends it), and BARs Windows moves are followed
 time slices, 2 ms an access and 0.3 ms a timer tick, the rest at the next
 look, so a frame of triangles never holds up the screen, the sound and
 the keyboard (in VMHV it runs inside a VM exit, with the host's
-interrupts off). `tests/voodoo` has the tests (`emutest` for the MMX/SSE
-emulation).
+interrupts off). The triangles' pixels are drawn by 86Box's JIT (its
+32-bit x86 code generator: code made for each combination of the card's
+modes, over ten times faster than the C loop) when vmdos has SSE on and
+the CPU has SSE2; the few modes it doesn't draw as the C loop does go to
+the C loop, and `v3nojit` sends everything there. `tests/voodoo` has the
+tests (`emutest` for the MMX/SSE emulation; `hosttest random jitcmp`
+compares the JIT with the C loop).
 
 With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
 BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`

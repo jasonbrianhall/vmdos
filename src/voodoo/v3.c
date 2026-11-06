@@ -20,6 +20,7 @@
 #include <86box/machine.h>
 #include <86box/pit.h>
 #include "../voodoo3.h"
+extern int host_osfxsr;                        /* cpu.c: SSE on (CR4.OSFXSR) */
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -100,13 +101,33 @@ void v3_fatal(const char *fmt, ...)
 
 double round(double x) { return x < 0 ? -floor(-x + 0.5) : floor(x + 0.5); }
 
+/* 86Box's JIT for the triangles' pixels (vid_voodoo_codegen_x86.h, the
+   32-bit one): x86 code made for each combination of the card's modes, in
+   place of the C loop that tests them all at every pixel. Its code uses
+   SSE2: on with SSE on (cpu.c) on a CPU that has SSE2; v3nojit: off. */
+static int v3_jit_on(void)
+{
+    static int on = -1;
+    if (on >= 0) return on;
+    u32 a = 1, b, c, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    on = host_osfxsr && (d & (1u << 26)) && !strstr(cmdline, "v3nojit");
+    kprintf("voodoo3: pixels drawn by %s\n", on ? "generated code (the JIT; v3nojit: the C loop)" :
+            !host_osfxsr || !(d & (1u << 26)) ? "the C loop (no SSE2 for the JIT)" : "the C loop (v3nojit)");
+    return on;
+}
+/* Its code blocks: memory it can run (the kernel's pages are). */
+__attribute__((weak)) void *v3_exec_alloc(u32 n) { return phys_alloc(n); }
+void *plat_mmap(size_t size, uint8_t executable) { (void)executable; return v3_exec_alloc((u32)size); }
+void plat_munmap(void *ptr, size_t size) { (void)ptr; (void)size; }
+
 int device_get_config_int(const char *n)
 {
     if (!strcmp(n, "bilinear")) return 1;
     if (!strcmp(n, "dithersub")) return 1;
     if (!strcmp(n, "dacfilter")) return 0;
     if (!strcmp(n, "render_threads")) return 1;
-    if (!strcmp(n, "recompiler")) return 0;
+    if (!strcmp(n, "recompiler")) return v3_jit_on();
     if (!strcmp(n, "chromakey")) return 1;
     if (!strcmp(n, "memory")) return 16;
     return 0;
@@ -396,17 +417,21 @@ uint16_t rom_readw(uint32_t addr, void *priv) { return rom_read(addr, priv) | ro
 uint32_t rom_readl(uint32_t addr, void *priv) { return rom_readw(addr, priv) | (u32)rom_readw(addr + 2, priv) << 16; }
 
 /* ---------------- the guest's x87 state, around the card's code ---------------- */
+/* The guest's x87 state, and with SSE on its XMM registers too (the JIT's
+   code uses them: FXSAVE), put aside while the card's code runs. */
 static int depth;
-static u8 fpu_save[108] __attribute__((aligned(16)));
+static u8 fpu_save[512] __attribute__((aligned(16)));
 static void v3_enter(void)
 {
     if (depth++) return;
-    __asm__ volatile("fnsave %0\n\tfninit" : "=m"(fpu_save));
+    if (host_osfxsr) __asm__ volatile("fxsave %0\n\tfninit" : "=m"(fpu_save));
+    else __asm__ volatile("fnsave %0\n\tfninit" : "=m"(fpu_save));
 }
 static void v3_leave(void)
 {
     if (--depth) return;
-    __asm__ volatile("frstor %0" : : "m"(fpu_save));
+    if (host_osfxsr) __asm__ volatile("fxrstor %0" : : "m"(fpu_save));
+    else __asm__ volatile("frstor %0" : : "m"(fpu_save));
 }
 
 /* ---------------- the card ---------------- */
@@ -787,6 +812,9 @@ void v3_debug(void)
 /* tests/voodoo/hosttest: the card's memory, to write a FIFO as the guest
    does through the mapped pages. */
 uint8_t *v3_test_vram(void) { return svga ? svga->vram : 0; }
+/* tests/voodoo/hosttest "random": the same triangle by the C loop and by
+   the JIT, to compare. */
+void v3_test_jit(int on) { if (vdo) vdo->use_recompiler = on; }
 
 /* The BIOS image, for the guest's C000h. */
 const u8 *v3_rom(u32 *len)

@@ -815,6 +815,8 @@ voodoo_codegen_alpha_used(const voodoo_params_t *params)
 #    include <86box/vid_voodoo_codegen_x86-64.h>
 #elif (defined __aarch64__ || defined _M_ARM64)
 #    include <86box/vid_voodoo_codegen_arm64.h>
+#elif (defined __i386__ && defined V3_CODEGEN)
+#    include <86box/vid_voodoo_codegen_x86.h>   /* vmdos: the 32-bit one, which 86Box no longer builds */
 #else
 int voodoo_recomp = 0;
 #endif
