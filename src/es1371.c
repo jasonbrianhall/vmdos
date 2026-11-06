@@ -72,6 +72,12 @@ struct ch {
     int curr;                          /* counting down */
     u32 acc;                           /* the SRC's accumulator: 1 << 19 per input sample */
     int s0l, s0r, s1l, s1r;            /* the two input samples being interpolated */
+    /* perf: the buffer in 32 parts, each one's samples hashed as they're
+       played: the same as a lap before (not silence) is a part the driver
+       didn't refill in time, a lap-old echo you hear as a crackle */
+    int seg;
+    u32 seg_hash, seg_nz, lap_hash[32];
+    u32 st_frames, st_irqs, st_segs, st_stale, st_pos;
 };
 
 static struct {
@@ -87,6 +93,7 @@ static struct {
     u16 ac97[64];
     int vol_l, vol_r;                  /* master x PCM, Q15 */
     int irq_pending, stuck;
+    u32 st_raised, st_reraised, st_acks, st_t0;
 } es;
 
 /* ---------------- guest memory ---------------- */
@@ -200,6 +207,7 @@ int es_take_irq(void)
 {
     if (!es.irq_pending) return 0;
     es.irq_pending = 0;
+    es.st_raised++;
     return 1;
 }
 
@@ -212,6 +220,9 @@ static int ch_fmt(int i) { return (es.si >> (2 * i)) & 3; }     /* bit 0 stereo,
 static void ch_start(int i)
 {
     struct ch *c = &es.ch[i];
+    c->seg = -1;
+    c->seg_hash = c->seg_nz = 0;
+    for (int k = 0; k < 32; k++) c->lap_hash[k] = 0;
     c->sub = 0;
     c->curr = c->samp_ct;
     c->s0l = c->s0r = c->s1l = c->s1r = 0;
@@ -233,6 +244,7 @@ static void ch_counted(int i)
     c->curr = c->samp_ct;
     static const u32 bit[3] = { ST_DAC1, ST_DAC2, ST_ADC }, en[3] = { SI_P1_INT_EN, SI_P2_INT_EN, SI_R1_INT_EN };
     if (!(es.si & en[i])) return;
+    c->st_irqs++;
     u32 old = sources();
     es.status |= bit[i];
     update_irq(old, 0);
@@ -247,7 +259,48 @@ static void dac_fetch(int i)
     else { l = (rd_u8(a) ^ 0x80) << 8; r = (f & 1) ? (rd_u8(a + 1) ^ 0x80) << 8 : l; ch_advance(c, (f & 1) ? 2 : 1); }
     c->s0l = c->s1l; c->s0r = c->s1r;
     c->s1l = l; c->s1r = r;
+    if (perf_on) {
+        int seg = (int)((u32)c->count * 32 / ((u32)c->size + 1));
+        if (seg != c->seg) {
+            if (c->seg >= 0 && c->seg_nz) {
+                c->st_segs++;
+                if (c->seg_hash == c->lap_hash[c->seg]) c->st_stale++;
+            }
+            if (c->seg >= 0) c->lap_hash[c->seg] = c->seg_nz ? c->seg_hash : 0;
+            c->seg = seg; c->seg_hash = 2166136261u; c->seg_nz = 0;
+        }
+        c->seg_hash = (c->seg_hash ^ ((u32)(u16)l << 16 | (u16)r)) * 16777619u;
+        c->seg_nz |= (u32)(l | r);
+        c->st_frames++;
+    }
     ch_counted(i);
+}
+
+static u32 dac_vf(int i);
+
+/* perf: every 5 s while a DAC plays, how the driver set it up and kept up */
+static void es_stats(void)
+{
+    if (!perf_on) return;
+    if (!es.st_t0) { es.st_t0 = ticks; return; }
+    u32 dt = ticks - es.st_t0;
+    if (dt < 5000) return;
+    es.st_t0 = ticks;
+    for (int i = 0; i < 2; i++) {
+        struct ch *c = &es.ch[i];
+        if (c->st_frames) {
+            static const char *const fmt[4] = { "8-bit mono", "8-bit stereo", "16-bit mono", "16-bit stereo" };
+            kprintf("es1371: DAC%d %u Hz %s, buffer %u bytes, IRQ every %u samples: played %u Hz, %u IRQs/s, "
+                    "position read %u/s, parts not refilled %u of %u\n", i + 1, (dac_vf(i) * 3000u + (1u << 14)) >> 15,
+                    fmt[ch_fmt(i)], ((u32)c->size + 1) * 4, (u32)c->samp_ct + 1, c->st_frames * 1000u / dt,
+                    c->st_irqs * 1000u / dt, c->st_pos * 1000u / dt, c->st_stale, c->st_segs);
+        }
+        c->st_frames = c->st_irqs = c->st_segs = c->st_stale = c->st_pos = 0;
+    }
+    if (es.st_raised || es.st_reraised)
+        kprintf("es1371: IRQ raised %u/s, acknowledged %u/s, raised again unserviced (60 ms) %u\n",
+                es.st_raised * 1000u / dt, es.st_acks * 1000u / dt, es.st_reraised);
+    es.st_raised = es.st_reraised = es.st_acks = 0;
 }
 
 static u32 dac_vf(int i)                             /* the SRC's variable frequency: 1 << 15 per 3000 Hz */
@@ -312,7 +365,8 @@ void es_render(int16_t *buf, int n)
         }
     }
     /* a level interrupt nobody took (some 60 ms at 250 renders a second): again */
-    if (es.status & ST_INTR) { if (++es.stuck >= 15) { es.stuck = 0; es.irq_pending = 1; } }
+    if (es.status & ST_INTR) { if (++es.stuck >= 15) { es.stuck = 0; es.irq_pending = 1; es.st_reraised++; } }
+    es_stats();
 }
 
 /* ---------------- the registers ---------------- */
@@ -323,6 +377,7 @@ static u32 frame_read(int off)
     if (p >= 0xE) return es.uart_fifo[((p & 1) << 2) + ((off >> 2) & 3)];
     struct ch *c = p == 0xC ? &es.ch[off >= 0x38] : p == 0xD && off < 0x38 ? &es.ch[2] : 0;
     if (!c) return 0xFFFFFFFFu;
+    if ((off & 4) && p == 0xC) c->st_pos++;
     return (off & 4) ? c->size | (u32)c->count << 16 : c->addr;
 }
 
@@ -407,6 +462,7 @@ static void reg_write(int off, u32 v, u32 m)         /* m: the bytes written */
         if (!(es.si & SI_P1_INT_EN)) es.status &= ~ST_DAC1;     /* the acknowledgement: enable off, on */
         if (!(es.si & SI_P2_INT_EN)) es.status &= ~ST_DAC2;
         if (!(es.si & SI_R1_INT_EN)) es.status &= ~ST_ADC;
+        if ((old & ~sources()) & (ST_DAC1 | ST_DAC2 | ST_ADC)) es.st_acks++;
         update_irq(old, 1);
         return; }
     case 0x24: case 0x28: case 0x2C:
