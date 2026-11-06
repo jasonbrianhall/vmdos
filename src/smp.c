@@ -22,7 +22,9 @@
    chunks of them alongside it, so a frame that one CPU can't draw in
    time at 1080p or with xBRZ is split. And with voodoo3, the Voodoo's
    triangles (smp_render_take: v3.c's render threads, one a helper), in
-   VMHV too, where the helper is parked but they go on. Between those
+   VMHV too, where the helper is parked but they go on; there the boot
+   CPU redraws the screen itself, and they take chunks of its rows as they
+   did the helper's (nohvrows: not). Between those
    they halt, woken by the helper's IPI or the boot CPU's (a triangle
    queued); a still screen and an idle card never wake them.
 
@@ -81,6 +83,7 @@ static volatile u32 cpu_wakes[2 + MAX_RENDER];  /* wake-up IPIs taken, by smp_cp
 static volatile int rh_fault;                  /* one faulted: par_for draws alone from then on */
 static volatile u32 rh_fault_vec, rh_fault_eip;
 static void render_main(int i);
+static volatile int bsp_rows;                  /* VMHV: the boot CPU redraws, and par_for shares its rows */
 static int (*rh_task)(int k, int run);         /* other work: the Voodoo's triangles (v3.c), k its render thread */
 static volatile int rh_task_k[MAX_RENDER] = { [0 ... MAX_RENDER - 1] = -1 };   /* render helper i's k, -1 none */
 static int task_rh[MAX_RENDER];                /* k's render helper */
@@ -417,13 +420,19 @@ static void run_chunks(void)
     }
 }
 
-/* 0: a render helper faulted part way (some rows may be undrawn). */
+/* 0: a render helper faulted part way (some rows may be undrawn). The
+   helper's redraw; or in VMHV, with the helper parked, the boot CPU's
+   (inside its tick, the guest stopped): its scratch is slot 0, the
+   helper's, and the render helpers' page table gets the boot CPU's
+   changes first (the helper, which did that each round, is parked). */
 int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
 {
-    if (!n_render || rh_fault || smp_cpu() != 1 || n < 2 * chunk) {
+    int me = smp_cpu();
+    if (!n_render || rh_fault || !(me == 1 || (me == 0 && bsp_rows)) || n < 2 * chunk) {
         for (u32 i = 0; i < n; i++) fn(i, arg);
         return 1;
     }
+    if (me == 0) ap_tables_sync();
     while (job_active && !rh_fault) __asm__ volatile("pause");
     job_next = JOB_BLOCKED;
     job.fn = fn; job.arg = arg; job.n = n; job.chunk = chunk; job.nchunks = (n + chunk - 1) / chunk;
@@ -431,8 +440,10 @@ int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
     __asm__ volatile("" ::: "memory");
     job_next = 0;
     xadd(&job_gen, 1);                         /* locked: a fence before rh_sleeping is read */
+    u32 fl = irq_save();                       /* the boot CPU: no tick IPI between the ICR's writes */
     for (int i = 0; i < n_render; i++)
         if (rh_ok[i] && rh_sleeping[i]) apic_ipi(rh_apic[i], 0x00004000 | AP_WAKE_VEC);
+    irq_restore(fl);
     run_chunks();
     while (job_done < job.nchunks && !rh_fault) __asm__ volatile("pause");
     job_next = JOB_BLOCKED;
@@ -740,12 +751,20 @@ static void ap_watchdog(void)
    once the helper has finished the round it's in, and the helper halted. */
 void smp_park(void)
 {
-    if (!ap_alive) return;
+    if (!ap_alive) {                           /* no helper (or it faulted): the render helpers, if any, still share the rows */
+        int rows = smp_render_count() && !rh_fault && !strstr(cmdline, "nohvrows");
+        __atomic_store_n(&bsp_rows, rows, __ATOMIC_SEQ_CST);
+        return;
+    }
     __atomic_store_n(&ap_park, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&smp_active, 0, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&ap_busy, __ATOMIC_SEQ_CST) && ap_alive) __asm__ volatile("pause");
-    kprintf("smp: VMHV runs on one CPU%s; the helper is the watchdog%s\n",
-            rh_task ? " (the Voodoo's triangles on the render helpers)" : "", strstr(cmdline, "nowatchdog") ? " (off: nowatchdog)" : "");
+    int rows = smp_render_count() && !rh_fault && !strstr(cmdline, "nohvrows");
+    while (rows && job_active && !rh_fault) __asm__ volatile("pause");   /* the helper's last par_for over */
+    __atomic_store_n(&bsp_rows, rows, __ATOMIC_SEQ_CST);
+    kprintf("smp: VMHV runs on one CPU%s%s; the helper is the watchdog%s\n",
+            rows ? ", the render helpers share its redraw" : "",
+            rh_task ? " and draw the Voodoo's triangles" : "", strstr(cmdline, "nowatchdog") ? " (off: nowatchdog)" : "");
 }
 
 /* From kmain, last thing before DOS: the helper takes over. */

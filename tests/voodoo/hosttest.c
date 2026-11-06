@@ -77,6 +77,34 @@ static void *mp_thread(void *p)
         if (mp_fault && k == 0 && drawn > 150) { mp_dead[0] = 1; printf("render helper 0 stops (as a fault)\n"); return 0; }
     }
 }
+/* smp.c's par_for ("par=N": N threads, each call, as the boot CPU and the
+   render helpers in VMHV; else one) and smp_slot */
+static int par_cpus;
+static __thread int my_slot;
+int smp_slot(void) { return my_slot; }
+struct par_job { u32 n, chunk; void (*fn)(u32, void *); void *arg; volatile u32 next; };
+static void par_run(struct par_job *j)
+{
+    for (;;) {
+        u32 a = __atomic_fetch_add(&j->next, j->chunk, __ATOMIC_SEQ_CST);
+        if (a >= j->n) return;
+        u32 b = a + j->chunk < j->n ? a + j->chunk : j->n;
+        for (u32 i = a; i < b; i++) j->fn(i, j->arg);
+    }
+}
+static struct par_job *par_cur;
+static void *par_thread(void *p) { my_slot = (int)(intptr_t)p; par_run(par_cur); return 0; }
+int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
+{
+    struct par_job j = { n, chunk, fn, arg, 0 };
+    if (par_cpus < 2) { for (u32 i = 0; i < n; i++) fn(i, arg); return 1; }
+    pthread_t t[8];
+    par_cur = &j;
+    for (int k = 1; k < par_cpus; k++) pthread_create(&t[k], 0, par_thread, (void *)(intptr_t)k);
+    par_run(&j);
+    for (int k = 1; k < par_cpus; k++) pthread_join(t[k], 0);
+    return 1;
+}
 int smp_render_count(void) { return mp_cpus; }
 int smp_render_take(int n, int (*fn)(int, int))
 {
@@ -133,6 +161,11 @@ static void grab(void)
     if (!v3_display(&w, &h)) { printf("the video processor doesn't own the screen\n"); exit(1); }
     if (w != W || h != H) printf("screen %ux%u\n", w, h);
     for (u32 y = 0; y < H; y++) v3_row(y, shot + y * W);
+    if (getenv("SHOTSUM")) {                   /* the picture itself, to compare par=N with without */
+        u32 h = 2166136261u;
+        for (u32 i = 0; i < W * H; i++) h = (h ^ (shot[i] & 0xffffff)) * 16777619u;
+        printf("picture %08x\n", h);
+    }
 }
 static int check(const char *what, int x, int y, u32 want)
 {
@@ -284,7 +317,7 @@ static int one_tri(int i)
             fclose(f);
             exit(0);
         }
-        if (!jit_cmp && i % 25 == 24) { idle(); printf("random %3d: %08x\n", i + 1, sum_vram()); }
+        if (!jit_cmp && i % 25 == 24) { idle(); printf("random %3d: %08x\n", i + 1, sum_vram()); if (getenv("SHOTSUM")) grab(); }
     }
     return 0;
 }
@@ -301,6 +334,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "jitcmp")) host_osfxsr = jit_cmp = 1;
         if (!strncmp(argv[i], "mp=", 3)) mp_cpus = atoi(argv[i] + 3);
         if (!strcmp(argv[i], "mpfault")) mp_fault = 1;
+        if (!strncmp(argv[i], "par=", 4)) par_cpus = atoi(argv[i] + 4);
     }
     v3_init();
     if (!v3_on) return 1;
@@ -406,6 +440,13 @@ int main(int argc, char **argv)
 
     if (getenv("RSEED")) rnd_state = strtoul(getenv("RSEED"), 0, 0);
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "random")) { random_tris(getenv("RCOUNT") ? atoi(getenv("RCOUNT")) : 400); grab(); }
+    if (getenv("SHOTSUM")) {                   /* the same memory as a tiled desktop (128x32-byte tiles), and half mode */
+        io(0xe8, (STRIDE / 128) | (STRIDE / 128) << 16);
+        io(0x5c, 1 | 1 << 18 | 1 << 10 | 1 << 11 | 1 << 24);
+        grab();
+        io(0x5c, 1 | 1 << 18 | 1 << 10 | 1 << 11 | 1 << 24 | 1 << 4);
+        grab();
+    }
 
     if (argc > 1) {
         FILE *f = fopen(argv[1], "wb");

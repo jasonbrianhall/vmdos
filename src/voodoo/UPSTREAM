@@ -16,3 +16,9 @@ so the Makefile can make it smaller; 86box/timer.h's int128 functions are
 under #ifdef __SIZEOF_INT128__ (not in 32-bit gcc). The other 86box/*.h,
 cpu.h and libc/*.h are stand-ins for voodoo_shim.h. To update: copy the files
 over and rebuild.
+
+vid_svga.c draws the lines of the modes a Voodoo 3's desktop uses (8/15/16/
+24/32 bpp highres, the Banshee's tiled 16 bpp) at the end of the visible
+frame (svga_defer_flush), shared among the CPUs by par_for, each on its own
+copy of svga_t; vid_voodoo_banshee.c's tiled renderer is split so a line
+can be drawn with its desktop_y given (svga_t's defer_* hooks).

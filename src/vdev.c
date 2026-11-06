@@ -36,6 +36,7 @@ static int pic_best(struct pic *p, u8 extra)
 }
 
 int vpic_base0(void) { return pm.base; }
+int vpic_masked(int irq) { return irq < 8 ? (pm.imr >> irq) & 1 : ((ps.imr >> (irq - 8)) & 1) | ((pm.imr >> 2) & 1); }
 void vpic_lower(int irq) { if (irq < 8) pm.irr &= (u8)~(1 << irq); else ps.irr &= (u8)~(1 << (irq - 8)); }
 int chosen_irq_of(int vec)                     /* the IRQ behind a vector the PICs deliver, -1: none */
 {

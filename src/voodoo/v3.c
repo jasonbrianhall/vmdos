@@ -600,7 +600,8 @@ void v3_hv_sync(void)
    draws, and the guest's driver polls it. */
 void v3_run_for(uint32_t us);
 #define SLICE_ACCESS 2000
-#define SLICE_TICK 300
+#define SLICE_TICK 300                 /* v3slice=N: N us instead (the card's share of each 1 ms tick) */
+static uint32_t slice_tick = SLICE_TICK;
 static void catch_up_for(uint32_t us)
 {
     lfb_remap(0);
@@ -762,7 +763,7 @@ void v3_tick(void)
 {
     if (!v3_on || depth) return;
     v3_enter();
-    catch_up_for(SLICE_TICK);
+    catch_up_for(slice_tick);
     static u32 tr_tick;
     if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
     if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; irq_raise("still up, raised again"); }   /* the level line, not serviced */
@@ -940,6 +941,12 @@ void v3_mp_queued(void) { if (mp_n) mp_wake(); }
 void v3_mp_start(void)
 {
     if (!v3_on || !vdo) return;
+    const char *sl = strstr(cmdline, "v3slice=");
+    if (sl) {
+        uint32_t v = 0;
+        for (sl += 8; *sl >= '0' && *sl <= '9'; sl++) v = v * 10 + (uint32_t)(*sl - '0');
+        if (v >= 20 && v <= 900) { slice_tick = v; kprintf("voodoo3: %u us of each tick for the card (v3slice)\n", v); }
+    }
     int n = smp_render_count();
     const char *c = strstr(cmdline, "v3mp=");
     if (c && c[5] >= '0' && c[5] <= '9' && c[5] - '0' < n) n = c[5] - '0';
