@@ -369,12 +369,15 @@ extern struct rlock log_lock;                 /* kprintf */
 extern volatile int smp_active;               /* the helper CPU redraws and renders (not the timer tick) */
 int smp_on_ap(void);                          /* running on the helper (or a render helper) */
 int smp_cpu(void);                            /* 0 boot CPU, 1 helper, 2.. render helpers */
-#define SMP_SLOTS 4                           /* the helper and up to three render helpers */
+#define SMP_SLOTS 5                           /* the helper and up to four render helpers */
 int smp_slot(void);                           /* 0..SMP_SLOTS-1: whose per-CPU scratch to use */
 int par_for(u32 n, u32 chunk, void (*fn)(u32 i, void *arg), void *arg);   /* the helper's rows, shared; 0: some undrawn */
 void smp_start(u32 tramp);                    /* tramp: a free physical page below 1 MiB */
 void smp_go(void);
 void smp_park(void);                          /* VMHV: everything back on the boot CPU, for good */
+int smp_render_count(void);                   /* render helpers that take wake-ups */
+int smp_render_take(int n, int (*fn)(int k, int run));   /* other work for n of them (the Voodoo's triangles) */
+int smp_render_kick(int k);                   /* boot CPU: k's work queued; 0: its helper faulted */
 void smp_ap_fault(struct regs *r) __attribute__((noreturn));
 /* The boot CPU's local APIC timer, one-shot, for the guest's PIT channel 0
    above the 1 kHz tick (vdev.c). Vector FAST_TIMER_VEC (boot.S). */

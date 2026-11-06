@@ -12,7 +12,9 @@
    draws the pixels), random (400 triangles with modes picked at random:
    the buffers' checksums), random jitcmp (each of them by the C loop and by
    the JIT, compared; RGAME=1 picks only modes the JIT takes, RSEED= another
-   set, RCOUNT= how many). */
+   set, RCOUNT= how many). mp=N: the triangles drawn by N render helper
+   CPUs (v3.c v3_mp_start), here threads, as vmdos does: the same checksums.
+   mpfault: the first of them stops a while in, as one that faulted would. */
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,6 +22,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <pthread.h>
+#include <sched.h>
 #include "../../src/voodoo3.h"
 
 typedef uint8_t u8;
@@ -60,6 +64,32 @@ uint32_t tsc_khz(void) { return slice ? 1000000 : 0; }   /* threads stop and go 
                                                           /* TSC rate: the card's clock is pit_clock */
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
+/* smp.c's render helpers, as threads ("mp=N") */
+static int mp_cpus, mp_fault;
+static int (*mp_fn)(int, int);
+static volatile int mp_dead[4];
+static void *mp_thread(void *p)
+{
+    int k = (int)(intptr_t)p, drawn = 0;
+    for (;;) {
+        if (!mp_fn(k, 0)) { sched_yield(); continue; }
+        drawn += mp_fn(k, 1);
+        if (mp_fault && k == 0 && drawn > 150) { mp_dead[0] = 1; printf("render helper 0 stops (as a fault)\n"); return 0; }
+    }
+}
+int smp_render_count(void) { return mp_cpus; }
+int smp_render_take(int n, int (*fn)(int, int))
+{
+    mp_fn = fn;
+    for (int k = 0; k < n; k++) {
+        pthread_t t;
+        pthread_create(&t, 0, mp_thread, (void *)(intptr_t)k);
+        pthread_detach(t);
+    }
+    return n;
+}
+int smp_render_kick(int k) { return !mp_dead[k]; }
+
 /* ---------------- the card's registers ---------------- */
 #define BAR0 0xC0000000u
 #define BAR1 0xC2000000u
@@ -78,11 +108,19 @@ static void lfb(u32 a, u32 v)                 /* vmdos's mapped pages (v3.c fifo
 
 static void idle(void)                        /* as grSstIdle: until the status says not busy */
 {
+    int v3_test_rendering(void);
+    time_t t0 = time(0);
     for (int i = 0; i < 100000; i++) {
+        if (mp_cpus && v3_test_rendering() && time(0) - t0 < 20) {   /* "mp": the helpers draw, the card's time stands */
+            sched_yield();                                            /* still, as when the card's code drew them here */
+            i--;
+            continue;
+        }
         fake_clock += 100;
         if (!(r3d_read(0) & 0x7a0)) return;   /* not busy, its FIFO empty */
     }
     printf("still busy!\n");
+    if (getenv("BUSYDBG")) { void v3_debug(void); v3_debug(); }
 }
 
 enum { W = 640, H = 480, STRIDE = W * 2, FRONT = 0, BACK = 0x100000, FIFO = 0x400000 };
@@ -261,9 +299,12 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "slice")) slice = 1;
         if (!strcmp(argv[i], "jit")) host_osfxsr = 1;
         if (!strcmp(argv[i], "jitcmp")) host_osfxsr = jit_cmp = 1;
+        if (!strncmp(argv[i], "mp=", 3)) mp_cpus = atoi(argv[i] + 3);
+        if (!strcmp(argv[i], "mpfault")) mp_fault = 1;
     }
     v3_init();
     if (!v3_on) return 1;
+    v3_mp_start();
 
     /* PCI: the IDs and the BARs */
     printf("PCI %08x class %06x BAR0 %08x BAR1 %08x BAR2 %08x\n", v3_cfg_read(0, 4), v3_cfg_read(8, 4) >> 8,

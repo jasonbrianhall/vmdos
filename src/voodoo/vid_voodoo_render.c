@@ -1758,6 +1758,8 @@ render_thread(void *param, int odd_even)
         thread_set_event(voodoo->render_not_full_event[odd_even]);
         thread_wait_event(voodoo->wake_render_thread[odd_even], -1);
         thread_reset_event(voodoo->wake_render_thread[odd_even]);
+        if (v3_mp_kick(odd_even))              /* vmdos: another CPU draws these (v3.c); this green thread only wakes it */
+            continue;
 #if (defined __aarch64__ || defined _M_ARM64)
     process_work:
 #endif
@@ -1795,6 +1797,54 @@ render_thread(void *param, int odd_even)
         }
 #endif
     }
+}
+
+/* vmdos: on a render helper CPU (v3.c, smp.c): is there anything queued
+   for odd_even, and draw it, as render_thread does. read_idx moves on only
+   once a triangle is drawn (and its textures' refcount_r counted), so
+   PARAM_EMPTY on the boot CPU means drawn; busy is what SST_status shows.
+   render_not_full_event: the boot CPU's green threads may be waiting for
+   room or for idle (v3sched.c's thread_reset_event is fenced against this). */
+int
+voodoo_render_pending(voodoo_t *voodoo, int odd_even)
+{
+    return !PARAM_EMPTY(odd_even);
+}
+
+/* vmdos: triangles queued that a render thread hasn't drawn yet, for the
+   status register: one on another CPU may not have set busy yet, and a
+   guest that saw "idle" reads the frame buffer through pages mapped
+   straight onto vram, where nothing waits for it. */
+int
+voodoo_render_queued(voodoo_t *voodoo)
+{
+    for (int i = 0; i < voodoo->render_threads; i++)
+        if (!PARAM_EMPTY(i))
+            return 1;
+    return 0;
+}
+
+int
+voodoo_render_drain(voodoo_t *voodoo, int odd_even)
+{
+    int n = 0;
+
+    RENDER_VOODOO_BUSY(voodoo, odd_even) = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    while (!PARAM_EMPTY(odd_even)) {
+        voodoo_params_t *params = &voodoo->params_buffer[PARAMS_READ_IDX(voodoo, odd_even) & PARAM_MASK];
+
+        voodoo_triangle(voodoo, params, odd_even);
+        __atomic_thread_fence(__ATOMIC_RELEASE);   /* its pixels and refcount_r before read_idx */
+        PARAMS_READ_IDX(voodoo, odd_even)++;
+        if (PARAM_ENTRIES(odd_even) > (PARAM_SIZE - 10))
+            thread_set_event(voodoo->render_not_full_event[odd_even]);
+        n++;
+    }
+    RENDER_VOODOO_BUSY(voodoo, odd_even) = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    thread_set_event(voodoo->render_not_full_event[odd_even]);   /* whoever waits for idle: look again */
+    return n;
 }
 
 void
@@ -1846,8 +1896,10 @@ voodoo_queue_triangle(voodoo_t *voodoo, voodoo_params_t *params)
         voodoo_use_texture(voodoo, params, 1);
 
     memcpy(params_new, params, sizeof(voodoo_params_t));
+    __atomic_thread_fence(__ATOMIC_RELEASE);   /* vmdos: the entry before write_idx (a render helper CPU reads it) */
 
     PARAMS_WRITE_IDX(voodoo)++;
+    v3_mp_queued();                            /* vmdos: wake the render helper CPUs (v3.c) */
 
     if (PARAM_ENTRIES(0) < 4 || (voodoo->render_threads >= 2 && PARAM_ENTRIES(1) < 4) || (voodoo->render_threads == 4 && (PARAM_ENTRIES(2) < 4 || PARAM_ENTRIES(3) < 4)))
         voodoo_wake_render_thread(voodoo);

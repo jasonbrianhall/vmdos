@@ -607,6 +607,7 @@ static void catch_up_for(uint32_t us)
     legacy_remap(0);
     v3_poll_timers();
     fifo_feed();
+    v3_mp_queued();
     v3_run_for(us);
     fifo_mark();
 }
@@ -794,6 +795,7 @@ void v3_row(u32 y, u32 *out)
 
 /* Ctrl+Shift+F10 (v86.c): the card's state in the log, to see where a
    frozen game is. */
+static int mp_n;                               /* below: render threads drawn on helpers */
 int v3_sched_state(char *buf, int n);
 void v3_debug(void)
 {
@@ -805,6 +807,9 @@ void v3_debug(void)
             vdo->fifo_read_idx, vdo->fifo_write_idx, vdo->cmdfifo_enabled, vdo->cmdfifo_depth_rd, vdo->cmdfifo_depth_wr,
             vdo->cmdfifo_rp, vdo->cmdfifo_in_sub, vdo->cmdfifo_holecount, vdo->cmdfifo_amin, vdo->cmdfifo_amax, vdo->voodoo_busy,
             (int)RENDER_VOODOO_BUSY(vdo, 0), (int)RENDER_VOODOO_BUSY(vdo, 1), vdo->swap_pending, vdo->swap_count);
+    for (int i = 0; i < vdo->render_threads; i++)
+        kprintf("log: voodoo3: render thread %d%s: queued %d, busy %d\n", i, i < mp_n ? " (a render helper CPU)" : "",
+                PARAMS_WRITE_IDX(vdo) - PARAMS_READ_IDX(vdo, i), (int)RENDER_VOODOO_BUSY(vdo, i));
     kprintf("log: voodoo3: picture %dx%d at %d,%d of %dx%d, front %x\n", blit_w, blit_h, blit_x, blit_y,
             svga->hdisp, svga->dispend, vdo->front_offset);
 }
@@ -812,6 +817,14 @@ void v3_debug(void)
 /* tests/voodoo/hosttest: the card's memory, to write a FIFO as the guest
    does through the mapped pages. */
 uint8_t *v3_test_vram(void) { return svga ? svga->vram : 0; }
+/* and whether render helpers still have triangles to draw (time stands still for them) */
+int voodoo_render_queued(voodoo_t *voodoo);
+int v3_test_rendering(void)
+{
+    if (!vdo) return 0;
+    for (int i = 0; i < vdo->render_threads; i++) if (RENDER_VOODOO_BUSY(vdo, i)) return 1;
+    return voodoo_render_queued(vdo);
+}
 /* tests/voodoo/hosttest "random": the same triangle by the C loop and by
    the JIT, to compare. */
 void v3_test_jit(int on) { if (vdo) vdo->use_recompiler = on; }
@@ -880,3 +893,68 @@ void v3_init(void)
             v3_rom_start[2] / 2u, bar0_lin, bar1_lin, V3_IO_BASE);
 }
 
+/* ---------------- the triangles on other CPUs ----------------
+   86Box draws a Voodoo's triangles on render threads, 1, 2 or 4 of them,
+   each every n-th scan line of every triangle, fed through a ring
+   (params_buffer) that is made for real threads. With render helper CPUs
+   (smp.c) idle, each takes one of them: the FIFO thread (a green thread on
+   the boot CPU) only sets up and queues triangles, and the drawing runs
+   alongside DOS, in VMHV too, where everything else the card does happens
+   inside a VM exit. The green render threads stay, to wake their CPU (and
+   to draw, should that CPU fault). 1 helper: one thread; 2 or 3: two; 4:
+   four. v3mp=N: at most N helpers (v3mp=0: none, the boot CPU draws). */
+int smp_render_count(void);                    /* smp.c */
+int smp_render_take(int n, int (*fn)(int k, int run));
+int smp_render_kick(int k);
+int voodoo_render_pending(voodoo_t *voodoo, int odd_even);   /* vid_voodoo_render.c */
+int voodoo_render_drain(voodoo_t *voodoo, int odd_even);
+void voodoo_set_render_threads(voodoo_t *voodoo, int n);     /* vid_voodoo.c */
+
+/* On render helper k: anything queued (run 0), or draw it (run 1). */
+static int mp_task(int k, int run)
+{
+    if (k >= mp_n) return 0;
+    return run ? voodoo_render_drain(vdo, k) : voodoo_render_pending(vdo, k);
+}
+
+int v3_mp_kick(int k)
+{
+    if (k >= mp_n) return 0;
+    if (smp_render_kick(k)) return 1;
+    static int said;
+    if (!said) { said = 1; kprintf("voodoo3: a render helper CPU faulted: its triangles drawn on CPU 0 from now on\n"); }
+    return 0;
+}
+
+/* Each render helper woken if it's halted, from voodoo_queue_triangle and
+   at every look at the card. One that faulted: its green render thread
+   draws what's queued for it. */
+static void mp_wake(void)
+{
+    for (int k = 0; k < mp_n; k++)
+        if (!smp_render_kick(k) && voodoo_render_pending(vdo, k)) thread_set_event(vdo->wake_render_thread[k]);
+}
+void v3_mp_queued(void) { if (mp_n) mp_wake(); }
+
+/* After smp_start, before DOS: nothing has been drawn yet. */
+void v3_mp_start(void)
+{
+    if (!v3_on || !vdo) return;
+    int n = smp_render_count();
+    const char *c = strstr(cmdline, "v3mp=");
+    if (c && c[5] >= '0' && c[5] <= '9' && c[5] - '0' < n) n = c[5] - '0';
+    int t = n >= 4 ? 4 : n >= 2 ? 2 : n;
+    if (!t) {
+        kprintf("voodoo3: triangles drawn on CPU 0 (%s)\n", c && c[5] == '0' ? "v3mp=0" : "no render helper CPUs");
+        return;
+    }
+    voodoo_set_render_threads(vdo, t);
+    mp_n = t;
+    if (smp_render_take(t, mp_task) != t) {    /* can't be: smp_render_count said so */
+        mp_n = 0;
+        kprintf("voodoo3: render helper CPUs gone: triangles drawn on CPU 0\n");
+        return;
+    }
+    kprintf("voodoo3: triangles drawn by %d render helper CPU%s\n", t,
+            t == 4 ? "s, every fourth scan line each" : t == 2 ? "s, every other scan line each" : "");
+}

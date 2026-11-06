@@ -22,6 +22,7 @@ void v3_cfg_write(int reg, uint32_t val, int size);
 void v3_tick(void);                           /* every timer tick (boot CPU) */
 void v3_mode_set(void);                       /* (the card's BIOS sets modes now: nothing) */
 void v3_hv_sync(void);                        /* VMHV made its nested page tables: map the frame buffer there */
+void v3_mp_start(void);                       /* after smp_start: its triangles drawn on render helper CPUs */
 /* The picture, when the Voodoo's video processor owns the screen. */
 int v3_display(uint32_t *w, uint32_t *h);
 void v3_row(uint32_t y, uint32_t *out);       /* 0x00RRGGBB, w pixels */
