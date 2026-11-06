@@ -242,6 +242,7 @@ static void
 voodoo_fifo_run(voodoo_t *voodoo)
 {
     while (!FIFO_EMPTY) {
+        v3_maybe_yield();                      /* vmdos: between writes when the slice is over */
         uint64_t      start_time = plat_timer_read();
         uint64_t      end_time;
         fifo_entry_t *fifo = &voodoo->fifo[voodoo->fifo_read_idx & FIFO_MASK];
@@ -512,7 +513,10 @@ voodoo_fifo_thread(void *param)
         while (voodoo->fifo_thread_run && voodoo->cmdfifo_enabled && (voodoo->cmdfifo_depth_rd != voodoo->cmdfifo_depth_wr || voodoo->cmdfifo_in_sub)) {
             uint64_t start_time = plat_timer_read();
             uint64_t end_time;
-            uint32_t header = cmdfifo_get(voodoo);
+            uint32_t header;
+            v3_maybe_yield();                  /* vmdos: between packets when the slice is over */
+            if (!voodoo->fifo_thread_run) break;
+            header = cmdfifo_get(voodoo);
             uint32_t addr;
             uint32_t mask;
             int      smode;
@@ -806,7 +810,10 @@ voodoo_fifo_thread(void *param)
         while (voodoo->fifo_thread_run && voodoo->cmdfifo_enabled_2 && (voodoo->cmdfifo_depth_rd_2 != voodoo->cmdfifo_depth_wr_2 || voodoo->cmdfifo_in_sub_2)) {
             uint64_t start_time = plat_timer_read();
             uint64_t end_time;
-            uint32_t header = cmdfifo_get_2(voodoo);
+            uint32_t header;
+            v3_maybe_yield();                  /* vmdos: between packets when the slice is over */
+            if (!voodoo->fifo_thread_run) break;
+            header = cmdfifo_get_2(voodoo);
             uint32_t addr;
             uint32_t mask;
             int      smode;
