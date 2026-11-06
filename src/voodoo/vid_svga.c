@@ -770,6 +770,7 @@ svga_set_ramdac_type(svga_t *svga, int type)
 void
 svga_recalctimings(svga_t *svga)
 {
+    svga_defer_flush(svga);   /* vmdos: the lines so far, in the mode they were in */
     ibm8514_t       *dev = (ibm8514_t *) svga->dev8514;
     xga_t           *xga = (xga_t *) svga->xga;
     uint8_t          set_timer = 0;
@@ -1409,6 +1410,91 @@ svga_recalctimings(svga_t *svga)
     }
 }
 
+/* vmdos: the lines drawn at the end of the visible frame, shared among
+   the CPUs (par_for: in VMHV the render helpers take a part, the boot CPU
+   then doesn't draw the picture alone inside its tick). A line in a mode
+   whose renderer touches nothing but memaddr and first/lastline_draw (and
+   the card's own, defer_fn) is noted with what changes from line to line;
+   each CPU draws its lines on its own copy of svga_t, made once a frame,
+   and the first and last lines drawn are merged back. A line with the
+   cursor or the overlay on it, or any other mode, is drawn as before, at
+   once. The frame's state is what it is at its end (svga_poll: before
+   dispend's), or before a mode change (svga_recalctimings): raster
+   effects inside a frame are a VGA's, not these modes'. */
+#define DL_MAX   2048
+#define DL_SLOTS 8
+typedef struct {
+    void   (*fn)(svga_t *svga);
+    uint32_t memaddr, extra;
+    int      displine, y_add, x_add, render_line_offset;
+} svga_dline_t;
+static svga_dline_t dl[DL_MAX];
+static int          dl_n;
+static uint32_t     dl_gen;
+static svga_t       dl_cp[DL_SLOTS];
+static uint32_t     dl_cp_gen[DL_SLOTS];
+
+extern int smp_slot(void);
+extern int par_for(uint32_t n, uint32_t chunk, void (*fn)(uint32_t i, void *arg), void *arg);
+
+static int
+svga_defer_ok(svga_t *svga)
+{
+    void (*f)(svga_t *) = svga->render;
+    return (f == svga_render_8bpp_highres || f == svga_render_15bpp_highres || f == svga_render_16bpp_highres ||
+            f == svga_render_24bpp_highres || f == svga_render_32bpp_highres || (f && f == svga->defer_fn)) &&
+           dl_n < DL_MAX;
+}
+
+static void
+svga_defer_line(uint32_t i, void *arg)
+{
+    svga_t *svga = (svga_t *) arg;
+    int     k    = smp_slot();
+    if (k < 0 || k >= DL_SLOTS)
+        k = 0;
+    svga_t *c = &dl_cp[k];
+    if (dl_cp_gen[k] != dl_gen) {
+        memcpy(c, svga, sizeof(svga_t));
+        c->firstline_draw  = 2000;
+        c->lastline_draw   = 0;
+        c->hwcursor_on     = 0;
+        c->dac_hwcursor_on = 0;
+        c->overlay_on      = 0;
+        dl_cp_gen[k]       = dl_gen;
+    }
+    const svga_dline_t *d = &dl[i];
+    c->memaddr            = d->memaddr;
+    c->displine           = d->displine;
+    c->y_add              = d->y_add;
+    c->x_add              = d->x_add;
+    c->render_line_offset = d->render_line_offset;
+    if (d->fn == svga->defer_fn && svga->defer_render)
+        svga->defer_render(c, d->extra);
+    else
+        d->fn(c);
+}
+
+void
+svga_defer_flush(svga_t *svga)
+{
+    if (!dl_n)
+        return;
+    dl_gen++;
+    if (!dl_gen)
+        dl_gen = 1;
+    par_for(dl_n, 16, svga_defer_line, svga);
+    for (int k = 0; k < DL_SLOTS; k++) {
+        if (dl_cp_gen[k] != dl_gen || dl_cp[k].firstline_draw == 2000)
+            continue;
+        if (svga->firstline_draw == 2000 || dl_cp[k].firstline_draw < svga->firstline_draw)
+            svga->firstline_draw = dl_cp[k].firstline_draw;
+        if (dl_cp[k].lastline_draw > svga->lastline_draw)
+            svga->lastline_draw = dl_cp[k].lastline_draw;
+    }
+    dl_n = 0;
+}
+
 static void
 svga_do_render(svga_t *svga)
 {
@@ -1425,7 +1511,17 @@ svga_do_render(svga_t *svga)
 
     if (!svga->override && (svga->crtc[0x17] & 0x80)) {
         svga->render_line_offset = svga->start_retrace_latch - svga->crtc[0x4];
-        svga->render(svga);
+        if (!svga->overlay_on && !svga->dac_hwcursor_on && !svga->hwcursor_on && svga_defer_ok(svga)) {   /* vmdos */
+            svga_dline_t *d       = &dl[dl_n++];
+            d->fn                 = svga->render;
+            d->memaddr            = svga->memaddr;
+            d->displine           = svga->displine;
+            d->y_add              = svga->y_add;
+            d->x_add              = svga->x_add;
+            d->render_line_offset = svga->render_line_offset;
+            d->extra              = (svga->render == svga->defer_fn && svga->defer_line) ? svga->defer_line(svga) : 0;
+        } else
+            svga->render(svga);
     }
 
     if (svga->overlay_on) {
@@ -1661,6 +1757,7 @@ svga_poll(void *priv)
             }
         }
         if (svga->vc == svga->dispend) {
+            svga_defer_flush(svga);   /* vmdos: the frame's lines, before its changed marks count down */
             if (svga->vblank_start)
                 svga->vblank_start(svga);
 

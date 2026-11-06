@@ -828,7 +828,8 @@ or driver that dies quietly shows there.
 
 While VMHV runs, the first CPU redraws the screen itself, and the render
 helpers take rows of each redraw as they did the second CPU's (`nohvrows`:
-not); they also go on drawing the Voodoo's triangles. The second CPU
+not), and of the Voodoo 3's picture, turned from its memory into pixels at
+the end of each frame; they also go on drawing the Voodoo's triangles. The second CPU
 (otherwise halted) is a watchdog: if
 vmdos's own timer tick stops for 3 s (vmdos stuck with its interrupts
 off: no screen, sound or keyboard, so Ctrl+Shift+F10 can't help), it sends
