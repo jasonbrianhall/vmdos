@@ -384,6 +384,8 @@ __attribute__((noreturn)) static void hv_stop(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
+    extern volatile int watchdog_quiet;
+    watchdog_quiet = 1;                          /* stopped on purpose: no NMI (smp.c) */
     gview_end();
     disk_flush();
     kprintf("VMHV: %s\n", msg);
@@ -1098,6 +1100,11 @@ int hv_start(int key)
                 kprintf("VMHV: %u exits (io %u hlt %u gp %u intr %u), last %x, at %04x:%08x CR0 %x FL %x\n",
                         n, hx.nio, hx.nhlt, hx.ngp, hx.nintr, code, V16(S_CS), V32(S_RIP), V32(S_CR0), V32(S_RFLAGS));
             }
+        }
+        {   /* wdtest: vmdos hangs 20 s after VMHV started, interrupts off (smp.c's watchdog's test) */
+            static int wdt = -1; static u32 wd0;
+            if (wdt < 0) { wdt = strstr(cmdline, "wdtest") != 0; wd0 = ticks; }
+            if (wdt && ticks - wd0 > 20000) { kprintf("wdtest: hanging now\n"); for (;;) __asm__ volatile("pause"); }
         }
         switch (code) {
         case X_INTR: break;

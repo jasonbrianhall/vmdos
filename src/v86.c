@@ -807,6 +807,11 @@ static struct regs *isr_dispatch_inner(struct regs *r)
            fault pushes no ESP/SS, so it goes on right after EFLAGS). Look
            them up with addr2line -f -e vmdos.elf. */
         extern u8 __kernel_start[], __text_end[];
+        extern volatile int watchdog_fired;
+        if (vec == 2 && watchdog_fired) {              /* smp.c's watchdog: vmdos itself stuck */
+            kprintf("watchdog: vmdos has been stuck for 3 s with its interrupts off (no screen, sound or keyboard); where:\n");
+            { void hv_debug(void), v3_debug(void); hv_debug(); v3_debug(); }
+        }
         kprintf("kernel exception %u at %x: EAX %x EBX %x ECX %x EDX %x ESI %x EDI %x EBP %x\n",
                 vec, r->eip, r->eax, r->ebx, r->ecx, r->edx, r->esi, r->edi, r->ebp);
         const u32 *sp = &r->esp;

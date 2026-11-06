@@ -812,6 +812,16 @@ level (each faulting address once, up to 300; the first few with code and
 stack): a Windows program
 or driver that dies quietly shows there.
 
+While VMHV runs, the second CPU (otherwise halted) is a watchdog: if
+vmdos's own timer tick stops for 3 s (vmdos stuck with its interrupts
+off: no screen, sound or keyboard, so Ctrl+Shift+F10 can't help), it sends
+the first CPU an NMI, and vmdos stops with the red screen and logs where it
+was (the VM's state, the Voodoo 3's, the kernel's EIP and the return
+addresses on its stack, for `addr2line -f -e vmdos.elf`). `nowatchdog`
+turns it off; `wdtest` hangs vmdos 20 s into VMHV to try it.
+Ctrl+Shift+F10 logs the same state (the VM, the screen's redraws, the
+Voodoo 3) when the screen freezes but the keyboard still works.
+
 Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
 PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
 untested.
