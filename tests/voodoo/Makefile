@@ -6,7 +6,7 @@ VSRC  := $(addprefix $(SRC)/,vid_voodoo.c vid_voodoo_banshee_blitter.c vid_voodo
          vid_voodoo_texture.c vid_svga.c vid_svga_render.c timer.c v3card.c v3.c v3sched.c)
 # as the kernel's Makefile builds them
 VFLAGS := -m32 -march=i686 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fcf-protection=none \
-          -mfpmath=387 -mno-sse -mno-mmx -O2 -g -fno-strict-aliasing -DNO_CODEGEN -DTEX_CACHE_MAX=16 \
+          -mfpmath=387 -mno-sse -mno-mmx -O2 -g -fno-strict-aliasing -DV3_CODEGEN -DVMDOS_V3 -DV3_JIT_DEBUG -DTEX_CACHE_MAX=16 \
           -I$(SRC)/libc -I$(SRC) -w
 VOBJS := $(patsubst $(SRC)/%.c,obj/%.o,$(VSRC))
 

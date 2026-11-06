@@ -7,12 +7,18 @@
 
    make -C tests/voodoo   (needs gcc-multilib), then ./hosttest out.ppm, and
    ./hosttest out.ppm direct: the FIFO written straight into the card's memory
-   (as through vmdos's mapped pages) instead of through the trap. */
+   (as through vmdos's mapped pages) instead of through the trap. Also:
+   slice (the card's time slices end after a read or two), jit (86Box's JIT
+   draws the pixels), random (400 triangles with modes picked at random:
+   the buffers' checksums), random jitcmp (each of them by the C loop and by
+   the JIT, compared; RGAME=1 picks only modes the JIT takes, RSEED= another
+   set, RCOUNT= how many). */
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
 #include "../../src/voodoo3.h"
 
@@ -28,6 +34,12 @@ void kprintf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vprintf(fmt,
 void panic(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap); exit(1); }
 void *phys_alloc(u32 n) { void *p = aligned_alloc(4096, (n + 4095) & ~4095u); memset(p, 0, n); return p; }
 void *phys_try_alloc(u32 n) { return phys_alloc(n); }
+int host_osfxsr;                              /* "jit": SSE on, so the card's JIT draws the pixels (v3.c) */
+void *v3_exec_alloc(u32 n)                    /* the JIT's code: memory it can run */
+{
+    void *p = mmap(0, n, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? 0 : p;
+}
 u32 linear_hole(u32 len, u32 align) { (void)len; (void)align; return 0xC0000000u; }
 static u8 ports[0x40];
 u32 video_port_in(u16 port) { return ports[port & 0x3F]; }
@@ -108,13 +120,147 @@ static void vga_640x480(void)
     inb(0x3DA); outb(0x3C0, 0x20);                         /* the attribute controller: palette on */
 }
 
+/* "random": triangles with modes picked at random (colour path, alpha
+   blending and test, depth test, fog, textures in several formats), the
+   frame and depth buffers checksummed every 25: the JIT ("jit") must give
+   the C loop's sums. */
+static u32 rnd_state = 12345;   /* RSEED= another */
+static u32 rnd(void) { u32 x = rnd_state; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return rnd_state = x; }   /* xorshift32 */
+static float rndf(float lo, float hi) { return lo + (hi - lo) * (float)(rnd() & 0xFFFF) / 65535.0f; }
+static u32 sum_vram(void)
+{
+    const u8 *v = v3_test_vram();
+    u32 h = 2166136261u;
+    for (u32 a = FRONT; a < 0x200000 + STRIDE * H; a++) h = (h ^ v[a]) * 16777619u;
+    return h;
+}
+void v3_test_jit(int on);
+static int jit_cmp;
+static u32 m_cp, m_fbz, m_am, m_fm, m_tm;                           /* "random jitcmp": each triangle by both, compared */
+static u8 *snap, *res;
+static void random_tris(int n);
+static int one_tri(int i);
+static void random_tris(int n)
+{
+    if (!jit_cmp) { for (int i = 0; i < n; i++) one_tri(i); return; }
+    u32 len = 0x200000 + STRIDE * H;
+    snap = malloc(len); res = malloc(len);
+    u8 *v = v3_test_vram();
+    for (u32 a = 0x800000; a < 0x900000; a++) v[a] = (u8)rnd();
+    int bad = 0, minor = 0;
+    for (int i = 0; i < n; i++) {
+        u32 seed = rnd_state;
+        idle();
+        memcpy(snap, v, len);
+        v3_test_jit(0); one_tri(i); idle();
+        memcpy(res, v, len);
+        memcpy(v, snap, len);
+        rnd_state = seed;
+        v3_test_jit(1); one_tri(i); idle();
+        u32 nd = 0, first = 0;
+        if (getenv("JALL")) printf("jitok? %d: cp %08x fbz %08x am %08x fog %02x tm %08x\n", i, m_cp, m_fbz, m_am, m_fm, m_tm);
+        for (u32 a = 0; a < len; a += 2)
+            if (*(u16 *)(v + a) != *(u16 *)(res + a)) { if (!nd++) first = a; }
+        if (nd && nd <= 32) minor++;                 /* a texel off here and there (perspective rounding) */
+        else if (nd) {
+            bad++;
+            printf("jitcmp %d: cp %08x fbz %08x am %08x fog %02x tm %08x:", i, m_cp, m_fbz, m_am, m_fm, m_tm);
+            printf(" %u words differ, first at %s %u,%u: C %04x JIT %04x\n", nd, first >= 0x200000 ? "aux" : "colour",
+                   (first % 0x200000) % STRIDE / 2, (first % 0x200000) / STRIDE, *(u16 *)(res + first), *(u16 *)(v + first));
+        }
+        memcpy(v, res, len);                  /* go on from the C loop's */
+    }
+    extern int v3_jit_used, v3_jit_refused;
+    printf("jitcmp: %d of %d triangles differ (%d more by at most 32 pixels); JIT drew %d of %d\n", bad, n, minor,
+           v3_jit_used, v3_jit_used + v3_jit_refused);
+}
+static int one_tri(int i)
+{
+    static const u8 fmts[] = { 0, 2, 3, 4, 8, 0xA, 0xB, 0xC, 0xD };
+    if (!jit_cmp && i == 0) { u8 *v = v3_test_vram(); for (u32 a = 0x800000; a < 0x900000; a++) v[a] = (u8)rnd(); }   /* textures */
+    {
+        u32 cp = rnd() & 0x0FFFFFFF;
+        if (rnd() & 1) cp |= 1u << 27; else cp &= ~(1u << 27);          /* textures on or off */
+        if (getenv("RNOTEX")) cp &= ~(1u << 27);
+        if (getenv("RCP")) cp &= strtoul(getenv("RCP"), 0, 16);
+        if (getenv("RCPSET")) cp |= strtoul(getenv("RCPSET"), 0, 16);
+        r3d(0x104, cp);                                                 /* fbzColorPath */
+        { u32 fm = rnd() & 0x3F, am = rnd();
+          if (getenv("RFOG")) fm &= strtoul(getenv("RFOG"), 0, 16);
+          if (getenv("RAM")) am &= strtoul(getenv("RAM"), 0, 16);
+          if (getenv("RAFIX")) am = strtoul(getenv("RAFIX"), 0, 16);
+          if (getenv("RV")) printf("fog %02x alpha %08x\n", fm, am);
+          r3d(0x108, fm); r3d(0x10c, am); m_fm = fm; m_am = am; }                             /* fogMode alphaMode */
+        u32 fbz = (rnd() & 0x001FFFFE) | 1 | 1 << 9;                    /* clipping, RGB writes */
+        fbz &= ~(3u << 14 | 1u << 17);                                  /* the front buffer, Y origin top */
+        if (getenv("RFBZ")) fbz &= strtoul(getenv("RFBZ"), 0, 16);
+        r3d(0x110, fbz);                                                /* fbzMode */
+        r3d(0x12c, rnd()); r3d(0x130, rnd()); r3d(0x134, rnd());        /* fogColor zaColor chromaKey */
+        r3d(0x144, rnd()); r3d(0x148, rnd());                           /* color0 color1 */
+        u32 tm = (rnd() & 0x3FFFF0FF) | (u32)fmts[rnd() % sizeof fmts] << 8;
+        if (getenv("RTM")) tm &= strtoul(getenv("RTM"), 0, 16);
+        if (getenv("RTMSET")) tm |= strtoul(getenv("RTMSET"), 0, 16);
+        r3d(0x300, tm);                                                 /* textureMode */
+        r3d(0x304, 12 | 12 << 6);                                       /* tLOD: 32x32 */
+        r3d(0x30c, 0x800000 + (rnd() & 0x7) * 0x10000);                 /* texBaseAddr */
+        if (getenv("RGAME")) {                                         /* only what the JIT takes: does it match there? */
+            fbz &= ~(1u << 2 | 1u << 13 | 1u << 18 | 1u << 20);
+            if (((cp >> 14) & 3) == 2) cp &= ~(3u << 14);
+            if ((cp & 3) == 3) cp &= ~3u;
+            cp &= ~(1u << 18 | 1u << 7);
+            if (((cp >> 10) & 7) == 2 || ((cp >> 10) & 7) >= 6) cp &= ~(7u << 10);
+            if (!(cp & 1u << 27)) {                                     /* no texture: nothing taken from one */
+                if ((cp & 3) == 1) cp &= ~3u;
+                if (((cp >> 2) & 3) == 1) cp &= ~(3u << 2);
+                if (((cp >> 10) & 7) >= 4) cp &= ~(7u << 10);
+                if (((cp >> 19) & 7) >= 4) cp &= ~(7u << 19);
+                cp &= ~(1u << 7);
+            }
+            if (fbz & 1u << 19) fbz &= ~(1u << 19);
+            for (int sh = 14; sh <= 23; sh += 9) if (((tm >> sh) & 7) >= 4) tm &= ~(4u << sh);
+            if ((tm >> 13) & 1) tm &= ~(3u << 18);
+            if ((tm >> 22) & 1) tm &= ~(3u << 27);
+            r3d(0x104, cp); r3d(0x110, fbz); r3d(0x300, tm);
+            u32 am = m_am & ~(8u << 12); if (((am >> 8) & 15) == 15) am &= ~(15u << 8);
+            u32 fm = m_fm; if ((fm & 0x21) == 1) fm &= ~0x18u;
+            r3d(0x10c, am); r3d(0x108, fm); m_am = am; m_fm = fm;
+        }
+        if (getenv("RV")) printf("tri %d: cp %08x fbz %08x tm %08x\n", i, cp, fbz, tm);
+        m_cp = cp; m_fbz = fbz; m_tm = tm;
+        r3d(0x260, 0xFF);                                               /* sSetupMode: everything */
+        for (int k = 0; k < 3; k++) {
+            r3d(0x264, f2u(rndf(-20, W + 20))); r3d(0x268, f2u(rndf(-20, H + 20)));
+            r3d(0x26c, rnd());                                          /* sARGB */
+            r3d(0x280, f2u(rndf(0, 65535)));                            /* sVz */
+            float w = rndf(0.2f, 2.0f);
+            r3d(0x284, f2u(w)); r3d(0x288, f2u(w)); r3d(0x294, f2u(w));
+            r3d(0x28c, f2u(rndf(0, 64) * w)); r3d(0x290, f2u(rndf(0, 64) * w));
+            r3d(0x298, f2u(rndf(0, 64) * w)); r3d(0x29c, f2u(rndf(0, 64) * w));
+            r3d(k ? 0x2a0 : 0x2a4, 0);                                  /* sBeginTriCMD, sDrawTriCMD */
+        }
+        if (getenv("RV")) idle();
+        if (getenv("RDUMP") && i == atoi(getenv("RN") ? getenv("RN") : "0")) {
+            idle();
+            FILE *f = fopen(getenv("RDUMP"), "wb");
+            fwrite(v3_test_vram(), 1, 0x200000 + STRIDE * H, f);
+            fclose(f);
+            exit(0);
+        }
+        if (!jit_cmp && i % 25 == 24) { idle(); printf("random %3d: %08x\n", i + 1, sum_vram()); }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int bad = 0;
+    setvbuf(stdout, 0, _IONBF, 0);
     shot = calloc(W * H, 4);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "direct")) direct = 1;
         if (!strcmp(argv[i], "slice")) slice = 1;
+        if (!strcmp(argv[i], "jit")) host_osfxsr = 1;
+        if (!strcmp(argv[i], "jitcmp")) host_osfxsr = jit_cmp = 1;
     }
     v3_init();
     if (!v3_on) return 1;
@@ -216,6 +362,9 @@ int main(int argc, char **argv)
     printf("command FIFO again: read pointer %x (wrote up to %x)\n", v3_mmio_read(BAR0 + 0x8002c, 4), a);
     grab();
     bad += !check("FIFO from its base again: red", 100, 100, 0xFF0000);
+
+    if (getenv("RSEED")) rnd_state = strtoul(getenv("RSEED"), 0, 0);
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "random")) { random_tris(getenv("RCOUNT") ? atoi(getenv("RCOUNT")) : 400); grab(); }
 
     if (argc > 1) {
         FILE *f = fopen(argv[1], "wb");

@@ -2,8 +2,14 @@ vid_voodoo*.c, vid_svga.c, vid_svga_render.c, timer.c and the 86box/*.h
 headers named there are from 86Box (GPL-2.0-or-later),
 https://github.com/86Box/86Box, src/video, src and src/include/86box at
 b6fbd231957c26d33bb434a7e2d2f410263c3ecd. vid_voodoo_banshee.c is built
-through v3card.c. Not taken: the JIT (vid_voodoo_codegen_*.h; built with
-NO_CODEGEN). Changes: 86box/vid_voodoo_common.h's TEX_CACHE_MAX is #ifndef'd
+through v3card.c. The JIT: only 86box/vid_voodoo_codegen_x86.h, the 32-bit
+one 86Box no longer builds, with vmdos's changes marked "vmdos" (no
+<xmmintrin.h>: its tables as plain words; DEPTHOP_NEVER and AFUNC_NEVER
+jump to the skip instead of a bare RET, as the x86-64 one does;
+params->aux_tiled; voodoo_jit_can sends the modes it doesn't draw as the C
+loop does to the C loop, found by tests/voodoo/hosttest random jitcmp;
+a block overflow is fatal). vid_voodoo_render.h and vid_voodoo_render.c
+take it on i386 with V3_CODEGEN. Changes: 86box/vid_voodoo_common.h's TEX_CACHE_MAX is #ifndef'd
 so the Makefile can make it smaller; 86box/timer.h's int128 functions are
 under #ifdef __SIZEOF_INT128__ (not in 32-bit gcc). The other 86box/*.h,
 cpu.h and libc/*.h are stand-ins for voodoo_shim.h. To update: copy the files

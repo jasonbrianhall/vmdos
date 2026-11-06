@@ -119,6 +119,8 @@ typedef struct v3_file FILE;                /* rom.h names it */
 #include <86box/i2c.h>
 #include <86box/vid_ddc.h>
 uint64_t plat_timer_read(void);
+void *plat_mmap(size_t size, uint8_t executable);   /* v3.c: the JIT's code blocks */
+void plat_munmap(void *ptr, size_t size);
 void plat_delay_ms(uint32_t ms);
 void v3_maybe_yield(void);              /* v3sched.c: a green thread gives the CPU back when its slice is over */
 static inline uint64_t plat_get_ticks(void) { return 0; }
