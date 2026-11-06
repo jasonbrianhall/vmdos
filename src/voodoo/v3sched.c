@@ -155,18 +155,25 @@ void thread_set_event(event_t *e) { e->set = 1; }
 void thread_reset_event(event_t *e) { e->set = 0; }
 
 static int ev_set(void *p) { return ((event_t *)p)->set; }
+/* A wait on an event that is set already still lets the others run (a
+   green thread yields, still runnable; the main thread runs one of them).
+   86Box's threads run side by side, and some of its waits are polls in a
+   loop, set event or not: voodoo_wait_for_render_thread_idle waits on
+   render_not_full_event, which the render thread leaves set, until the
+   render thread has drawn what's queued. Returning at once, the FIFO
+   thread went round that loop for ever and the render thread never ran
+   (a 2D blit's launch after triangles: UT with Glide hung vmdos). */
 int thread_wait_event(event_t *e, int timeout)
 {
     (void)timeout;
-    if (e->set) return 0;
     if (cur) {
-        cur->wait_ev = e;
+        if (!e->set) cur->wait_ev = e;
         yield();
         return e->set ? 0 : 1;
     }
     uint64_t se = slice_end;
     slice_end = 0;
-    run_until(ev_set, e);                      /* the main thread: let the others get it done */
+    run_until(ev_set, e);                      /* the main thread: let the others get it done (set: one of them runs) */
     slice_end = se;
     return e->set ? 0 : 1;
 }

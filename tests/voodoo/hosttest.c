@@ -157,7 +157,8 @@ int main(int argc, char **argv)
     r3d(0x264, f2u(320)); r3d(0x268, f2u(40));  r3d(0x26c, 0xFF0000); r3d(0x2a4, 0);   /* sBeginTriCMD */
     r3d(0x264, f2u(560)); r3d(0x268, f2u(440)); r3d(0x26c, 0x00FF00); r3d(0x2a0, 0);   /* sDrawTriCMD */
     r3d(0x264, f2u(80));  r3d(0x268, f2u(440)); r3d(0x26c, 0x0000FF); r3d(0x2a0, 0);
-    idle();
+    v3_mmio_write(BAR0 + 0x100000 + 0x70, 0, 4);          /* a 2D command (NOP) right after: its launch waits for */
+    idle();                                                /* the render thread to draw the triangle (UT's hang) */
     grab();
     printf("pixels in %u, chroma fail %u, z fail %u, alpha fail %u, out %u\n", r3d_read(0x14c), r3d_read(0x150), r3d_read(0x154), r3d_read(0x158), r3d_read(0x15c));
     bad += !check("triangle, near the red corner", 320, 50, 0xF80000);
