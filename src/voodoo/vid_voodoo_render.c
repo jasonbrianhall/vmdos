@@ -1769,6 +1769,7 @@ render_thread(void *param, int odd_even)
             voodoo_triangle(voodoo, params, odd_even);
 
             PARAMS_READ_IDX(voodoo, odd_even)++;
+            v3_maybe_yield();                  /* vmdos: a triangle at a time when the slice is over */
 
             if (PARAM_ENTRIES(odd_even) > (PARAM_SIZE - 10))
                 thread_set_event(voodoo->render_not_full_event[odd_even]);

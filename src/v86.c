@@ -754,6 +754,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                 kprintf("log: %s, DPMI %s, IRQ 0 raised %u delivered %u, pm %u refl %u rm %u\n",
                         b1, b2, stat_irq0, stat_vec8, stat_pmirq, stat_reflirq, stat_rmirq);
             }
+            { void video_debug(void), v3_debug(void), hv_debug(void); hv_debug(); video_debug(); v3_debug(); }   /* a frozen screen: why */
             video_log_toggle();
             bootcon_show(1);                      /* video=vbe: the log screen on the other card */
         }
