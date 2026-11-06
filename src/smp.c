@@ -60,6 +60,8 @@ static volatile int ap_probe_done;
 static volatile int ap_sleeping;               /* halted till the next tick's IPI */
 static int ap_wake_setup(void);
 static void ap_wait(u32 last);
+static void ap_watchdog(void);
+static u32 bsp_apic;                          /* the boot CPU (ap_watchdog's NMI) */
 static void udelay(u32 us);
 static u64 ap_pat;                            /* PAT: the boot CPU's (write-combining framebuffer) */
 
@@ -198,7 +200,7 @@ void ap_main(void)
         frame += t - last;
         last = t;
         __atomic_store_n(&ap_busy, 1, __ATOMIC_SEQ_CST);                         /* then look: smp_park's other half */
-        if (ap_park) { ap_busy = 0; for (;;) __asm__ volatile("cli; hlt"); }
+        if (ap_park) { ap_busy = 0; ap_watchdog(); }
         if (!smp_active) { ap_busy = 0; continue; }
         ap_tables_sync();                                                          /* the boot CPU's page table changes */
         __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");
@@ -592,6 +594,7 @@ void smp_start(u32 tramp)
     const u8 *madt = madt_find();
     if (!madt) { kprintf("smp: no ACPI MADT: one CPU\n"); return; }
     u32 self = apic_id();
+    bsp_apic = self;
     int ncpu;
     u32 ids[1 + MAX_RENDER];
     int nids = pick_cpus(madt, self, &ncpu, ids, 1 + MAX_RENDER);
@@ -651,6 +654,28 @@ void smp_start(u32 tramp)
             more[rendering < 4 ? rendering : 3]);
 }
 
+/* VMHV's watchdog, on the parked helper: when the boot CPU's tick stops
+   for 3 s (vmdos stuck with its interrupts off: no screen, no sound, no
+   keyboard), an NMI to it, whose handler (v86.c) logs where it is and what
+   called it and stops with the red screen. The guest can't keep the tick
+   from moving (the host's interrupts end its run), so this is vmdos's own
+   code. watchdog_quiet: vmdos stopped on purpose. nowatchdog: none. */
+volatile int watchdog_quiet, watchdog_fired;
+static void ap_watchdog(void)
+{
+    if (strstr(cmdline, "nowatchdog") || !apic_ok) for (;;) __asm__ volatile("cli; hlt");
+    u32 last = ticks, still = 0;
+    for (;;) {
+        kdelay_us(250000);
+        u32 t = ticks;
+        if (t != last || watchdog_quiet) { last = t; still = 0; continue; }
+        if (++still < 12) continue;                                   /* 3 s */
+        watchdog_fired = 1;
+        apic_ipi(bsp_apic, 0x00004400);                               /* NMI, assert */
+        for (;;) __asm__ volatile("cli; hlt");                        /* once */
+    }
+}
+
 /* VMHV (hv.c) is starting: the screen and the sound back on the boot CPU,
    once the helper has finished the round it's in, and the helper halted. */
 void smp_park(void)
@@ -659,7 +684,7 @@ void smp_park(void)
     __atomic_store_n(&ap_park, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&smp_active, 0, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&ap_busy, __ATOMIC_SEQ_CST) && ap_alive) __asm__ volatile("pause");
-    kprintf("smp: VMHV runs on one CPU; the helper is halted\n");
+    kprintf("smp: VMHV runs on one CPU; the helper is the watchdog%s\n", strstr(cmdline, "nowatchdog") ? " (off: nowatchdog)" : "");
 }
 
 /* From kmain, last thing before DOS: the helper takes over. */

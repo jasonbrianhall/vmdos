@@ -92,8 +92,22 @@ static void yield(void)
     v3_switch(&t->esp, main_esp);
 }
 
+/* A time slice for v3_run_for: the green threads give the CPU back at
+   v3_maybe_yield (between commands and triangles) once it's over, still
+   runnable, and go on at the next v3_run. The card's work is done by
+   whoever calls into it, in VMHV inside a VM exit with the host's
+   interrupts off: a frame of triangles rendered in one go stopped the
+   screen, the sound and the keyboard for as long as it took. 0: none. */
+static uint64_t slice_end;
+uint64_t tsc_read(void);
+uint32_t tsc_khz(void);
+void v3_maybe_yield(void)
+{
+    if (cur && slice_end && tsc_read() > slice_end) yield();
+}
+
 /* Main thread: run the green threads until none can go on (or, with
-   until, until it says so). */
+   until, until it says so; or the slice is over). */
 static void run_until(int (*until)(void *), void *p)
 {
     if (cur || in_run) return;
@@ -109,12 +123,30 @@ static void run_until(int (*until)(void *), void *p)
             cur = t;
             v3_switch(&main_esp, t->esp);
             if (until && until(p)) { in_run = 0; return; }
+            if (!until && slice_end && tsc_read() > slice_end) { in_run = 0; return; }
         }
         if (!any) break;
     }
     in_run = 0;
 }
-void v3_run(void) { run_until(0, 0); }
+void v3_run(void) { slice_end = 0; run_until(0, 0); }
+/* For v3_debug: where the green threads are. */
+int v3_sched_state(char *buf, int n)
+{
+    int k = snprintf(buf, n, "in_run %d cur %d:", in_run, cur ? (int)(cur - threads) : -1);
+    for (int i = 0; i < nthreads && k < n; i++)
+        k += snprintf(buf + k, n - k, " %d%s%s%s%s", i, threads[i].done ? "D" : "", threads[i].sleeping ? "S" : "",
+                      threads[i].wait_ev ? (threads[i].wait_ev->set ? "e+" : "e") : "", threads[i].wait_mx ? (threads[i].wait_mx->locked ? "m+" : "m") : "");
+    return k;
+}
+void v3_run_for(uint32_t us)
+{
+    uint32_t khz = tsc_khz();
+    if (!khz || cur || in_run) { v3_run(); return; }
+    slice_end = tsc_read() + (uint64_t)khz * us / 1000;
+    run_until(0, 0);
+    slice_end = 0;
+}
 
 /* ---------------- events ---------------- */
 event_t *thread_create_event(void) { return calloc(1, sizeof(event_t)); }
@@ -123,16 +155,26 @@ void thread_set_event(event_t *e) { e->set = 1; }
 void thread_reset_event(event_t *e) { e->set = 0; }
 
 static int ev_set(void *p) { return ((event_t *)p)->set; }
+/* A wait on an event that is set already still lets the others run (a
+   green thread yields, still runnable; the main thread runs one of them).
+   86Box's threads run side by side, and some of its waits are polls in a
+   loop, set event or not: voodoo_wait_for_render_thread_idle waits on
+   render_not_full_event, which the render thread leaves set, until the
+   render thread has drawn what's queued. Returning at once, the FIFO
+   thread went round that loop for ever and the render thread never ran
+   (a 2D blit's launch after triangles: UT with Glide hung vmdos). */
 int thread_wait_event(event_t *e, int timeout)
 {
     (void)timeout;
-    if (e->set) return 0;
     if (cur) {
-        cur->wait_ev = e;
+        if (!e->set) cur->wait_ev = e;
         yield();
         return e->set ? 0 : 1;
     }
-    run_until(ev_set, e);                      /* the main thread: let the others get it done */
+    uint64_t se = slice_end;
+    slice_end = 0;
+    run_until(ev_set, e);                      /* the main thread: let the others get it done (set: one of them runs) */
+    slice_end = se;
     return e->set ? 0 : 1;
 }
 
@@ -144,7 +186,10 @@ int thread_wait_mutex(mutex_t *m)
 {
     while (m->locked) {
         if (cur) { cur->wait_mx = m; yield(); continue; }
+        uint64_t se = slice_end;
+        slice_end = 0;
         run_until(mx_free, m);
+        slice_end = se;
         if (m->locked) {                       /* its holder can't go on: a deadlock, don't hang the PC */
             kprintf("voodoo: main thread can't get a mutex, taking it\n");
             break;
