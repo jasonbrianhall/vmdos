@@ -123,6 +123,8 @@ void *plat_mmap(size_t size, uint8_t executable);   /* v3.c: the JIT's code bloc
 void plat_munmap(void *ptr, size_t size);
 void plat_delay_ms(uint32_t ms);
 void v3_maybe_yield(void);              /* v3sched.c: a green thread gives the CPU back when its slice is over */
+int v3_mp_kick(int odd_even);          /* v3.c: 1 if a render helper CPU draws odd_even's triangles (woken) */
+void v3_mp_queued(void);               /* v3.c: a triangle queued: wake the render helper CPUs */
 static inline uint64_t plat_get_ticks(void) { return 0; }
 
 /* ---------------- threads (v3sched.c) ---------------- */

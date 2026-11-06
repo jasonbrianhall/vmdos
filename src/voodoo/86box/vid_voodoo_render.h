@@ -271,6 +271,7 @@ void voodoo_codegen_close(voodoo_t *voodoo);
     } while (0)
 
 void voodoo_render_thread_1(void *param);
+int  voodoo_render_queued(voodoo_t *voodoo);   /* vmdos */
 void voodoo_render_thread_2(void *param);
 void voodoo_render_thread_3(void *param);
 void voodoo_render_thread_4(void *param);

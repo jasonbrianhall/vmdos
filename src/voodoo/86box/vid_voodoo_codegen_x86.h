@@ -658,10 +658,9 @@ voodoo_generate(uint8_t *code_block, voodoo_t *voodoo, voodoo_params_t *params, 
     xmm_ff_w = (__m128i)0x00ff00ff00ff00ffull;
     xmm_ff_b = (__m128i)0x00000000ffffffffull;
 #endif
-    xmm_01_w  = _mm_set_epi32(0, 0, 0x00010001, 0x00010001);
-    xmm_ff_w  = _mm_set_epi32(0, 0, 0x00ff00ff, 0x00ff00ff);
-    xmm_ff_b  = _mm_set_epi32(0, 0, 0, 0x00ffffff);
-    minus_254 = _mm_set_epi32(0, 0, 0xff02ff02, 0xff02ff02);
+    /* vmdos: xmm_01_w, xmm_ff_w, xmm_ff_b and minus_254 set once, in
+       voodoo_codegen_init: render helper CPUs run blocks that read them
+       while another one makes a block. */
 #if 0
     *(uint64_t *)&const_1_48 = 0x45b0000000000000ull;
     block_pos = 0;
@@ -3241,6 +3240,10 @@ void
 voodoo_codegen_init(voodoo_t *voodoo)
 {
     voodoo->codegen_data = plat_mmap(sizeof(voodoo_x86_data_t) * BLOCK_NUM * 4, 1);
+    xmm_01_w  = _mm_set_epi32(0, 0, 0x00010001, 0x00010001);   /* vmdos: from voodoo_generate */
+    xmm_ff_w  = _mm_set_epi32(0, 0, 0x00ff00ff, 0x00ff00ff);
+    xmm_ff_b  = _mm_set_epi32(0, 0, 0, 0x00ffffff);
+    minus_254 = _mm_set_epi32(0, 0, 0xff02ff02, 0xff02ff02);
 
     for (uint16_t c = 0; c < 256; c++) {
         int d[4];

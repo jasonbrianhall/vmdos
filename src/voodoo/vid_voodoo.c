@@ -435,7 +435,8 @@ voodoo_readl(uint32_t addr, void *priv)
                                voodoo->voodoo_busy ||
                                RENDER_VOODOO_BUSY(voodoo, 0) ||
                                (voodoo->render_threads >= 2 && RENDER_VOODOO_BUSY(voodoo, 1)) ||
-                               (voodoo->render_threads == 4 && (RENDER_VOODOO_BUSY(voodoo, 2) || RENDER_VOODOO_BUSY(voodoo, 3)));
+                               (voodoo->render_threads == 4 && (RENDER_VOODOO_BUSY(voodoo, 2) || RENDER_VOODOO_BUSY(voodoo, 3))) ||
+                               voodoo_render_queued(voodoo);   /* vmdos: queued, not yet taken by a render helper CPU */
 
                     if (SLI_ENABLED && voodoo->type != VOODOO_2) {
                         voodoo_t *voodoo_other  = (voodoo == voodoo->set->voodoos[0]) ? voodoo->set->voodoos[1] : voodoo->set->voodoos[0];
@@ -1646,6 +1647,24 @@ voodoo_init(const device_t *info)
     mem_mapping_add(&voodoo_set->snoop_mapping, 0, 0, NULL, voodoo_snoop_readw, voodoo_snoop_readl, NULL, voodoo_snoop_writew, voodoo_snoop_writel, NULL, MEM_MAPPING_EXTERNAL, voodoo_set);
 
     return voodoo_set;
+}
+
+/* vmdos: more render threads, once the CPUs that draw them are known
+   (v3.c v3_mp_start), before any triangle: n of 1, 2 or 4, each drawing
+   every n-th scan line (odd_even_mask), as 86Box's render_threads. */
+void
+voodoo_set_render_threads(voodoo_t *voodoo, int n)
+{
+    static void (*const fn[4])(void *) = { voodoo_render_thread_1, voodoo_render_thread_2,
+                                           voodoo_render_thread_3, voodoo_render_thread_4 };
+
+    for (int i = voodoo->render_threads; i < n; i++) {
+        PARAMS_READ_IDX(voodoo, i)     = PARAMS_WRITE_IDX(voodoo);
+        voodoo->render_thread_run[i]   = 1;
+        voodoo->render_thread[i]       = thread_create(fn[i], voodoo);
+    }
+    voodoo->render_threads = n;
+    voodoo->odd_even_mask  = n - 1;
 }
 
 void

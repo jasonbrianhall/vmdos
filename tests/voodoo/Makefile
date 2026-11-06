@@ -17,7 +17,7 @@ emutest: emutest.c ../../src/mememu.c ../../src/kernel.h
 	gcc -m32 -march=i686 -O1 -g -no-pie -mgeneral-regs-only -fno-strict-aliasing -I../../src -w -o $@ emutest.c
 
 hosttest: hosttest.c $(VOBJS) obj/v3rom.o
-	gcc -m32 -O1 -g -no-pie -o $@ hosttest.c $(VOBJS) obj/v3rom.o -lm
+	gcc -m32 -O1 -g -no-pie -pthread -o $@ hosttest.c $(VOBJS) obj/v3rom.o -lm
 
 obj/v3rom.o: $(SRC)/v3rom.S $(ROM)
 	@mkdir -p obj
