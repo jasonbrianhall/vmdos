@@ -130,6 +130,15 @@ static void run_until(int (*until)(void *), void *p)
     in_run = 0;
 }
 void v3_run(void) { slice_end = 0; run_until(0, 0); }
+/* For v3_debug: where the green threads are. */
+int v3_sched_state(char *buf, int n)
+{
+    int k = snprintf(buf, n, "in_run %d cur %d:", in_run, cur ? (int)(cur - threads) : -1);
+    for (int i = 0; i < nthreads && k < n; i++)
+        k += snprintf(buf + k, n - k, " %d%s%s%s%s", i, threads[i].done ? "D" : "", threads[i].sleeping ? "S" : "",
+                      threads[i].wait_ev ? (threads[i].wait_ev->set ? "e+" : "e") : "", threads[i].wait_mx ? (threads[i].wait_mx->locked ? "m+" : "m") : "");
+    return k;
+}
 void v3_run_for(uint32_t us)
 {
     uint32_t khz = tsc_khz();

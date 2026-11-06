@@ -767,6 +767,23 @@ void v3_row(u32 y, u32 *out)
     for (u32 x = 0; x < w; x++) out[x] = src[x] & 0xffffff;
 }
 
+/* Ctrl+Shift+F10 (v86.c): the card's state in the log, to see where a
+   frozen game is. */
+int v3_sched_state(char *buf, int n);
+void v3_debug(void)
+{
+    if (!v3_on || !vdo) return;
+    char b[160];
+    v3_sched_state(b, sizeof b);
+    kprintf("log: voodoo3: depth %d, %s\n", depth, b);
+    kprintf("log: voodoo3: fifo %u-%u, cmdfifo on %d rd %d wr %d rp %x in_sub %d holes %d amin %x amax %x, busy %d render %d/%d, swap pending %d count %d\n",
+            vdo->fifo_read_idx, vdo->fifo_write_idx, vdo->cmdfifo_enabled, vdo->cmdfifo_depth_rd, vdo->cmdfifo_depth_wr,
+            vdo->cmdfifo_rp, vdo->cmdfifo_in_sub, vdo->cmdfifo_holecount, vdo->cmdfifo_amin, vdo->cmdfifo_amax, vdo->voodoo_busy,
+            (int)RENDER_VOODOO_BUSY(vdo, 0), (int)RENDER_VOODOO_BUSY(vdo, 1), vdo->swap_pending, vdo->swap_count);
+    kprintf("log: voodoo3: picture %dx%d at %d,%d of %dx%d, front %x\n", blit_w, blit_h, blit_x, blit_y,
+            svga->hdisp, svga->dispend, vdo->front_offset);
+}
+
 /* tests/voodoo/hosttest: the card's memory, to write a FIFO as the guest
    does through the mapped pages. */
 uint8_t *v3_test_vram(void) { return svga ? svga->vram : 0; }
