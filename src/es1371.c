@@ -93,7 +93,7 @@ static struct {
     u16 ac97[64];
     int vol_l, vol_r;                  /* master x PCM, Q15 */
     int irq_pending, stuck;
-    u32 st_raised, st_reraised, st_acks, st_t0;
+    u32 st_raised, st_reraised, st_acks, st_t0, st_clip_dac, st_clip_mix, st_out;
 } es;
 
 /* ---------------- guest memory ---------------- */
@@ -300,7 +300,13 @@ static void es_stats(void)
     if (es.st_raised || es.st_reraised)
         kprintf("es1371: IRQ raised %u/s, acknowledged %u/s, raised again unserviced (60 ms) %u\n",
                 es.st_raised * 1000u / dt, es.st_acks * 1000u / dt, es.st_reraised);
-    es.st_raised = es.st_reraised = es.st_acks = 0;
+    if (es.st_out)
+        kprintf("es1371: AC'97 master %04x PCM %04x (x%u.%02u, %u.%02u), SRC volume DAC1 %04x/%04x DAC2 %04x/%04x "
+                "(1000h = 1); clipped: DACs summed %u, the mix %u of %u samples\n",
+                es.ac97[0x02 >> 1], es.ac97[0x18 >> 1], (u32)es.vol_l >> 15, ((u32)es.vol_l & 0x7FFF) * 100u >> 15,
+                (u32)es.vol_r >> 15, ((u32)es.vol_r & 0x7FFF) * 100u >> 15, es.src[0x7C], es.src[0x7D],
+                es.src[0x7E], es.src[0x7F], es.st_clip_dac, es.st_clip_mix, es.st_out);
+    es.st_raised = es.st_reraised = es.st_acks = es.st_clip_dac = es.st_clip_mix = es.st_out = 0;
 }
 
 static u32 dac_vf(int i)                             /* the SRC's variable frequency: 1 << 15 per 3000 Hz */
@@ -357,10 +363,13 @@ void es_render(int16_t *buf, int n)
             }
             if (adc) adc_step();
             if (es.vol_l | es.vol_r) {
+                if (perf_on && (l != clamp16(l) || r != clamp16(r))) es.st_clip_dac++;
                 l = (int)(((int64_t)clamp16(l) * es.vol_l) >> 15);
                 r = (int)(((int64_t)clamp16(r) * es.vol_r) >> 15);
-                buf[2 * k] = (int16_t)clamp16(buf[2 * k] + l);
-                buf[2 * k + 1] = (int16_t)clamp16(buf[2 * k + 1] + r);
+                int ml = buf[2 * k] + l, mr = buf[2 * k + 1] + r;
+                if (perf_on) { es.st_out++; if (ml != clamp16(ml) || mr != clamp16(mr)) es.st_clip_mix++; }
+                buf[2 * k] = (int16_t)clamp16(ml);
+                buf[2 * k + 1] = (int16_t)clamp16(mr);
             }
         }
     }
