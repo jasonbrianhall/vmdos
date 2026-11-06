@@ -59,9 +59,39 @@ int sound_sb_api(int bx)
     return dsp.sb16 ? 16 : 2;
 }
 
+/* sblog: the first 3000 accesses to the Sound Blaster (DSP, mixer, OPL),
+   the DMA controller and the IRQ, a run of the same one counted, to see
+   what a driver (Windows') does with the card and where it gives up. */
+int vpic_masked(int irq);
+static int sblog = -1, sblog_n;
+static u16 sbl_port; static u8 sbl_val, sbl_wr; static u32 sbl_rep;
+static void sbl_flush(void)
+{
+    if (sbl_rep > 1) kprintf("sblog:   ... the same %u times\n", sbl_rep);
+    sbl_rep = 0;
+}
+static void sbl(u16 port, int write, u8 v)
+{
+    if (sblog < 0) sblog = strstr(cmdline, "sblog") != 0;
+    if (!sblog || sblog_n >= 3000) return;
+    if (sbl_rep && port == sbl_port && v == sbl_val && write == sbl_wr) { sbl_rep++; return; }
+    sbl_flush();
+    sbl_port = port; sbl_val = v; sbl_wr = (u8)write; sbl_rep = 1;
+    sblog_n++;
+    kprintf("sblog: %s %03x %02x%s\n", write ? "out" : "in ", port, v, sblog_n == 3000 ? " (the last)" : "");
+}
+
 static void check_irq(void)
 {
-    if (sb_take_irq()) vpic_raise(sb_irq_line());
+    if (sb_take_irq()) {
+        vpic_raise(sb_irq_line());
+        if (sblog > 0 && sblog_n < 3000) {
+            sbl_flush();
+            sblog_n++;
+            kprintf("sblog: IRQ %d raised (%s on the guest's PIC, its vectors at %02xh)\n", sb_irq_line(),
+                    vpic_masked(sb_irq_line()) ? "masked" : "unmasked", vpic_base0());
+        }
+    }
     if (gus_take_irq()) vpic_raise(gus_irq_line());
     if (es_take_irq()) vpic_raise(es_irq_line());   /* the AudioPCI (es1371.c) */
 }
@@ -71,6 +101,7 @@ static int sound_port_(u16 port, int write, u8 *v)
     if (dsp_owns(port)) {
         if (write) dsp_out(port, *v); else *v = dsp_in(port);
         if (debug_level >= 4) kprintf("SB %s %03x %02x\n", write ? "out" : "in ", port, *v);
+        sbl(port, write, *v);
         check_irq();
         return 1;
     }
@@ -86,6 +117,7 @@ static int sound_port_(u16 port, int write, u8 *v)
     }
     if (dma_owns(port)) {
         if (write) { dma_out(port, *v); gus_dma_poll(); check_irq(); } else *v = dma_in(port);
+        sbl(port, write, *v);
         return 1;
     }
     return 0;
