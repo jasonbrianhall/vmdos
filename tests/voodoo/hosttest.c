@@ -41,8 +41,11 @@ void hv_map_gpa(u32 gpa, u32 host) { (void)gpa; (void)host; }
 void vpci_bios_patch(void) { }
 void vpic_raise(int irq) { (void)irq; }
 int v3_map_own;
-uint64_t tsc_read(void) { return 0; }
-uint32_t tsc_khz(void) { return 0; }                /* no TSC rate: the card's clock is pit_clock */
+static int slice;                             /* "slice": a 1 GHz TSC that also moves on 1 ms at every read, */
+static uint64_t slice_tsc;                    /* so the card's time slices (v3sched.c) end after a few reads: */
+uint64_t tsc_read(void) { return slice ? (slice_tsc += 1000000) + (uint64_t)fake_clock * 838 : 0; }   /* the green */
+uint32_t tsc_khz(void) { return slice ? 1000000 : 0; }   /* threads stop and go on wherever they can. Else no */
+                                                          /* TSC rate: the card's clock is pit_clock */
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
 /* ---------------- the card's registers ---------------- */
@@ -109,7 +112,10 @@ int main(int argc, char **argv)
 {
     int bad = 0;
     shot = calloc(W * H, 4);
-    direct = argc > 2 && !strcmp(argv[2], "direct");
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "direct")) direct = 1;
+        if (!strcmp(argv[i], "slice")) slice = 1;
+    }
     v3_init();
     if (!v3_on) return 1;
 
@@ -151,7 +157,8 @@ int main(int argc, char **argv)
     r3d(0x264, f2u(320)); r3d(0x268, f2u(40));  r3d(0x26c, 0xFF0000); r3d(0x2a4, 0);   /* sBeginTriCMD */
     r3d(0x264, f2u(560)); r3d(0x268, f2u(440)); r3d(0x26c, 0x00FF00); r3d(0x2a0, 0);   /* sDrawTriCMD */
     r3d(0x264, f2u(80));  r3d(0x268, f2u(440)); r3d(0x26c, 0x0000FF); r3d(0x2a0, 0);
-    idle();
+    v3_mmio_write(BAR0 + 0x100000 + 0x70, 0, 4);          /* a 2D command (NOP) right after: its launch waits for */
+    idle();                                                /* the render thread to draw the triangle (UT's hang) */
     grab();
     printf("pixels in %u, chroma fail %u, z fail %u, alpha fail %u, out %u\n", r3d_read(0x14c), r3d_read(0x150), r3d_read(0x154), r3d_read(0x158), r3d_read(0x15c));
     bad += !check("triangle, near the red corner", 320, 50, 0xF80000);

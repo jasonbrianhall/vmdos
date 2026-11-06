@@ -478,6 +478,8 @@ void panic(const char *fmt, ...)
 {
     char buf[1024];
     cli();
+    extern volatile int watchdog_quiet;
+    watchdog_quiet = 1;                           /* stopped on purpose: no NMI (smp.c) */
     smp_active = 0;                               /* the helper CPU stops drawing over the screen */
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);

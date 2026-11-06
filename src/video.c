@@ -2325,9 +2325,17 @@ void video_refresh_late(void)
     draw_late = 0;
 }
 
+static int refresh_busy;
+static u32 refresh_done, refresh_done_ms;
+/* Ctrl+Shift+F10 (v86.c): whether the screen is being redrawn at all. */
+void video_debug(void)
+{
+    kprintf("log: video: refreshes %u (last at %u ms, now %u), busy %d, draw_late %d, voodoo picture %d %ux%u, log box %d, lock held %d\n",
+            refresh_done, refresh_done_ms, ticks, refresh_busy, draw_late, vd_on, vd_w, vd_h, logov_on, video_lock.held);
+}
 static void video_refresh_(void)
 {
-    static int busy;
+#define busy refresh_busy
     if (busy) return;
     if (draw_late && !smp_on_ap()) {               /* the helper is drawing: wait (unless it's gone) */
         while (draw_late && smp_active) __asm__ volatile("pause");
@@ -2399,7 +2407,9 @@ static void video_refresh_(void)
     draw_log_overlay();
     draw_osd();
     tick_poll_end();
+    refresh_done++; refresh_done_ms = ticks;
     busy = 0;
+#undef busy
 }
 
 /* A full screen of text over whatever the guest shows: title, then msg.

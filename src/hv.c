@@ -296,6 +296,17 @@ static void put_regs(struct regs *r)
 }
 
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
+
+/* The VM's exits, counted: Ctrl+Shift+F10 (v86.c, hv_debug) says where the
+   guest is and what it last left the VM for, to see where a frozen game is. */
+static struct { u32 n, nio, nhlt, ngp, nintr, npf, code, info1, info2; } hx;
+void hv_debug(void)
+{
+    if (!hv_active) return;
+    kprintf("log: VMHV: guest at %04x:%08x (CPL %u, %s), FL %x; exits %u (io %u hlt %u gp %u npf %u intr %u), last %x i1 %x i2 %x\n",
+            V16(S_CS), V32(S_RIP), V8(S_CPL), real_or_v86() ? "real/V86" : "protected", V32(S_RFLAGS),
+            hx.n, hx.nio, hx.nhlt, hx.ngp, hx.npf, hx.nintr, hx.code, hx.info1, hx.info2);
+}
 /* For vgalog: hex of the VM's code around CS:EIP and the top of its stack
    (what WIN386 does around a VGA access, for disassembling). */
 static u8 *glin(u32 lin);
@@ -373,6 +384,8 @@ __attribute__((noreturn)) static void hv_stop(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
+    extern volatile int watchdog_quiet;
+    watchdog_quiet = 1;                          /* stopped on purpose: no NMI (smp.c) */
     gview_end();
     disk_flush();
     kprintf("VMHV: %s\n", msg);
@@ -1075,16 +1088,23 @@ int hv_start(int key)
         V64(C_EVENT) = (ei & EV_VALID) ? ei : 0;
         u32 code = V32(C_EXIT);
         {
-            static u32 n, last, nio, nhlt, ngp, nintr;
-            n++;
+            static u32 last;
+            u32 n = ++hx.n;
+            hx.code = code; hx.info1 = (u32)V64(C_INFO1); hx.info2 = (u32)V64(C_INFO2);
+            if (code == X_NPF) hx.npf++;
             if (debug_level >= 3 && n < 300)
                 kprintf("x%u %x %04x:%04x i1 %x i2 %x fl %x\n", n, code, V16(S_CS), V32(S_RIP), (u32)V64(C_INFO1), (u32)V64(C_INFO2), V32(S_RFLAGS));
-            if (code == X_IOIO) nio++; else if (code == X_HLT) nhlt++; else if (code == X_EXC(13)) ngp++; else if (code == X_INTR) nintr++;
+            if (code == X_IOIO) hx.nio++; else if (code == X_HLT) hx.nhlt++; else if (code == X_EXC(13)) hx.ngp++; else if (code == X_INTR) hx.nintr++;
             if (debug_level >= 2 && ticks - last >= 2000) {
                 last = ticks;
                 kprintf("VMHV: %u exits (io %u hlt %u gp %u intr %u), last %x, at %04x:%08x CR0 %x FL %x\n",
-                        n, nio, nhlt, ngp, nintr, code, V16(S_CS), V32(S_RIP), V32(S_CR0), V32(S_RFLAGS));
+                        n, hx.nio, hx.nhlt, hx.ngp, hx.nintr, code, V16(S_CS), V32(S_RIP), V32(S_CR0), V32(S_RFLAGS));
             }
+        }
+        {   /* wdtest: vmdos hangs 20 s after VMHV started, interrupts off (smp.c's watchdog's test) */
+            static int wdt = -1; static u32 wd0;
+            if (wdt < 0) { wdt = strstr(cmdline, "wdtest") != 0; wd0 = ticks; }
+            if (wdt && ticks - wd0 > 20000) { kprintf("wdtest: hanging now\n"); for (;;) __asm__ volatile("pause"); }
         }
         switch (code) {
         case X_INTR: break;
