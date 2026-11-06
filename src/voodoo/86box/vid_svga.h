@@ -355,6 +355,13 @@ typedef struct svga_t {
     void *     priv_parent;
 
     void *     local;
+    /* vmdos: a card's renderer whose lines can be drawn later, on other CPUs
+       (svga_do_render, svga_defer_flush): defer_line runs in its place on
+       the line (its side effects, a value the line needs), defer_render
+       draws the line later with that value, on a copy of this svga_t. */
+    void (*defer_fn)(struct svga_t *svga);
+    uint32_t (*defer_line)(struct svga_t *svga);
+    void (*defer_render)(struct svga_t *svga, uint32_t extra);
 } svga_t;
 
 extern void     ibm8514_set_poll(svga_t *svga);
@@ -435,6 +442,7 @@ uint32_t svga_mask_changedaddr(uint32_t addr, svga_t *svga);
 void svga_doblit(int wx, int wy, svga_t *svga);
 void svga_set_poll(svga_t *svga);
 void svga_poll(void *priv);
+void svga_defer_flush(svga_t *svga);   /* vmdos */
 
 enum {
     RAMDAC_6BIT = 0,

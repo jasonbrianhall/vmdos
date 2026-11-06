@@ -527,6 +527,69 @@ banshee_conv_16to32(svga_t* svga, uint16_t color, UNUSED(uint8_t bpp))
     return ret;
 }
 
+/* vmdos: the line at desktop_y y, leaving banshee->desktop_y alone, so it
+   can be drawn later on another CPU (svga_defer_flush); banshee_defer_line
+   moves desktop_y on in its place, as banshee_render_16bpp_tiled does. */
+static int
+banshee_tiled_addr(svga_t *svga, uint32_t y, uint32_t *addr)
+{
+    banshee_t *banshee = (banshee_t *) svga->priv;
+
+    if (((svga->displine + svga->y_add) < 0) ||
+        (svga->monitor->target_buffer == NULL) ||
+        (svga->monitor->target_buffer->line[svga->displine + svga->y_add] == NULL))
+        return 0;
+
+    if (banshee->vidProcCfg & VIDPROCCFG_HALF_MODE)
+        *addr = banshee->desktop_addr + ((y >> 1) & 31) * 128 + ((y >> 6) * banshee->desktop_stride_tiled);
+    else
+        *addr = banshee->desktop_addr + (y & 31) * 128 + ((y >> 5) * banshee->desktop_stride_tiled);
+
+    return *addr < svga->vram_max;
+}
+
+static void
+banshee_render_16bpp_tiled_at(svga_t *svga, uint32_t y)
+{
+    uint32_t  *p;
+    uint32_t   addr;
+    int        drawn = 0;
+
+    if (!banshee_tiled_addr(svga, y, &addr))
+        return;
+    p = &(svga->monitor->target_buffer->line[svga->displine + svga->y_add])[svga->x_add];
+
+    for (int x = 0; x < svga->hdisp; x += 64) {
+        if (svga->changedvram[addr >> 12] || svga->fullchange) {
+            const uint16_t *vram_p = (uint16_t *) &svga->vram[addr & svga->vram_display_mask];
+
+            for (uint8_t xx = 0; xx < 64; xx++)
+                *p++ = banshee_conv_16to32(svga, *vram_p++, 16);
+
+            drawn = 1;
+        } else
+            p += 64;
+        addr += 128 * 32;
+    }
+
+    if (drawn) {
+        if (svga->firstline_draw == 2000)
+            svga->firstline_draw = svga->displine;
+        svga->lastline_draw = svga->displine;
+    }
+}
+
+static uint32_t
+banshee_defer_line(svga_t *svga)
+{
+    banshee_t *banshee = (banshee_t *) svga->priv;
+    uint32_t   y = banshee->desktop_y, addr;
+
+    if (banshee_tiled_addr(svga, y, &addr))
+        banshee->desktop_y++;
+    return y;
+}
+
 static void
 banshee_render_16bpp_tiled(svga_t *svga)
 {
@@ -535,17 +598,7 @@ banshee_render_16bpp_tiled(svga_t *svga)
     uint32_t   addr;
     int        drawn = 0;
 
-    if (((svga->displine + svga->y_add) < 0) ||
-        (svga->monitor->target_buffer == NULL) ||
-        (svga->monitor->target_buffer->line[svga->displine + svga->y_add] == NULL))
-        return;
-
-    if (banshee->vidProcCfg & VIDPROCCFG_HALF_MODE)
-        addr = banshee->desktop_addr + ((banshee->desktop_y >> 1) & 31) * 128 + ((banshee->desktop_y >> 6) * banshee->desktop_stride_tiled);
-    else
-        addr = banshee->desktop_addr + (banshee->desktop_y & 31) * 128 + ((banshee->desktop_y >> 5) * banshee->desktop_stride_tiled);
-
-    if (addr >= svga->vram_max)
+    if (!banshee_tiled_addr(svga, banshee->desktop_y, &addr))
         return;
 
     for (int x = 0; x < svga->hdisp; x += 64) {
@@ -3415,6 +3468,9 @@ banshee_init_common(const device_t *info, const char *fn, const int has_sgram,
               banshee_hwcursor_draw,
               banshee_overlay_draw);
     banshee->svga.vsync_callback = banshee_vsync_callback;
+    banshee->svga.defer_fn       = banshee_render_16bpp_tiled;   /* vmdos: its lines drawn later (vid_svga.c) */
+    banshee->svga.defer_line     = banshee_defer_line;
+    banshee->svga.defer_render   = banshee_render_16bpp_tiled_at;
 
     mem_mapping_add(&banshee->linear_mapping, 0, 0, banshee_read_linear,
                     banshee_read_linear_w,
