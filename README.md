@@ -321,7 +321,15 @@ modes, over ten times faster than the C loop) when vmdos has SSE on and
 the CPU has SSE2; the few modes it doesn't draw as the C loop does go to
 the C loop, and `v3nojit` sends everything there. `tests/voodoo` has the
 tests (`emutest` for the MMX/SSE emulation; `hosttest random jitcmp`
-compares the JIT with the C loop).
+compares the JIT with the C loop; `hosttest random mp=4` draws with four
+threads standing in for render helper CPUs).
+
+With render helper CPUs (below), the triangles are drawn on them instead:
+one helper draws them all, two or three split each triangle's scan lines
+between two, four between four. The boot CPU then only sets triangles up,
+so in VMHV a frame no longer has to be drawn inside VM exits. The log says
+`voodoo3: triangles drawn by ...`; `v3mp=N` uses at most N helpers,
+`v3mp=0` none.
 
 With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
 BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
@@ -355,9 +363,10 @@ On a PC with more than one core, a second core (found in the ACPI MADT)
 redraws the screen and renders the sound while DOS keeps the first one, so
 neither takes time from the game (the log says `smp: ...`). Between frames
 it halts, so a still screen costs next to nothing. With more cores, up to
-three more share the drawing of each frame's changed rows with it (scaling,
+four more share the drawing of each frame's changed rows with it (scaling,
 xBRZ, writing the framebuffer), for high resolutions or slow CPUs where one
-core can't keep up; `render=N` uses at most N of them, `render=0` none.
+core can't keep up, and draw the Voodoo 3's triangles (in VMHV too);
+`render=N` uses at most N of them, `render=0` none.
 `nosmp` keeps everything on one core.
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
@@ -817,7 +826,8 @@ level (each faulting address once, up to 300; the first few with code and
 stack): a Windows program
 or driver that dies quietly shows there.
 
-While VMHV runs, the second CPU (otherwise halted) is a watchdog: if
+While VMHV runs, the second CPU (otherwise halted; the render helpers go
+on drawing the Voodoo's triangles) is a watchdog: if
 vmdos's own timer tick stops for 3 s (vmdos stuck with its interrupts
 off: no screen, sound or keyboard, so Ctrl+Shift+F10 can't help), it sends
 the first CPU an NMI, and vmdos stops with the red screen and logs where it

@@ -8,7 +8,9 @@ one 86Box no longer builds, with vmdos's changes marked "vmdos" (no
 jump to the skip instead of a bare RET, as the x86-64 one does;
 params->aux_tiled; voodoo_jit_can sends the modes it doesn't draw as the C
 loop does to the C loop, found by tests/voodoo/hosttest random jitcmp;
-a block overflow is fatal). vid_voodoo_render.h and vid_voodoo_render.c
+a block overflow is fatal; its constant SSE tables set once in
+voodoo_codegen_init, not at every block, as render helper CPUs run blocks
+while another is made). vid_voodoo_render.h and vid_voodoo_render.c
 take it on i386 with V3_CODEGEN. Changes: 86box/vid_voodoo_common.h's TEX_CACHE_MAX is #ifndef'd
 so the Makefile can make it smaller; 86box/timer.h's int128 functions are
 under #ifdef __SIZEOF_INT128__ (not in 32-bit gcc). The other 86box/*.h,

@@ -9,7 +9,9 @@
    by the kernel, or the timer tick. v3_run lets the green threads run
    until none can go on; a main-thread wait runs them until what it waits
    for has happened. Nothing is ever preempted, so 86Box's locking works
-   as written and needs no atomics.
+   as written and needs no atomics. But for this: with render helper CPUs
+   (v3.c v3_mp_start) the triangles are drawn there, and the green render
+   threads only wake them; the ring between is 86Box's, made for threads.
 
    Timers (the FIFO thread's wake-up delay) count PIT clocks; due ones fire
    in v3_poll, from the tick and from every access to the card. */
@@ -151,8 +153,12 @@ void v3_run_for(uint32_t us)
 /* ---------------- events ---------------- */
 event_t *thread_create_event(void) { return calloc(1, sizeof(event_t)); }
 void thread_destroy_event(event_t *e) { (void)e; }
-void thread_set_event(event_t *e) { e->set = 1; }
-void thread_reset_event(event_t *e) { e->set = 0; }
+/* A render helper CPU (v3.c) sets render_not_full_event while a green
+   thread here resets it and then reads the ring's indices: the reset is
+   fenced (XCHG) so it can't land after the helper's set, which follows its
+   read_idx store, and a wake-up is never lost. */
+void thread_set_event(event_t *e) { __atomic_store_n(&e->set, 1, __ATOMIC_RELEASE); }
+void thread_reset_event(event_t *e) { __atomic_store_n(&e->set, 0, __ATOMIC_SEQ_CST); }
 
 static int ev_set(void *p) { return ((event_t *)p)->set; }
 /* A wait on an event that is set already still lets the others run (a

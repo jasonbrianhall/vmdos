@@ -7,7 +7,8 @@
    both instead, in a loop that follows the timer ticks; the boot CPU keeps
    DOS, the devices, USB, the network and the disks. When VMHV starts, the
    helper is parked for good (smp_park): VMHV runs on the boot CPU alone,
-   as without one (DOOM crashed in VMHV with the helper running).
+   as without one (DOOM crashed in VMHV with the helper running), but for
+   the Voodoo's triangles on the render helpers.
 
    Between ticks the helper halts, and the boot CPU's timer tick wakes it
    with an IPI (vector 30h, smp_tick) when it is halted: MONITOR/MWAIT on
@@ -15,12 +16,15 @@
    the core at 100% even when there is nothing to draw. Without a local
    APIC it can take that on, it waits as before.
 
-   With more CPUs, up to three more start as render helpers (render=N:
+   With more CPUs, up to four more start as render helpers (render=N:
    at most N; render=0: none). They take no part but this: when the
    helper's redraw has rows to scale and write out (par_for), they take
    chunks of them alongside it, so a frame that one CPU can't draw in
-   time at 1080p or with xBRZ is split. Between those they halt, woken by
-   the helper's IPI; a still screen never wakes them.
+   time at 1080p or with xBRZ is split. And with voodoo3, the Voodoo's
+   triangles (smp_render_take: v3.c's render threads, one a helper), in
+   VMHV too, where the helper is parked but they go on. Between those
+   they halt, woken by the helper's IPI or the boot CPU's (a triangle
+   queued); a still screen and an idle card never wake them.
 
    The helper is found in the ACPI MADT (the RSDP from vmdos.efi, rsdp= on
    the command line, or the BIOS areas) and started with INIT-SIPI-SIPI
@@ -77,6 +81,10 @@ static volatile u32 cpu_wakes[2 + MAX_RENDER];  /* wake-up IPIs taken, by smp_cp
 static volatile int rh_fault;                  /* one faulted: par_for draws alone from then on */
 static volatile u32 rh_fault_vec, rh_fault_eip;
 static void render_main(int i);
+static int (*rh_task)(int k, int run);         /* other work: the Voodoo's triangles (v3.c), k its render thread */
+static volatile int rh_task_k[MAX_RENDER] = { [0 ... MAX_RENDER - 1] = -1 };   /* render helper i's k, -1 none */
+static int task_rh[MAX_RENDER];                /* k's render helper */
+extern int host_osfxsr;                        /* cpu.c: SSE on */
 
 struct rlock video_lock, sound_lock, log_lock;
 
@@ -438,10 +446,22 @@ int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
     return 0;
 }
 
-/* A render helper: its wake-up test, then jobs. Between jobs it spins a
-   little (a frame's jobs come close together) and then halts. */
+/* Render helper i's other work: is there any (the Voodoo's ring not empty). */
+static int task_pending(int i)
+{
+    int k = rh_task_k[i];
+    return k >= 0 && rh_task && rh_task(k, 0);
+}
+
+/* A render helper: its wake-up test, then jobs and tasks. Between them it
+   spins a little (a frame's jobs, a game's triangles, come close
+   together) and then halts. A task is drawn to its end (its ring empty);
+   a par_for meanwhile is done by the helper, who never waits for a chunk
+   nobody took. */
 static void render_main(int i)
 {
+    __asm__ volatile("fninit" ::: "memory");   /* the Voodoo's code uses the x87, and SSE in its JIT */
+    if (host_osfxsr) { u32 mx = 0x1F80; __asm__ volatile("ldmxcsr %0" :: "m"(mx)); }
     int ready = ap_wake_setup();
     rh_alive[i] = 1;
     if (ready) {
@@ -454,20 +474,59 @@ static void render_main(int i)
     if (!rh_ok[i]) for (;;) __asm__ volatile("cli; hlt");      /* no wake-ups: it would have to poll */
     u32 seen = job_gen;
     for (;;) {
-        for (int s = 0; s < 4000 && job_gen == seen; s++) __asm__ volatile("pause");
-        while (job_gen == seen) {
-            __atomic_exchange_n(&rh_sleeping[i], 1, __ATOMIC_SEQ_CST);  /* XCHG: fenced before job_gen is read */
-            if (job_gen == seen) __asm__ volatile("sti; hlt; cli" ::: "memory");
+        for (int s = 0; s < 4000 && job_gen == seen && !task_pending(i); s++) __asm__ volatile("pause");
+        while (job_gen == seen && !task_pending(i)) {
+            __atomic_exchange_n(&rh_sleeping[i], 1, __ATOMIC_SEQ_CST);  /* XCHG: fenced before job_gen and the ring are read */
+            if (job_gen == seen && !task_pending(i)) __asm__ volatile("sti; hlt; cli" ::: "memory");
             rh_sleeping[i] = 0;
         }
-        seen = job_gen;
-        xadd(&job_active, 1);
-        if (job_gen == seen) {
-            __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");   /* the helper's page table changes */
-            run_chunks();
+        if (job_gen != seen) {
+            seen = job_gen;
+            xadd(&job_active, 1);
+            if (job_gen == seen) {
+                __asm__ volatile("mov %%cr3,%%eax; mov %%eax,%%cr3" ::: "eax", "memory");   /* the helper's page table changes */
+                run_chunks();
+            }
+            xadd(&job_active, (u32)-1);
         }
-        xadd(&job_active, (u32)-1);
+        if (task_pending(i)) rh_task(rh_task_k[i], 1);
     }
+}
+
+/* Render helpers that take wake-ups, for smp_render_take. */
+int smp_render_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < n_render; i++) n += rh_ok[i] != 0;
+    return n;
+}
+
+/* fn's work 0..n-1 (fn(k, 0): is there any for k; fn(k, 1): do it), one
+   each on n render helpers. Before DOS starts. The number taken. */
+int smp_render_take(int n, int (*fn)(int k, int run))
+{
+    int k = 0;
+    for (int i = 0; i < n_render && k < n; i++)
+        if (rh_ok[i]) { task_rh[k] = i; rh_task_k[i] = k++; }
+    __atomic_store_n(&rh_task, fn, __ATOMIC_RELEASE);
+    for (int j = 0; j < k; j++) smp_render_kick(j);   /* look again with the task there */
+    return k;
+}
+
+/* Boot CPU, work for k queued: wake its render helper if it's halted. 0:
+   it faulted, do the work yourself. The IPI with interrupts off: the timer
+   tick's (smp_tick) mustn't come between the ICR's two writes. */
+int smp_render_kick(int k)
+{
+    int i = task_rh[k];
+    if (!rh_ok[i]) return 0;
+    __asm__ volatile("lock orl $0,(%%esp)" ::: "memory");             /* the ring's write_idx out before rh_sleeping is read */
+    if (rh_sleeping[i]) {
+        u32 fl = irq_save();
+        apic_ipi(rh_apic[i], 0x00004000 | AP_WAKE_VEC);
+        irq_restore(fl);
+    }
+    return 1;
 }
 
 static void udelay(u32 us) { kdelay_us(us); }   /* TSC-timed, interrupts off or on */
@@ -648,10 +707,11 @@ void smp_start(u32 tramp)
         rendering += rh_ok[i] != 0;
     }
     memcpy(page, saved, 4096);
-    static const char *const more[] = { "", ", 1 more draws with it", ", 2 more draw with it", ", 3 more draw with it" };
+    static const char *const more[] = { "", ", 1 more draws with it", ", 2 more draw with it", ", 3 more draw with it",
+                                        ", 4 more draw with it" };
     kprintf("smp: %d CPUs; CPU with APIC ID %u does the screen and the sound%s%s%s\n", ncpu, id,
             x2apic ? " (x2APIC)" : "", ap_hlt_ok ? "" : has_mwait ? ", waits with MWAIT" : ", waits by polling",
-            more[rendering < 4 ? rendering : 3]);
+            more[rendering < MAX_RENDER ? rendering : MAX_RENDER]);
 }
 
 /* VMHV's watchdog, on the parked helper: when the boot CPU's tick stops
@@ -684,7 +744,8 @@ void smp_park(void)
     __atomic_store_n(&ap_park, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&smp_active, 0, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&ap_busy, __ATOMIC_SEQ_CST) && ap_alive) __asm__ volatile("pause");
-    kprintf("smp: VMHV runs on one CPU; the helper is the watchdog%s\n", strstr(cmdline, "nowatchdog") ? " (off: nowatchdog)" : "");
+    kprintf("smp: VMHV runs on one CPU%s; the helper is the watchdog%s\n",
+            rh_task ? " (the Voodoo's triangles on the render helpers)" : "", strstr(cmdline, "nowatchdog") ? " (off: nowatchdog)" : "");
 }
 
 /* From kmain, last thing before DOS: the helper takes over. */
