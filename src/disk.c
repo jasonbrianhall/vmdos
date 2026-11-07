@@ -79,27 +79,41 @@ static int probe_rd(u32 lba, u32 n, void *buf)
    contiguous, when the run is full, 50 ms after it started (timer tick),
    on INT 13h reset, before a restart and when vmdos stops.
 
-   The read cache can be big (GiBs): once a game or a program has been
-   read it comes from RAM after that. Lines are found through a hash
-   table and kept in least-recently-used order on a list, so a lookup
-   costs the same at 8 MiB as at 2 GiB; the RAM is taken in 4 MiB
-   pieces, so it needn't be in one stretch. A read bigger than an eighth
-   of the cache goes straight to the disk (it would only push everything
-   else out). diskcache=MB sizes it (0: off, at most 3072); by default a
-   quarter of the free RAM below 4 GiB, at most 1 GiB, taken before XMS,
-   EMS and DPMI size themselves from what's left. */
+   The read cache is big: by default the whole partition, as far as the
+   RAM below 4 GiB goes (diskcache=MB caps it, 0: off, at most 3072). The
+   RAM is only lent to it: taken in 4 MiB pieces from the top of the heap,
+   and when anything else can't get memory (XMS, EMS, DPMI, VMHV's
+   machine) pieces go back, lowest first, so the free memory below grows
+   in one stretch. XMS and the rest count the cache's RAM as free, so they
+   are as big as without it. Lines are found through a hash table and kept
+   in least-recently-used order on a list: a lookup costs the same at any
+   size. A read bigger than an eighth of the cache goes straight to the
+   disk (it would only push everything else out).
+
+   Preloading: the partition's used clusters (by its FAT; with FAT12 all
+   of it), in disk order, into lines nothing has used yet, so a game plays
+   from RAM instead of stopping for the disk. By default one line (32 KiB)
+   each time the guest idles (HLT: DOS, Windows, VMHV), so nothing that
+   runs waits for it; diskpreload=boot reads it all before DOS starts (Esc:
+   the rest in the background), diskpreload=0 doesn't preload. It never
+   pushes out a line that was used. */
 #define LINE 64                                   /* sectors a cache line */
 #define RUN_MAX BOUNCE_SECS                       /* sectors a gathered write */
 #define CHUNK_LINES 128                           /* lines a 4 MiB piece of RAM */
+#define CHUNK_BYTES (CHUNK_LINES * LINE * 512)
 #define MAX_CHUNKS 768                            /* 3 GiB */
 #define NIL 0xFFFFFFFFu
 static struct cline { u32 lba, n, prev, next, hnext; } *lines;   /* lba NIL: empty */
-static u8 *chunk[MAX_CHUNKS];
+static u8 *chunk[MAX_CHUNKS];                     /* from the top of the heap down: chunk[n_chunks - 1] lowest */
+static u32 n_chunks;                              /* pieces still held */
 static u32 *htab, hmask;                          /* hash: line base -> first line, chained by hnext */
-static u32 n_lines, mru = NIL, lru = NIL;         /* the LRU list: mru most recent, lru the next to go */
+static u32 n_lines, live_lines, mru = NIL, lru = NIL;   /* the LRU list: mru most recent, lru the next to go */
 static u8 *run;                                   /* pending write run */
 static u32 run_lba, run_n, run_since;
-static int flushing;
+static int flushing, in_io;
+static u32 f_type, f_spc, f_fat, f_data, f_nclus; /* C:'s FAT, absolute LBAs (for preloading) */
+static int pre_mode;                              /* 0 off, 1 when idle, 2 at boot */
+static u32 pre_next, pre_lines;
 
 static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through the bounce buffer */
 {
@@ -112,7 +126,7 @@ static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through 
     return 0;
 }
 
-static u32 opt_mb(const char *key, u32 def)       /* key=N on the command line, else def */
+static u32 opt_num(const char *key, u32 def)      /* key=N on the command line, else def */
 {
     const char *o = strstr(cmdline, key);
     if (!o) return def;
@@ -136,17 +150,61 @@ static void lru_front(u32 i)
 }
 
 static u32 hslot(u32 base) { return (base / LINE * 0x9E3779B1u) & hmask; }
+static u8 *line_data(u32 i) { return chunk[i / CHUNK_LINES] + i % CHUNK_LINES * LINE * 512; }
+static u32 line_base(u32 lba) { return pstart + (lba - pstart) / LINE * LINE; }
+
+static u32 line_find(u32 base)                    /* the line holding base, NIL if none */
+{
+    if (!live_lines) return NIL;
+    for (u32 i = htab[hslot(base)]; i != NIL; i = lines[i].hnext)
+        if (lines[i].lba == base) return i;
+    return NIL;
+}
+
+static void line_drop(u32 i)                      /* out of the hash: empty */
+{
+    if (lines[i].lba == NIL) return;
+    u32 *p = &htab[hslot(lines[i].lba)];
+    while (*p != i) p = &lines[*p].hnext;
+    *p = lines[i].hnext;
+    lines[i].lba = NIL; lines[i].hnext = NIL;
+}
+
+/* The cache's RAM, for cpu.c: what it holds (it all counts as free), the
+   lowest run of pieces in one stretch, and a piece given back. */
+u32 disk_cache_bytes(void) { return n_chunks * CHUNK_BYTES; }
+u32 disk_cache_low_run(u32 *lo)
+{
+    if (!n_chunks) return 0;
+    u32 i = n_chunks - 1, len = CHUNK_BYTES;
+    while (i > 0 && chunk[i - 1] == chunk[i] + CHUNK_BYTES) { i--; len += CHUNK_BYTES; }
+    *lo = (u32)(uintptr_t)chunk[n_chunks - 1];
+    return len;
+}
+int disk_cache_give(void)
+{
+    if (!n_chunks || in_io) return 0;
+    u32 c = --n_chunks;
+    for (u32 i = c * CHUNK_LINES; i < (c + 1) * CHUNK_LINES; i++) {
+        line_drop(i);
+        lru_unlink(i);
+        lines[i].n = 0;
+    }
+    live_lines -= CHUNK_LINES;
+    phys_release(chunk[c], CHUNK_BYTES);
+    return 1;
+}
 
 static void cache_init(void)
 {
-    u32 free_mb = phys_free() >> 20, reserve_mb = (HEAP_RESERVE >> 20) + 64;   /* left for the kernel and XMS/EMS/DPMI */
+    u32 free_mb = phys_free() >> 20, reserve_mb = (HEAP_RESERVE >> 20) + 64;   /* left for the kernel and the rest */
     u32 room = free_mb > reserve_mb ? free_mb - reserve_mb : 0;
-    u32 mb = opt_mb("diskcache=", free_mb / 4 > 1024 ? 1024 : free_mb / 4);
+    u32 mb = opt_num("diskcache=", (psize >> 11) + 1);
     if (mb > 3072) mb = 3072;
     if (mb > room) mb = room;
     run = phys_try_alloc(RUN_MAX * 512);
-    u32 want = mb * 32 / CHUNK_LINES * CHUNK_LINES;  /* 32 KiB lines, whole pieces */
-    if (!want && mb) want = CHUNK_LINES;            /* at least one piece when asked for any */
+    u32 want = (mb * 32 + CHUNK_LINES - 1) / CHUNK_LINES * CHUNK_LINES;   /* 32 KiB lines, whole pieces */
+    if (want > MAX_CHUNKS * CHUNK_LINES) want = MAX_CHUNKS * CHUNK_LINES;
     if (want) {
         u32 hn = 1;
         while (hn < want) hn <<= 1;
@@ -154,14 +212,17 @@ static void cache_init(void)
         htab = phys_try_alloc(hn * sizeof *htab);
         if (lines && htab) {
             hmask = hn - 1;
-            u32 nc = 0;
-            while (nc < want / CHUNK_LINES && nc < MAX_CHUNKS && (chunk[nc] = phys_try_alloc(CHUNK_LINES * LINE * 512))) nc++;
-            n_lines = nc * CHUNK_LINES;
+            while (n_chunks < want / CHUNK_LINES && (chunk[n_chunks] = phys_take_top(CHUNK_BYTES))) n_chunks++;
+            n_lines = live_lines = n_chunks * CHUNK_LINES;
             memset(htab, 0xFF, hn * sizeof *htab);
             for (u32 i = 0; i < n_lines; i++) { lines[i].lba = NIL; lines[i].hnext = NIL; lru_front(i); }
         }
     }
-    kprintf("disk: cache %u MiB%s\n", n_lines / 32, run ? ", writes gathered" : "");
+    const char *pm = strstr(cmdline, "diskpreload=");
+    pre_mode = !live_lines ? 0 : !pm ? 1 : pm[12] == 'b' ? 2 : pm[12] == '0' ? 0 : 1;
+    pre_next = pstart;
+    kprintf("disk: cache %u MiB (lent: given back when needed)%s%s\n", live_lines / 32, run ? ", writes gathered" : "",
+            pre_mode == 2 ? ", preloading now" : pre_mode ? ", preloading when idle" : "");
 }
 
 /* Put the pending run on the disk. */
@@ -185,23 +246,17 @@ static void overlay_run(u32 lba, u32 n, u8 *buf)
     memcpy(buf + (a - lba) * 512, run + (a - run_lba) * 512, (b - a) * 512);
 }
 
-static u8 *line_data(u32 i) { return chunk[i / CHUNK_LINES] + i % CHUNK_LINES * LINE * 512; }
-static u32 line_base(u32 lba) { return pstart + (lba - pstart) / LINE * LINE; }
-
-static u32 line_find(u32 base)                    /* the line holding base, NIL if none */
+static int line_fill(u32 i, u32 base)            /* line i (out of the hash) gets base's sectors, in front */
 {
-    for (u32 i = htab[hslot(base)]; i != NIL; i = lines[i].hnext)
-        if (lines[i].lba == base) return i;
-    return NIL;
-}
-
-static void line_drop(u32 i)                      /* out of the hash: empty */
-{
-    if (lines[i].lba == NIL) return;
-    u32 *p = &htab[hslot(lines[i].lba)];
-    while (*p != i) p = &lines[*p].hnext;
-    *p = lines[i].hnext;
-    lines[i].lba = NIL; lines[i].hnext = NIL;
+    line_drop(i);
+    lru_unlink(i); lru_front(i);
+    u32 n = disk_sectors - base < LINE ? disk_sectors - base : LINE;
+    if (dev_io(base, n, line_data(i), 0)) return -1;
+    overlay_run(base, n, line_data(i));          /* the disk doesn't have those yet */
+    lines[i].lba = base; lines[i].n = n;
+    u32 h = hslot(base);
+    lines[i].hnext = htab[h]; htab[h] = i;
+    return 0;
 }
 
 static int line_get(u32 base, u32 *out)          /* the line holding base, loaded if need be */
@@ -213,22 +268,77 @@ static int line_get(u32 base, u32 *out)          /* the line holding base, loade
         return 0;
     }
     i = lru;                                     /* the least recently used (empty ones are there too) */
-    line_drop(i);
-    lru_unlink(i); lru_front(i);
-    u32 n = disk_sectors - base < LINE ? disk_sectors - base : LINE;
-    if (dev_io(base, n, line_data(i), 0)) return -1;
-    overlay_run(base, n, line_data(i));          /* the disk doesn't have those yet */
-    lines[i].lba = base; lines[i].n = n;
-    u32 h = hslot(base);
-    lines[i].hnext = htab[h]; htab[h] = i;
     *out = i;
+    return line_fill(i, base);
+}
+
+/* ---- preloading ---- */
+/* Does the line at base hold anything (by C:'s FAT, as far as the cache has
+   it: a FAT sector not cached yet counts as "yes")? */
+static int line_used(u32 base)
+{
+    if (base < f_data || (f_type != 16 && f_type != 32)) return 1;
+    u32 c0 = (base - f_data) / f_spc + 2, c1 = (base + LINE - 1 - f_data) / f_spc + 2;
+    if (c1 > f_nclus + 1) c1 = f_nclus + 1;
+    for (u32 c = c0; c <= c1; c++) {
+        u32 off = c * (f_type / 8), sec = f_fat + off / 512, lb = line_base(sec), li = line_find(lb);
+        if (li == NIL || sec - lb >= lines[li].n) return 1;
+        u8 *e = line_data(li) + (sec - lb) * 512 + off % 512;
+        if (f_type == 16 ? *(u16 *)e != 0 : (*(u32 *)e & 0x0FFFFFFF) != 0) return 1;
+    }
     return 0;
+}
+
+/* One more line in: 1 if it read one, 0 when it's done (or the cache is full). */
+static int preload_step(void)
+{
+    while (pre_next < disk_sectors) {
+        u32 base = pre_next;
+        pre_next += LINE;
+        if (line_find(base) != NIL || !line_used(base)) continue;
+        if (lru == NIL || lines[lru].lba != NIL) break;           /* no line nothing has used: done */
+        if (line_fill(lru, base)) break;
+        pre_lines++;
+        return 1;
+    }
+    if (pre_mode) kprintf("disk: preloaded %u MiB of C:%s\n", pre_lines / 32, pre_next < disk_sectors ? " (the cache is full)" : "");
+    pre_mode = 0;
+    return 0;
+}
+
+/* The guest idles (cpu.c's idle_wait, interrupts off): a line of preloading. */
+void disk_idle(void)
+{
+    if (pre_mode && !in_io && !flushing && live_lines) preload_step();
+}
+
+static int esc_pressed(void)                     /* interrupts are off: PS/2 polled, USB through usb_tick */
+{
+    u8 st = inb(0x64);
+    if (st & 1) { u8 b = inb(0x60); if (!(st & 0x20)) vkbd_real_scancode(b); }
+    usb_tick();
+    int k, esc = 0;
+    while ((k = vkbd_take()) >= 0) if (k == 0x01) esc = 1;
+    return esc;
+}
+
+/* diskpreload=boot: all of it now, with the progress on the boot log. */
+static void preload_boot(void)
+{
+    u32 shown = ~0u, span = disk_sectors - pstart;
+    while (pre_mode == 2) {
+        u32 pct = (u32)((u64)(pre_next - pstart) * 100 / span);
+        if (pct / 5 != shown) { shown = pct / 5; kprintf("\rdisk: preloading C: %u%% (%u MiB), Esc: the rest in the background ", pct, pre_lines / 32); }
+        if (!preload_step()) break;
+        if ((pre_lines & 15) == 0 && esc_pressed()) { pre_mode = 1; kprintf("\n"); return; }
+    }
+    kprintf("\n");
 }
 
 /* Every cached line overlapping [lba, lba + n): copy from it (to_cache 0) or into it (1). */
 static void lines_overlap(u32 lba, u32 n, u8 *buf, int to_cache)
 {
-    if (!n_lines) return;
+    if (!live_lines) return;
     for (u32 base = line_base(lba); base < lba + n; base += LINE) {
         u32 i = line_find(base);
         if (i == NIL) continue;
@@ -242,7 +352,7 @@ static void lines_overlap(u32 lba, u32 n, u8 *buf, int to_cache)
 /* The partition's sectors, through the cache. */
 static int part_read(u32 lba, u32 n, u8 *d)
 {
-    if (!n_lines || n > n_lines * LINE / 8) {     /* huge reads straight from the disk (they'd only evict) */
+    if (!live_lines || n > live_lines * LINE / 8) {     /* huge reads straight from the disk (they'd only evict) */
         if (dev_io(lba, n, d, 0)) return -1;
         overlay_run(lba, n, d);
         lines_overlap(lba, n, d, 0);              /* cached lines may be newer than the disk */
@@ -292,8 +402,10 @@ int disk_read(u32 lba, u32 n, void *buf)
         }
         lba += k; n -= k; d += k * 512;
     }
-    if (n && part_read(lba, n, d)) return 0x20;
-    return 0;
+    in_io = 1;
+    int e = n && part_read(lba, n, d);
+    in_io = 0;
+    return e ? 0x20 : 0;
 }
 
 int disk_write(u32 lba, u32 n, const void *buf)
@@ -314,7 +426,10 @@ int disk_write(u32 lba, u32 n, const void *buf)
         lba += k; n -= k; s += k * 512;
         if (!n) return 0;
     }
-    return part_write(lba, n, s) ? 0x20 : 0;
+    in_io = 1;
+    int e = part_write(lba, n, s);
+    in_io = 0;
+    return e ? 0x20 : 0;
 }
 
 /* The FAT partition DOS boots from, through the same view (for cd.c / bios.c). */
@@ -406,7 +521,9 @@ static void use(int d, u32 start, u32 size)
     vmbr[510] = 0x55; vmbr[511] = 0xAA;
     kprintf("disk: C: is FAT%d partition at LBA %u (%u MiB) on %s disk %d (%s)\n",
             v.type, start, size >> 11, dev_kind(d), dev[d].idx, dev[d].name);
+    f_type = (u32)v.type; f_spc = v.spc; f_fat = start + v.fat_start; f_data = start + v.data_start; f_nclus = v.nclus;
     cache_init();
+    if (pre_mode == 2) preload_boot();
 }
 
 static int scan(int d, u32 *bs, u32 *bz, const char **os)

@@ -127,6 +127,7 @@ u32 phys_free(void);                          /* bytes left in the heap */
 void *phys_try_alloc(u32 bytes);              /* like phys_alloc, NULL when out */
 void phys_release(void *p, u32 bytes);        /* give back (what phys_alloc gave, or a part) */
 u32 phys_largest(void);                       /* the biggest piece phys_alloc could give */
+void *phys_take_top(u32 bytes);               /* from the top of the heap, not cleared (the disk cache) */
 #define HEAP_RESERVE (4u << 20)                /* kept for the kernel: EMS, XMS, DPMI stop short of it */
 u32 phys_spare(void);                         /* phys_free less HEAP_RESERVE */
 u32 ram_top_addr(void);                       /* the end of RAM below 4 GiB */
@@ -215,6 +216,10 @@ int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
 void disk_flush(void);                        /* gathered writes out to the disk */
 void disk_tick(void);                         /* timer: flush writes older than 50 ms */
+void disk_idle(void);                         /* the guest idles: preload a line of C: */
+u32 disk_cache_bytes(void);                   /* RAM lent to the C: cache (cpu.c counts it as free) */
+u32 disk_cache_low_run(u32 *lo);              /* its lowest run of pieces in one stretch: bytes, start */
+int disk_cache_give(void);                    /* a piece of it back to the heap; 0: none left */
 const char *disk_kind(void);
 int disk_dev_count(void);                      /* every real disk, for hd.c */
 u64 disk_dev_sectors(int d);
