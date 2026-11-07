@@ -647,6 +647,8 @@ static void perf_report(void)
     }
     kprintf("%s\n", b);
     hv_perf_print(total, pct);
+    void v3_perf_print(void);
+    v3_perf_print();
     u64 parts = 0;
     for (int i = 0; i < PT_OTHER; i++) parts += pt_tsc[i];
     pt_tsc[PT_OTHER] = pf_tsc[PF_IRQ0] > parts ? pf_tsc[PF_IRQ0] - parts : 0;

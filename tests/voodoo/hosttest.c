@@ -64,6 +64,8 @@ uint32_t tsc_khz(void) { return slice ? 1000000 : 0; }   /* threads stop and go 
                                                           /* TSC rate: the card's clock is pit_clock */
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
+int perf_on;                                   /* lib.c's: v3.c's access counts ("perf") */
+
 /* smp.c's render helpers, as threads ("mp=N") */
 static int mp_cpus, mp_fault;
 static int (*mp_fn)(int, int);
