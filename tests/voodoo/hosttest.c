@@ -439,6 +439,14 @@ int main(int argc, char **argv)
     bad += !check("FIFO from its base again: red", 100, 100, 0xFF0000);
 
     if (getenv("RSEED")) rnd_state = strtoul(getenv("RSEED"), 0, 0);
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "fillbench")) {   /* 4 MB into the frame buffer a dword at a time, */
+        struct timespec t0, t1;                                            /* as a trapped fill (a mode switch's clear) */
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (u32 a = 0; a < (4u << 20); a += 4) v3_mmio_write(BAR1 + (8u << 20) + a, 0x12345678, 4);
+        v3_settle();
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("fillbench: 4 MB a dword at a time: %.0f ms\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+    }
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "random")) { random_tris(getenv("RCOUNT") ? atoi(getenv("RCOUNT")) : 400); grab(); }
     if (getenv("SHOTSUM")) {                   /* the same memory as a tiled desktop (128x32-byte tiles), and half mode */
         io(0xe8, (STRIDE / 128) | (STRIDE / 128) << 16);

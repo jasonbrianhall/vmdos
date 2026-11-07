@@ -1030,7 +1030,11 @@ static void vga_write_planes(u8 v, u8 *base, u32 stride)
 int vga16_fault(struct emu_cpu *e, u32 cr2)
 {
     if (!vga16_window(cr2) && !v3_window(cr2)) return 0;   /* the Voodoo 3's BARs (voodoo3.h) the same way */
-    if (mem_emulate(e)) { if (hv_active || v3_window(cr2)) mem_emulate_more(e); return 1; }
+    if (mem_emulate(e)) {
+        if (hv_active || v3_window(cr2)) mem_emulate_more(e);
+        if (v3_on) v3_settle();               /* the card catches up once, after the batch (voodoo/v3.c) */
+        return 1;
+    }
     /* The instruction's bytes for the log, read the way the guest sees
        them: under the hypervisor a is the guest's linear address (its own
        page tables), and here the window it may sit in is the card's or

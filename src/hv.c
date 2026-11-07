@@ -786,15 +786,19 @@ static void npf_exit(void)
    Voodoo's VGA is in a text or planar mode), other memory (the cards'
    registers), the VGA's ports, other ports, the BIOS (INT 13h and the
    rest, through HLT and #GP), the rest. */
-enum { HX_VGAMEM, HX_MMIO, HX_VGAIO, HX_IO, HX_BIOS, HX_OTHER, HX_N };
-static const char *const hx_name[HX_N] = { "VGA memory", "other memory (card registers)", "VGA ports", "other ports",
+enum { HX_VGAMEM, HX_FB, HX_MMIO, HX_VGAIO, HX_IO, HX_BIOS, HX_OTHER, HX_N };
+static const char *const hx_name[HX_N] = { "VGA memory", "Voodoo frame buffer", "card registers", "VGA ports", "other ports",
                                            "BIOS (INT 13h ...)", "other" };
+int v3_is_fb(u32 phys);
 static u64 hx_tsc[HX_N];
 static u32 hx_cnt[HX_N];
 static void hx_account(u32 code, u64 t)
 {
     int k = HX_OTHER;
-    if (code == X_NPF) k = (u32)V64(C_INFO2) - 0xA0000 < 0x20000 ? HX_VGAMEM : HX_MMIO;
+    if (code == X_NPF) {
+        u32 gpa = (u32)V64(C_INFO2);
+        k = gpa - 0xA0000 < 0x20000 ? HX_VGAMEM : v3_is_fb(gpa) ? HX_FB : HX_MMIO;
+    }
     else if (code == X_IOIO) { u32 port = (u32)(V64(C_INFO1) >> 16) & 0xFFFF; k = port - 0x3B0 < 0x30 ? HX_VGAIO : HX_IO; }
     else if (code == X_HLT || code == X_EXC(13)) k = HX_BIOS;
     else if (code == X_INTR || code == X_VINTR) return;           /* the host's interrupts: the ISR counts them */

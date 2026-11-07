@@ -671,9 +671,40 @@ static void trace(u32 phys, u32 val, int size, int wr)
     tr_off = off; tr_val = val; tr_size = size; tr_wr = wr; tr_n = 1;
 }
 
+/* The frame buffer (BAR1) and the VGA's window: memory, read and written
+   without the card's timers or FIFO, as a Banshee's linear frame buffer is
+   (a driver waits for idle itself). A fill or copy through trapped pages
+   (the tiled part above tile_base, the VGA's text and planar modes) comes
+   a dword at a time, millions at a mode switch: the card's catch-up (its
+   timers, FIFO, threads, up to 2 ms) once, after the batch the emulator
+   runs (v3_settle, video.c vga16_fault), the next register access or the
+   next tick; not after each one. */
+static int mem_owed;
+static int is_mem(u32 phys)
+{
+    return legacy(phys) || phys - bar1_lin < (32u << 20) || (cur_bar1 && phys - cur_bar1 < (32u << 20));
+}
+int v3_is_fb(u32 phys) { return v3_on && is_mem(phys) && !legacy(phys); }   /* hv.c's perf: the frame buffer, not registers */
+void v3_settle(void)
+{
+    if (!mem_owed) return;
+    mem_owed = 0;
+    v3_enter();
+    catch_up();
+    v3_leave();
+}
+
 u32 v3_mmio_read(u32 phys, int size)
 {
+    if (is_mem(phys)) {
+        v3_enter();
+        u32 v = map_read(phys, size);
+        v3_leave();
+        mem_owed = 1;
+        return v;
+    }
     v3_enter();
+    mem_owed = 0;
     catch_up();
     u32 v = map_read(phys, size);
     trace(phys, v, size, 0);
@@ -688,7 +719,8 @@ void v3_mmio_write(u32 phys, u32 val, int size)
     for (int i = 0; i < 2; i++)                /* a FIFO's base written through the trap (unmapped yet, v3trap's */
         if (fv[i].on && phys - v3_card_bar(card, 1) == *fv[i].base) fv[i].base_free = 0;   /* tests): counted already */
     map_write(phys, val, size);
-    catch_up();
+    if (is_mem(phys)) mem_owed = 1;
+    else { mem_owed = 0; catch_up(); }
     v3_leave();
 }
 
