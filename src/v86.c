@@ -635,6 +635,9 @@ static void perf_report(void)
     since = now;
     char b[400]; int n = 0;
     for (int i = 0; i < PF_N; i++) mon += pf_tsc[i];
+    u64 hv_perf_total(void);
+    void hv_perf_print(u64 total, u32 (*pct)(u64, u64));
+    mon += hv_perf_total();                   /* VMHV: its exits are vmdos's time too */
     u32 g = pct(total - (mon < total ? mon : total), total);
     n += snprintf(b + n, sizeof b - n, "perf: guest %u.%u%%", g / 10, g % 10);
     for (int i = 0; i < PF_N; i++) {
@@ -643,6 +646,7 @@ static void perf_report(void)
         n += snprintf(b + n, sizeof b - n, ", %s %u.%u%% (%u/s)", pf_name[i], p / 10, p % 10, pf_cnt[i] / 5);
     }
     kprintf("%s\n", b);
+    hv_perf_print(total, pct);
     u64 parts = 0;
     for (int i = 0; i < PT_OTHER; i++) parts += pt_tsc[i];
     pt_tsc[PT_OTHER] = pf_tsc[PF_IRQ0] > parts ? pf_tsc[PF_IRQ0] - parts : 0;

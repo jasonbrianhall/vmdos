@@ -778,6 +778,48 @@ static void npf_exit(void)
             (V32(C_INFO1) & 2) ? "write" : "read");
 }
 
+/* ---------------- perf ----------------
+   VM exits are vmdos's time, not the guest's: what kind, how long, for
+   perf_report (v86.c). The VGA's memory (A0000h-BFFFFh, trapped when the
+   Voodoo's VGA is in a text or planar mode), other memory (the cards'
+   registers), the VGA's ports, other ports, the BIOS (INT 13h and the
+   rest, through HLT and #GP), the rest. */
+enum { HX_VGAMEM, HX_MMIO, HX_VGAIO, HX_IO, HX_BIOS, HX_OTHER, HX_N };
+static const char *const hx_name[HX_N] = { "VGA memory", "other memory (card registers)", "VGA ports", "other ports",
+                                           "BIOS (INT 13h ...)", "other" };
+static u64 hx_tsc[HX_N];
+static u32 hx_cnt[HX_N];
+static void hx_account(u32 code, u64 t)
+{
+    int k = HX_OTHER;
+    if (code == X_NPF) k = (u32)V64(C_INFO2) - 0xA0000 < 0x20000 ? HX_VGAMEM : HX_MMIO;
+    else if (code == X_IOIO) { u32 port = (u32)(V64(C_INFO1) >> 16) & 0xFFFF; k = port - 0x3B0 < 0x30 ? HX_VGAIO : HX_IO; }
+    else if (code == X_HLT || code == X_EXC(13)) k = HX_BIOS;
+    else if (code == X_INTR || code == X_VINTR) return;           /* the host's interrupts: the ISR counts them */
+    hx_tsc[k] += t; hx_cnt[k]++;
+}
+u64 hv_perf_total(void)
+{
+    u64 t = 0;
+    for (int i = 0; i < HX_N; i++) t += hx_tsc[i];
+    return t;
+}
+void hv_perf_print(u64 total, u32 (*pct)(u64, u64))
+{
+    u64 all = hv_perf_total();
+    if (!all) return;
+    char b[400]; int n;
+    u32 a = pct(all, total);
+    n = snprintf(b, sizeof b, "perf: VMHV exits %u.%u%%:", a / 10, a % 10);
+    for (int i = 0; i < HX_N; i++) {
+        if (!hx_cnt[i]) continue;
+        u32 p = pct(hx_tsc[i], total);
+        n += snprintf(b + n, sizeof b - n, " %s %u.%u%% (%u/s)", hx_name[i], p / 10, p % 10, hx_cnt[i] / 5);
+    }
+    kprintf("%s\n", b);
+    for (int i = 0; i < HX_N; i++) { hx_tsc[i] = 0; hx_cnt[i] = 0; }
+}
+
 /* ---------------- interrupts ---------------- */
 static u32 vintr_base = 1u << 24;                                 /* V_INTR_MASKING */
 
@@ -1084,6 +1126,7 @@ int hv_start(int key)
         if (vmx) vmx_run(vmcb, g);
         else svm_run((u32)(uintptr_t)vmcb, (u32)(uintptr_t)hvsave, g);
 
+        u64 hx_t0 = perf_on ? tsc_read() : 0;
         u64 ei = V64(C_EXITINT);                                  /* an event cut short: send it again */
         V64(C_EVENT) = (ei & EV_VALID) ? ei : 0;
         u32 code = V32(C_EXIT);
@@ -1172,6 +1215,7 @@ int hv_start(int key)
             hv_stop("unexpected exit %x (info %x %x)", code, (u32)V64(C_INFO1), (u32)V64(C_INFO2));
         }
         gview_end();
+        if (perf_on) hx_account(code, tsc_read() - hx_t0);
         __asm__ volatile("sti; nop; cli" ::: "memory");          /* the host's interrupts */
     }
 }
