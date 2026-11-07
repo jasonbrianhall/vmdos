@@ -23,6 +23,8 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
                           (default VMSHOT.BMP)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 0.05, VMSPEED 100)
+  REBOOT                Restart the machine (DOS's and SMARTDRV's buffers
+                          and vmdos's disk cache written out first)
   DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
   DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
                           when it stops, or on Ctrl+Shift+S in the log
@@ -102,7 +104,10 @@ BOOT OPTIONS
     cd=/ISOS/GAME.ISO     ISO in the CD drive at boot
     cdrives=N             Up to 4 CD drives
     fda=/DISKS/BOOT.IMG   Floppy image in A: at boot (boot=a boots it)
-    diskcache=MB          C: cache (0 turns it off)
+    diskcache=MB          C: read cache (default: the partition's size;
+                          up to 3072; 0 turns it off)
+    diskpreload=boot|0    Preload C: before DOS starts / not at all
+                          (default: while DOS or Windows idles)
     usb=off  ide=off  ehci=off  c=ram
   Trouble
     debug=1|2|3    More in the log
