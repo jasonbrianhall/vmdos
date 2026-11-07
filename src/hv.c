@@ -306,6 +306,8 @@ void hv_debug(void)
     kprintf("log: VMHV: guest at %04x:%08x (CPL %u, %s), FL %x; exits %u (io %u hlt %u gp %u npf %u intr %u), last %x i1 %x i2 %x\n",
             V16(S_CS), V32(S_RIP), V8(S_CPL), real_or_v86() ? "real/V86" : "protected", V32(S_RFLAGS),
             hx.n, hx.nio, hx.nhlt, hx.ngp, hx.npf, hx.nintr, hx.code, hx.info1, hx.info2);
+    void hv_dump_here(const char *why);
+    hv_dump_here("where the guest is");      /* its code and stack: what a loop it's stuck in is waiting for */
 }
 /* For vgalog: hex of the VM's code around CS:EIP and the top of its stack
    (what WIN386 does around a VGA access, for disassembling). */
