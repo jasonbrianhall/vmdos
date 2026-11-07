@@ -441,8 +441,12 @@ kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
 images are held in RAM as boot modules instead, one drive each, and
 `VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
 
-Disk speed: C: on a real disk is cached (8 MiB by default, `diskcache=MB` on
-the kernel command line, 0 to turn it off). Reads fetch 32 KiB at a time and
+Disk speed: C: on a real disk has a read cache that can be huge: by default
+a quarter of the RAM below 4 GiB (at most 1 GiB); `diskcache=MB` on the
+kernel command line sets it (up to 3072, 0 turns it off), so anything read
+once (a game's data files, a CD image on C:) comes from RAM after that. It
+is taken before XMS, EMS and DPMI size themselves, which get what's left
+(64 MiB at least). Reads fetch 32 KiB at a time and
 sequential writes are gathered into one disk command; gathered writes reach
 the disk within 50 ms (and before a restart), so switch off a moment after
 saving, not in the same instant.

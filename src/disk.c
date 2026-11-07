@@ -77,13 +77,26 @@ static int probe_rd(u32 lba, u32 n, void *buf)
    at once and, when sequential, are gathered into one run (up to 64 KiB)
    that goes to the disk as one command: when the next write isn't
    contiguous, when the run is full, 50 ms after it started (timer tick),
-   on INT 13h reset, before a restart and when vmdos stops. diskcache=MB
-   sizes the read cache (default 8, 0: off). */
+   on INT 13h reset, before a restart and when vmdos stops.
+
+   The read cache can be big (GiBs): once a game or a program has been
+   read it comes from RAM after that. Lines are found through a hash
+   table and kept in least-recently-used order on a list, so a lookup
+   costs the same at 8 MiB as at 2 GiB; the RAM is taken in 4 MiB
+   pieces, so it needn't be in one stretch. A read bigger than an eighth
+   of the cache goes straight to the disk (it would only push everything
+   else out). diskcache=MB sizes it (0: off, at most 3072); by default a
+   quarter of the free RAM below 4 GiB, at most 1 GiB, taken before XMS,
+   EMS and DPMI size themselves from what's left. */
 #define LINE 64                                   /* sectors a cache line */
 #define RUN_MAX BOUNCE_SECS                       /* sectors a gathered write */
-static struct cline { u32 lba, n, used; } *lines; /* lba ~0: empty */
-static u8 *cdata;
-static u32 n_lines, stamp;
+#define CHUNK_LINES 128                           /* lines a 4 MiB piece of RAM */
+#define MAX_CHUNKS 768                            /* 3 GiB */
+#define NIL 0xFFFFFFFFu
+static struct cline { u32 lba, n, prev, next, hnext; } *lines;   /* lba NIL: empty */
+static u8 *chunk[MAX_CHUNKS];
+static u32 *htab, hmask;                          /* hash: line base -> first line, chained by hnext */
+static u32 n_lines, mru = NIL, lru = NIL;         /* the LRU list: mru most recent, lru the next to go */
 static u8 *run;                                   /* pending write run */
 static u32 run_lba, run_n, run_since;
 static int flushing;
@@ -99,20 +112,54 @@ static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through 
     return 0;
 }
 
+static u32 opt_mb(const char *key, u32 def)       /* key=N on the command line, else def */
+{
+    const char *o = strstr(cmdline, key);
+    if (!o) return def;
+    u32 v = 0;
+    for (o += strlen(key); *o >= '0' && *o <= '9'; o++) v = v * 10 + (u32)(*o - '0');
+    return v;
+}
+
+static void lru_unlink(u32 i)
+{
+    struct cline *l = &lines[i];
+    if (l->prev != NIL) lines[l->prev].next = l->next; else mru = l->next;
+    if (l->next != NIL) lines[l->next].prev = l->prev; else lru = l->prev;
+}
+
+static void lru_front(u32 i)
+{
+    lines[i].prev = NIL; lines[i].next = mru;
+    if (mru != NIL) lines[mru].prev = i; else lru = i;
+    mru = i;
+}
+
+static u32 hslot(u32 base) { return (base / LINE * 0x9E3779B1u) & hmask; }
+
 static void cache_init(void)
 {
-    u32 mb = 8;
-    const char *o = strstr(cmdline, "diskcache=");
-    if (o) { mb = 0; for (o += 10; *o >= '0' && *o <= '9'; o++) mb = mb * 10 + (u32)(*o - '0'); }
-    if (mb > 64) mb = 64;
-    if (mb && mb * 2 > phys_free() >> 20) mb = phys_free() >> 21;    /* never more than half the free RAM */
+    u32 free_mb = phys_free() >> 20, reserve_mb = (HEAP_RESERVE >> 20) + 64;   /* left for the kernel and XMS/EMS/DPMI */
+    u32 room = free_mb > reserve_mb ? free_mb - reserve_mb : 0;
+    u32 mb = opt_mb("diskcache=", free_mb / 4 > 1024 ? 1024 : free_mb / 4);
+    if (mb > 3072) mb = 3072;
+    if (mb > room) mb = room;
     run = phys_try_alloc(RUN_MAX * 512);
-    n_lines = mb * 32;                                              /* 32 KiB lines */
-    if (n_lines) {
-        lines = phys_try_alloc(n_lines * sizeof *lines);
-        cdata = phys_try_alloc(n_lines * LINE * 512);
-        if (!lines || !cdata) n_lines = 0;
-        for (u32 i = 0; i < n_lines; i++) lines[i].lba = ~0u;
+    u32 want = mb * 32 / CHUNK_LINES * CHUNK_LINES;  /* 32 KiB lines, whole pieces */
+    if (!want && mb) want = CHUNK_LINES;            /* at least one piece when asked for any */
+    if (want) {
+        u32 hn = 1;
+        while (hn < want) hn <<= 1;
+        lines = phys_try_alloc(want * sizeof *lines);
+        htab = phys_try_alloc(hn * sizeof *htab);
+        if (lines && htab) {
+            hmask = hn - 1;
+            u32 nc = 0;
+            while (nc < want / CHUNK_LINES && nc < MAX_CHUNKS && (chunk[nc] = phys_try_alloc(CHUNK_LINES * LINE * 512))) nc++;
+            n_lines = nc * CHUNK_LINES;
+            memset(htab, 0xFF, hn * sizeof *htab);
+            for (u32 i = 0; i < n_lines; i++) { lines[i].lba = NIL; lines[i].hnext = NIL; lru_front(i); }
+        }
     }
     kprintf("disk: cache %u MiB%s\n", n_lines / 32, run ? ", writes gathered" : "");
 }
@@ -138,40 +185,71 @@ static void overlay_run(u32 lba, u32 n, u8 *buf)
     memcpy(buf + (a - lba) * 512, run + (a - run_lba) * 512, (b - a) * 512);
 }
 
-static u8 *line_data(u32 i) { return cdata + i * LINE * 512; }
+static u8 *line_data(u32 i) { return chunk[i / CHUNK_LINES] + i % CHUNK_LINES * LINE * 512; }
+static u32 line_base(u32 lba) { return pstart + (lba - pstart) / LINE * LINE; }
+
+static u32 line_find(u32 base)                    /* the line holding base, NIL if none */
+{
+    for (u32 i = htab[hslot(base)]; i != NIL; i = lines[i].hnext)
+        if (lines[i].lba == base) return i;
+    return NIL;
+}
+
+static void line_drop(u32 i)                      /* out of the hash: empty */
+{
+    if (lines[i].lba == NIL) return;
+    u32 *p = &htab[hslot(lines[i].lba)];
+    while (*p != i) p = &lines[*p].hnext;
+    *p = lines[i].hnext;
+    lines[i].lba = NIL; lines[i].hnext = NIL;
+}
 
 static int line_get(u32 base, u32 *out)          /* the line holding base, loaded if need be */
 {
-    u32 victim = 0, oldest = ~0u;
-    for (u32 i = 0; i < n_lines; i++) {
-        if (lines[i].lba == base) { lines[i].used = ++stamp; *out = i; return 0; }
-        if (lines[i].used < oldest) { oldest = lines[i].used; victim = i; }
+    u32 i = line_find(base);
+    if (i != NIL) {
+        if (i != mru) { lru_unlink(i); lru_front(i); }
+        *out = i;
+        return 0;
     }
+    i = lru;                                     /* the least recently used (empty ones are there too) */
+    line_drop(i);
+    lru_unlink(i); lru_front(i);
     u32 n = disk_sectors - base < LINE ? disk_sectors - base : LINE;
-    lines[victim].lba = ~0u;
-    if (dev_io(base, n, line_data(victim), 0)) return -1;
-    overlay_run(base, n, line_data(victim));     /* the disk doesn't have those yet */
-    lines[victim].lba = base; lines[victim].n = n; lines[victim].used = ++stamp;
-    *out = victim;
+    if (dev_io(base, n, line_data(i), 0)) return -1;
+    overlay_run(base, n, line_data(i));          /* the disk doesn't have those yet */
+    lines[i].lba = base; lines[i].n = n;
+    u32 h = hslot(base);
+    lines[i].hnext = htab[h]; htab[h] = i;
+    *out = i;
     return 0;
+}
+
+/* Every cached line overlapping [lba, lba + n): copy from it (to_cache 0) or into it (1). */
+static void lines_overlap(u32 lba, u32 n, u8 *buf, int to_cache)
+{
+    if (!n_lines) return;
+    for (u32 base = line_base(lba); base < lba + n; base += LINE) {
+        u32 i = line_find(base);
+        if (i == NIL) continue;
+        u32 a = base > lba ? base : lba, b = base + lines[i].n < lba + n ? base + lines[i].n : lba + n;
+        if (a >= b) continue;
+        u8 *c = line_data(i) + (a - base) * 512, *m = buf + (a - lba) * 512;
+        if (to_cache) memcpy(c, m, (b - a) * 512); else memcpy(m, c, (b - a) * 512);
+    }
 }
 
 /* The partition's sectors, through the cache. */
 static int part_read(u32 lba, u32 n, u8 *d)
 {
-    if (!n_lines || n >= LINE) {                  /* big reads straight from the disk (they'd only evict) */
+    if (!n_lines || n > n_lines * LINE / 8) {     /* huge reads straight from the disk (they'd only evict) */
         if (dev_io(lba, n, d, 0)) return -1;
         overlay_run(lba, n, d);
-        for (u32 i = 0; i < n_lines; i++)         /* cached lines may be newer than the disk */
-            if (lines[i].lba != ~0u && lines[i].lba < lba + n && lines[i].lba + lines[i].n > lba) {
-                u32 a = lines[i].lba > lba ? lines[i].lba : lba;
-                u32 b = lines[i].lba + lines[i].n < lba + n ? lines[i].lba + lines[i].n : lba + n;
-                memcpy(d + (a - lba) * 512, line_data(i) + (a - lines[i].lba) * 512, (b - a) * 512);
-            }
+        lines_overlap(lba, n, d, 0);              /* cached lines may be newer than the disk */
         return 0;
     }
     while (n) {
-        u32 base = pstart + (lba - pstart) / LINE * LINE, off = lba - base, k = LINE - off, li;
+        u32 base = line_base(lba), off = lba - base, k = LINE - off, li;
         if (k > n) k = n;
         if (line_get(base, &li)) return -1;
         memcpy(d, line_data(li) + off * 512, k * 512);
@@ -182,12 +260,7 @@ static int part_read(u32 lba, u32 n, u8 *d)
 
 static int part_write(u32 lba, u32 n, const u8 *s)
 {
-    for (u32 i = 0; i < n_lines; i++)              /* cached copies first */
-        if (lines[i].lba != ~0u && lines[i].lba < lba + n && lines[i].lba + lines[i].n > lba) {
-            u32 a = lines[i].lba > lba ? lines[i].lba : lba;
-            u32 b = lines[i].lba + lines[i].n < lba + n ? lines[i].lba + lines[i].n : lba + n;
-            memcpy(line_data(i) + (a - lines[i].lba) * 512, s + (a - lba) * 512, (b - a) * 512);
-        }
+    lines_overlap(lba, n, (u8 *)s, 1);             /* cached copies first */
     if (!run) return dev_io(lba, n, (void *)s, 1);
     if (run_n && lba >= run_lba && lba + n <= run_lba + run_n) {    /* rewrites sectors of the run */
         memcpy(run + (lba - run_lba) * 512, s, n * 512);

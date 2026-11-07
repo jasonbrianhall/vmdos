@@ -102,7 +102,8 @@ BOOT OPTIONS
     cd=/ISOS/GAME.ISO     ISO in the CD drive at boot
     cdrives=N             Up to 4 CD drives
     fda=/DISKS/BOOT.IMG   Floppy image in A: at boot (boot=a boots it)
-    diskcache=MB          C: cache (0 turns it off)
+    diskcache=MB          C: read cache (default 1/4 of RAM, max 1024;
+                          up to 3072; 0 turns it off)
     usb=off  ide=off  ehci=off  c=ram
   Trouble
     debug=1|2|3    More in the log
