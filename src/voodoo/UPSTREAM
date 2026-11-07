@@ -22,3 +22,7 @@ vid_svga.c draws the lines of the modes a Voodoo 3's desktop uses (8/15/16/
 frame (svga_defer_flush), shared among the CPUs by par_for, each on its own
 copy of svga_t; vid_voodoo_banshee.c's tiled renderer is split so a line
 can be drawn with its desktop_y given (svga_t's defer_* hooks).
+
+vid_voodoo_banshee.c's status register shows a new vertical retrace
+(out of it, then in it) on the two reads after a write to dacAddr or
+dacData: the Windows driver loads its gamma table an entry a retrace.

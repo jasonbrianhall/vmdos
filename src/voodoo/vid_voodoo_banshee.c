@@ -802,6 +802,7 @@ banshee_recalctimings(svga_t *svga)
 }
 
 static uint32_t banshee_ext_inl(uint16_t addr, void *priv);
+static int banshee_dac_retrace;   /* vmdos: banshee_status's made-up retrace after a DAC write */
 static void     banshee_ext_outl(uint16_t addr, uint32_t val, void *priv);
 
 static void
@@ -939,10 +940,12 @@ banshee_ext_outl(uint16_t addr, uint32_t val, void *priv)
             break;
         case DAC_dacAddr:
             banshee->dacAddr = val & 0x1ff;
+            banshee_dac_retrace = 2;   /* vmdos: see banshee_status */
             break;
         case DAC_dacData:
             svga->pallook[banshee->dacAddr] = val & 0xffffff;
             svga->fullchange                = changeframecount;
+            banshee_dac_retrace = 2;   /* vmdos */
             break;
 
         case Video_vidProcCfg:
@@ -1142,7 +1145,17 @@ banshee_status(banshee_t *banshee)
         ret |= (swap_count << 28);
     else
         ret |= (7 << 28);
-    if (!(svga->cgastat & 8))
+    /* vmdos: after a write to the DAC's palette/gamma registers, the next
+       two reads show a retrace beginning (out of it, then in it): the
+       Windows driver loads its gamma table an entry at a time, each after
+       waiting for a new vertical retrace, one entry a frame: 768 of them,
+       10-20 s at every mode switch. A real card takes as long; vmdos
+       makes it take milliseconds. Retrace timing for anything else
+       (frame pacing, port 3DAh) is the real one. */
+    if (banshee_dac_retrace) {
+        if (banshee_dac_retrace-- == 2)
+            ret |= 0x40;
+    } else if (!(svga->cgastat & 8))
         ret |= 0x40;
 
     if (busy)

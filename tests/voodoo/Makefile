@@ -29,3 +29,6 @@ obj/%.o: $(SRC)/%.c
 
 clean:
 	rm -rf obj hosttest emutest
+
+# v3card.c #includes 86Box's Banshee
+obj/v3card.o: $(SRC)/vid_voodoo_banshee.c

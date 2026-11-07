@@ -1014,11 +1014,43 @@ extern "C" uint64_t usb_msd_sectors(int i) { return msd_is(i) ? kbds[msd_dev[i]]
 extern "C" uint32_t usb_msd_gen(int i) { return i >= 0 && i < n_msd ? msd_last[i].gen : 0; }
 extern "C" const char* usb_msd_name(int i) { return i >= 0 && i < n_msd ? msd_last[i].model : ""; }
 
+// perf: every 5 s while a USB disk is used, what it was asked and how
+// long its commands took (DOS and Windows wait for each one, the boot CPU
+// inside it), and how many went wrong: retries, transfers that never
+// completed (each waits 5 s), commands that failed outright.
+static struct { uint32_t t0, cmds, rd, wr, retries, fails, timeouts, slow100, slow1000; uint64_t cyc, cyc_max; } mst;
+static void msd_stats(Keyboard& k, uint64_t cyc, int tries, int ok, int timeouts) {
+    if (!perf_on) return;
+    mst.cmds++; mst.cyc += cyc; if (cyc > mst.cyc_max) mst.cyc_max = cyc;
+    uint32_t khz = tsc_khz() ? tsc_khz() : 1;
+    uint32_t ms = (uint32_t)(cyc / khz);
+    if (ms >= 100) mst.slow100++;
+    if (ms >= 1000) mst.slow1000++;
+    mst.retries += (uint32_t)(tries - 1);
+    if (!ok) mst.fails++;
+    mst.timeouts += (uint32_t)timeouts;
+    if (!mst.t0) { mst.t0 = ticks; return; }
+    uint32_t dt = ticks - mst.t0;
+    if (dt < 5000) return;
+    uint32_t avg_us = (uint32_t)(mst.cyc * 1000 / khz / mst.cmds);
+    printf("USB: disk on %s (%s, %s speed): %u commands/s, read %u KiB/s, written %u KiB/s; a command %u.%02u ms on average, "
+           "%u ms at most, %u over 100 ms, %u over 1 s; retried %u, failed %u, transfers with no completion %u\n",
+           k.where, H->type == HC_XHCI ? "xHCI" : hc2_name(), speed_name(k.speed), mst.cmds * 1000 / dt,
+           (uint32_t)((uint64_t)mst.rd * 500 / dt), (uint32_t)((uint64_t)mst.wr * 500 / dt), avg_us / 1000, avg_us % 1000 / 10,
+           (uint32_t)(mst.cyc_max / khz), mst.slow100, mst.slow1000, mst.retries, mst.fails, mst.timeouts);
+    uint32_t t = ticks;
+    mst = {};
+    mst.t0 = t;
+}
+
 // count <= 128 sectors; buf anywhere (copied through the DMA buffer).
 extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int write) {
     if (!msd_is(i) || !count || count > 128) return -1;
     Keyboard& k = kbds[msd_dev[i]];
     if (lba + count > k.blocks || lba > 0xFFFFFFFFull) return -1;
+    uint64_t c0 = perf_on ? tsc_read() : 0;
+    int to0 = k.timeouts, tries = 0;
+    if (perf_on) { if (write) mst.wr += count; else mst.rd += count; }
     Hc* saved = H;
     usb_busy = 1;
     H = k.hc;
@@ -1028,6 +1060,7 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
                         (uint8_t)(lba >> 8), (uint8_t)lba, 0, (uint8_t)(count >> 8), (uint8_t)count, 0 };
     int r = -1;
     for (int t = 0; t < 3 && r != 0; t++) {
+        tries++;
         r = scsi(k, cdb, 10, !write, bytes);
         if (r != 0) {
             request_sense(k);
@@ -1036,6 +1069,7 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     }
     if (r == 0 && !write) memcpy(buf, (const void*)msd_buf, bytes);
     if (r != 0) printf("USB: %s: %s of %u sectors at %u failed\n", k.where, write ? "write" : "read", count, (uint32_t)lba);
+    if (perf_on) msd_stats(k, tsc_read() - c0, tries, r == 0, k.timeouts - to0);
     H = saved;
     usb_busy = 0;
     return r == 0 ? 0 : -1;

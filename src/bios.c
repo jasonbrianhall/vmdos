@@ -355,8 +355,8 @@ static int int15(struct regs *r)
     switch (AH(r)) {
     case 0x24:
         switch (AL(r)) {
-        case 0: set_a20(0); AH(r) = 0; break;
-        case 1: set_a20(1); AH(r) = 0; break;
+        case 0: guest_a20(0); AH(r) = 0; break;
+        case 1: guest_a20(1); AH(r) = 0; break;
         case 2: AH(r) = 0; AL(r) = (u8)a20_on; break;
         case 3: AH(r) = 0; BX(r) = 3; break;
         default: AH(r) = 0x86; set_cf(r, 1); return BIOS_DONEF;
