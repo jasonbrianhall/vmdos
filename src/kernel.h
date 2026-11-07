@@ -141,6 +141,7 @@ u32 page_phys(u32 lin);                       /* physical page behind lin, 0: no
 u32 linear_hole(u32 len, u32 align);          /* unmapped linear space for an emulated device (cpu.c) */
 int page_user(u32 lin, int write);            /* ring 3 may access it without a fault */
 void set_a20(int on);
+void guest_a20(int on);                       /* the guest's A20 changes: set_a20 only when it changes */
 extern int a20_on;
 extern int usb_ready;
 void *phys_low(u32 phys);                     /* pointer to physical memory below 1 MiB */

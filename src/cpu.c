@@ -176,6 +176,12 @@ void set_a20(int on)
     flush_tlb();
 }
 
+/* The guest's A20 changes (8042, port 92h, XMS, INT 15h): only when it
+   changes. Each remap flushes the TLBs, the VM's too (hv_tlb_dirty), and
+   code that turns A20 on around every access (an XMS local enable, a
+   driver polling port 92h) would pay that every time. */
+void guest_a20(int on) { if ((on != 0) != (a20_on != 0)) set_a20(on); }
+
 void *phys_low(u32 phys) { return (void *)(uintptr_t)(LOW_ALIAS + phys); }
 
 /* Where the guest's own page for linear address lin is. */

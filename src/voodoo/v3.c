@@ -671,9 +671,77 @@ static void trace(u32 phys, u32 val, int size, int wr)
     tr_off = off; tr_val = val; tr_size = size; tr_wr = wr; tr_n = 1;
 }
 
+/* The frame buffer (BAR1) and the VGA's window: memory, read and written
+   without the card's timers or FIFO, as a Banshee's linear frame buffer is
+   (a driver waits for idle itself). A fill or copy through trapped pages
+   (the tiled part above tile_base, the VGA's text and planar modes) comes
+   a dword at a time: the card's catch-up (its timers, FIFO, threads, up
+   to 2 ms) once, after the batch the emulator runs (v3_settle, video.c
+   vga16_fault), at the next register access or the next tick; not after
+   each one. Registers still catch up at every access. */
+static int mem_owed;
+static int is_mem(u32 phys)
+{
+    return legacy(phys) || phys - bar1_lin < (32u << 20) || (cur_bar1 && phys - cur_bar1 < (32u << 20));
+}
+int v3_is_fb(u32 phys) { return v3_on && is_mem(phys) && !legacy(phys); }   /* hv.c's perf: the frame buffer, not registers */
+void v3_settle(void)
+{
+    if (!mem_owed) return;
+    mem_owed = 0;
+    v3_enter();
+    catch_up();
+    v3_leave();
+}
+
+/* perf: the guest's accesses to the card, and its busiest registers
+   (offsets in BAR0), every 5 s (v3_perf_print, from v86.c's report). */
+extern int perf_on;
+static u32 pa_mem, pa_rd, pa_wr;
+static struct { u32 off, n; } pa_reg[64];
+static void pa_count(u32 phys, int wr)
+{
+    if (!perf_on) return;
+    if (is_mem(phys)) { pa_mem++; return; }
+    if (wr) pa_wr++; else pa_rd++;
+    u32 b0 = cur_bar0 ? cur_bar0 : bar0_lin, off = (phys - b0) & ~3u;
+    int free_ = -1;
+    for (int i = 0; i < 64; i++) {
+        if (pa_reg[i].n && pa_reg[i].off == (off | (u32)wr)) { pa_reg[i].n++; return; }
+        if (!pa_reg[i].n && free_ < 0) free_ = i;
+    }
+    if (free_ >= 0) { pa_reg[free_].off = off | (u32)wr; pa_reg[free_].n = 1; }
+}
+void v3_perf_print(void)
+{
+    if (!v3_on || !(pa_mem | pa_rd | pa_wr)) return;
+    char b[300]; int n = snprintf(b, sizeof b, "perf: voodoo3: frame buffer %u/s, registers read %u/s, written %u/s:",
+                                  pa_mem / 5, pa_rd / 5, pa_wr / 5);
+    for (int k = 0; k < 6; k++) {
+        int best = -1;
+        for (int i = 0; i < 64; i++) if (pa_reg[i].n && (best < 0 || pa_reg[i].n > pa_reg[best].n)) best = i;
+        if (best < 0) break;
+        n += snprintf(b + n, sizeof b - n, " %s %06x %u", (pa_reg[best].off & 1) ? "W" : "R", pa_reg[best].off & ~3u,
+                      pa_reg[best].n / 5);
+        pa_reg[best].n = 0;
+    }
+    kprintf("%s\n", b);
+    for (int i = 0; i < 64; i++) pa_reg[i].n = 0;
+    pa_mem = pa_rd = pa_wr = 0;
+}
+
 u32 v3_mmio_read(u32 phys, int size)
 {
+    pa_count(phys, 0);
+    if (is_mem(phys)) {
+        v3_enter();
+        u32 v = map_read(phys, size);
+        v3_leave();
+        mem_owed = 1;
+        return v;
+    }
     v3_enter();
+    mem_owed = 0;
     catch_up();
     u32 v = map_read(phys, size);
     trace(phys, v, size, 0);
@@ -683,12 +751,14 @@ u32 v3_mmio_read(u32 phys, int size)
 
 void v3_mmio_write(u32 phys, u32 val, int size)
 {
+    pa_count(phys, 1);
     v3_enter();
     trace(phys, val, size, 1);
     for (int i = 0; i < 2; i++)                /* a FIFO's base written through the trap (unmapped yet, v3trap's */
         if (fv[i].on && phys - v3_card_bar(card, 1) == *fv[i].base) fv[i].base_free = 0;   /* tests): counted already */
     map_write(phys, val, size);
-    catch_up();
+    if (is_mem(phys)) mem_owed = 1;            /* after the batch, at a register access or the tick (v3_settle) */
+    else { mem_owed = 0; catch_up(); }         /* a register: at once (the time-sliced tests need it) */
     v3_leave();
 }
 

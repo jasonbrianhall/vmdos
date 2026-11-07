@@ -41,7 +41,7 @@ void xms_exec_a20_off(void)
 {
     if (!hma_used || !a20_on) return;
     if (a20_local) a20_local--;
-    if (!a20_local && !a20_global) set_a20(0);
+    if (!a20_local && !a20_global) guest_a20(0);
 }
 
 /* noxms on the command line: no XMS driver at all (the installation check
@@ -154,12 +154,12 @@ void xms_call(struct regs *r)
     case 0x02:
         if (!hma_used) { fail(r, 0x93); return; }
         hma_used = 0; AX(r) = 1; return;
-    case 0x03: a20_global = 1; set_a20(1); AX(r) = 1; return;
-    case 0x04: a20_global = 0; if (!a20_local) set_a20(0); AX(r) = 1; return;
-    case 0x05: a20_local++; set_a20(1); AX(r) = 1; return;
+    case 0x03: a20_global = 1; guest_a20(1); AX(r) = 1; return;
+    case 0x04: a20_global = 0; if (!a20_local) guest_a20(0); AX(r) = 1; return;
+    case 0x05: a20_local++; guest_a20(1); AX(r) = 1; return;
     case 0x06:
         if (a20_local) a20_local--;
-        if (!a20_local && !a20_global) set_a20(0);
+        if (!a20_local && !a20_global) guest_a20(0);
         AX(r) = 1; return;
     case 0x07: AX(r) = (u16)a20_on; return;
     case 0x08: case 0x88: {

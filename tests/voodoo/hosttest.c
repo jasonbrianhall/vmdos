@@ -64,6 +64,8 @@ uint32_t tsc_khz(void) { return slice ? 1000000 : 0; }   /* threads stop and go 
                                                           /* TSC rate: the card's clock is pit_clock */
 u32 video_frame_no(void) { return fake_clock / 17045; }
 
+int perf_on;                                   /* lib.c's: v3.c's access counts ("perf") */
+
 /* smp.c's render helpers, as threads ("mp=N") */
 static int mp_cpus, mp_fault;
 static int (*mp_fn)(int, int);
@@ -439,6 +441,26 @@ int main(int argc, char **argv)
     bad += !check("FIFO from its base again: red", 100, 100, 0xFF0000);
 
     if (getenv("RSEED")) rnd_state = strtoul(getenv("RSEED"), 0, 0);
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "dacbench")) {    /* the Windows driver's gamma table: each */
+        v3_mmio_write(BAR0 + 0x50, 0, 4);
+        for (int k = 0; k < 4; k++) printf("dacbench: status after a DAC write: %08x\n", v3_mmio_read(BAR0, 4));
+        u32 t0 = fake_clock;                                               /* entry after waiting for the retrace, */
+        for (int e = 0; e < 768; e++) {                                    /* every access ~25 us (a nested VM exit) */
+            while (!(v3_mmio_read(BAR0, 4) & 0x40)) fake_clock += 30;      /* out of a retrace, */
+            while (v3_mmio_read(BAR0, 4) & 0x40) fake_clock += 30;         /* then into a new one */
+            v3_mmio_write(BAR0 + 0x50, e & 255, 4); fake_clock += 30;
+            v3_mmio_write(BAR0 + 0x54, 0x010101u * (e & 255), 4); fake_clock += 30;
+        }
+        printf("dacbench: 768 entries in %u ms of card time\n", (fake_clock - t0) * 1000u / 1193182u);
+    }
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "fillbench")) {   /* 4 MB into the frame buffer a dword at a time, */
+        struct timespec t0, t1;                                            /* as a trapped fill (a mode switch's clear) */
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (u32 a = 0; a < (4u << 20); a += 4) v3_mmio_write(BAR1 + (8u << 20) + a, 0x12345678, 4);
+        v3_settle();
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("fillbench: 4 MB a dword at a time: %.0f ms\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+    }
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "random")) { random_tris(getenv("RCOUNT") ? atoi(getenv("RCOUNT")) : 400); grab(); }
     if (getenv("SHOTSUM")) {                   /* the same memory as a tiled desktop (128x32-byte tiles), and half mode */
         io(0xe8, (STRIDE / 128) | (STRIDE / 128) << 16);

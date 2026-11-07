@@ -623,8 +623,8 @@ static void kbd_command(u8 v)
 {
     switch (v) {
     case 0xD1: case 0x60: case 0xD3: case 0xD4: kbd_cmd = v; break;
-    case 0xDD: set_a20(0); break;
-    case 0xDF: set_a20(1); break;
+    case 0xDD: guest_a20(0); break;
+    case 0xDF: guest_a20(1); break;
     case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; break;
     case 0xA7: ccb |= 0x20; MLOG("mouse: 8042 A7h: mouse port off\n"); break;   /* mouse port off */
     case 0xA8: ccb &= ~0x20; break;                 /* mouse port on */
@@ -638,7 +638,7 @@ static void kbd_command(u8 v)
 
 static void kbd_data(u8 v)
 {
-    if (kbd_cmd == 0xD1) { set_a20((v & 2) != 0); kbd_cmd = 0; return; }
+    if (kbd_cmd == 0xD1) { guest_a20((v & 2) != 0); kbd_cmd = 0; return; }
     if (kbd_cmd == 0x60) { if (v != ccb) MLOG("mouse: 8042 command byte %02x -> %02x\n", ccb, v); ccb = v; kbd_cmd = 0; return; }
     if (kbd_cmd == 0xD4) { kbd_cmd = 0; aux_data(v); return; }     /* to the mouse */
     if (kbd_cmd == 0xD3) { kbd_cmd = 0; mq_put(v); return; }       /* as if from the mouse */
@@ -708,7 +708,7 @@ static void out8(u16 port, u8 v)
     case 0x64: kbd_command(v); return;
     case 0x70: cmos_index = v; return;
     case 0x71: return;                          /* the real CMOS stays untouched */
-    case 0x92: set_a20((v & 2) != 0); return;
+    case 0x92: guest_a20((v & 2) != 0); return;
     case 0x80: case 0xED: return;               /* POST / delay ports */
     case 0x201: joy_port_out(); return;
     }
