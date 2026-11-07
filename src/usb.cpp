@@ -285,6 +285,10 @@ static struct {
 static bool hc2_control(Keyboard& k, uint8_t type, uint8_t req, uint16_t value, uint16_t index, uint16_t len, volatile void* buf);
 static bool hc2_intr(Keyboard& k, int ep_addr, int ep_mps, int ep_interval, int ilen = 0);
 static int hc2_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t* got);
+// How long a bulk transfer may take: a USB stick writing a lot can stall
+// for seconds while it erases (Linux allows disk commands 30 s); giving up
+// sooner resets the stick in the middle of its write.
+static int bulk_ms = 5000;
 static void hc2_clear_halt(Keyboard& k, bool in);
 static bool hc2_address(Keyboard& k);
 static void hc2_release(Keyboard& k);
@@ -838,7 +842,7 @@ static int bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32_t
     // one for a short packet; taking that as the next transfer's would put
     // every transfer after it out of step.
     for (int tries = 0; ; tries++) {
-        if (tries == 8 || !wait_event(TRB_TRANSFER_EVENT, k.slot, dci, &e, 5000)) {
+        if (tries == 8 || !wait_event(TRB_TRANSFER_EVENT, k.slot, dci, &e, bulk_ms)) {
             printf("USB: %s: bulk %s of %u bytes: no completion\n", k.where, in ? "IN" : "OUT", len);
             return -1;
         }
@@ -855,6 +859,9 @@ static void clear_halt(Keyboard& k, bool in) {
     if (H->type != HC_XHCI) { hc2_clear_halt(k, in); return; }
     Ring& r = in ? k.intr : k.bout;
     int dci = in ? k.dci : k.dci_out;
+    // Stop Endpoint first: after a timeout the endpoint is still running
+    // with the old transfer on it (a halted one just refuses the stop).
+    command(0, 0, 0, 15u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);
     command(0, 0, 0, 14u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);       // Reset Endpoint
     uint64_t dq = phys(&r.trb[r.enq]) | r.cycle;
     command((uint32_t)dq, (uint32_t)(dq >> 32), 0, 16u << 10 | (uint32_t)dci << 16 | (uint32_t)k.slot << 24, nullptr);
@@ -881,11 +888,11 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
     w[14] = (uint8_t)(k.subclass >= 2 && k.subclass <= 5 ? 12 : cdb_len);
     for (int i = 0; i < cdb_len; i++) w[15 + i] = cdb[i];
     int cc = bulk(k, false, w, 31, nullptr);
-    if (cc < 0) { k.timeouts++; return -1; }
+    if (cc < 0) { k.timeouts++; bot_reset(k); return -1; }
     if (cc != 1) { if (cc == 6) bot_reset(k); return -1; }
     if (len) {
         cc = bulk(k, in, msd_buf, len, nullptr);
-        if (cc < 0) { k.timeouts++; return -1; }
+        if (cc < 0) { k.timeouts++; bot_reset(k); return -1; }
         if (cc == 6) clear_halt(k, in);
         else if (cc != 1 && cc != 13) return -1;
     }
@@ -896,7 +903,7 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
         if (cc == 6) { clear_halt(k, true); continue; }
         break;
     }
-    if (cc < 0) { k.timeouts++; return -1; }
+    if (cc < 0) { k.timeouts++; bot_reset(k); return -1; }
     if (cc != 1 && cc != 13) { bot_reset(k); return -1; }
     uint32_t t = csw[4] | csw[5] << 8 | csw[6] << 16 | (uint32_t)csw[7] << 24;
     if (csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S' || t != tag || csw[12] == 2) { bot_reset(k); return -1; }
@@ -1053,6 +1060,8 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     if (perf_on) { if (write) mst.wr += count; else mst.rd += count; }
     Hc* saved = H;
     usb_busy = 1;
+    watchdog_slow++;                                    // a stalled stick isn't vmdos stuck (smp.c)
+    bulk_ms = 20000;
     H = k.hc;
     uint32_t bytes = count * 512;
     if (write) memcpy((void*)msd_buf, buf, bytes);
@@ -1071,6 +1080,8 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     if (r != 0) printf("USB: %s: %s of %u sectors at %u failed\n", k.where, write ? "write" : "read", count, (uint32_t)lba);
     if (perf_on) msd_stats(k, tsc_read() - c0, tries, r == 0, k.timeouts - to0);
     H = saved;
+    bulk_ms = 5000;
+    watchdog_slow--;
     usb_busy = 0;
     return r == 0 ? 0 : -1;
 }
