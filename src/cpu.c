@@ -40,16 +40,58 @@ static void fr_add(u32 lo, u32 hi)
     fr[i].lo = lo; fr[i].hi = hi; nfr++;
 }
 
-void *phys_try_alloc(u32 bytes)
+static void *take_low(u32 bytes)                 /* first fit */
 {
-    bytes = (bytes + 4095) & ~4095u;
-    if (!bytes) return 0;
     for (int i = 0; i < nfr; i++)
         if (fr[i].hi - fr[i].lo >= bytes) {
             void *p = (void *)(uintptr_t)fr[i].lo;
             fr[i].lo += bytes;
             if (fr[i].lo == fr[i].hi) { nfr--; for (int k = i; k < nfr; k++) fr[k] = fr[k + 1]; }
-            memset(p, 0, bytes);
+            return p;
+        }
+    return 0;
+}
+
+static u32 real_largest(void) { u32 n = 0; for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo; return n; }
+
+/* The largest piece there could be once the disk cache gives its RAM back:
+   its lowest run of pieces, with the free stretch just below it. */
+u32 phys_largest(void)
+{
+    u32 n = real_largest(), lo = 0, run = disk_cache_low_run(&lo);
+    if (run) {
+        u32 m = run;
+        for (int i = 0; i < nfr; i++) if (fr[i].hi == lo) m += fr[i].hi - fr[i].lo;
+        if (m > n) n = m;
+    }
+    return n;
+}
+
+/* Memory the disk cache holds is lent: a request that doesn't fit takes it
+   back, a piece at a time (only when giving it all back would do). */
+void *phys_try_alloc(u32 bytes)
+{
+    bytes = (bytes + 4095) & ~4095u;
+    if (!bytes) return 0;
+    void *p = take_low(bytes);
+    if (!p && bytes <= phys_largest()) {
+        u32 gave = 0;
+        while (!(p = take_low(bytes)) && disk_cache_give()) gave++;
+        kprintf("disk: the cache gave %u MiB back for %u KiB, %u MiB left\n", gave * 4, bytes >> 10, disk_cache_bytes() >> 20);
+    }
+    if (p) memset(p, 0, bytes);
+    return p;
+}
+
+/* From the top of the heap, not cleared: the disk cache's pieces. */
+void *phys_take_top(u32 bytes)
+{
+    bytes = (bytes + 4095) & ~4095u;
+    for (int i = nfr - 1; i >= 0; i--)
+        if (fr[i].hi - fr[i].lo >= bytes) {
+            fr[i].hi -= bytes;
+            void *p = (void *)(uintptr_t)fr[i].hi;
+            if (fr[i].lo == fr[i].hi) { nfr--; for (int k = i; k < nfr; k++) fr[k] = fr[k + 1]; }
             return p;
         }
     return 0;
@@ -68,8 +110,7 @@ void phys_release(void *p, u32 bytes)
     if (p && bytes) fr_add((u32)(uintptr_t)p, (u32)(uintptr_t)p + bytes);
 }
 
-u32 phys_free(void) { u32 n = 0; for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo; return n; }
-u32 phys_largest(void) { u32 n = 0; for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo; return n; }
+u32 phys_free(void) { u32 n = disk_cache_bytes(); for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo; return n; }   /* the disk cache's RAM counts: it gives it back */
 u32 ram_top_addr(void) { return ram_top; }
 u32 phys_spare(void) { u32 f = phys_free(); return f > HEAP_RESERVE ? f - HEAP_RESERVE : 0; }
 
@@ -586,7 +627,7 @@ void tick_poll_end(void)
     tp_on = 0;
 }
 
-void idle_wait(void) { __asm__ volatile("sti; hlt; cli" ::: "memory"); }
+void idle_wait(void) { disk_idle(); __asm__ volatile("sti; hlt; cli" ::: "memory"); }   /* idle: the disk cache preloads a line first */
 
 void reboot(void)
 {
