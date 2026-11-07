@@ -441,6 +441,18 @@ int main(int argc, char **argv)
     bad += !check("FIFO from its base again: red", 100, 100, 0xFF0000);
 
     if (getenv("RSEED")) rnd_state = strtoul(getenv("RSEED"), 0, 0);
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "dacbench")) {    /* the Windows driver's gamma table: each */
+        v3_mmio_write(BAR0 + 0x50, 0, 4);
+        for (int k = 0; k < 4; k++) printf("dacbench: status after a DAC write: %08x\n", v3_mmio_read(BAR0, 4));
+        u32 t0 = fake_clock;                                               /* entry after waiting for the retrace, */
+        for (int e = 0; e < 768; e++) {                                    /* every access ~25 us (a nested VM exit) */
+            while (!(v3_mmio_read(BAR0, 4) & 0x40)) fake_clock += 30;      /* out of a retrace, */
+            while (v3_mmio_read(BAR0, 4) & 0x40) fake_clock += 30;         /* then into a new one */
+            v3_mmio_write(BAR0 + 0x50, e & 255, 4); fake_clock += 30;
+            v3_mmio_write(BAR0 + 0x54, 0x010101u * (e & 255), 4); fake_clock += 30;
+        }
+        printf("dacbench: 768 entries in %u ms of card time\n", (fake_clock - t0) * 1000u / 1193182u);
+    }
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "fillbench")) {   /* 4 MB into the frame buffer a dword at a time, */
         struct timespec t0, t1;                                            /* as a trapped fill (a mode switch's clear) */
         clock_gettime(CLOCK_MONOTONIC, &t0);
