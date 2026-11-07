@@ -129,7 +129,7 @@ static int u_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32
     }
     uint32_t bytes = 0;
     int done = 0;
-    int rc = u_run(n, -1, 0, n - 1, 5000, &bytes, &done);
+    int rc = u_run(n, -1, 0, n - 1, bulk_ms, &bytes, &done);
     if (rc == 1 || rc == 13) tog = (uint8_t)(tog ^ (done & 1));
     if (got) *got = bytes;
     return rc;
@@ -332,7 +332,7 @@ static int e_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32
     }
     uint32_t bytes = 0;
     bool shortp = false;
-    int rc = e_run(e_chars(k, ep, mps, false, false), e_caps(k, false), n, 0, n - 1, tog, 5000, &bytes, &shortp);
+    int rc = e_run(e_chars(k, ep, mps, false, false), e_caps(k, false), n, 0, n - 1, tog, bulk_ms, &bytes, &shortp);
     if (rc == 1 || rc == 13) tog = (uint8_t)(tog ^ (packets(len, bytes, mps, shortp) & 1));
     if (got) *got = bytes;
     return rc;
@@ -569,7 +569,7 @@ static int o_bulk(Keyboard& k, bool in, volatile void* buf, uint32_t len, uint32
         o_fill(i, i + 1 < n ? o_td(i + 1) : o_tail(), in ? 2 : 1, 0, i == n - 1, phys(buf) + off, l);
     }
     uint32_t bytes = 0;
-    int rc = o_run(H->xqh, false, o_ed0(k, ep, mps), n, 0, n - 1, lens, &tog, 5000, &bytes);
+    int rc = o_run(H->xqh, false, o_ed0(k, ep, mps), n, 0, n - 1, lens, &tog, bulk_ms, &bytes);
     if (got) *got = bytes;
     return rc;
 }

@@ -732,6 +732,7 @@ void smp_start(u32 tramp)
    from moving (the host's interrupts end its run), so this is vmdos's own
    code. watchdog_quiet: vmdos stopped on purpose. nowatchdog: none. */
 volatile int watchdog_quiet, watchdog_fired;
+volatile int watchdog_slow;                    /* a disk command is waiting on its device: allow 60 s */
 static void ap_watchdog(void)
 {
     if (strstr(cmdline, "nowatchdog") || !apic_ok) for (;;) __asm__ volatile("cli; hlt");
@@ -740,7 +741,7 @@ static void ap_watchdog(void)
         kdelay_us(250000);
         u32 t = ticks;
         if (t != last || watchdog_quiet) { last = t; still = 0; continue; }
-        if (++still < 12) continue;                                   /* 3 s */
+        if (++still < (watchdog_slow ? 240 : 12)) continue;          /* 3 s, 60 s */
         watchdog_fired = 1;
         apic_ipi(bsp_apic, 0x00004400);                               /* NMI, assert */
         for (;;) __asm__ volatile("cli; hlt");                        /* once */
