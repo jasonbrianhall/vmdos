@@ -114,6 +114,7 @@ __attribute__((noreturn)) void panic(const char *fmt, ...);
 
 /* ---- cpu.c ---- */
 extern volatile u32 ticks;                    /* real timer ticks (TICK_HZ) */
+extern volatile int watchdog_slow;            /* smp.c: a device wait under way */
 #define TICK_HZ 1000
 #define PIT_HZ 1193182u
 #define PIT_PER_TICK 1193u
