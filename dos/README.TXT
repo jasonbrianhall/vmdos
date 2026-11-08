@@ -103,6 +103,7 @@ BOOT OPTIONS
     cdrives=N             Up to 4 CD drives
     fda=/DISKS/BOOT.IMG   Floppy image in A: at boot (boot=a boots it)
     diskcache=MB          C: cache (0 turns it off)
+    wcache=MB             C: write-back cache (default 4, 0: write through)
     usb=off  ide=off  ehci=off  c=ram
   Trouble
     debug=1|2|3    More in the log

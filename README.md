@@ -443,9 +443,13 @@ images are held in RAM as boot modules instead, one drive each, and
 
 Disk speed: C: on a real disk is cached (8 MiB by default, `diskcache=MB` on
 the kernel command line, 0 to turn it off). Reads fetch 32 KiB at a time and
-sequential writes are gathered into one disk command; gathered writes reach
-the disk within 50 ms (and before a restart), so switch off a moment after
-saving, not in the same instant.
+writes are cached and written back in the background (4 MiB by default,
+`wcache=MB`, 0 to write straight through), so saving a game doesn't freeze
+it while the disk catches up; on a USB stick (xHCI) the stick's own slow
+writes run while the game and its music go on. Writes go out when DOS is idle, or about a
+quarter of a second after the last one (at most 2 s while writes keep
+coming), and before a restart: wait a couple of seconds after saving
+before switching off.
 
 Floppy drives: A: and B: hold disk images from C: (there is no floppy
 controller): `VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
