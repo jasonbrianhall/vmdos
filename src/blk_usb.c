@@ -9,7 +9,10 @@ u64 usb_msd_sectors(int i);
 const char *usb_msd_name(int i);
 u32 usb_msd_gen(int i);
 int usb_msd_rw(int i, u64 lba, u32 count, void *buf, int write);
+int usb_msd_wstart(int i, u64 lba, u32 count, const void *buf);
+int usb_msd_wpoll(int i, int wait);
 
 const struct blk_driver blk_usb = {
     "USB", 0, 0, 1, usb_msd_count, usb_msd_count, usb_msd_sectors, usb_msd_name, usb_msd_gen, usb_msd_rw,
+    usb_msd_wstart, usb_msd_wpoll,
 };

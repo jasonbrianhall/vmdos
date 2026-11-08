@@ -183,7 +183,7 @@ extern "C" int ahci_rw(int d, uint64_t lba, uint32_t count, void* buf, int write
 }
 
 extern "C" const struct blk_driver blk_ahci = {
-    "SATA", "ahci=off", 1, 0, ahci_init, nullptr, ahci_sectors, ahci_model, nullptr, ahci_rw,
+    "SATA", "ahci=off", 1, 0, ahci_init, nullptr, ahci_sectors, ahci_model, nullptr, ahci_rw, nullptr, nullptr,
 };
 
 // CD/DVD drives. A SCSI command (cdb, 12 bytes) with bytes of data in to

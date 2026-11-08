@@ -569,6 +569,7 @@ static void release_all(Keyboard& k) {
 static bool ua_dispatch(int slot, int ep, const Trb& e);   // the audio stream's (below)
 static bool um_dispatch(int slot, int ep, const Trb& e);   // the microphone's (below)
 static bool un_dispatch(int slot, int ep, const Trb& e);   // USB Ethernet's receive ring (below)
+static bool aw_dispatch(int slot, int ep, const Trb& e);   // a background disk write's (below)
 // Events that arrive while we're waiting for something else.
 static void dispatch(const Trb& e) {
     int type = (e.d3 >> 10) & 0x3F;
@@ -582,6 +583,7 @@ static void dispatch(const Trb& e) {
     if (ua_dispatch(slot, ep, e)) return;
     if (um_dispatch(slot, ep, e)) return;
     if (un_dispatch(slot, ep, e)) return;
+    if (aw_dispatch(slot, ep, e)) return;
     for (auto& k : kbds) {
         if (!k.active || k.hc != H || k.slot != slot || k.dci != ep || k.kind == MSD || k.kind == AUDIO || k.kind == NET) continue;
         uint64_t trb = (uint64_t)e.d1 << 32 | e.d0;
@@ -874,8 +876,78 @@ static void bot_reset(Keyboard& k) {
     clear_halt(k, false);
 }
 
+// ---- background writes (disk.c's write-back cache), xHCI only ----
+// A slow stick takes tens to hundreds of milliseconds for a write, and
+// waiting for it with interrupts off stops DOS and its sound for that long.
+// Here the CBW, the data and the CSW go on the rings at once and the call
+// returns; their events are picked up later (usb_msd_wpoll from the timer,
+// or whoever reads the event ring meanwhile: dispatch). One at a time, in
+// msd_buf: anything else that uses msd_buf waits for it first (aw_wait).
+static struct {
+    int state;                             // 0 none, 1 under way, 2 done, 3 failed (2, 3: until usb_msd_wpoll takes it)
+    int dev;                               // kbds index
+    uint64_t t_cbw, t_data, t_csw;         // the TRBs
+    int cc_cbw, cc_data, cc_csw;           // their completion codes, 0: none yet
+    uint32_t tag, since;
+} aw;
+
+static bool aw_dispatch(int slot, int ep, const Trb& e) {
+    if (aw.state != 1) return false;
+    Keyboard& k = kbds[aw.dev];
+    if (k.hc != H || k.slot != slot || (ep != k.dci && ep != k.dci_out)) return false;
+    uint64_t trb = ((uint64_t)e.d1 << 32 | e.d0) & ~15ull;
+    int cc = (int)(e.d2 >> 24);
+    if (trb == aw.t_cbw) aw.cc_cbw = cc;
+    else if (trb == aw.t_data) aw.cc_data = cc;
+    else if (trb == aw.t_csw) aw.cc_csw = cc;
+    return true;                                       // the disk's: nobody else's anyway
+}
+
+static void bot_reset(Keyboard& k);
+static bool msd_is(int i);
+// Where the write stands, from the events seen so far; 1: still under way.
+static int aw_check(void) {
+    Keyboard& k = kbds[aw.dev];
+    bool bad = !k.active || (aw.cc_cbw && aw.cc_cbw != 1) || (aw.cc_data && aw.cc_data != 1 && aw.cc_data != 13)
+            || (aw.cc_csw && aw.cc_csw != 1 && aw.cc_csw != 13);
+    if (!bad && !aw.cc_csw) return 1;
+    if (!bad) {
+        volatile uint8_t* csw = msd_cbw + 64;
+        uint32_t t = csw[4] | csw[5] << 8 | csw[6] << 16 | (uint32_t)csw[7] << 24;
+        bad = csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S' || t != aw.tag || csw[12] != 0;
+    }
+    aw.state = bad ? 3 : 2;
+    if (bad) {
+        printf("USB: %s: background write failed (codes %d %d %d)\n", k.where, aw.cc_cbw, aw.cc_data, aw.cc_csw);
+        if (k.active) { Hc* saved = H; H = k.hc; bot_reset(k); H = saved; }   // the endpoints back in step
+    }
+    return 0;
+}
+static void aw_drain(void) {                           // read the event ring of the write's controller
+    Hc* saved = H;
+    H = kbds[aw.dev].hc;
+    Trb e;
+    for (int i = 0; i < 64 && aw.state == 1 && next_event(&e); i++) dispatch(e);
+    H = saved;
+}
+// Before msd_buf / msd_cbw are used for anything else: the write finished (or given up on).
+static void aw_wait(void) {
+    for (long t = 0; aw.state == 1; t++) {
+        aw_drain();
+        if (aw.state == 1 && !aw_check()) break;
+        if (aw.state != 1) break;
+        if (t > 20000L * 20) {                         // 20 s, as a foreground write
+            aw.cc_csw = -1;
+            aw_check();
+            break;
+        }
+        io_delay(50);
+    }
+}
+
 // A SCSI command: 0 done, 1 failed (check condition), -1 transport error.
 static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t len) {
+    aw_wait();
     volatile uint8_t* w = msd_cbw;
     for (int i = 0; i < 31; i++) w[i] = 0;
     uint32_t tag = ++k.tag;
@@ -948,6 +1020,7 @@ static bool msd_setup(Keyboard& k) {
     k.kind = MSD;
     if (!configure_bulk(k)) return false;
     k.active = true;
+    aw_wait();
     msd_buf[0] = 0;
     uint8_t inq[6] = { 0x12, 0, 0, 0, 36, 0 };
     int ri = -1;
@@ -1055,6 +1128,7 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     if (!msd_is(i) || !count || count > 128) return -1;
     Keyboard& k = kbds[msd_dev[i]];
     if (lba + count > k.blocks || lba > 0xFFFFFFFFull) return -1;
+    aw_wait();                                          // a background write first (msd_buf)
     uint64_t c0 = perf_on ? tsc_read() : 0;
     int to0 = k.timeouts, tries = 0;
     if (perf_on) { if (write) mst.wr += count; else mst.rd += count; }
@@ -1084,6 +1158,61 @@ extern "C" int usb_msd_rw(int i, uint64_t lba, uint32_t count, void* buf, int wr
     watchdog_slow--;
     usb_busy = 0;
     return r == 0 ? 0 : -1;
+}
+
+// A background write (blk.h's wstart): 0 under way, 1 can't (xHCI only, or
+// something else is using the disk path): write it the usual way.
+extern "C" int usb_msd_wstart(int i, uint64_t lba, uint32_t count, const void* buf) {
+    if (aw.state || usb_busy || in_poll || !msd_is(i) || !count || count > 128) return 1;
+    Keyboard& k = kbds[msd_dev[i]];
+    if (k.hc->type != HC_XHCI || lba + count > k.blocks || lba > 0xFFFFFFFFull) return 1;
+    Hc* saved = H;
+    H = k.hc;
+    uint32_t bytes = count * 512;
+    memcpy((void*)msd_buf, buf, bytes);
+    volatile uint8_t* w = msd_cbw;
+    for (int j = 0; j < 31; j++) w[j] = 0;
+    for (int j = 0; j < 13; j++) w[64 + j] = 0;
+    uint32_t tag = ++k.tag;
+    w[0] = 'U'; w[1] = 'S'; w[2] = 'B'; w[3] = 'C';
+    w[4] = (uint8_t)tag; w[5] = (uint8_t)(tag >> 8); w[6] = (uint8_t)(tag >> 16); w[7] = (uint8_t)(tag >> 24);
+    w[8] = (uint8_t)bytes; w[9] = (uint8_t)(bytes >> 8); w[10] = (uint8_t)(bytes >> 16); w[11] = (uint8_t)(bytes >> 24);
+    w[14] = (uint8_t)(k.subclass >= 2 && k.subclass <= 5 ? 12 : 10);
+    const uint8_t cdb[10] = { 0x2A, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+                              0, (uint8_t)(count >> 8), (uint8_t)count, 0 };
+    for (int j = 0; j < 10; j++) w[15 + j] = cdb[j];
+    aw = {};
+    aw.dev = msd_dev[i];
+    aw.tag = tag;
+    aw.since = ticks;
+    aw.state = 1;
+    uint64_t pc = phys(w), pd = phys(msd_buf), ps = phys(w + 64);
+    aw.t_cbw = ring_push(k.bout, (uint32_t)pc, (uint32_t)(pc >> 32), 31, TRB_NORMAL << 10 | (1 << 5));
+    aw.t_data = ring_push(k.bout, (uint32_t)pd, (uint32_t)(pd >> 32), bytes, TRB_NORMAL << 10 | (1 << 5));
+    aw.t_csw = ring_push(k.intr, (uint32_t)ps, (uint32_t)(ps >> 32), 13, TRB_NORMAL << 10 | (1 << 5) | (1 << 2));
+    H->db[k.slot] = k.dci_out;
+    H->db[k.slot] = k.dci;
+    if (perf_on) mst.wr += count;
+    H = saved;
+    return 0;
+}
+
+// The background write: 0 still under way, 1 done, -1 failed (disk.c writes it again);
+// wait: till it is one or the other (interrupts may be off: no ticks to time it by).
+extern "C" int usb_msd_wpoll(int i, int wait) {
+    if (wait) aw_wait();
+    if (aw.state == 1) {
+        if (usb_busy || in_poll) return 0;
+        aw_drain();
+        if (aw.state == 1 && aw_check()) {
+            if (ticks - aw.since < 20000) return 0;
+            aw.cc_csw = -1;                            // no answer in 20 s: give up on it
+            aw_check();
+        }
+    }
+    int r = aw.state == 2 ? 1 : aw.state == 3 ? -1 : 0;
+    if (aw.state >= 2) aw.state = 0;
+    return r;
 }
 
 // ---------------------------------------------------------------- audio

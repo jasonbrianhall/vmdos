@@ -257,7 +257,7 @@ extern "C" int ide_rw(int d, uint64_t lba, uint32_t count, void* buf, int write)
 }
 
 extern "C" const struct blk_driver blk_ide = {
-    "IDE", "ide=off", 0, 0, ide_init, nullptr, ide_sectors, ide_model, nullptr, ide_rw,   // PIO: any buffer
+    "IDE", "ide=off", 0, 0, ide_init, nullptr, ide_sectors, ide_model, nullptr, ide_rw, nullptr, nullptr,   // PIO: any buffer
 };
 
 // CD/DVD drives, as ahci_cd_*: a SCSI command (12 bytes) with bytes of

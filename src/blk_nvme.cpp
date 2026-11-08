@@ -305,5 +305,5 @@ int rw(int i, uint64_t lba, uint32_t n, void* buf, int write)
 } // namespace
 
 extern "C" const struct blk_driver blk_nvme = {
-    "NVMe", "nvme=off", 1, 0, start, nullptr, sectors, name, nullptr, rw,
+    "NVMe", "nvme=off", 1, 0, start, nullptr, sectors, name, nullptr, rw, nullptr, nullptr,
 };
