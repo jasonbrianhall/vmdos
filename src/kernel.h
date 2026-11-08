@@ -213,8 +213,10 @@ void disk_init(void);
 int disk_read(u32 lba, u32 n, void *buf);     /* 0 or a BIOS INT 13h status */
 int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
-void disk_flush(void);                        /* gathered writes out to the disk */
-void disk_tick(void);                         /* timer: flush writes older than 50 ms */
+void disk_flush(void);                        /* the write-back cache out to the disk, all of it */
+void disk_flush_soon(void);                   /* INT 13h reset: start writing back now */
+void disk_tick(void);                         /* timer: write back a run once writes stop */
+void disk_idle(void);                         /* DOS idle: write back a run */
 const char *disk_kind(void);
 int disk_dev_count(void);                      /* every real disk, for hd.c */
 u64 disk_dev_sectors(int d);

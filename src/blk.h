@@ -20,6 +20,13 @@ struct blk_driver {
     const char *(*name)(int i);
     u32 (*gen)(int i);                    /* hotplug: changes when the disk in slot i changes (0: never) */
     int (*rw)(int i, u64 lba, u32 n, void *buf, int write);   /* n <= 128; 0 done, else failed */
+    /* Optional, a write that runs on while vmdos goes on (disk.c's write-back):
+       wstart takes it (n <= 128, buf copied at once): 0 under way, 1 can't
+       now (rw it instead); wpoll: 0 still under way, 1 done, -1 failed; with
+       wait, not 0 (it waits, and gives up after a while itself). One at a
+       time; rw waits for it. */
+    int (*wstart)(int i, u64 lba, u32 n, const void *buf);
+    int (*wpoll)(int i, int wait);
 };
 
 extern const struct blk_driver blk_ahci, blk_ide, blk_virtio, blk_nvme, blk_usb;

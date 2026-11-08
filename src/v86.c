@@ -107,7 +107,7 @@ void guest_idle_poll(void)
 {
     static u32 last, polls;
     if (ticks != last) { last = ticks; polls = 0; fs9p_idle(); }
-    if (++polls > 4) { idle_wait(); polls = 0; }
+    if (++polls > 4) { disk_idle(); idle_wait(); polls = 0; }
 }
 
 /* Wait (real HLT) until the guest has an interrupt it will take. */
@@ -288,7 +288,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
         return;
     }
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
-    if (n == 0x2F && AX(r) == 0x1680) { idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
+    if (n == 0x2F && AX(r) == 0x1680) { disk_idle(); idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
     if (n == 0x21 && AH(r) == 0x4B) hd_dos_up();                        /* a program runs: DOS has its drives */
     if (n == 0x21 && AX(r) == 0x4B03 && !xms_hidden) {                   /* overlay: see ovl_check_return */
         ovl_pending = 1; ovl_cs = (u16)r->cs; ovl_ip = IP(r); ovl_sp = SP(r);

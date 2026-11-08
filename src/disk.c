@@ -72,21 +72,43 @@ static int probe_rd(u32 lba, u32 n, void *buf)
 /* ---- the cache, for C: on a real disk ----
    DOS asks for one sector at a time (a file read in small pieces, every
    FAT and directory sector), and each request was a disk command of its
-   own. Reads now load 64 sectors (32 KiB, aligned to the partition start)
-   at once and serve the rest from memory; writes go into the cached copy
-   at once and, when sequential, are gathered into one run (up to 64 KiB)
-   that goes to the disk as one command: when the next write isn't
-   contiguous, when the run is full, 50 ms after it started (timer tick),
-   on INT 13h reset, before a restart and when vmdos stops. diskcache=MB
-   sizes the read cache (default 8, 0: off). */
+   own. Reads load 64 sectors (32 KiB, aligned to the partition start) at
+   once and serve the rest from memory. diskcache=MB sizes the read cache
+   (default 8, 0: off).
+
+   Writes are written back later: they go into the cached copy and into
+   the write cache, and DOS goes on at once, so a game saving doesn't
+   stand still while a slow USB stick takes its time. The write cache goes
+   out to the disk a run of contiguous sectors (up to 64 KiB, one disk
+   command) at a time, in disk order: whenever DOS is idle (waiting for a
+   key, INT 28h, INT 2Fh AX=1680h), and from the timer once writes have
+   stopped for WB_QUIET ms (or the oldest has waited WB_MAX_AGE ms).
+   Where the driver can (blk.h's wstart: a USB stick on xHCI), a run goes
+   out in the background: the command is handed to the controller and
+   vmdos goes on, DOS and its sound too, while the stick takes its time;
+   the timer looks for the end of it. Otherwise DOS stands still for each
+   run, so the timer starts one every WB_GAP ms only. Everything goes
+   out at once (DOS waiting) only when the cache is full (as much as the
+   new write needs room for), before a restart and when vmdos stops.
+   wcache=MB sizes it (default 4, at most 64; 0: every write straight to
+   the disk). */
 #define LINE 64                                   /* sectors a cache line */
-#define RUN_MAX BOUNCE_SECS                       /* sectors a gathered write */
+#define RUN_MAX BOUNCE_SECS                       /* sectors a write-back command */
+#define WB_QUIET 250                              /* ms without writes before the timer writes back */
+#define WB_MAX_AGE 2000                           /* ms the oldest write waits at most (writes going on) */
+#define WB_GAP 10                                 /* ms between timer write-backs */
 static struct cline { u32 lba, n, used; } *lines; /* lba ~0: empty */
 static u8 *cdata;
 static u32 n_lines, stamp;
-static u8 *run;                                   /* pending write run */
-static u32 run_lba, run_n, run_since;
-static int flushing;
+static u8 *run;                                   /* a write-back run, put together */
+static u32 wb_cap, wb_n, wb_mask;                 /* sectors it holds at most, holds now; hash buckets - 1 */
+static u32 *wb_lba;                               /* a slot's sector (~0: free) */
+static int *wb_next, *wb_head, wb_free;           /* hash chains and the free list; buckets */
+static u8 *wb_data;
+static u32 wb_last, wb_first, wb_ran, wb_cursor;  /* last write; when the oldest went in; last timer run; next sector in order */
+static int flushing, in_io;
+static int fl_on, async_off;                      /* a run under way in the background (blk.h's wstart); that failed once */
+static u32 fl_lba, fl_n, fl_again[RUN_MAX / 32];  /* its sectors; those written again meanwhile (kept) */
 
 static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through the bounce buffer */
 {
@@ -99,12 +121,18 @@ static int dev_io(u32 lba, u32 n, void *buf, int write)  /* any length, through 
     return 0;
 }
 
+static u32 cmd_mb(const char *key, u32 def)
+{
+    const char *o = strstr(cmdline, key);
+    if (!o) return def;
+    u32 mb = 0;
+    for (o += strlen(key); *o >= '0' && *o <= '9'; o++) mb = mb * 10 + (u32)(*o - '0');
+    return mb > 64 ? 64 : mb;
+}
+
 static void cache_init(void)
 {
-    u32 mb = 8;
-    const char *o = strstr(cmdline, "diskcache=");
-    if (o) { mb = 0; for (o += 10; *o >= '0' && *o <= '9'; o++) mb = mb * 10 + (u32)(*o - '0'); }
-    if (mb > 64) mb = 64;
+    u32 mb = cmd_mb("diskcache=", 8), wmb = cmd_mb("wcache=", 4);
     if (mb && mb * 2 > phys_free() >> 20) mb = phys_free() >> 21;    /* never more than half the free RAM */
     run = phys_try_alloc(RUN_MAX * 512);
     n_lines = mb * 32;                                              /* 32 KiB lines */
@@ -114,28 +142,169 @@ static void cache_init(void)
         if (!lines || !cdata) n_lines = 0;
         for (u32 i = 0; i < n_lines; i++) lines[i].lba = ~0u;
     }
-    kprintf("disk: cache %u MiB%s\n", n_lines / 32, run ? ", writes gathered" : "");
+    if (wmb * 4 > phys_free() >> 20) wmb = phys_free() >> 22;       /* at most a quarter of what's left */
+    if (wmb && run) {
+        u32 cap = wmb * 2048, nb = 1;
+        while (nb < cap) nb <<= 1;
+        wb_lba = phys_try_alloc(cap * sizeof *wb_lba);
+        wb_next = phys_try_alloc(cap * sizeof *wb_next);
+        wb_head = phys_try_alloc(nb * sizeof *wb_head);
+        wb_data = phys_try_alloc(cap * 512);
+        if (wb_lba && wb_next && wb_head && wb_data) {
+            wb_cap = cap; wb_mask = nb - 1;
+            for (u32 i = 0; i < nb; i++) wb_head[i] = -1;
+            for (u32 i = 0; i < cap; i++) { wb_lba[i] = ~0u; wb_next[i] = i + 1 < cap ? (int)i + 1 : -1; }
+            wb_free = 0;
+        }
+    }
+    kprintf("disk: cache %u MiB, write-back %u MiB\n", n_lines / 32, wb_cap / 2048);
 }
 
-/* Put the pending run on the disk. */
+/* ---- the write cache: sectors by LBA (a hash with chains) ---- */
+static int wb_find(u32 lba)
+{
+    for (int i = wb_head[lba & wb_mask]; i >= 0; i = wb_next[i]) if (wb_lba[i] == lba) return i;
+    return -1;
+}
+
+static void wb_put(u32 lba, const u8 *s)          /* a slot must be free if lba isn't in yet */
+{
+    int i = wb_find(lba);
+    if (i < 0) {
+        i = wb_free;
+        wb_free = wb_next[i];
+        wb_lba[i] = lba;
+        wb_next[i] = wb_head[lba & wb_mask];
+        wb_head[lba & wb_mask] = i;
+        if (!wb_n++) wb_first = ticks;
+    }
+    if (fl_on && lba - fl_lba < fl_n) fl_again[(lba - fl_lba) / 32] |= 1u << ((lba - fl_lba) % 32);   /* newer than what's going out */
+    memcpy(wb_data + (u32)i * 512, s, 512);
+}
+
+static void wb_drop(u32 lba)
+{
+    int *pp = &wb_head[lba & wb_mask];
+    for (int i = *pp; i >= 0; pp = &wb_next[i], i = *pp)
+        if (wb_lba[i] == lba) {
+            *pp = wb_next[i];
+            wb_lba[i] = ~0u;
+            wb_next[i] = wb_free;
+            wb_free = i;
+            wb_n--;
+            return;
+        }
+}
+
+/* Sectors of [lba, lba + n) that are waiting in the write cache: copied over buf. */
+static void wb_overlay(u32 lba, u32 n, u8 *buf)
+{
+    for (u32 k = 0; k < n && wb_n; k++) {
+        int i = wb_find(lba + k);
+        if (i >= 0) memcpy(buf + k * 512, wb_data + (u32)i * 512, 512);
+    }
+}
+
+/* The background run is finished: its sectors let go, but for those
+   written again meanwhile. Failed: they stay and go out again, the usual
+   way from now on. */
+static void fl_done(int ok)
+{
+    fl_on = 0;
+    if (!ok) {
+        kprintf("disk: background write of %u sectors at %u failed: writing in the foreground from now on\n", fl_n, fl_lba);
+        async_off = 1;
+        return;
+    }
+    for (u32 j = 0; j < fl_n; j++)
+        if (!(fl_again[j / 32] & 1u << (j % 32))) wb_drop(fl_lba + j);
+    wb_cursor = wb_n ? fl_lba + fl_n : 0;
+}
+static int fl_check(int wait)                     /* 1: still under way */
+{
+    if (!fl_on) return 0;
+    int r = dev[cdev].drv->wpoll(dev[cdev].idx, wait);
+    if (!r) return 1;
+    fl_done(r > 0);
+    return 0;
+}
+static int fl_poll(void) { return fl_check(0); }
+static void fl_wait(void) { fl_check(1); }        /* the driver gives up after a while */
+
+/* One run out to the disk: the first waiting sector at or after the
+   cursor (else the first of all) and the ones right after it, as one
+   command; bg: in the background if the driver can (wstart), else the
+   usual way. The sectors it took: 0 when nothing waits. A failed write
+   (in the foreground) is logged and its sectors let go (as before), so
+   this always gets somewhere. */
+static u32 wb_run(int bg)
+{
+    if (!wb_n || flushing) return 0;
+    fl_wait();                                    /* one at a time, and the cache as the disk will have it */
+    if (!wb_n) return 0;
+    flushing = 1;
+    u32 start = ~0u, lowest = ~0u;
+    for (u32 i = 0; i < wb_cap; i++) {
+        u32 l = wb_lba[i];
+        if (l == ~0u) continue;
+        if (l < lowest) lowest = l;
+        if (l >= wb_cursor && l < start) start = l;
+    }
+    if (start == ~0u) start = lowest;
+    u32 k = 0;
+    int i;
+    while (k < RUN_MAX && (i = wb_find(start + k)) >= 0) {
+        memcpy(run + k * 512, wb_data + (u32)i * 512, 512);
+        k++;
+    }
+    const struct blk_driver *d = dev[cdev].drv;
+    if (bg && !async_off && d->wstart && !d->wstart(dev[cdev].idx, start, k, run)) {
+        fl_on = 1; fl_lba = start; fl_n = k;
+        memset(fl_again, 0, sizeof fl_again);
+        flushing = 0;
+        return k;
+    }
+    if (dev_io(start, k, run, 1)) kprintf("disk: write of %u sectors at %u failed\n", k, start);
+    for (u32 j = 0; j < k; j++) wb_drop(start + j);
+    wb_cursor = start + k;
+    if (!wb_n) wb_cursor = 0;
+    flushing = 0;
+    return k;
+}
+
+/* Everything waiting out to the disk (a restart, vmdos stopping). */
 void disk_flush(void)
 {
-    if (!run_n || flushing) return;
-    flushing = 1;
-    if (dev_io(run_lba, run_n, run, 1)) kprintf("disk: write of %u sectors at %u failed\n", run_n, run_lba);
-    run_n = 0;
-    flushing = 0;
+    if (in_io) return;
+    while (wb_run(0)) ;
+    fl_wait();
 }
 
-/* Timer tick: a run doesn't wait more than 50 ms. */
-void disk_tick(void) { if (run_n && ticks - run_since > 50) disk_flush(); }
+/* INT 13h reset: DOS wants the disk up to date; start now rather than
+   holding it up (the timer writes everything out within moments). */
+void disk_flush_soon(void) { if (wb_n) wb_first = ticks - WB_MAX_AGE; }
 
-/* Sectors of [lba, lba + n) that are in the pending run: copied over buf. */
-static void overlay_run(u32 lba, u32 n, u8 *buf)
+/* Timer tick: once writes have stopped for a moment (or the oldest has
+   waited long enough), a run out to the disk. In the background (a USB
+   stick on xHCI) the next one starts as soon as the last is done; in the
+   foreground (DOS stands still meanwhile) one every WB_GAP ms. */
+void disk_tick(void)
 {
-    if (!run_n || lba >= run_lba + run_n || lba + n <= run_lba) return;
-    u32 a = lba > run_lba ? lba : run_lba, b = lba + n < run_lba + run_n ? lba + n : run_lba + run_n;
-    memcpy(buf + (a - lba) * 512, run + (a - run_lba) * 512, (b - a) * 512);
+    if (in_io || flushing || fl_poll() || !wb_n) return;
+    u32 now = ticks;
+    int bg = !async_off && dev[cdev].drv->wstart;
+    if (!bg && now - wb_ran < WB_GAP) return;
+    if (now - wb_last < WB_QUIET && now - wb_first < WB_MAX_AGE) return;
+    wb_run(1);
+    wb_ran = ticks;
+}
+
+/* DOS is idle (spinning on the keyboard, INT 28h, INT 2Fh AX=1680h): a run out now costs nobody anything. */
+void disk_idle(void)
+{
+    if (in_io || flushing || fl_poll() || !wb_n || ticks - wb_last < 20) return;
+    wb_run(1);
+    wb_ran = ticks;
 }
 
 static u8 *line_data(u32 i) { return cdata + i * LINE * 512; }
@@ -150,7 +319,7 @@ static int line_get(u32 base, u32 *out)          /* the line holding base, loade
     u32 n = disk_sectors - base < LINE ? disk_sectors - base : LINE;
     lines[victim].lba = ~0u;
     if (dev_io(base, n, line_data(victim), 0)) return -1;
-    overlay_run(base, n, line_data(victim));     /* the disk doesn't have those yet */
+    wb_overlay(base, n, line_data(victim));      /* the disk doesn't have those yet */
     lines[victim].lba = base; lines[victim].n = n; lines[victim].used = ++stamp;
     *out = victim;
     return 0;
@@ -161,7 +330,7 @@ static int part_read(u32 lba, u32 n, u8 *d)
 {
     if (!n_lines || n >= LINE) {                  /* big reads straight from the disk (they'd only evict) */
         if (dev_io(lba, n, d, 0)) return -1;
-        overlay_run(lba, n, d);
+        wb_overlay(lba, n, d);
         for (u32 i = 0; i < n_lines; i++)         /* cached lines may be newer than the disk */
             if (lines[i].lba != ~0u && lines[i].lba < lba + n && lines[i].lba + lines[i].n > lba) {
                 u32 a = lines[i].lba > lba ? lines[i].lba : lba;
@@ -188,20 +357,14 @@ static int part_write(u32 lba, u32 n, const u8 *s)
             u32 b = lines[i].lba + lines[i].n < lba + n ? lines[i].lba + lines[i].n : lba + n;
             memcpy(line_data(i) + (a - lines[i].lba) * 512, s + (a - lba) * 512, (b - a) * 512);
         }
-    if (!run) return dev_io(lba, n, (void *)s, 1);
-    if (run_n && lba >= run_lba && lba + n <= run_lba + run_n) {    /* rewrites sectors of the run */
-        memcpy(run + (lba - run_lba) * 512, s, n * 512);
-        return 0;
+    if (!wb_cap || flushing) return dev_io(lba, n, (void *)s, 1);
+    if (n > wb_cap / 2) {                          /* too big to hold: straight out, older copies of it dropped */
+        for (u32 k = 0; k < n && wb_n; k++) wb_drop(lba + k);
+        return dev_io(lba, n, (void *)s, 1);
     }
-    if (run_n && lba == run_lba + run_n && run_n + n <= RUN_MAX) {  /* carries it on */
-        memcpy(run + run_n * 512, s, n * 512);
-        run_n += n;
-        return 0;
-    }
-    disk_flush();
-    if (n >= RUN_MAX) return dev_io(lba, n, (void *)s, 1);
-    memcpy(run, s, n * 512);
-    run_lba = lba; run_n = n; run_since = ticks;
+    while (wb_cap - wb_n < n && wb_run(0)) ;      /* full: make room (DOS waits, as it used to) */
+    for (u32 k = 0; k < n; k++) wb_put(lba + k, s + k * 512);
+    wb_last = ticks;
     return 0;
 }
 
@@ -219,8 +382,11 @@ int disk_read(u32 lba, u32 n, void *buf)
         }
         lba += k; n -= k; d += k * 512;
     }
-    if (n && part_read(lba, n, d)) return 0x20;
-    return 0;
+    if (!n) return 0;
+    in_io++;
+    int e = part_read(lba, n, d);
+    in_io--;
+    return e ? 0x20 : 0;
 }
 
 int disk_write(u32 lba, u32 n, const void *buf)
@@ -241,7 +407,10 @@ int disk_write(u32 lba, u32 n, const void *buf)
         lba += k; n -= k; s += k * 512;
         if (!n) return 0;
     }
-    return part_write(lba, n, s) ? 0x20 : 0;
+    in_io++;
+    int e = part_write(lba, n, s);
+    in_io--;
+    return e ? 0x20 : 0;
 }
 
 /* The FAT partition DOS boots from, through the same view (for cd.c / bios.c). */
@@ -662,11 +831,13 @@ int disk_dev_index(int d) { return dev[d].idx; }
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write)      /* any length */
 {
     u8 *b = buf;
+    in_io++;                                       /* the timer's write-back stays off the drivers meanwhile */
     while (n) {
         u32 k = n < BOUNCE_SECS ? n : BOUNCE_SECS;
-        if (dev_rw(d, lba, k, b, write)) return -1;
+        if (dev_rw(d, lba, k, b, write)) { in_io--; return -1; }
         lba += k; n -= k; b += k * 512;
     }
+    in_io--;
     return 0;
 }
 /* The disk and partition C: is on; -1 if C: isn't on a real disk. */

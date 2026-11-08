@@ -293,7 +293,7 @@ static int int13_(struct regs *r)
         return BIOS_DONEF;
     }
     switch (fn) {
-    case 0x00: case 0x0D: disk_flush(); break;                  /* reset: the disk up to date */
+    case 0x00: case 0x0D: disk_flush_soon(); break;             /* reset: written back from now on, DOS not held up */
     case 0x04: case 0x0C: case 0x10: case 0x11: case 0x47: break;
     case 0x01: AH(r) = disk_status; set_cf(r, disk_status != 0); return BIOS_DONEF;
     case 0x02: case 0x03: {
