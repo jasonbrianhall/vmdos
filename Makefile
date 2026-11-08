@@ -157,7 +157,7 @@ $(BUILD)/VMMIC.COM: dos/vmmic.asm | $(BUILD)
 $(BUILD)/VMHV.COM: dos/vmhv.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
-$(BUILD)/VMHV.COM: dos/reboot.asm | $(BUILD)
+$(BUILD)/REBOOT.COM: dos/reboot.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
 $(BUILD)/hvasm.o: src/hvasm.S | $(BUILD)
