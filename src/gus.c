@@ -130,7 +130,7 @@ static void reset(void)
     set_voices(14);
 }
 
-void gus_init(u16 port, int irq, int dma)
+void gus_init(u16 port, int irq, int dma)    /* Init GUS */
 {
     base = port;
     irq_line = irq;
