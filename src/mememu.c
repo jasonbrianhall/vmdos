@@ -596,6 +596,11 @@ int mem_emulate(struct emu_cpu *e)
     case 0xA8: case 0xA9: alu(4, rget(0, sz), sz == 1 ? fetch8() : osz == 4 ? fetch32() : fetch16(), sz); break;
     case 0x8D: modrm(); if (mod_ == 3) return 0; rset(reg_, ea_off, osz); break;
     case 0x90: break;
+    case 0xD7: {                                         /* XLAT: AL = [seg:eBX + AL] (a lookup table in the window) */
+        u32 off = idx_get(3) + (rget(0, 1) & 0xFF);
+        if (asz == 2) off &= 0xFFFF;
+        rset(0, mrd8(segbase(DS) + off), 1);
+        break; }
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
         if (!string_op(op, rep)) return 0;
         break;
