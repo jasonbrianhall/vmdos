@@ -410,7 +410,7 @@ static inline void dac_catch_up(uint32_t frame)
 }
 
 static int32_t mix[2 * OPL_MAX_FRAMES];
-void speaker_mix(int32_t *lr, int frames);            /* vdev.c: PC speaker */
+void speaker_mix(int32_t *lr, int frames, uint32_t t0, uint32_t t1);   /* vdev.c: PC speaker, PIT time [t0, t1) */
 
 /* Soft limiter: linear up to 3/4 of full scale, then 4:1 until the rail,
    so loud moments (music + effects together) squash instead of crackle. */
@@ -483,9 +483,11 @@ static void render_chunk(int16_t *out, int frames)
         mix[i * 2] = l;
         mix[i * 2 + 1] = r;
     }
-    opl_mix(mix, frames);
+    uint32_t f0 = span_frames ? span_pos * span_len / span_frames : 0;
+    uint32_t f1 = span_frames ? (span_pos + (uint32_t)frames) * span_len / span_frames : span_len;
+    opl_mix(mix, frames, span_t0 + f0, span_t0 + f1);
     gus_mix(mix, frames);
-    speaker_mix(mix, frames);
+    speaker_mix(mix, frames, span_t0 + f0, span_t0 + f1);
     for (int i = 0; i < frames * 2; i++)
         out[i] = limit(mix[i]);
     span_pos += (uint32_t)frames;

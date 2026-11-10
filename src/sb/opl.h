@@ -14,7 +14,7 @@ extern "C" {
 void opl_init(int rate);                        /* load time only (uses the FPU) */
 void opl_write(uint32_t reg, uint8_t val);      /* game chip, reg 0x000-0x1FF */
 void midi_opl_write(int chip, uint32_t reg, uint8_t val); /* MIDI synth chip 0/1 */
-void opl_mix(int32_t *out, int frames);         /* adds interleaved stereo */
+void opl_mix(int32_t *out, int frames, uint32_t t0, uint32_t t1);   /* adds interleaved stereo; PIT time [t0, t1) */
 #ifdef __cplusplus
 }
 #endif

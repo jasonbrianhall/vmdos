@@ -114,7 +114,7 @@ static u8 pic_in(struct pic *p, int a0)
 }
 
 /* ---------------- 8254 ---------------- */
-struct pitch { u32 reload, start; u16 latch; u8 mode, access, latched, rflip, wflip, wlo; };
+struct pitch { u32 reload, start; u16 latch; u8 mode, access, latched, rflip, wflip, wlo, wait; };
 static struct pitch pit[3];
 static u32 next_irq0;
 static u8 port61;
@@ -134,14 +134,87 @@ static u16 pit_count(int n)
     return (u16)v;
 }
 
+/* PC speaker: what channel 2's OUT and port 61h make of the speaker, as a
+   snapshot taken at each change (a write to 42h, 43h for channel 2, or
+   61h bits 0-1). The speaker sounds while 61h bit 1 is set and OUT2 is
+   high. wait: a control word written, the count not yet (mode 0: OUT low
+   meanwhile), or mode 1 not yet triggered by the gate. per: the PWM
+   period (PIT clocks) when counts come at a steady rate, else 0. */
+struct spk { u32 t, start, rl, per; u8 mode, p61, wait; };
+
+/* High PIT clocks of a mode 3 square wave, period rl, in [0, x) */
+static inline u32 sq_high(u32 x, u32 rl)
+{
+    u32 h = (rl + 1) / 2;
+    return x / rl * h + (x % rl < h ? x % rl : h);
+}
+
+/* How many PIT clocks of [a, a + n) the speaker is driven (OUT2 high, 61h bit 1 set) */
+static u32 spk_high(const struct spk *s, u32 a, u32 n)
+{
+    if (!(s->p61 & 2) || !n) return 0;
+    if (s->wait) return s->mode == 0 ? 0 : n;
+    if (!(s->p61 & 1)) return n;                     /* gate low: OUT2 high (counting held) */
+    u32 rl = s->rl;
+    switch (s->mode) {
+    case 0: case 1: {                                /* low for rl clocks after the start, then high */
+        u32 e = a - s->start;
+        if (e >= rl) return n;
+        u32 low = rl - e;
+        return n > low ? n - low : 0; }
+    case 3: case 7: {
+        u32 ph = (a - s->start) % rl;
+        return sq_high(ph + n, rl) - sq_high(ph, rl); }
+    default: return n;                               /* 2, 4, 5: high but for one clock */
+    }
+}
+
+static u32 spk_per, spk_lastw;
+
+/* A count written to channel 2: PWM when they come at a steady rate. From
+   a fast IRQ 0 (Silent Service II's ISOUND.SS: 7850 Hz) the period is the
+   guest's channel 0 reload exactly; else the time since the last one. */
+static void spk_count_written(u32 t)
+{
+    u32 d = t - spk_lastw, r0 = reload_of(&pit[0]), per = 0;
+    spk_lastw = t;
+    if (pit[2].mode != 0) { spk_per = 0; return; }
+    if (r0 < PIT_PER_TICK && d >= r0 / 2 && d <= r0 * 3 / 2) per = r0;
+    else if (d >= 40 && d <= 2400) per = spk_per && d + d / 8 >= spk_per && d <= spk_per + spk_per / 8 ? spk_per : d;
+    static u32 said;                              /* logged once a rate holds for two counts */
+    if (per && per == spk_per && per != said) { said = per; kprintf("speaker: PWM sound, %u Hz\n", PIT_HZ / per); }
+    spk_per = per;
+}
+
+static struct spk spk_now(u32 t)
+{
+    struct spk s = { t, pit[2].start, reload_of(&pit[2]), spk_per, pit[2].mode, port61, pit[2].wait };
+    return s;
+}
+
 static int pit_out2(void)
 {
-    struct pitch *c = &pit[2];
-    u32 rl = reload_of(c), e = pit_clock() - c->start;
-    if (!(port61 & 1)) return 1;
-    if (c->mode == 0) return e >= rl;
-    if ((c->mode & 3) == 3) return (e % rl) < rl / 2;
-    return (e % rl) != rl - 1;
+    struct spk s = spk_now(pit_clock());
+    s.p61 |= 2;
+    return spk_high(&s, s.t, 1) != 0;
+}
+
+/* The changes, timed, for speaker_mix to play at the time they were made:
+   PWM speech (a timer IRQ writing a count to channel 2 in mode 0 at 6-16
+   kHz, or 61h bit 1 toggled from a timed loop) changes the speaker many
+   times within one 48 kHz output sample. */
+#define SPK_Q 4096
+static struct spk spkq[SPK_Q], spk_cur;
+static u32 spk_head, spk_tail;
+
+static void spk_event(u32 t)
+{
+    rlock_take(&sound_lock);
+    u32 next = (spk_tail + 1) % SPK_Q;
+    if (next == spk_head) { spk_cur = spkq[spk_head]; spk_head = (spk_head + 1) % SPK_Q; }   /* nobody rendering */
+    spkq[spk_tail] = spk_now(t);
+    spk_tail = next;
+    rlock_drop(&sound_lock);
 }
 
 static void fast_pit_arm(u32 now);
@@ -159,6 +232,8 @@ static void pit_write(int n, u8 v)
     }
     if (done) {
         c->start = pit_clock();
+        c->wait = c->mode == 1;                   /* mode 1 counts from the gate's next rising edge */
+        if (n == 2) { spk_count_written(c->start); spk_event(c->start); }
         if (n == 0) {
             next_irq0 = c->start + reload_of(c);
             fast_pit_arm(c->start);
@@ -198,6 +273,7 @@ static void pit_control(u8 v)
     c->mode = (v >> 1) & 7;
     c->rflip = c->wflip = 0;
     c->latched = 0;
+    if (n == 2) { c->wait = 1; spk_per = 0; spk_event(pit_clock()); }   /* mode 0: OUT low until the count */
 }
 
 /* Channel 0 faster than the host's 1 kHz tick: the APIC timer (smp.c)
@@ -232,19 +308,81 @@ static void irq0_check(void)
 void vdev_tick(void) { fast_timer_tick(); irq0_check(); }   /* the host's tick */
 void vdev_fast_tick(void) { irq0_check(); }        /* the APIC timer */
 
-/* PC speaker: channel 2 as a square wave while ports 61h bits 0-1 are set. */
-void speaker_mix(int32_t *lr, int frames)
+/* PC speaker, PIT time [t0, t1) into frames of 48 kHz. The speaker's
+   driven time is integrated exactly (C, in PIT clocks, from the states
+   above in force at each moment); each frame is its share over the last
+   PWM period when there is one (the average over exactly one carrier
+   period: the 7-16 kHz carrier and its harmonics cancel, the duty cycle,
+   the voice, remains), else over the frame itself (a beep's square wave,
+   61h toggled by hand). Then two low-pass stages (~5 kHz, the cone's
+   inertia) and a DC block (a speaker left on, or PWM's mean, is silence). */
+#define SPK_AMP 12000
+#define SPK_H 128
+static struct { u32 t, c; struct spk s; } spk_hist[SPK_H];   /* the states from t on, C at t */
+static u32 spk_hn;                                            /* entries made; the newest is spk_hn - 1 */
+
+/* C at time x; 0 if x is before the history kept */
+static int spk_c_at(u32 x, u32 *c)
 {
-    static u32 phase;
-    if ((port61 & 3) != 3) return;
-    u32 rl = reload_of(&pit[2]);
-    if (rl < 20) return;                           /* above hearing */
-    u32 step = (PIT_HZ / rl) * 4096 / 3000;          /* cycles per frame, 16.16 */
+    for (u32 k = 0; k < SPK_H && k < spk_hn; k++) {
+        u32 j = (spk_hn - 1 - k) % SPK_H;
+        if ((int32_t)(x - spk_hist[j].t) >= 0) {
+            *c = spk_hist[j].c + spk_high(&spk_hist[j].s, spk_hist[j].t, x - spk_hist[j].t);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void spk_hist_add(u32 t, u32 c, const struct spk *s)
+{
+    u32 j = spk_hn++ % SPK_H;
+    spk_hist[j].t = t; spk_hist[j].c = c; spk_hist[j].s = *s;
+}
+
+void speaker_mix(int32_t *lr, int frames, u32 t0, u32 t1)
+{
+    static int32_t lp1, lp2, dc_x, dc_y;
+    static u32 ca;                                   /* C at the frame's start */
+    u32 len = t1 - t0;
+    if (!spk_hn || (int32_t)(t0 - spk_hist[(spk_hn - 1) % SPK_H].t) < 0) {
+        spk_hn = 0;                                  /* first, or time went back: start over */
+        spk_hist_add(t0, 0, &spk_cur);
+        ca = 0;
+    }
     for (int i = 0; i < frames; i++) {
-        phase += step;
-        int32_t v = (phase & 0x8000) ? 5000 : -5000;
-        lr[2 * i] += v;
-        lr[2 * i + 1] += v;
+        u32 a = t0 + (u32)i * len / (u32)frames, b = t0 + (u32)(i + 1) * len / (u32)frames;   /* < 2^32: frames, len small */
+        while (spk_head != spk_tail && (int32_t)(spkq[spk_head].t - b) < 0) {
+            u32 te = spkq[spk_head].t, c;
+            if ((int32_t)(te - a) < 0) te = a;       /* late: from here */
+            if (!spk_c_at(te, &c)) c = ca;
+            spk_cur = spkq[spk_head];
+            spk_head = (spk_head + 1) % SPK_Q;
+            spk_hist_add(te, c, &spk_cur);
+        }
+        u32 cb = ca, cp;
+        spk_c_at(b, &cb);
+        u32 per = spk_cur.per;
+        int32_t v;
+        if (per && spk_c_at(b - per, &cp)) v = (int32_t)((cb - cp) * SPK_AMP / per);
+        else v = b != a ? (int32_t)((cb - ca) * SPK_AMP / (b - a)) : 0;
+        ca = cb;
+        lp1 += (v - lp1) >> 1;
+        lp2 += (lp1 - lp2) >> 1;
+        int32_t y = lp2 - dc_x + (int32_t)(((int64_t)dc_y * 65400) >> 16);
+        dc_x = lp2; dc_y = y;
+        lr[2 * i] += y;
+        lr[2 * i + 1] += y;
+    }
+    /* A long-idle state: fold it into a new entry now and then, so spk_high's spans stay short */
+    u32 n = (spk_hn - 1) % SPK_H;
+    if (t1 - spk_hist[n].t > 0x10000000u) {
+        struct spk st = spk_hist[n].s;
+        u32 c = ca;
+        spk_c_at(t1, &c);
+        if (st.mode <= 1 && !st.wait) st.mode = 4;   /* a one-shot long over: high */
+        spk_hist_add(t1, c, &st);
+        if (spk_cur.t == st.t) spk_cur = st;
     }
 }
 
@@ -702,9 +840,13 @@ static void out8(u16 port, u8 v)
     case 0x40: case 0x41: case 0x42: pit_write(port - 0x40, v); return;
     case 0x43: pit_control(v); return;
     case 0x60: kbd_data(v); return;
-    case 0x61:
-        if ((v & 1) && !(port61 & 1)) pit[2].start = pit_clock();
-        port61 = v; return;
+    case 0x61: {
+        u32 now = pit_clock();
+        if ((v & 1) && !(port61 & 1)) { pit[2].start = now; if (pit[2].mode == 1) pit[2].wait = 0; }   /* the gate's rising edge */
+        u8 old = port61;
+        port61 = v;
+        if ((old ^ v) & 3) spk_event(now);
+        return; }
     case 0x64: kbd_command(v); return;
     case 0x70: cmos_index = v; return;
     case 0x71: return;                          /* the real CMOS stays untouched */
