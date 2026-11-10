@@ -1123,6 +1123,18 @@ int dpmi_reflected_buffer(struct regs *r, u32 *lin)
     return 1;
 }
 
+/* The same for any pointer of a reflected protected-mode INT (the long-name
+   API on a 9p drive, fs9p.cpp): es 0 DS, 1 ES, off32 the register's full
+   value (EDX, ESI, EDI as the client had them). 0: not a reflected INT. */
+int dpmi_reflected_ptr(struct regs *r, int es, u32 off32, u32 *lin)
+{
+    if (!client || !xdepth || xs[xdepth - 1].kind != X_REFLECT) return 0;
+    if (((es ? r->v86_es : r->v86_ds) & 0xFFFF) != rm_stack_seg) return 0;
+    struct ctx *pm = &xs[xdepth - 1].saved;
+    *lin = sel_base(es ? pm->es : pm->ds) + (client32 ? off32 : (off32 & 0xFFFF));
+    return 1;
+}
+
 /* Run a real-mode routine that ends with IRET (the mouse driver's event
    callback) for a client in protected mode; it resumes as it was. */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip)
