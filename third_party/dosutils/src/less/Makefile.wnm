@@ -1,0 +1,81 @@
+# Makefile for less.
+# Windows 32/64 Visual C++ version
+#
+# To build in msvc env (VCVARS32.BAT, VCVARS64.BAT, ...)
+#
+# A release tarball:
+#   nmake -f Makefile.wnm
+#
+# A git snapshot:
+#   nmake -f Makefile.wnm generated
+#   nmake -f Makefile.wnm
+#
+# If cross compiling (e.g. arm): "generated" should be made in a native env.
+# Else (native build) this works too: nmake -f Makefile.wnm generated less.exe
+
+#### Start of system configuration section. ####
+
+CC = cl
+
+# Normal flags
+CFLAGS = /nologo /W3 /EHsc /O2 /I "." /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /c
+LDFLAGS = /nologo /subsystem:console /incremental:no
+
+# Debugging flags
+#CFLAGS = /nologo /MDd /W3 /GX /Od /Gm /Zi /I "." /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /c
+#LDFLAGS = /nologo /subsystem:console /incremental:yes /debug
+
+LD = link
+LIBS = user32.lib shell32.lib
+
+#### End of system configuration section. ####
+
+SRC = brac.c ch.c charset.c cmdbuf.c command.c \
+      cvt.c decode.c edit.c evar.c filename.c forwback.c \
+      ifile.c input.c jump.c line.c linenum.c lmsg.c \
+      lsystem.c main.c mark.c optfunc.c option.c \
+      opttbl.c os.c output.c pattern.c position.c \
+      prompt.c screen.c search.c \
+      signal.c tags.c ttyin.c version.c xbuf.c \
+      regexp.c
+
+!IF "$(SECURE_COMPILE)" == "1"
+CFLAGS = $(CFLAGS) /D "SECURE_COMPILE=1"
+!ELSE
+SRC = $(SRC) lesskey_parse.c
+!ENDIF
+
+OBJ = $(SRC:.c=.obj) help.obj
+
+# This rule allows us to supply the necessary -D options
+# in addition to whatever the user asks for.
+.c.obj::
+	$(CC) $(CFLAGS) $<
+
+all: less.exe
+
+less.exe: $(OBJ)
+	$(LD) $(LDFLAGS) $** $(LIBS) /out:$@
+
+defines.h: defines.wn
+	-del defines.h
+	-copy defines.wn defines.h
+
+$(OBJ): less.h funcs.h defines.h lang.h lmsg.h lessmsg.inc pattern.h xbuf.h
+
+# generate help.c, funcs.h and lessmsg.inc.
+# intentionally detached from $(OBJ) in case of cross compile - needs native cc
+generated:
+	$(CC) buildgen.c
+	buildgen.exe help < less.hlp > help.c
+	type $(SRC) 2>NUL | buildgen.exe funcs > funcs.h
+	type lessmsg lessmsg_int 2>NUL | buildgen.exe lessmsg > lessmsg.inc
+
+clean:
+	-del *.obj 
+	-del *.exe
+	-del defines.h
+	-del help.c
+	-del funcs.h
+	-del lessmsg.inc
+

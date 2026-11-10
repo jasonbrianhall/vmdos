@@ -17,6 +17,9 @@ LH C:\VMDOS\SHSUCDX /Q /D:?VMCD0001 >NUL
 REM Long file names (INT 21h 71xxh) on FAT drives and CDs: DOSLFN. Not
 REM wanted? Put REM in front of the LH line. (VMDOSNET drives have their own.)
 LH C:\VMDOS\DOSLFN.COM
+REM Keyboard layout other than US: take the REM off and give yours (MKEYB /?
+REM lists them: GR German, FR French, UK British ...).
+REM LH C:\VMDOS\MKEYB.EXE GR
 REM A folder QEMU shares (make run SHARE=dir) as drive V:, with long names:
 REM VMDOSNET V: share
 REM Mouse driver (CuteMouse): some games need it (Warcraft II), most don't,

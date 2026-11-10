@@ -317,8 +317,12 @@ int08:  TRAP 0x08               ; tick count, then the user hook, then EOI
 ; the VM's own EOI.
 int09:  push ax
         in al, 0x60
+        mov ah, 0x4F            ; keyboard intercept, as the config table says (a
+        stc                     ; keyboard driver such as mKEYB translates the
+        int 0x15                ; scan code there, or takes it: CF clear)
+        jnc .taken
         TRAP 0x09               ; AL: the scan code; the monitor fills the buffer
-        mov al, 0x20
+.taken: mov al, 0x20
         out 0x20, al
         pop ax
         iret

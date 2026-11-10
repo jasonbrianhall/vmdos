@@ -1,0 +1,1031 @@
+/*
+	mKEYB.C - minimum keyboard handler for international keyboards
+
+	requires only ~512 byte (~600 byte with COMBI characters)
+	of precious memory to do what it does.
+
+	for details, please see readme.txt
+
+
+	Copyright (C) 2002-2018 by www.tomehlert.de
+	Copyright (C) 2022-2025 by github.com/davidebreso
+*/
+
+
+#include <dos.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+#ifndef __WATCOMC__
+    #include <stdio.h>
+#endif
+
+#include "mkeyb.h"
+
+#define MY_MEMORY_SIGNATURE "mKEYB   "
+#define COPYRIGHT_TEXT "(c) 2002-2018 tom ehlert, 2022-2025 davidebreso"
+
+#ifndef EXTRADEBUG
+#define EXTRADEBUG 0
+#endif  /* EXTRADEBUG */
+
+#if EXTRADEBUG
+
+#define DBGprintf printf
+
+#else /* EXTRADEBUG */
+
+#ifdef __TURBOC__
+/* Borland doesn't support variadic macros */
+
+static int DBGprintf(const char *fmt, ...)
+{
+	UNREFERENCED_PARAMETER(fmt);
+	return 1;
+}
+
+#else /* __TURBOC__ */
+
+#define DBGprintf(x, ...)
+
+#endif /* __TURBOC__ */
+
+#endif /* EXTRADEBUG */
+
+#ifdef __WATCOMC__
+    short printf(const char * fmt, ...);
+#endif
+
+/*
+    this allocates memory as undisturbing as possible.
+	strategy choosen: allocate at end of memory,
+	in upper memory if present and tryHigh is true
+*/
+
+uint AllocMemory(uint residentsize, int makeResident, int tryHigh)
+{
+	union REGS r;
+	uint allocSeg;
+	uint oldlink,oldstrategy;
+
+	r.x.ax = 0x5802;     /* get UMB link state */
+	int86(0x21,&r,&r);
+	oldlink = r.h.al;
+
+	r.x.ax = 0x5800;     /* get allocation strategy */
+	int86(0x21,&r,&r);
+	oldstrategy = r.h.al;
+
+	r.x.ax = 0x5803;     /* set UMB link state */
+	r.x.bx = tryHigh;	 /* 0 = no UMB link, 1 = set UMB link */
+	int86(0x21,&r,&r);
+
+	r.x.ax = 0x5801;     /* set allocation strategy */
+	if (tryHigh) {
+		r.x.bx = 0x82;       /* last fit, try high, then low */
+	} else {
+		r.x.bx = 0x02;       /* last fit, low memory only */
+	}
+	int86(0x21,&r,&r);
+
+	r.x.ax = 0x4800;                       /* dosAllocMem */
+	r.x.bx = (residentsize + 15) / 16;     /* size in paragraphs */
+	int86(0x21,&r,&r);
+
+	if (r.x.cflag) { printf("can't allocate memory\n");exit(1); }
+
+	allocSeg = r.x.ax;
+
+	if (makeResident)
+	{
+		*(short far*)MK_FP(allocSeg-1, 1) = allocSeg;   /* makes it selfreferencing */
+		_fmemcpy(MK_FP(allocSeg-1, 8), MY_MEMORY_SIGNATURE, 8);   /* mark our name */
+	}
+
+	r.x.ax = 0x5803;     /* reset UMB link state */
+	r.x.bx = oldlink;
+	int86(0x21,&r,&r);
+
+	r.x.ax = 0x5801;         /* reset UMB allocation strategy */
+	r.x.bx = oldstrategy;
+	int86(0x21,&r,&r);
+
+	return allocSeg;
+}
+
+/*
+	VerifyScancodeTableForCorrectness();
+	this is in theory not needed.
+	in practice, it's better to check, that the tables are setup correctly
+	at least as there are yet many missing keyboard definitions
+*/
+
+void VerifyScancodeTableForCorrectness(	struct KeyboardDefinition *kb,int print)
+{
+	unsigned flags;
+	uchar *tbl, *tblnext, *lasttbl;
+	int loopdetect = 0;
+	uchar *scancode_end;
+
+	/* this depends on the next thing in memory being either the first combi table
+	   or the keyboard definition */
+	scancode_end = kb->CombicodeTables[0];
+	if(scancode_end == NULL)
+		scancode_end = (uchar *) kb;
+
+	lasttbl = kb->ScancodeTable;
+	for(tbl = kb->ScancodeTable;
+		tbl[0] != 0;
+		tbl = tblnext)
+	{
+		if(print)
+			printf("offset %02x scancode %02x flags %02x \n",
+					tbl-kb->ScancodeTable, tbl[0], tbl[1]);
+		if(++loopdetect > 200)
+		{
+			printf("loop detected\n");
+				goto error;
+		}
+
+		flags = tbl[1];
+		tblnext = tbl+(flags & SIZEFIELD);
+		if(tblnext > scancode_end)
+		{
+			printf("scancode table error <SIZE> offset 0x%2x, scancode = 0x%02x, flags = 0x%02x\n",
+					tbl-kb->ScancodeTable, tbl[0],flags);
+			goto error;
+		}
+
+		if (tblnext[0])
+			if ((tblnext[1] & SIZEFIELD) <= 2)
+			{
+				printf("scancode table error <FLAGS> offset 0x%2x, scancode = 0x%02x, flags = 0x%02x\n",
+						tbl-kb->ScancodeTable, tbl[0],flags);
+				goto error;
+			}
+
+		lasttbl = tbl;
+	}
+
+	if (tbl + 1 != scancode_end)
+	{
+		printf("scancode table error: early zero found at offset 0x%2x last scan 0x%02x\n",
+				tbl-kb->ScancodeTable, lasttbl[0]);
+		goto error;
+	}
+	return;
+
+error:
+	if (!print)
+		VerifyScancodeTableForCorrectness(kb, 1);
+	exit(1);
+}
+
+/*
+   AutodetectInt9h();
+   Autodetects if a new INT9 handler is needed by reading
+   feature byte 1 of the ROM configuration table
+   Returns 1 if the handler is needed, 0 otherwise
+*/
+
+int AutodetectInt9h(void)
+{
+	union REGS r;
+	struct SREGS sr;
+
+	r.h.ah = 0xc0;
+	int86x(0x15, &r, &r, &sr);		/* INT 15,C0: Get system configuration */
+	if ((r.x.cflag & 0x01) == 0)  	/* CF = 0 */
+	{
+		/* ROM Table is at ES:BX, feature byte 1 at offset 5 */
+		uchar fbyte = *(uchar far *)MK_FP(sr.es, r.x.bx + 5);
+		DBGprintf("Feature byte at %04x:%04x is %02x\n", sr.es, r.x.bx, fbyte);
+		/* bit 4 is 1 if INT 15,4F is called upon INT9 */
+		return ((fbyte & 0x10) == 0);
+	}
+	/* if carry flag is set, function is unavailable */
+	return 1;		/* Chain INT9 */
+}
+
+/*
+  AutodetectInt16h();
+  Autodetects if extended keyboard BIOS is available
+  Returns 0 if available, 1 if not available
+*/
+
+int AutodetectInt16h(void)
+{
+	union REGS r;
+
+	/*
+	   Here we use the same trick as the original KEYB driver:
+	   we call the (nonexistend) INT 16h function 92h and check AH:
+	   if it is 80h or less, then extended BIOS is present
+	 */
+	r.h.ah = 0x92;
+	int86(0x16, &r, &r);
+	/* If the returned AH is greater than 80h then handler is needed */
+	return (r.h.ah > 0x80);
+}
+
+/*
+  SetKeyboardType(flag);
+  Set the keyboard type depending on flag:
+  	0 = force standard 83/84 keys keyboard
+  	1 = force enhanced 101/102 keys keyboard
+  	2 = autodetect keyboard type from the keyboard mode/type byte at 40:96h
+  Returns the keyboard type and sets the keyboard mode/type byte accordingly
+*/
+uint SetKeyboardType(uint flag)
+{
+	uchar far *status= MK_FP(0x40, 0x96);
+	if (flag == 0) {
+		/* Set standard keyboard type */
+		*status &= ~0x10;
+	} else if (flag == 1) {
+		*status |= 0x10;
+	}
+	DBGprintf("Keyboard status byte: %04x\n", *status);
+	return (*status & 0x10);
+}
+
+/*
+  uint DetectKeyboardDriver(uint *resident);
+  Check if a keyboard driver is installed.
+  Return value:
+	0	no driver installed
+	1	same version of mKEYB installed
+	2	different version of mKEYB installed
+	3	another keyboard driver installed
+  resident is modifed to point to the resident code segment
+*/
+
+uint DetectKeyboardDriver(uint *resident)
+{
+	union REGS r;
+	struct SREGS sr;
+
+	r.x.ax = 0xad80;  		  // Check for keyboard driver
+	int86x(0x2f,&r,&r,&sr);
+	*resident = sr.es;
+
+	if (r.h.al == 0xff)
+	{
+		DBGprintf("Another keyboard driver is installed\n");
+		return 3;
+	}
+
+	if (r.x.ax != MY_INSTALL_SIGNATURE)
+	{
+		DBGprintf("No keyboard driver installed\n");
+		return 0;
+	}
+
+	if (r.x.bx != MY_VERSION_SIGNATURE)
+	{
+		DBGprintf("Different version of mKEYB installed\n");
+		return 2;
+	}
+
+	return 1;
+}
+
+/*
+  UninstallKeyboard(int verbose);
+  Uninstall mKEYB if present in memory
+  If verbose == 0 and another keyb driver is found, disable it
+  If verbose == 1 and another keyb driver is found, terminate with
+  a warning message.
+*/
+
+// helper to split a far pointer into segment,offset pair for printf
+#define SPLIT_FP(x) FP_SEG(x), FP_OFF(x)
+
+void UninstallKeyboard(int verbose)
+{
+	void far *int9handler = *(void far *far *)MK_FP(0,4*0x9);
+	void far *int16handler = *(void far *far *)MK_FP(0,4*0x16);
+	void far *int15handler = *(void far *far *)MK_FP(0,4*0x15);
+	void far *int2fhandler = *(void far *far *)MK_FP(0,4*0x2f);
+	unsigned resident = (unsigned)NULL;
+	void far *orig9;
+	void far *orig16;
+	void far *orig15;
+	void far *orig2f;
+
+	union  REGS r;
+	struct SREGS sr;
+
+	uint installed, freemem = 1;
+
+	DBGprintf("current values %04x:%04x, %04x:%04x, %04x:%04x, %04x:%04x\n", SPLIT_FP(int9handler), SPLIT_FP(int16handler), SPLIT_FP(int15handler), SPLIT_FP(int2fhandler));
+
+	installed = DetectKeyboardDriver(&resident);
+
+	if (installed == 0)
+	{
+		if(verbose)
+			printf("No keyboard driver installed\n");
+		return;
+	}
+
+	if (installed == 1)
+	{
+		/* Current version of mKEYB is installed */
+		/* Check if you can uninstall it 		 */
+
+		// printf("resident found at %x:0\n",resident);
+		if (_fmemcmp( ((char far *)&OldInt15)-8,
+		   ((char far *)MK_FP(resident,FP_OFF(&OldInt15)))-8, 8) != 0)
+		{
+			if(verbose)
+			{
+				printf("Different version of mKEYB found\n");
+				return;
+			}
+			installed = 2;
+		}
+	} else {
+		if(verbose)
+		{
+			printf("No previous instance of mKEYB " MY_VERSION_TEXT " found\n");
+			return;
+		}
+	}
+
+	if (installed > 1)
+	{
+		r.x.ax = 0xad82;  			// Disable current driver
+		r.x.bx = 0;
+		int86(0x2f,&r,&r);
+		DBGprintf("Old keyb driver disabled\n");
+		return;
+	}
+
+	orig9 = *(void far *far*)MK_FP(resident,FP_OFF(&OldInt9));
+	orig16 = *(void far *far*)MK_FP(resident,FP_OFF(&OldInt16));
+	orig15 = *(void far *far*)MK_FP(resident,FP_OFF(&OldInt15));
+	orig2f = *(void far *far*)MK_FP(resident,FP_OFF(&OldInt2F));
+
+	DBGprintf("original values %04x:%04x, %04x:%04x, %04x:%04x, %04x:%04x\n", SPLIT_FP(int9handler), SPLIT_FP(int16handler), SPLIT_FP(int15handler), SPLIT_FP(int2fhandler));
+
+	if (FP_SEG(int9handler) == resident)
+	{
+		r.x.ax  = 0x2509;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(orig9);
+		sr.ds   = FP_SEG(orig9);
+		int86x(0x21,&r,&r,&sr);
+		DBGprintf("int9 handler desinstalled\n");
+	} else {
+		freemem = (orig9 == NULL);
+	}
+
+	if (FP_SEG(int16handler) == resident)
+	{
+		r.x.ax  = 0x2516;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(orig16);
+		sr.ds   = FP_SEG(orig16);
+		int86x(0x21,&r,&r,&sr);
+		DBGprintf("int16 handler desinstalled\n");
+	} else {
+		freemem = (orig16 == NULL);
+	}
+
+	if (FP_SEG(int15handler) == resident)
+	{
+		r.x.ax  = 0x2515;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(orig15);
+		sr.ds   = FP_SEG(orig15);
+		int86x(0x21,&r,&r,&sr);
+		DBGprintf("int15 handler desinstalled\n");
+	} else {
+		freemem = (orig15 == NULL);
+	}
+
+	if (FP_SEG(int2fhandler) == resident)
+	{
+		r.x.ax  = 0x252f;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(orig2f);
+		sr.ds   = FP_SEG(orig2f);
+		int86x(0x21,&r,&r,&sr);
+		DBGprintf("int2f handler deinstalled\n");
+	} else {
+		freemem = (orig2f == NULL);
+	}
+
+	if (freemem)
+	{
+					// OK. free memory also
+					/* DosFree(resident) */
+		r.x.ax = 0x4900;
+		sr.es  = resident;
+		int86x(0x21,&r,&r,&sr);
+
+		*(short far*)MK_FP(resident-1, 1) = 0;   /* bums. DosFree(resident) */
+		DBGprintf("DOS memory at %x freed\n",resident);
+		if (verbose)
+			printf("Old mKEYB deinstalled\n");
+	} else if (verbose) {
+		printf("Old mKEYB disabled.\nCannot remove it from memory since it is not the last installed driver.\n");
+	}
+
+}
+
+int InstallKeyboard(struct KeyboardDefinition *kb,
+		uint GOTSR, uint int9hChain, uint int16hChain, uint tryHigh)
+{
+	union  REGS r;
+	struct SREGS sregs;
+	uint residentSeg;
+	uint residentsize;
+	void far *pint9_handler;
+	void far *pint16_handler = NULL;
+
+	int  i;
+
+
+	/* make sure some assumptions hold */
+	int err = 0;
+
+	extern int  cdecl far cint15_handler_full(int);
+	extern void cdecl far END_cint15_handler_full(void);
+	extern int  cdecl far cint15_handler_normal(int);
+	extern void cdecl far END_cint15_handler_normal(void);
+	extern int  cdecl far cint15_handler_fastswitch(int);
+	extern void cdecl far END_cint15_handler_fastswitch(void);
+	extern int  cdecl far cint15_handler_standard(int);
+	extern void cdecl far END_cint15_handler_standard(void);
+	extern int  cdecl far cint15_handler_stdfull(int);
+	extern void cdecl far END_cint15_handler_stdfull(void);
+	extern void cdecl far END_int16_handler(void);
+
+	if (FP_SEG(int2f_handler) != FP_SEG(int16_handler)) err |= 0x0001;
+//    if (FP_SEG(ResidentScancodetable)  != FP_SEG(int15_handler)) err |= 0x0002;
+//    if (FP_OFF(ResidentScancodetable)  > 0x800)                  err |= 0x0004;
+
+#if EXTRADEBUG
+
+	/* more thorough internal consistency checks, see memmap.txt */
+
+#define CHECK(c, fmt) if (!(c)) { printf(fmt); err = 1; }
+
+	CHECK(FP_SEG(int2f_handler) == FP_SEG(int15_handler), "int2f and int15 segment mismatch\n")
+	CHECK(FP_OFF(int2f_handler)  < FP_OFF(int15_handler), "int2f and int15 wrong order\n")
+
+	CHECK(FP_SEG(int9_handler) == FP_SEG(int16_handler), "int9 and int16 segment mismatch\n")
+	CHECK(FP_OFF(int9_handler)  < FP_OFF(int16_handler), "int9 and int16 wrong order\n")
+
+	CHECK(FP_SEG(cint15_handler_full) == FP_SEG(END_cint15_handler_full),             "cint15 full end point segment error\n")
+	CHECK(FP_OFF(cint15_handler_full)  < FP_OFF(END_cint15_handler_full),             "cint15 full end point offset error\n")
+
+	CHECK(FP_SEG(cint15_handler_normal) == FP_SEG(END_cint15_handler_normal),         "cint15 normal end point segment error\n")
+	CHECK(FP_OFF(cint15_handler_normal)  < FP_OFF(END_cint15_handler_normal),         "cint15 normal end point offset error\n")
+
+	CHECK(FP_SEG(cint15_handler_fastswitch) == FP_SEG(END_cint15_handler_fastswitch), "cint15 fastswitch end point segment error\n")
+	CHECK(FP_OFF(cint15_handler_fastswitch)  < FP_OFF(END_cint15_handler_fastswitch), "cint15 fastswitch end point offset error\n")
+
+	CHECK(FP_SEG(cint15_handler_standard) == FP_SEG(END_cint15_handler_standard),     "cint15 standard end point segment error\n")
+	CHECK(FP_OFF(cint15_handler_standard)  < FP_OFF(END_cint15_handler_standard),     "cint15 standard end point offset error\n")
+
+	CHECK(FP_SEG(cint15_handler_stdfull) == FP_SEG(END_cint15_handler_stdfull),       "cint15 stdfull end point segment error\n")
+	CHECK(FP_OFF(cint15_handler_stdfull)  < FP_OFF(END_cint15_handler_stdfull),       "cint15 stdfull end point offset error\n")
+
+	CHECK(FP_SEG(cint15_handler_full) == FP_SEG(cint15_handler_normal),     "cint15 full and normal segment mismatch\n")
+	CHECK(FP_SEG(cint15_handler_full) == FP_SEG(cint15_handler_fastswitch), "cint15 full and fastswitch segment mismatch\n")
+	CHECK(FP_SEG(cint15_handler_full) == FP_SEG(cint15_handler_standard),   "cint15 full and standard segment mismatch\n")
+	CHECK(FP_SEG(cint15_handler_full) == FP_SEG(cint15_handler_stdfull),    "cint15 full and stdfull segment mismatch\n")
+
+	CHECK(FP_SEG(int2f_handler      ) != FP_SEG(InstallKeyboard), "int2f in default segment\n")
+	CHECK(FP_SEG(cint15_handler_full) != FP_SEG(InstallKeyboard), "int15 full handler in default segment\n")
+	CHECK(FP_SEG(int9_handler)        != FP_SEG(InstallKeyboard), "int9 in default segment\n")
+
+	CHECK(FP_SEG(kb->ScancodeTable) == FP_SEG(kb), "keyboard def and scancode table segment mismatch\n")
+	CHECK(FP_OFF(kb->ScancodeTable)  < FP_OFF(kb), "keyboard def and scancode table in wrong order\n")
+
+	printf("int2f_handler at %04x:%04x\n", SPLIT_FP(int2f_handler));
+	printf("int15_handler at %04x:%04x\n", SPLIT_FP(int15_handler));
+	printf("OldInt15 at %04x:%04x\n", SPLIT_FP(&OldInt15));
+	printf("pResidentScancodetable at %04x:%04x\n", SPLIT_FP(&pResidentScancodetable));
+	printf("cint15_handler_full at %04x:%04x\n", SPLIT_FP(cint15_handler_full));
+	printf("cint15_handler_normal at %04x:%04x\n", SPLIT_FP(cint15_handler_normal));
+	printf("int9_handler at %04x:%04x\n", SPLIT_FP(int9_handler));
+	printf("int16_handler at %04x:%04x\n", SPLIT_FP(int16_handler));
+
+	{
+		uint lastoffs = FP_OFF(kb->ScancodeTable);
+
+		for (i = 0; i < 6; i++) {
+			uchar *combi = kb->CombicodeTables[i];
+			if (!combi)
+			{
+				continue;
+			}
+
+			if (FP_SEG(combi) != FP_SEG(kb))
+			{
+				printf("combi table %d in wrong segment\n", i);
+				err = 1;
+			}
+
+			if (FP_OFF(combi) < lastoffs)
+			{
+				printf("combi table %d in wrong order\n", i);
+				err = 1;
+			}
+			lastoffs = FP_OFF(combi);
+		}
+	}
+
+	CHECK((FP_SEG(int2f_handler) < FP_SEG(cint15_handler_full) || (FP_OFF(int2f_handler) < FP_OFF(cint15_handler_full))), "int2f and cint15_handler in wrong order\n")
+	CHECK((FP_SEG(cint15_handler_full) < FP_SEG(int9_handler) || (FP_OFF(cint15_handler_full) < FP_OFF(int9_handler))), "cint15_handler and int9 in wrong order\n")
+
+#undef CHECK
+
+#endif /* EXTRADEBUG */
+
+	if (err)
+	{
+		printf("compile time error %x\n", err);
+		printf("please check your compiler switches and recompile\n");
+		return 1;
+	}
+
+	VerifyScancodeTableForCorrectness(kb,0);
+
+	memset(&r, 0, sizeof(r));
+
+	/*
+	 * Do this before copying.
+	 * Save only the handlers that will be installed.
+	 */
+	if(int9hChain) 	OldInt9 = getvect(0x9);
+	if(int16hChain) OldInt16 = getvect(0x16);
+	OldInt15 = getvect(0x15);
+	OldInt2F = getvect(0x2f);
+
+  {	/* install the resident part */
+	void far *pint15_handler;
+	uint      int15_handler_size;
+	uint	  int9_handler_size;
+	uint	  int16_handler_size;
+	uchar far *pres;
+
+	switch(kb->DriverFunctionRequired)
+	{
+		case DRIVER_FUNCTION_FULL:
+			pint15_handler = (void far *)cint15_handler_full;
+			int15_handler_size = FP_OFF(END_cint15_handler_full) - FP_OFF(cint15_handler_full);
+			break;
+
+		case DRIVER_FUNCTION_NORMAL:
+			pint15_handler = (void far *)cint15_handler_normal;
+			int15_handler_size = FP_OFF(END_cint15_handler_normal) - FP_OFF(cint15_handler_normal);
+			break;
+
+		case DRIVER_FUNCTION_FASTSWITCH:
+			pint15_handler = (void far *)cint15_handler_fastswitch;
+			int15_handler_size = FP_OFF(END_cint15_handler_fastswitch) - FP_OFF(cint15_handler_fastswitch);
+			break;
+
+		case DRIVER_FUNCTION_STANDARD:
+			pint15_handler = (void far *)cint15_handler_standard;
+			int15_handler_size = FP_OFF(END_cint15_handler_standard) - FP_OFF(cint15_handler_standard);
+			break;
+
+		case DRIVER_FUNCTION_STD_FULL:
+			pint15_handler = (void far *)cint15_handler_stdfull;
+			int15_handler_size = FP_OFF(END_cint15_handler_stdfull) - FP_OFF(cint15_handler_stdfull);
+			break;
+
+		default:
+			/* this should not happen unless the tables are corrupted */
+			printf("compile time error bad driver function %d\n", kb->DriverFunctionRequired);
+			exit(1);
+			break;
+	}
+
+	pres = (void far *)cint15_handler_full;
+	_fmemcpy(pres, pint15_handler, int15_handler_size);
+	pres += int15_handler_size;
+	if(int9hChain)
+	{
+		/* copy the INT9 handler */
+		pint9_handler = pres;
+		int9_handler_size = FP_OFF(int16_handler) - FP_OFF(int9_handler);
+		_fmemcpy(pres, int9_handler, int9_handler_size);
+		pres += int9_handler_size;
+	}
+	if(int16hChain)
+	{
+		/* copy the INT16 handler */
+		pint16_handler = pres;
+		int16_handler_size = FP_OFF(END_int16_handler) - FP_OFF(int16_handler);
+		_fmemcpy(pres, int16_handler, int16_handler_size);
+		pres += int16_handler_size;
+	}
+
+	pResidentScancodetable = (uchar*)FP_OFF(pres);
+
+	for (i = COMBI1; i <= COMBI6; i++)
+	{
+		ResidentCombiTables[i-COMBI1] = (char*)pResidentScancodetable +
+						(kb->CombicodeTables[i-COMBI1] - kb->ScancodeTable);
+	}
+
+	_fmemcpy(pres, kb->ScancodeTable, (char *)kb - (char *)kb->ScancodeTable);
+	pres += (char *)kb - (char *)(kb->ScancodeTable);
+
+	DecimalDingsBums = kb->DezimalDingsbums;
+
+	if (kb->DefaultLayoutUS)
+		usebiosonly_flag = 0;
+
+	residentsize = FP_OFF(pres);
+
+								/* fetch enough memory for the TSR part */
+	residentSeg = AllocMemory(residentsize, GOTSR, tryHigh);
+
+#define RESPTR(x) MK_FP(residentSeg, (void near*)x)
+
+							/* copy code and data up into (high) memory */
+	_fmemcpy(RESPTR(0),
+		MK_FP(FP_SEG(int15_handler),0),
+		residentsize);
+
+	if(int9hChain)	   	/* install int9 handler if requested */
+	{
+		r.x.ax  = 0x2509;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(pint9_handler);
+		sregs.ds   = residentSeg;
+		int86x(0x21,&r,&r,&sregs);
+		DBGprintf("INT9 installed at %04x:%04x\n", sregs.ds, r.x.dx);
+	}
+	if(int16hChain)		/* install 1nt16 handler if requested */
+	{
+		r.x.ax  = 0x2516;                        /* dosSetVect */
+		r.x.dx  = FP_OFF(pint16_handler);
+		sregs.ds   = residentSeg;
+		int86x(0x21,&r,&r,&sregs);
+		DBGprintf("INT16 installed at %04x:%04x\n", sregs.ds, r.x.dx);
+	}
+	r.x.ax  = 0x2515;                        /* dosSetVect */
+	r.x.dx  = FP_OFF(int15_handler);
+	sregs.ds   = residentSeg;
+	int86x(0x21,&r,&r,&sregs);
+	DBGprintf("INT15 installed at %04x:%04x\n", sregs.ds, r.x.dx);
+
+	r.x.ax  = 0x252f;                        /* dosSetVect */
+	r.x.dx  = FP_OFF(int2f_handler);
+	sregs.ds   = residentSeg;
+	int86x(0x21,&r,&r,&sregs);
+	DBGprintf("INT2F installed at %04x:%04x\n", sregs.ds, r.x.dx);
+
+  }	/* done with install */
+
+	if (GOTSR)
+	{
+		exit(0);
+	}
+
+	printf("\n mKEYB installed at segment %04x, %u bytes\n", residentSeg, residentsize);
+	if(int9hChain)
+		printf(" INT 9 handler installed at %04x:%04x\n", residentSeg, FP_OFF(pint9_handler));
+	if(int16hChain)
+		printf(" INT 16 handler installed at %04x:%04x\n", residentSeg, FP_OFF(pint16_handler));
+	printf(" INT 15 handler installed at %04x:%04x\n", residentSeg, FP_OFF(int15_handler));
+	printf(" INT 2F handler installed at %04x:%04x\n", residentSeg, FP_OFF(int2f_handler));
+	printf(" %s keyboard layout\n", (kb->DriverFunctionRequired & 4) ? "Standard" : "Enhanced");
+
+	printf("\n mKEYB debug mode - hit ESC key to terminate test mode\n");
+
+  {	/* debug only */
+	extern uchar far debug_scancode;        /* debug */
+	uchar last_scancode = 0;
+
+	do
+	{
+		if (*(uchar far*)RESPTR(&debug_scancode) != 0)
+		{
+			printf("shiftstate  %04x  scancode %02x\n",
+					*(uint far*)MK_FP(0x40,0x17),
+					*(uchar far*)RESPTR(&debug_scancode));
+
+			if (*(uchar far*)RESPTR(&debug_scancode) & 0x80 && /* release key ??*/
+				*(uchar far*)RESPTR(&debug_scancode) != 0xe0)
+					printf("\n");
+
+			*(uchar far*)RESPTR(&debug_scancode) = 0;
+		}
+
+		r.h.ah = 0x01;
+		int86(0x16,&r,&r);
+		if ((r.x.cflag & 0x40) == 0)  /* ZF = 0 */
+		{
+			r.h.ah = 0x00;
+			int86(0x16,&r,&r);
+			last_scancode = r.h.ah;
+			if (r.h.al < ' ') {
+				printf("key pressed %04x  ASCII %02x\n",r.x.ax,r.h.al);
+			} else {
+				printf("key pressed %04x  ASCII '%c'\n",r.x.ax,r.h.al);
+			}
+		}
+	}
+	while (last_scancode != 1);
+  } /* end debug */
+	if(int9hChain) 	setvect(0x9,OldInt9);
+	if(int16hChain) setvect(0x16,OldInt16);
+	setvect(0x15,OldInt15);
+	setvect(0x2f,OldInt2F);
+
+	printf(" mKEYB - uninstalled\n");
+
+	return 0;
+}
+
+extern struct KeyboardDefinition
+	 Keyboard_BE
+	,Keyboard_BG
+	,Keyboard_BGP
+	,Keyboard_DK
+	,Keyboard_GR
+	,Keyboard_GRstd
+	,Keyboard_GR2
+	,Keyboard_GR2std
+	,Keyboard_IT
+	,Keyboard_ITstd
+	,Keyboard_LA
+	,Keyboard_NL
+	,Keyboard_NO
+	,Keyboard_PL
+	,Keyboard_PO
+	,Keyboard_RU
+	,Keyboard_SF
+	,Keyboard_SG
+	,Keyboard_SP
+	,Keyboard_SU
+	,Keyboard_SV
+	,Keyboard_UK
+	,Keyboard_BR
+	,Keyboard_BX
+	,Keyboard_FR
+	,Keyboard_HE
+	,Keyboard_SL
+	,Keyboard_UX
+	,Keyboard_TR
+	,Keyboard_TRF
+	;
+
+/* 101/102 keys enhanced keyboards definition table */
+struct KeyboardDefinition *KeyDefTab[] =
+	{
+	 &Keyboard_BE
+	,&Keyboard_BG
+	,&Keyboard_BGP
+	,&Keyboard_BR
+	,&Keyboard_BX
+	,&Keyboard_DK
+	,&Keyboard_FR
+	,&Keyboard_GR
+	,&Keyboard_GR2
+	,&Keyboard_HE
+	,&Keyboard_IT
+	,&Keyboard_LA
+	,&Keyboard_NL
+	,&Keyboard_NO
+	,&Keyboard_PL
+	,&Keyboard_PO
+	,&Keyboard_RU
+	,&Keyboard_SF
+	,&Keyboard_SG
+	,&Keyboard_SL
+	,&Keyboard_SP
+	,&Keyboard_SU
+	,&Keyboard_SV
+	,&Keyboard_TR
+	,&Keyboard_TRF
+	,&Keyboard_UK
+	,&Keyboard_UX
+	};
+
+/* 83/84 keys standard keyboards definition table */
+struct KeyboardDefinition *StdKeyDefTab[] =
+	{
+	 &Keyboard_BE
+	,&Keyboard_BG
+	,&Keyboard_BGP
+	,&Keyboard_BR
+	,&Keyboard_BX
+	,&Keyboard_DK
+	,&Keyboard_FR
+	,&Keyboard_GRstd
+	,&Keyboard_GR2std
+	,&Keyboard_HE
+	,&Keyboard_ITstd
+	,&Keyboard_LA
+	,&Keyboard_NL
+	,&Keyboard_NO
+	,&Keyboard_PL
+	,&Keyboard_PO
+	,&Keyboard_RU
+	,&Keyboard_SF
+	,&Keyboard_SG
+	,&Keyboard_SL
+	,&Keyboard_SP
+	,&Keyboard_SU
+	,&Keyboard_SV
+	,&Keyboard_TR
+	,&Keyboard_TRF
+	,&Keyboard_UK
+	,&Keyboard_UX
+	};
+
+
+void ListLanguages(void)
+{
+	struct KeyboardDefinition *kb;
+	unsigned int j;
+
+	printf("List of keyboard layouts:\n");
+	for (j = 0; j < LENGTH(KeyDefTab); j++)
+	{
+		kb = KeyDefTab[j];
+		printf(" %-3s- %s\n",kb->LanguageShort,kb->Description);
+	}
+}
+
+
+void usage(void)
+{
+	printf("MKEYB usage:\n"
+		   "      MKEYB UK - United Kingdom keyboard\n"
+		   "      MKEYB GR - German - deutsche Tastatur\n"
+		   "      ....\n"
+		   "      MKEYB /L - Lists all available keyboards\n"
+		   "      MKEYB /U - Uninstalls previous keyboard driver\n"
+		   "      MKEYB /Q - Quiet - absorb all keyboard input\n"
+		   "      MKEYB /E - Specifies that an enhanced 101/102 keys keyboard is installed\n"
+		   "      MKEYB /S - Specifies that a standard 83/84 keys keyboard is installed\n"
+		   "      MKEYB /C - CapsLock acts as Ctrl (Shift-CapsLock to get a real CapsLock)\n"
+		   "      MKEYB /9 - Installs INT 9 handler (/9- to disable)\n"
+		   "      MKEYB /G - Installs INT 16 handler (/G- to disable)\n"
+		   "      MKEYB /M - Installs driver in low memory\n"
+		   "      MKEYB GR /T - Tests the GERman keyboard driver, don't go resident\n"
+		   "When loaded:\n"
+		   "      Ctrl+Alt+F1 : International (QWERTY) keyboard\n"
+		   "      Ctrl+Alt+F2 : National loaded keyboard\n"
+		   "      on some languages, tapping Right-Control also switches"
+		   );
+	exit(1);
+}
+
+
+int main(int argc, char *argv[])
+{
+    struct KeyboardDefinition *kb = NULL;
+	uint GOTSR = 1;
+	uint int9hChain = 2;	/* 0 = disabled, 1 = enabled, 2 = autodetect */
+	uint int16hChain = 2;	/* 0 = disabled, 1 = enabled, 2 = autodetect */
+	uint enhancedKeyb = 2;	/* 0 = disabled, 1 = enabled, 2 = autodetect */
+	uint tryHigh = 1;		/* 0 = low memory only, 1 = try high then low */
+	int i;
+	unsigned int kb_idx = LENGTH(KeyDefTab);
+
+	printf("mKEYB " MY_VERSION_TEXT " [" __DATE__ "] " COPYRIGHT_TEXT "\n");
+
+	for (i = 1; i < argc; i++)
+	{
+		char *argptr = argv[i];
+
+		if (*argptr == '/' || *argptr == '-')
+		{
+			switch(toupper(argptr[1]))
+			{
+				case 'L': ListLanguages(); exit(0);
+				case 'T': GOTSR = 0; break;
+
+				case 'U':
+						  UninstallKeyboard(1);
+						  exit(0);
+						  break;
+
+				case 'Q': Flags.silent = 1;
+						  break;
+
+				case 'C': Flags.capsisctrl = 1;
+						  break;
+
+				case 'E': enhancedKeyb = 1;
+						  break;
+
+				case 'S': enhancedKeyb = 0;
+						  break;
+
+				case '9': int9hChain = (argptr[2] != '-');
+					break;
+
+				case 'G': int16hChain = (argptr[2] != '-');
+					break;
+
+				case 'M': tryHigh = 0;
+					break;
+
+				default: printf("unknown argument <%s>\n", argptr+1);
+				case 'H':
+				case '?':usage();
+						 break;
+
+			}
+		} else {
+			for (kb_idx = 0; kb_idx < LENGTH(KeyDefTab); kb_idx++)
+			{
+				if (stricmp(argptr,KeyDefTab[kb_idx]->LanguageShort) == 0)
+				{
+					break;
+				}
+			}
+
+			if (kb_idx == LENGTH(KeyDefTab))
+			{
+				if (stricmp(argptr,"US") == 0)
+				{
+					printf("US keyboards don't need a keyboard handler\n");
+					UninstallKeyboard(0);
+					exit(0);
+				}
+
+				printf("unknown keyboard driver '%s'\n", argptr);
+				printf("use MKEYB /L to get a list of available languages\n");
+				exit(1);
+			}
+		}
+	}
+
+	enhancedKeyb = SetKeyboardType(enhancedKeyb);
+	if (kb_idx == LENGTH(KeyDefTab))
+	{
+		printf("you MUST specify a keyboard language like\n"
+			   "   MKEYB GR\n"
+			   "   MKEYB SP\n"
+			   "use MKEYB /L to get a list of available languages\n");
+		exit(1);
+	}
+
+	kb = KeyDefTab[kb_idx];
+	if(!enhancedKeyb)
+	{
+		kb = StdKeyDefTab[kb_idx];
+		if (kb == NULL)
+		{
+			printf("%s language not available for 83/84 keys keyboards\n"
+				   "please select a different language\n", KeyDefTab[kb_idx]->LanguageShort);
+			exit(1);
+		}
+		/* Patch enhanced keyboard layouts to use standard drivers */
+		kb->DriverFunctionRequired = (kb->DriverFunctionRequired & 1) | 4;
+	}
+
+	printf("%s - %s\n", kb->LanguageShort, kb->Description);
+	UninstallKeyboard(0);
+	/* BUGFIX: be sure that mKEYB is unloaded before autodetecting INT 9 and INT 16 */
+	if(int9hChain > 1) int9hChain = AutodetectInt9h();
+	if(int16hChain > 1) int16hChain = AutodetectInt16h();
+	return InstallKeyboard(kb, GOTSR, int9hChain, int16hChain, tryHigh);
+}
+
+/*
+	TE - some size optimizations for __TURBOC__
+
+	as printf() is redefined in PRF.C to use no stream functions,
+	rather calls DOS directly, these Stream operations are nowhere used,
+    but happen to be in the executable.
+
+    so we define some dummy functions here to save some precious bytes :-)
+
+	this is in no way necessary, but saves us some 1500 bytes
+*/
+
+#ifdef __TURBOC__
+
+
+    int     _Cdecl flushall (void){return 0;}
+
+	int     _Cdecl fprintf  (FILE *__stream, const char *__format, ...)
+                             { UNREFERENCED_PARAMETER (__stream);
+                               UNREFERENCED_PARAMETER ( __format);    return 0;}
+    int     _Cdecl fseek    (FILE *__stream, long __offset, int __whence)
+                             { UNREFERENCED_PARAMETER (__stream);
+                               UNREFERENCED_PARAMETER (__offset);
+							   UNREFERENCED_PARAMETER ( __whence);
+                               return 0;}
+
+    int     _Cdecl setvbuf  (FILE *__stream, char *__buf, int __type, size_t __size)
+                             { UNREFERENCED_PARAMETER (__stream);
+                               UNREFERENCED_PARAMETER ( __buf);
+                               UNREFERENCED_PARAMETER ( __type);
+				   UNREFERENCED_PARAMETER ( __size);   return 0;}
+
+    void    _Cdecl _xfflush (void){}
+    void    _Cdecl _setupio (void){}
+
+#endif

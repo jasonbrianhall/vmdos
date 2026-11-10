@@ -199,6 +199,9 @@ $(BUILD)/VMHD.COM: dos/vmhdtool.asm dos/vmapi.inc | $(BUILD)
 $(BUILD)/SHSUCDX.COM: third_party/shsucd/shsucdx.nsm | $(BUILD)
 	nasm -O9 -w-all -Di8086 -i third_party/shsucd/ $< -o $@   # 8086 build: assembles with any NASM
 
+$(BUILD)/SUBST.COM: dos/subst.asm | $(BUILD)
+	nasm -f bin $< -o $@
+
 $(BUILD)/VMXMS.SYS: dos/vmxms.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
@@ -209,15 +212,20 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 # drivers go in C:\VMDOS (on the PATH).
 VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMMIC.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SERTEST.COM $(BUILD)/SHSUCDX.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE \
-               third_party/doslfn/DOSLFN.COM third_party/doslfn/CP437UNI.TBL
+               third_party/doslfn/DOSLFN.COM third_party/doslfn/CP437UNI.TBL \
+               dos/bin/EDIT.EXE dos/bin/TREE.EXE $(BUILD)/SUBST.COM \
+               $(addprefix third_party/dosutils/bin/,ATTRIB.COM CHOICE.EXE DELTREE.COM FIND.EXE LABEL.EXE MEM.EXE \
+                 MKEYB.EXE MORE.EXE MOVE.EXE NANSI.SYS SORT.EXE XCOPY.EXE)
+# On C: only (the boot floppy has no room): LESS (DJGPP, needs DPMI), ZIP, UNZIP
+C_ONLY_FILES := $(addprefix third_party/dosutils/bin/,LESS.EXE ZIP.EXE UNZIP.EXE)
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \
              net/bin/VMDOSNET.EXE \
              dos/net/VMTCP.CFG     # the default settings (kept when esp.img is updated)
-DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES)
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES) $(C_ONLY_FILES)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT \
-             $(foreach f,$(VMDOS_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f)))
+             $(foreach f,$(VMDOS_FILES) $(C_ONLY_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f)))
 
 # The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
 FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT \

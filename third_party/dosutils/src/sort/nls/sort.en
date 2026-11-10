@@ -1,0 +1,11 @@
+2.0:Invalid parameter\n
+0.0:    SORT [/R] [/+num] [/A] [/?] [file]\n
+0.1:    /R    Reverse order\n
+0.2:    /A    Use ASCII instead of COUNTRY sort order\n
+0.3:    /+num start sorting with column num, 1 based\n
+0.4:    /?    help\n
+2.1:Error reading NLS collate table\n
+2.2:Using ASCII sort order (old DOS version).\n
+2.3:SORT: Can't open file '%s' for read\n
+2.5:SORT: insufficient memory\n
+2.6:SORT: number of records exceeds maximum\n

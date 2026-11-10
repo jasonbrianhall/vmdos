@@ -93,8 +93,14 @@ more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
-CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH. AUTOEXEC.BAT loads
-DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
+CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
+DOS utilities: EDIT (vmdos's own text editor, long names included), MORE,
+LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM,
+CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
+FDCONFIG.SYS to take the `;` off). WHICH is built into FreeCOM.
+`third_party/dosutils/README.vmdos` says where each comes from.
+
+AUTOEXEC.BAT loads DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
 `DIR /LFN`, DJGPP programs and file managers use) on FAT drives and CDs; an
 install updated from an older one has to add the line
 (`LH C:\VMDOS\DOSLFN.COM`).
@@ -898,6 +904,8 @@ untested.
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
+| `dos/edit/`, `dos/tree/`, `dos/bin/` | EDIT, vmdos's text editor, and TREE (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
+| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licences and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 

@@ -1,0 +1,61 @@
+**************************
+Known bugs and limitations
+**************************
+
+mKEYB relies on the BIOS to do most of the work. It should work on any
+machine where the BIOS:
+ - uses INT 15,4F to allow for keyboard translation,
+ - implements the INT 16,5 service (Keyboard buffer write),
+ - populates the Keyboard Flags Bytes at 40:17 and 40:96.
+
+All the required functionalities are present in the IBM XT BIOS after
+11/8/82, and in most (all?) AT and PS/2 class machines. The situation
+differs for XT clones, where different models implement different
+subsets of the three functionalities.
+
+From version 0.48 onwards, mKEYB autodetects the functionalities present
+in the BIOS, and install additional handlers to support the missing
+functionalities.
+
+If the BIOS do not support INT 15,4F, the /9 switch installs a new INT9
+handler that calls INT 15,4F to do keyboard translation. The handler
+should work on any machine with a keyboard controller that is compatible
+with the 8255 PPI: data buffer at port 60h and status register at port 61h.
+
+With the /G switch, mKEYB installs also a handler for the INT 16,5, if
+your BIOS do not have it.
+
+The /9 and /G switch can be disabled with /9- and /G- respectively, if
+autodetecs fails to detect them.
+
+*******************************
+Standard and enhanced keyboards
+*******************************
+
+PC keyboards came in two flavours: "standard" keyboards with 83 or 84 keys,
+common on XT class machines, and "enhanced" keyboards with 101 or 102 keys,
+common on AT, PS2 and later machines.
+
+From version 0.49 onwards, mKEYB tries to autodetect the keyboard type.
+If a standard keyboard is detected, a custom layout for 83/84 keys
+keyboards is used, if available. If the custom layout is not available
+for the selected language, it patches the enhanced keyboard layout to
+use Ctrl+Alt instead of AltGr (not available on standard keyboards).
+This pached layout may not be accurate for standard keyboards.
+
+The /E switch selects the enhanced keyboard layout, while /S selects the
+standard keyboard layout. These switches also update the keyboard mode/type
+byte in the BIOS Data Area at address 40:96h to reflect the chosen keyboard
+type. As a result, programs that read this byte can correctly detect which
+keyboard is in use.
+
+**************************
+Confirmed working machines
+**************************
+ - Amstrad PC5086: real and emulated, chain INT9 needed and autodetected
+ - Olivetti PCS86: real machine, no need to chain INT9, BIOS uses INT 15,4F
+ - Amstrad PC2086, PC3086: emulated, chain INT9, autodetect do not work
+ - Toshiba T1200: emulated, no need to chain INT9 since BIOS uses INT 15,4F
+ - Tandy 1000 SL/2: emulated, no need to chain INT9 since BIOS uses INT 15,4F
+ - IBM XT: emulated, no need to chain INT9 since BIOS uses INT 15,4F
+
