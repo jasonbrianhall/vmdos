@@ -214,6 +214,7 @@ VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE \
                third_party/doslfn/DOSLFN.COM third_party/doslfn/CP437UNI.TBL \
                dos/bin/EDIT.EXE dos/bin/TREE.EXE $(BUILD)/SUBST.COM \
+	       third_party/fsck/bin/FSCK.EXE \
                $(addprefix third_party/dosutils/bin/,ATTRIB.COM CHOICE.EXE DELTREE.COM FIND.EXE LABEL.EXE MEM.EXE \
                  MKEYB.EXE MORE.EXE MOVE.EXE NANSI.SYS SORT.EXE XCOPY.EXE)
 # On C: only (the boot floppy has no room): LESS (DJGPP, needs DPMI), ZIP, UNZIP
