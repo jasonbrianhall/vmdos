@@ -27,9 +27,29 @@ extern "C" void opl_init(int rate)
     __asm__ volatile("frstor %0" : : "m"(fpu_state));
 }
 
+/* The game chip's writes are kept with the time they were made (pit_clock)
+   and made at that point of the render, between the frames they fall
+   between: a program that plays samples by writing a level to an operator
+   at ~8 kHz (Silent Service II's ASOUND.SS: "Dive! Dive!" by register 43h
+   from a polled PIT channel 2; other AdLib speech and drum drivers) is
+   heard at its own rate instead of one write per 4 ms render (a buzz). */
+extern "C" uint32_t pit_clock(void);
+#define OPLQ 4096
+static struct { uint32_t t; uint16_t reg; uint8_t val; } oplq[OPLQ];
+static uint32_t oq_head, oq_tail;
+
 extern "C" void opl_write(uint32_t reg, uint8_t val)
 {
-    if (chips[0]) chips[0]->WriteReg(reg, val);
+    if (!chips[0]) return;
+    uint32_t next = (oq_tail + 1) % OPLQ;
+    if (next == oq_head) {                      /* nobody rendering: the oldest goes now */
+        chips[0]->WriteReg(oplq[oq_head].reg, oplq[oq_head].val);
+        oq_head = (oq_head + 1) % OPLQ;
+    }
+    oplq[oq_tail].t = pit_clock();
+    oplq[oq_tail].reg = (uint16_t)reg;
+    oplq[oq_tail].val = val;
+    oq_tail = next;
 }
 
 extern "C" void midi_opl_write(int chip, uint32_t reg, uint8_t val)
@@ -58,10 +78,37 @@ static void mix_chip(DBOPL::Handler *h, int32_t *out, int frames, int gain)
     }
 }
 
-/* Adds both chips' output to 'out' (interleaved stereo). */
-extern "C" void opl_mix(int32_t *out, int frames)
+/* Adds both chips' output to 'out' (interleaved stereo), the frames
+   covering PIT time [t0, t1): the game chip in pieces, each queued write
+   made at its frame. */
+/* The frame of [0, frames) a write at t falls in; frames + 1: after t1 (a later render's) */
+static int oq_frame(uint32_t t, uint32_t t0, uint32_t len, int frames)
+{
+    int32_t d = (int32_t)(t - t0);
+    if (d <= 0) return 0;
+    if ((uint32_t)d >= len) return frames + 1;
+    return (int)((uint64_t)(uint32_t)d * (uint32_t)frames / len);
+}
+
+extern "C" void opl_mix(int32_t *out, int frames, uint32_t t0, uint32_t t1)
 {
     if (frames > OPL_MAX_FRAMES) frames = OPL_MAX_FRAMES;
-    for (int i = 0; i < OPL_CHIPS; i++)
-        if (chips[i]) mix_chip(chips[i], out, frames, i == 0 ? 4 : 3);
+    if (chips[0]) {
+        uint32_t len = t1 - t0;
+        int done = 0;
+        for (;;) {
+            int next = frames;
+            while (oq_head != oq_tail) {            /* the writes due by frame 'done' */
+                int f = oq_frame(oplq[oq_head].t, t0, len, frames);
+                if (f > done) { if (f < next) next = f; break; }
+                chips[0]->WriteReg(oplq[oq_head].reg, oplq[oq_head].val);
+                oq_head = (oq_head + 1) % OPLQ;
+            }
+            if (done >= frames) break;
+            mix_chip(chips[0], out + 2 * done, next - done, 4);   /* to the next write */
+            done = next;
+        }
+    }
+    for (int i = 1; i < OPL_CHIPS; i++)
+        if (chips[i]) mix_chip(chips[i], out, frames, 3);
 }
