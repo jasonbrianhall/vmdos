@@ -1,0 +1,30 @@
+Vim 7.4.1398 for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), on C: only
+(the boot floppy has no room). VI.BAT runs it as vi.
+
+  bin/VIM.EXE        github.com/vim/vim tag v7.4.1398, the last with the DJGPP
+                     makefile (src/Make_djg.mak); DJGPP gcc 12, "normal"
+                     features (syntax colouring, undo, search/replace, :s, ...),
+                     UPX --best
+  bin/VI.BAT         @C:\VMDOS\VIM.EXE %1 ... %9
+  RT/_VIMRC          vmdos's settings (nocompatible, backspace, ruler, syntax on)
+  RT/VIM74/          a few runtime files from the same tag: filetype detection
+                     and syntax files for C/C++, assembler, batch, INI, make,
+                     shell, Python, Pascal, BASIC, HTML/XML/CSS, Markdown, ...
+                     (names kept to 8.3). No :help files (too big).
+  vim-7.4.1398-djgpp.patch   what it takes to build with today's DJGPP:
+                     json.o in the makefile, reltimefloat() only with
+                     FEAT_FLOAT, EMPTY_IF_NULL's type
+  LICENSE.txt        Vim's licence (runtime/doc/uganda.txt): charityware,
+                     GPL-compatible
+
+RT/ goes in C:\VMDOS: Vim looks for $VIM\_VIMRC and $VIM\VIM74 and, with no
+VIM variable set, takes $VIM to be its own directory. More syntax files: copy
+them from any Vim 7.4 runtime/syntax into C:\VMDOS\VIM74\SYNTAX (8.3 names,
+or with DOSLFN loaded, any).
+
+tools/build-vim.sh rebuilds bin/VIM.EXE (same size; only the build date in
+:version differs).
+
+Exiting Vim under QEMU without KVM used to crash QEMU (8.2's TCG matches a
+DR0 breakpoint against EIP, not the linear address, and DJGPP's code segment
+isn't based at 0): src/dpmi.c now single-steps such segments under TCG.

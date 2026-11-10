@@ -573,6 +573,9 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
         else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
+        else if (AX(r) == 0x5657) {                             /* REBOOT.COM: the write caches onto the disks, now */
+            fs9p_flush_all(); disk_flush(); BX(r) = 0x564D;
+        }
         else if (AX(r) == 0x5646) {                             /* VMFD.COM: likewise (VMHV reaches only this way) */
             bios_restarted = 0;
             fd_api(r);

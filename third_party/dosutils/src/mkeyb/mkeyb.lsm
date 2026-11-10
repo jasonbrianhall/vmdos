@@ -1,0 +1,14 @@
+Begin3
+Title:          MKEYB
+Version:        0.54
+Entered-date:   6 Jan 2026
+Description:    Very small Keyboarddriver, 500-700 Bytes resident
+Keywords:       freedos keyboard
+Author:         Tom Ehlert, Email found at website
+                Davide Bresolin, Email found at website 
+Maintained-by:  Davide Bresolin
+Primary-site:   https://github.com/davidebreso/mkeyb
+Original-site:  www.drivesnapshot.de/freedos/mkeyb.htm
+Platforms:      DOS
+Copying-policy: Free! Open! Source!
+End

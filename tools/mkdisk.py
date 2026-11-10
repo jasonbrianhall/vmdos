@@ -127,7 +127,7 @@ def bios_boot(out, boot_img, core_img):
         f.seek(512); f.write(core)
 
 
-KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG", "VMTCP.CFG"}
+KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG", "VMTCP.CFG", "_VIMRC"}
 
 
 def copy_files(out, files, update):

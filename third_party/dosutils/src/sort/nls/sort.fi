@@ -1,0 +1,15 @@
+# Language: Finnish (CP850)
+# Translated by Sampo Hippeläinen
+# Last update: 21 Dec 2020
+#
+2.0:Virheellinen parametri\n
+0.0:    SORT [/R] [/+num] [/A] [/?] [tiedosto]\n
+0.1:    /R    Käänteinen järjestys\n
+0.2:    /A    Käytä ASCII-lajittelua COUNTRY:n järjestyksen sijasta\n
+0.3:    /+num aloita lajittelu sarakkeesta num, 1 = ensimmäinen\n
+0.4:    /?    ohje\n
+2.1:NLS-lajittelutaulukon lukuvirhe\n
+2.2:ASCII-lajittelujärjestystä käytetään (kuin vanhassa DOS:ssa).\n
+2.3:SORT: Luettavan tiedoston '%s' avaus epäonnistui\n
+2.5:SORT: muisti ei riitä\n
+2.6:SORT: liikaa tietueita, ylittää enimmäisrajan\n
