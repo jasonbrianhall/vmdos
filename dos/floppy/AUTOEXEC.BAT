@@ -5,8 +5,11 @@ SET MTCPCFG=A:\VMDOS\NET\VMTCP.CFG
 SET BLASTER=A220 I5 D1 T4 P330
 SET DIRCMD=/O:GN
 LH A:\VMDOS\SHSUCDX /Q /D:?VMCD0001 >NUL
+REM Long file names (INT 21h 71xxh) on FAT drives and CDs: DOSLFN. Not
+REM wanted? Put REM in front of the LH line. (VMDOSNET drives have their own.)
+LH A:\VMDOS\DOSLFN.COM >NUL
 REM A folder QEMU shares (make run SHARE=dir) as drive V:, with long names:
-REM VMDOSNET V: share /LFN
+REM VMDOSNET V: share
 LH A:\VMDOS\CTMOUSE.COM >NUL
 ECHO.
 ECHO FreeDOS on vmdos, from the built-in floppy (A:)

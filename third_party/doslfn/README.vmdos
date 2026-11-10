@@ -1,0 +1,20 @@
+DOSLFN 0.42a by Henrik Haftmann and Jason Hood: the long-name API (INT 21h
+71xxh) for plain DOS, on FAT12/16/32 drives and (with SHSUCDX) CD-ROMs.
+Source: https://github.com/adoxa/doslfn, commit 7fd985d (Oct 2026), unmodified
+(src/ holds the files the build needs, its README.md and doslfn.txt, the
+documentation). Freeware with source; it has no licence file of its own, and
+FreeDOS distributes it as "freeware w/sources".
+
+DOSLFN.COM is prebuilt so the normal build needs no extra tools; the build
+puts it, and CP437UNI.TBL (the code page 437 to Unicode table it loads from
+its own folder at startup), in C:\VMDOS, and AUTOEXEC.BAT loads it high
+after SHSUCDX. About 12.5 KB resident.
+
+VMDOSNET drives don't need it: vmdos answers the long-name API for them
+itself (src/fs9p.cpp), ahead of DOSLFN. DPMI programs get DOSLFN's long
+names through INT 31h 0300h (DJGPP); INT 21h AH=71h made straight from
+protected mode reaches DOSLFN untranslated (a DOS extender has to translate
+it, as with any real-mode DOS service).
+
+Rebuild: tools/build-doslfn.sh /path/to/TASM/BIN (TASM 4.1 and TLINK 7.1 in
+DOSBox: DOSLFN is written in TASM's IDEAL mode).

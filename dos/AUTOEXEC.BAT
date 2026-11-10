@@ -14,8 +14,11 @@ REM (Doom, ULTRAMID) they want Gravis's patches in C:\ULTRASND\MIDI.
 REM SET ULTRASND=240,3,3,7,7
 REM SET ULTRADIR=C:\ULTRASND
 LH C:\VMDOS\SHSUCDX /Q /D:?VMCD0001 >NUL
+REM Long file names (INT 21h 71xxh) on FAT drives and CDs: DOSLFN. Not
+REM wanted? Put REM in front of the LH line. (VMDOSNET drives have their own.)
+LH C:\VMDOS\DOSLFN.COM
 REM A folder QEMU shares (make run SHARE=dir) as drive V:, with long names:
-REM VMDOSNET V: share /LFN
+REM VMDOSNET V: share
 REM Mouse driver (CuteMouse): some games need it (Warcraft II), most don't,
 REM since vmdos has a mouse built in. Not needed? Put REM in front of the LH line.
 LH C:\VMDOS\CTMOUSE.COM
