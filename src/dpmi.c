@@ -1293,10 +1293,31 @@ static int insn_len(const u8 *p, int big)
     return 0;                                   /* POPF, IRET, jumps, calls, INT, ... */
 }
 
+/* QEMU's TCG (8.2 at least) matches a guest's DR0 breakpoint against EIP,
+   not the linear address: with a code segment based anywhere but 0 it never
+   matches, QEMU takes the hit for its gdbstub's and, with no debugger
+   attached, crashes (DJGPP programs, Vim's exit). Under TCG such a segment
+   is single-stepped instead. */
+static int tcg = -1;
+static int under_tcg(void)
+{
+    if (tcg < 0) {
+        u32 a, b, c, d;
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+        tcg = 0;
+        if (c & (1u << 31)) {                   /* a hypervisor: whose? */
+            __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x40000000));
+            tcg = b == 0x54474354 && c == 0x43544743 && d == 0x47435447;   /* "TCGTCGTCGTCG" */
+        }
+    }
+    return tcg;
+}
+
 static int step_arm(struct ctx *k)
 {
     u32 base = sel_base(k->cs), a = base + k->eip;
     int big = sel_big(k->cs);
+    if (base && under_tcg()) { dr7_set(0); return 1; }
     u32 win = 256;
     if (a < 0xA0000 && a + win > 0xA0000) win = 0xA0000 - a;   /* never read into the VGA window */
     while (win >= 32 && !lin_ok(a, win)) win /= 2;

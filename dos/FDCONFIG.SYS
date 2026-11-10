@@ -10,6 +10,8 @@ MENUDEFAULT = 1, 5
 DOS=HIGH,UMB
 123?DEVICE=C:\VMDOS\VMCD.SYS
 1?DEVICE=C:\VMDOS\VMHD.SYS
+; ANSI escape codes (colours, cursor moves) for programs that print them: NANSI
+;1?DEVICE=C:\VMDOS\NANSI.SYS
 LASTDRIVE=Z
 FILES=40
 BUFFERS=20

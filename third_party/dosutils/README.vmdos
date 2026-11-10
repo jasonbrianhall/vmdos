@@ -1,0 +1,54 @@
+DOS utilities for C:\VMDOS (on the PATH): FreeDOS's own and a few others.
+Prebuilt in bin/, so the normal build needs no extra tools; src/ holds their
+source and tools/build-dosutils.sh rebuilds bin/ from it (byte for byte the
+same, apart from MEM's build time). The boot floppy gets all but LESS, ZIP
+and UNZIP (no room).
+
+  Program      Version / upstream                                     Licence      Built with
+  MORE.EXE     FDOS/more a071c3b (2022) + kitten, tnyprntf            GPL-2.0      Open Watcom, UPX
+  FIND.EXE     FDOS/find a6e245d (2022) + kitten, tnyprntf            GPL-2.0      Open Watcom, UPX
+  SORT.EXE     FDOS/sort f55bb17 (2026) + kitten, tnyprntf            GPL-2.0      Open Watcom, UPX
+  MOVE.EXE     FDOS/move 44b6ad5 (2026) + kitten, tnyprntf            GPL-2.0      Open Watcom, UPX
+  CHOICE.EXE   FDOS/choice fba7772 (2022) + kitten, tnyprntf          GPL-2.0      Open Watcom, UPX
+  LABEL.EXE    FDOS/label 21994ae (2026) + kitten, tnyprntf           GPL-2.0      Open Watcom, UPX
+  ATTRIB.COM   FDOS/attrib 20e373d (2024), 2.1                        GPL-2.0      Open Watcom (tiny)
+  DELTREE.COM  FDOS/deltree ed47278 (2006), 1.02f                     GPL-2.0      NASM
+  MEM.EXE      FDOS/mem 2b2c833 (2021)                                GPL-2.0      Open Watcom
+  XCOPY.EXE    FDOS/xcopy 0c11376 (2026)                              GPL-2.0      Open Watcom
+  NANSI.SYS    FDOS/ansi 129904f, NANSI 4.0d (Dan Kegel)              GPL          JWasm, wlink
+  MKEYB.EXE    davidebreso/mkeyb 96edb1d (2026), 0.54 (Tom Ehlert)    GPL-2.0 (*)  Open Watcom, UPX
+  LESS.EXE     gwsw/less v712 (Oct 2026), GNU less                    GPL-3.0 or   DJGPP (32-bit,
+                                                                      Less licence DPMI), UPX
+  ZIP.EXE      Info-ZIP Zip 3.0, unmodified                           Info-ZIP     Open Watcom
+  UNZIP.EXE    Info-ZIP UnZip 6.0, unmodified                         Info-ZIP     Open Watcom
+  (*) with the exception that any executable packer may be used.
+
+vmdos's changes (marked "vmdos:" in the source):
+- MORE: read the input with DOS's read call. MORE reads piped or redirected
+  input from a duplicate of STDIN, a handle the C library didn't open, and
+  Open Watcom's read() refuses those: `TYPE X | MORE` and `MORE < X` showed
+  nothing.
+- DELTREE: the "Do you REALLY want to do this??" prompt (DELTREE /Y in a
+  root folder) lacked the $ that ends a DOS string, so it printed memory
+  after it.
+- MOVE: built with a 16 KB stack (build.sh): the 2 KB Watcom default gave
+  "Stack Overflow!".
+- ATTRIB: built with Open Watcom instead of Borland C (no source change).
+- LESS: src/ leaves out the test suite (lesstest/) and the Unicode data
+  (unicode/), and has help.c, funcs.h and lessmsg.inc generated already
+  (make -f Makefile.aut help.c funcs.h lessmsg.inc).
+
+ZIP and UNZIP: from https://github.com/kevin1024/infozip-dos16-builds,
+commit 0261a3f, built here with its build.sh (Open Watcom; the C sources
+unmodified, its Watcom makefiles adapted to a POSIX host), the same bytes as
+its release. Not in src/ (12 MB); the Info-ZIP licence (src/ of that repo)
+asks for none. They warn that TZ isn't set (no UTC times): SET TZ=EST5EDT
+(or yours) in AUTOEXEC.BAT stops that.
+
+Not here: EDIT, TREE and SUBST (vmdos's own: dos/edit, dos/tree,
+dos/subst.asm), WHICH (FreeCOM has it built in), JOIN (FreeDOS's kernel
+doesn't handle joined drives: see dos/subst.asm), KEYB (FreeDOS's FD-KEYB is
+Turbo Pascal; mKEYB does the same with the layouts built in: MKEYB GR).
+FreeDOS EDIT (0.9a/0.9c) was here first, and left: in vmdos it stopped
+with an invalid opcode on about half its starts (a window's class read back
+as garbage, then a call through a null pointer); not found why.

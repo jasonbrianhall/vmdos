@@ -1,0 +1,122 @@
+name: Main
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  dist:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+
+    - name: Build distribution
+      id: build-dist
+      # Since we don't have a PGP key here, replace gpg with a no-op.
+      run: |
+        make -f Makefile.aut dist GPG=:
+        echo "basename=$(basename release/less-*)" > "$GITHUB_OUTPUT"
+        mv -v release/less-*/*.tar.gz less-githubtest.tar.gz
+        mv -v release/less-*/*.zip less-githubtest.zip
+
+    - name: Upload tarball
+      uses: actions/upload-artifact@v7
+      with:
+        archive: false
+        path: less-githubtest.tar.gz
+
+    - name: Upload ZIP file
+      uses: actions/upload-artifact@v7
+      with:
+        archive: false
+        path: less-githubtest.zip
+
+    outputs:
+      basename: ${{ steps.build-dist.outputs.basename }}
+
+  linux:
+    runs-on: ubuntu-latest
+
+    needs: dist
+
+    env:
+      SAN: 1 # enable sanitizers
+
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: less-githubtest.tar.gz
+
+    - name: Unpack
+      run: tar -xzf less-githubtest.tar.gz
+
+    - name: Configure
+      working-directory: ${{ needs.dist.outputs.basename }}
+      run: ./configure
+
+    - name: Make
+      working-directory: ${{ needs.dist.outputs.basename }}
+      run: make
+
+    - name: Run sanity check
+      working-directory: ${{ needs.dist.outputs.basename }}
+      run: ./less README > README.out && cmp README README.out
+
+    - name: Make (LESSTEST)
+      working-directory: ${{ needs.dist.outputs.basename }}
+      run: make LESSTEST=1
+
+    - name: Test
+      working-directory: ${{ needs.dist.outputs.basename }}
+      run: make check
+
+  windows:
+    runs-on: windows-latest
+
+    needs: dist
+
+    strategy:
+      matrix:
+        toolchain: [mingw-w64, msvc]
+        source: [dist, git]
+
+    defaults:
+      run:
+        working-directory: ${{ case(matrix.source == 'dist', needs.dist.outputs.basename, '.') }}
+
+    steps:
+    - uses: actions/download-artifact@v8
+      if: matrix.source == 'dist'
+      with:
+        # Since the artifact is a ZIP file, it will automatically be unpacked.
+        name: less-githubtest.zip
+
+    - uses: actions/checkout@v7
+      if: matrix.source == 'git'
+
+    - name: Make with Mingw-w64
+      if: matrix.toolchain == 'mingw-w64'
+      run: |
+        mingw32-make -j4 -f Makefile.wng
+
+    - name: Make with Visual C++
+      if: matrix.toolchain == 'msvc'
+      env:
+        TARGETS: ${{ case(matrix.source == 'dist', 'all', 'generated all') }}
+      run: |
+        $vsPath = & "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        & "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64
+        nmake -f Makefile.wnm (-split $Env:TARGETS)
+
+    - name: Run sanity check
+      run: |
+        .\less.exe README > README.out
+        cmd /c fc /b README README.out

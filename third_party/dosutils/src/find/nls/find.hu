@@ -1,0 +1,10 @@
+# Translation by Daniel Nagy <nagyd@users.sourceforge.net>
+0.0:Az összes, a sztringet tartalmazó sor megjelenítése
+0.1:A sztringet tartalmazó sorok számának meghatározása
+0.2:Kis- és nagybetük figyelmen kívül hagyása
+0.3:A megjelenített sorok számozása, 1-töl kezdödöen
+0.4:A sztringet nem tartalmazó sorok megjelenítése
+1.0:fájl
+1.1:sztring
+2.0:A fájlt nem lehet megnyitni
+2.1:Nem létezö fájl
