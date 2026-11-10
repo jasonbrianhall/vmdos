@@ -1,0 +1,36 @@
+FSCK.EXE: checks and repairs a FAT12/16/32 drive from DOS (C:\VMDOS\FSCK).
+It is FreeBSD's fsck_msdosfs (sbin/fsck_msdosfs, freebsd-src a7163bd,
+2026-11-10; BSD-2-Clause), built with DJGPP (32-bit, so it runs under vmdos's
+DPMI host, like LESS and VIM). FreeBSD's sbin/fsck itself is only a front end
+that picks fsck_<type> from /etc/fstab, so it isn't needed here.
+
+  FSCK -n C:      check only, change nothing
+  FSCK C:         check, asking before each repair
+  FSCK -y C:      repair everything without asking
+  FSCK -f C:      check even if the drive is marked clean
+  FSCK X.IMG      a disk or partition image file instead of a drive
+                  (-o SECTORS gives the partition start; MBR and GPT
+                  disks are found by themselves)
+
+Exit status 0: clean or repaired; 8: errors left. Lost cluster chains are
+freed (fsck_msdosfs's LOST.DIR is not created). Best run with nothing else
+using the drive (no TSRs writing to it).
+
+Changes from FreeBSD (src/):
+  devio.c, devio.h  new: all disk I/O. "C:" is read and written by absolute
+                    sector, INT 21h AX=7305h (FreeDOS: FAT12/16/32); DOS's
+                    buffers are flushed (INT 21h AH=0Dh) before and after.
+                    Anything else is a file. 64-bit offsets throughout
+                    (DJGPP's off_t is 32 bits). mmap is never used.
+  fsutil.c, .h      small replacement for sbin/fsck/fsutil.c.
+  boot.c            the sector after FSInfo needn't end in 55AA (Linux
+                    mkfs.fat, which make esp uses, leaves it zero).
+  main.c            usage text; -o.
+  check.c           <stdint.h>.
+  compat/, compat-dos/  BSD headers (cdefs, endian, param, queue, mman).
+
+Rebuild: tools/build-fsck.sh (DJGPP), or tools/build-fsck.sh host for a
+Linux fsck that checks images (esp.img, /dev/sdX).
+
+Not supported: MS-DOS 6.22 (no INT 21h 7305h; INT 25h/26h would be needed),
+disks with sectors other than 512 bytes, partitions above 2 TiB.

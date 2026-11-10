@@ -218,6 +218,8 @@ VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/
                  MKEYB.EXE MORE.EXE MOVE.EXE NANSI.SYS SORT.EXE XCOPY.EXE)
 # On C: only (the boot floppy has no room): LESS (DJGPP, needs DPMI), ZIP, UNZIP
 C_ONLY_FILES := $(addprefix third_party/dosutils/bin/,LESS.EXE ZIP.EXE UNZIP.EXE)
+# FSCK (FreeBSD fsck_msdosfs, DJGPP): third_party/fsck/README.vmdos
+C_ONLY_FILES += third_party/fsck/bin/FSCK.EXE
 # Vim (DJGPP) and vi; its _VIMRC and a few runtime files (VIM74\) next to it
 VIM_RT := $(shell cd third_party/vim/RT && find . -type f | sed 's|^./||' | sort)
 C_ONLY_FILES += third_party/vim/bin/VIM.EXE third_party/vim/bin/VI.BAT
