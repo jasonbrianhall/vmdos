@@ -9,7 +9,8 @@
                                        a 9P2000.L server on the network
                                        (diod; port 564 by default), IPv4 or
                                        IPv6 ([2001:db8::1]:5640/srv/dos)
-       /LFN     long names for programs that ask for them (INT 21h 71xxh)
+       /SFN     short names only: no long-name API (INT 21h 71xxh) on the
+                drive (long names are on by default; /LFN is still taken)
        /WT      write straight through (no gathering of writes)
        /RO      read-only
        /C:kb    file cache size, KiB (default 4096; the first drive sets it)
@@ -118,9 +119,10 @@ static void usage( void ) {
         "  VMDOSNET V: host[:port][/export] [opts]   a 9P server (diod), port 564\n"
         "  VMDOSNET V: /D    take it out     VMDOSNET /F    write out now\n"
         "  VMDOSNET          list\n\n"
-        "  /LFN long names  /WT write-through  /RO read-only  /C:kb cache  /T:ms\n"
-        "  listings trusted  /UID:n user on a network server\n"
-        "  e.g. VMDOSNET V: 192.168.1.10/home/jason/dos /LFN" );
+        "  /SFN short names only (long names are the default)  /WT write-through\n"
+        "  /RO read-only  /C:kb cache  /T:ms listings trusted\n"
+        "  /UID:n user on a network server\n"
+        "  e.g. VMDOSNET V: 192.168.1.10/home/jason/dos" );
   exit( 1 );
 }
 
@@ -199,6 +201,7 @@ int main( int argc, char *argv[] ) {
   char *a = argv[1];
   if ( !isalpha( a[0] ) || a[1] != ':' || a[2] ) usage( );
   blk.drive = (uint8_t)(toupper( a[0] ) - 'A');
+  blk.flags = 1;                                   // long names unless /SFN
 
   char *target = NULL;
   bool unmount = false;
@@ -208,6 +211,7 @@ int main( int argc, char *argv[] ) {
     char *v = strchr( o, ':' );
     if ( !stricmp( o, "/D" ) ) unmount = true;
     else if ( !stricmp( o, "/LFN" ) ) blk.flags |= 1;
+    else if ( !stricmp( o, "/SFN" ) ) blk.flags &= (uint8_t)~1;
     else if ( !stricmp( o, "/WT" ) ) blk.flags |= 2;
     else if ( !stricmp( o, "/RO" ) ) blk.flags |= 4;
     else if ( v && toupper( o[1] ) == 'C' && v == o + 2 ) blk.cacheKb = (uint16_t)atoi( v + 1 );

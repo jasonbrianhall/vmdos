@@ -735,14 +735,14 @@ A folder as a DOS drive, over 9P2000.L: one QEMU shares (virtio-9p), or a
 9P server on the network (diod), over TCP on IPv4 or IPv6:
 
     make run SHARE=~/dosfiles            # or: -virtfs local,path=DIR,mount_tag=share,security_model=none
-    VMDOSNET V: share /LFN               # in DOS (C:\VMDOS\NET)
+    VMDOSNET V: share                    # in DOS (C:\VMDOS\NET)
 
     diod -f -n -S -U $USER -l 0.0.0.0:564 -e /home/me/dos      # on the server (-l IP:port for another port)
-    VMDOSNET V: 192.168.1.10/home/me/dos /LFN                  # after STARTNET (DHCP)
+    VMDOSNET V: 192.168.1.10/home/me/dos                       # after STARTNET (DHCP)
     VMDOSNET V: fileserver:5640/home/me/dos                    # a name, another port
     VMDOSNET V: [2001:db8::10]:5640/home/me/dos                # IPv6
 
-`VMDOSNET V: target [/LFN] [/WT] [/RO] [/C:kb] [/T:ms] [/UID:n]`,
+`VMDOSNET V: target [/SFN] [/WT] [/RO] [/C:kb] [/T:ms] [/UID:n]`,
 `VMDOSNET V: /D`, `VMDOSNET` lists. vmdos answers DOS's redirector calls
 (INT 2Fh AH=11h) for the drive itself (`src/fs9p.cpp`); nothing stays
 resident. For a network server VMDOSNET.EXE uses the TCP/IP settings (DHCP's)
@@ -751,14 +751,19 @@ connection itself (`src/tcp9p.cpp`), as IPXNET does with UDP: DOS's own
 TCP/IP keeps working beside it with the same address, and if the connection
 drops (the server restarted) vmdos connects again on the next access (open
 files are lost). Host names that aren't 8.3 get a stable short name
-(`LONG~K3Q.TXT`); with `/LFN` the long-name API (INT 21h 71xxh) works on the
-drive too (FreeCOM: `DIR /LFN`, quoted long names in COPY/CD/MD/DEL/REN).
+(`LONG~K3Q.TXT`), and the long-name API (INT 21h 71xxh) works on the drive
+too (FreeCOM: `DIR /LFN`, quoted long names in COPY/CD/MD/DEL/REN), for DPMI
+programs as well: through INT 31h 0300h as DJGPP's C library calls it, and as
+INT 21h straight from protected mode, taken with the program's own selectors
+and offsets as a host that translates these calls would (`tests/dpmilfn.asm`).
+`/SFN` leaves the API out (short names only); `/LFN`, the old switch for it,
+is still taken.
 Listings and file data are cached (4 MiB of 32 KiB blocks, checked against
 the file's time and size when opened; listings trusted for /T ms); writes
 are gathered and sent on close, commit or after 0.5 s (`/WT`: straight
 through). Files' times are taken as the PC clock's time (QEMU's RTC is UTC
-by default). VMCD takes CD images from these drives too. Not in VMHV's
-virtual machine, and not the long-name API for DPMI programs. `tcplog` on
+by default). VMCD takes CD images from these drives too. In VMHV's
+virtual machine the drive has short names only. `tcplog` on
 the kernel command line logs the connection.
 
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)

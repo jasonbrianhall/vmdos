@@ -298,6 +298,7 @@ u16 mouse_begin_callback(void);               /* for a client in PM: the stub's 
 int mouse_log(void);                          /* "mouselog" on the command line */
 struct regs *dpmi_rm_iret_call(struct regs *r, u16 cs, u16 ip);
 int dpmi_reflected_buffer(struct regs *r, u32 *lin);   /* PM ES:EDI of a reflected INT */
+int dpmi_reflected_ptr(struct regs *r, int es, u32 off32, u32 *lin);   /* PM DS/ES:offset of a reflected INT */
 void mouse_cb_regs(struct regs *r);
 void mouse_cb_done(void);
 int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);

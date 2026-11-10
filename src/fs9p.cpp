@@ -11,8 +11,10 @@
 // valid 8.3 name already is that name in capitals, any other gets a short
 // name made from it and a hash of the whole name (SOME~K3Q.TXT), which stays
 // the same whatever else is in the folder. Files and folders made from DOS
-// are made in lower case. With /LFN the long-name API (INT 21h AX=71xxh) is
-// answered for the drive too, so programs that use it see the real names.
+// are made in lower case. The long-name API (INT 21h AX=71xxh) is answered
+// for the drive too (unless it was mounted /SFN), so programs that use it see
+// the real names: real-mode ones, and DPMI programs both through INT 31h
+// 0300h (DJGPP) and with INT 21h straight from protected mode (lfn_ptr).
 //
 // Caching: directory listings are kept (names checked against the folder's
 // times after ttl ms, sizes and dates read again after ttl ms); file data is
@@ -1899,6 +1901,20 @@ void lfn_fill(u32 rec, const Found& F, int dosfmt)
 
 struct { bool on; u16 ds, si; } lfn_saved;
 
+// A pointer argument of a long-name call: DS or ES with the offset register.
+// From a DPMI program's protected-mode INT 21h (reflected, not translated by
+// an extender) it is the program's own selector and 32-bit offset, as a host
+// that translates these calls would take it; otherwise the real-mode one.
+u32 lfn_ptr(struct regs* r, int es, u32 off32)
+{
+    u32 a;
+    if (dpmi_reflected_ptr(r, es, off32, &a)) return a;
+    return LIN(es ? r->v86_es : r->v86_ds, off32 & 0xFFFF);
+}
+#define DS_SI lfn_ptr(r, 0, r->esi)
+#define DS_DX lfn_ptr(r, 0, r->edx)
+#define ES_DI lfn_ptr(r, 1, r->edi)
+
 int lfn(struct regs* r)
 {
     u8 fn = AL(r);
@@ -1917,12 +1933,12 @@ int lfn(struct regs* r)
         gstr(m->cds, c, 67);
         int bs = rd16(m->cds + 0x4F);
         if ((e = resolve(*m, c + (bs < 67 ? bs : 2), R))) {
-            pstr(LIN(r->v86_ds, SI(r)), "");
+            pstr(DS_SI, "");
             return 0;
         }
         char lp[300];
         long_path(R.hp, lp);
-        pstr(LIN(r->v86_ds, SI(r)), lp + 1);
+        pstr(DS_SI, lp + 1);
         return 0;
     }
     case 0x4F: case 0xA1: {                    // find next / close: BX
@@ -1934,7 +1950,7 @@ int lfn(struct regs* r)
         Found F;
         char nb[256];
         if (srch_next(S, F, nb)) { S.used = true; S.lfn = true; return E_NOMORE; }   // (the handle stays till A1h)
-        lfn_fill(LIN(r->v86_es, DI(r)), F, SI(r) & 1);
+        lfn_fill(ES_DI, F, SI(r) & 1);
         CX(r) = 0;
         return 0;
     }
@@ -1960,7 +1976,7 @@ int lfn(struct regs* r)
         wb_flush(f);
         Attr a;
         if ((e = p_getattr(devs[mnts[f.drive].dev], f.fid, a))) return dos_err(e, E_HANDLE);
-        u32 o = LIN(r->v86_ds, DX(r));
+        u32 o = DS_DX;
         for (int i = 0; i < 52; i++) wr8(o + i, 0);
         wr32(o, rd8(sft + 4));
         u64 ft = filetime(a.mt), fa = filetime(a.at);
@@ -1977,7 +1993,7 @@ int lfn(struct regs* r)
         return -1;
     }
     // the calls with a path at DS:DX (DS:SI for 60h and 6Ch)
-    u32 src = (fn == 0x60 || fn == 0x6C) ? LIN(r->v86_ds, SI(r)) : LIN(r->v86_ds, DX(r));
+    u32 src = (fn == 0x60 || fn == 0x6C) ? DS_SI : DS_DX;
     if ((dr = lfn_path(src, p)) < 0) return dr == -2 ? E_PNF : -1;
     Mount& m = mnts[dr];
     bool ro = m.flags & MF_RO;
@@ -1985,7 +2001,7 @@ int lfn(struct regs* r)
     case 0xA0: {                               // volume information: ES:DI the file system's name
         if (p[1]) return -1;
         BX(r) = 0x4002;                        // case kept, long names
-        if (CX(r) >= 3) pstr(LIN(r->v86_es, DI(r)), "9P");
+        if (CX(r) >= 3) pstr(ES_DI, "9P");
         CX(r) = 255; DX(r) = 260;
         return 0;
     }
@@ -2091,14 +2107,14 @@ int lfn(struct regs* r)
         Found F;
         char nb[256];
         if (srch_next(*S, F, nb)) return E_FNF;
-        lfn_fill(LIN(r->v86_es, DI(r)), F, SI(r) & 1);
+        lfn_fill(ES_DI, F, SI(r) & 1);
         AX(r) = (u16)(0x9F00 | (S - srch));
         CX(r) = 0;
         return 0;
     }
     case 0x56: {                               // rename DS:DX to ES:DI
         char q[300];
-        if (lfn_path(LIN(r->v86_es, DI(r)), q) != dr) return 17;
+        if (lfn_path(ES_DI, q) != dr) return 17;
         if ((e = resolve(m, p, R))) return e;
         if (ro) return E_ACCESS;
         Res T;
@@ -2128,7 +2144,7 @@ int lfn(struct regs* r)
             }
             snprintf(out, sizeof out, "%c:%s", 'A' + dr, sp);
         } else snprintf(out, sizeof out, "%c:%s", 'A' + dr, p);
-        pstr(LIN(r->v86_es, DI(r)), out);
+        pstr(ES_DI, out);
         return 0;
     }
     case 0x6C: {                               // extended open / create: DOS's 6C00h with the short name
@@ -2298,7 +2314,7 @@ const u32 MB_KIND = 0x0E, MB_UID = 0x0F, MB_TAG = 0x13, MB_NET = 0x33, MB_ANAME 
 // where nothing takes them off the chain before DOS's own handler ends it.
 // INT 2Fh goes to vmdos's BIOS (bios.asm redir_hook: AH=11h by a trap to
 // fs9p_redir, the rest on to the handler that was there). Long names
-// (INT 21h AH=71h) don't come either: a drive mounted /LFN has short ones.
+// (INT 21h AH=71h) don't come either: the drive has short ones only.
 bool hv_hook()
 {
     const u32 BIOS = 0xF0000u;
@@ -2552,7 +2568,7 @@ int fs9p_lfn(struct regs* r)
     in9p--;
     if (debug_level >= (fn == 0x4F || fn == 0x60 ? 3 : 2) && (e != -1 || debug_level >= 4)) {
         char p[128];
-        gstr(LIN(r->v86_ds, (fn == 0x60 || fn == 0x6C) ? SI(r) : DX(r)), p, 80);
+        gstr(lfn_ptr(r, 0, (fn == 0x60 || fn == 0x6C) ? r->esi : r->edx), p, 80);
         kprintf("9p: 71%02x %s -> %d\n", fn, p, e);
     }
     if (e == -1) return 0;
