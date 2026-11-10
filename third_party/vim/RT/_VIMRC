@@ -1,0 +1,6 @@
+" vmdos: Vim with a few of its runtime files (C:\VMDOS\VIM74)
+set nocompatible
+set backspace=indent,eol,start
+set ruler showcmd incsearch hlsearch
+filetype on
+syntax on

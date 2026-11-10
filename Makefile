@@ -218,14 +218,20 @@ VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/
                  MKEYB.EXE MORE.EXE MOVE.EXE NANSI.SYS SORT.EXE XCOPY.EXE)
 # On C: only (the boot floppy has no room): LESS (DJGPP, needs DPMI), ZIP, UNZIP
 C_ONLY_FILES := $(addprefix third_party/dosutils/bin/,LESS.EXE ZIP.EXE UNZIP.EXE)
+# Vim (DJGPP) and vi; its _VIMRC and a few runtime files (VIM74\) next to it
+VIM_RT := $(shell cd third_party/vim/RT && find . -type f | sed 's|^./||' | sort)
+C_ONLY_FILES += third_party/vim/bin/VIM.EXE third_party/vim/bin/VI.BAT
+C_ONLY_DEPS  := $(C_ONLY_FILES) $(addprefix third_party/vim/RT/,$(VIM_RT))
+C_ONLY_MAP   := $(foreach f,$(VIM_RT),third_party/vim/RT/$(f)=VMDOS/$(f))
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \
              net/bin/VMDOSNET.EXE \
              dos/net/VMTCP.CFG     # the default settings (kept when esp.img is updated)
-DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES) $(C_ONLY_FILES)
+DOS_DEPS  := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT $(VMDOS_FILES) $(NET_FILES) $(C_ONLY_DEPS)
 DOS_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/FDCONFIG.SYS dos/AUTOEXEC.BAT dos/STARTNET.BAT dos/README.TXT \
-             $(foreach f,$(VMDOS_FILES) $(C_ONLY_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f)))
+             $(foreach f,$(VMDOS_FILES) $(C_ONLY_FILES),$(f)=VMDOS/$(notdir $(f))) $(foreach f,$(NET_FILES),$(f)=VMDOS/NET/$(notdir $(f))) \
+             $(C_ONLY_MAP)
 
 # The fallback boot floppy (A:): FreeDOS and vmdos's tools, configured for A:.
 FLOPPY_FILES := $(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM dos/floppy/FDCONFIG.SYS dos/floppy/AUTOEXEC.BAT dos/floppy/STARTNET.BAT \
