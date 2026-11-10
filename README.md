@@ -630,6 +630,15 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   VOICE.DRV: 8 kHz) runs at its own rate from the local APIC timer
   (`nofastpit`: capped at 1 kHz as before). Test: `tests/dacdir.asm`
   (3 s of a 440 Hz sine from an 8 kHz timer).
+  PC speaker digitized speech (PWM: Silent Service II's "Dive! Dive!" with
+  ISOUND, RealSound, and other drivers that write a mode 0 count to PIT
+  channel 2 from a fast IRQ 0, or toggle port 61h from a timed loop): every
+  change to ports 42h, 43h and 61h is kept with the time it was made, and
+  each 48 kHz output sample is the speaker's driven share of the last PWM
+  period (the carrier cancels; the log says `speaker: PWM sound, N Hz`).
+  AdLib register writes are timed the same way, so speech made by writing
+  an operator's level at ~8 kHz (Silent Service II with ASOUND) plays too.
+  Tests: `tests/pcspwm.asm`, `tests/adlibdig.asm` (3 s of a 440 Hz sine each).
   Gravis UltraSound (GF1, 1 MB of DRAM; 240h, IRQ 7, DMA 3; `src/gus.c`):
   32 voices with loops, 8/16-bit samples, volume ramps and pan, mixed at the
   GF1's own rate (44.1 kHz at 14 voices, 19.3 kHz at 32), timers, DMA
