@@ -93,7 +93,11 @@ more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
-CTMOUSE) are in C:\VMDOS, which is on the PATH.
+CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH. AUTOEXEC.BAT loads
+DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
+`DIR /LFN`, DJGPP programs and file managers use) on FAT drives and CDs; an
+install updated from an older one has to add the line
+(`LH C:\VMDOS\DOSLFN.COM`).
 
 `C=disk` (default): C: is the FAT partition of `esp.img`, which the run
 targets attach as a SATA (AHCI) disk (`run-usb`: as a USB stick); what DOS writes stays there. Rebuilding
@@ -894,6 +898,7 @@ untested.
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
+| `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 
 License: GPL-2.0-or-later (it includes FreeDOS's boot sector).
