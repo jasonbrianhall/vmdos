@@ -729,12 +729,13 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             if (vifhack && from_pm && !vif && vpic_pending() >= 0) {
                 if (++vif_off >= 4) { vif = 1; vif_off = 0; }
             } else vif_off = 0;
-        } else if (irq == 1) {
+        } else if (irq == 1 || irq == 12) {
+            /* A touchpad byte can sit behind an IRQ 1 on some laptop ECs:
+               the status's aux bit says it's the mouse's. IRQ 12's bytes
+               always go to the mouse (some ECs don't set that bit). */
             kbc_irqs++;
-            vkbd_real_scancode(inb(0x60));
-        } else if (irq == 12) {
-            kbc_irqs++;
-            mouse_ps2_byte(inb(0x60));
+            u8 st = inb(0x64), b = inb(0x60);
+            if (irq == 12 || (st & 0x21) == 0x21) mouse_ps2_byte(b); else vkbd_real_scancode(b);
         } else serial_irq(irq);                      /* serial=dos: a UART's, for the guest */
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
