@@ -56,40 +56,104 @@ void mouse_input(int dx, int dy, int b)
 /* ---------------- PS/2 mouse on the real 8042 ---------------- */
 static int kbc_wait_write(void) { for (int i = 0; i < 100000; i++) if (!(inb(0x64) & 2)) return 1; return 0; }
 static int kbc_wait_read(void) { for (int i = 0; i < 100000; i++) if (inb(0x64) & 1) return 1; return 0; }
+static void kbc_flush(void) { for (int i = 0; i < 64 && (inb(0x64) & 1); i++) { inb(0x60); kdelay_us(50); } }
+
+/* A byte from the mouse within ms milliseconds, or -1. The keyboard port is
+   off while the mouse is set up, so whatever comes is the mouse's (some
+   laptop ECs don't set the aux bit, 20h, in the status). */
+static int aux_read(int ms)
+{
+    for (int i = 0; i < ms * 10; i++) {
+        if (inb(0x64) & 1) return inb(0x60);
+        kdelay_us(100);
+    }
+    return -1;
+}
+
+/* A command to the mouse: its answer (FAh = ACK), retried on FEh (resend). */
 static int aux_cmd(u8 c)
 {
-    kbc_wait_write(); outb(0x64, 0xD4);
-    kbc_wait_write(); outb(0x60, c);
-    return kbc_wait_read() ? inb(0x60) : -1;
+    int r = -1;
+    for (int t = 0; t < 3; t++) {
+        kbc_wait_write(); outb(0x64, 0xD4);
+        kbc_wait_write(); outb(0x60, c);
+        r = aux_read(50);
+        if (r != 0xFE) break;
+    }
+    return r;
+}
+
+/* Reset (FFh): ACK, then AAh (self-test passed) and the ID. A touchpad takes
+   a while (Synaptics: up to ~1 s). The reset is what puts a touchpad the
+   firmware left in its own mode (HP's BIOS setup drives Synaptics and Elan
+   pads in absolute mode: 6-byte packets that aren't PS/2 mouse packets)
+   back to a plain 3-byte PS/2 mouse. */
+static int aux_reset(void)
+{
+    int a = aux_cmd(0xFF);
+    if (a != 0xFA) return a;
+    int st = aux_read(1500);
+    if (st == 0xAA) aux_read(100);                     /* the ID, 00h */
+    return st;
 }
 
 void mouse_ps2_init(void)
 {
     if (inb(0x64) == 0xFF) return;                     /* no 8042 */
+    /* Both ports off while the mouse is set up, so its answers can't be
+       mixed with keystrokes, and no IRQs from the 8042 meanwhile. */
+    kbc_wait_write(); outb(0x64, 0xAD);                /* keyboard port off */
+    kbc_wait_write(); outb(0x64, 0xA7);                /* aux port off */
+    kbc_flush();                                       /* stale bytes */
+    kbc_wait_write(); outb(0x64, 0x20);
+    u8 cfg = 0x47;
+    if (kbc_wait_read()) cfg = inb(0x60);
+    else kprintf("kbd: 8042 command byte unreadable\n");
+    if ((cfg & 0x51) != 0x41) kprintf("kbd: 8042 command byte %02x: keyboard IRQ, clock and translation on\n", cfg);
+    u8 probe = (cfg | 0x40) & ~0x03;                   /* translation; no IRQs while probing */
+    probe &= ~0x30;                                    /* both clocks on */
+    kbc_wait_write(); outb(0x64, 0x60);
+    kbc_wait_write(); outb(0x60, probe);
+
+    kbc_wait_write(); outb(0x64, 0xA8);                /* aux port on */
+    kdelay_us(1000);
+    kbc_flush();
+    int st = aux_reset();
+    if (st == -1) { kdelay_us(100000); st = aux_reset(); }   /* a pad still waking up */
+    int ok;
+    if (st == 0xAA || st == 0xFC) {                    /* FCh: self-test failed; it may still work */
+        if (st == 0xFC) kprintf("mouse: PS/2 device self-test failed, trying it anyway\n");
+        ok = aux_cmd(0xF6) == 0xFA;                    /* defaults: 100/s, 4 counts/mm, 1:1 */
+    } else {
+        /* No reset answer: an EC that only passes some commands. The old
+           way: set defaults alone. */
+        if (mouse_log()) kprintf("mouse: reset answered %s%02x\n", st < 0 ? "nothing " : "", st & 0xFF);
+        ok = aux_cmd(0xF6) == 0xFA;
+    }
+    int id = -1;
+    if (ok && aux_cmd(0xF2) == 0xFA) id = aux_read(50);   /* ID: 00 = standard mouse */
+    if (ok) ok = aux_cmd(0xF4) == 0xFA;                /* stream mode on */
+    kbc_flush();
+
+    cfg = probe | 0x01;                                /* keyboard IRQ 1 */
+    if (ok) cfg |= 0x02;                               /* aux IRQ 12 */
+    kbc_wait_write(); outb(0x64, 0x60);
+    kbc_wait_write(); outb(0x60, cfg);
     /* The keyboard side too, whatever the firmware left: a legacy BIOS /
        CSM boot can hand over the 8042 with the keyboard port or its
        scanning off, and then nothing comes (a PS/2 keyboard seems dead;
        USB ones work). */
-    for (int i = 0; i < 16 && (inb(0x64) & 1); i++) inb(0x60);   /* stale bytes */
-    kbc_wait_write(); outb(0x64, 0xAE);                /* enable the keyboard port */
+    kbc_wait_write(); outb(0x64, 0xAE);                /* keyboard port on */
     kbc_wait_write(); outb(0x60, 0xF4);                /* the keyboard: scanning on */
     if (kbc_wait_read()) inb(0x60);                    /* its ACK */
-    kbc_wait_write(); outb(0x64, 0xA8);                /* enable the aux port */
-    kbc_wait_write(); outb(0x64, 0x20);
-    if (!kbc_wait_read()) return;
-    u8 cfg = inb(0x60);
-    if ((cfg & 0x51) != 0x41) kprintf("kbd: 8042 command byte %02x: keyboard IRQ, clock and translation on\n", cfg);
-    cfg |= 0x41;                                       /* keyboard IRQ 1, set 2 -> set 1 translation */
-    cfg &= ~0x10;                                      /* keyboard clock on */
-    cfg |= 0x02;                                       /* aux IRQ 12 */
-    cfg &= ~0x20;                                      /* aux clock on */
-    kbc_wait_write(); outb(0x64, 0x60);
-    kbc_wait_write(); outb(0x60, cfg);
-    if (aux_cmd(0xF6) != 0xFA) { kprintf("mouse: no PS/2 mouse\n"); return; }
-    aux_cmd(0xF4);                                     /* stream mode on */
+    if (!ok) {
+        kbc_wait_write(); outb(0x64, 0xA7);            /* aux port off: no stray bytes */
+        kprintf("mouse: no PS/2 mouse (reset: %s%02x)\n", st < 0 ? "no answer " : "", st & 0xFF);
+        return;
+    }
     outb(0xA1, inb(0xA1) & ~0x10);                     /* unmask IRQ 12 */
     present = 1;
-    kprintf("mouse: PS/2\n");
+    kprintf("mouse: PS/2 (id %02x)\n", id & 0xFF);
 }
 
 void mouse_ps2_byte(u8 b)
