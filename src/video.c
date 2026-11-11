@@ -535,6 +535,93 @@ static void smooth_setup(u32 w, u32 h)
     smooth = 1;
 }
 
+/* Color filters for 256-color screens (color=vivid, color=deband,
+   color=all, or Ctrl+Shift+F7, which steps off, vivid, vivid+deband,
+   deband; off by default).
+
+   vivid: each palette entry graded as it is packed (free per pixel):
+   vibrance, more saturation for dull colors than for strong ones, then
+   the shadows and midtones lifted a little. Graphics modes only.
+
+   deband: each pixel blended with its four neighbours, but only those
+   within deband_t (per channel, 0-255; deband=N sets it, 32 by default)
+   of it, so the steps of a light ramp and dither patterns smooth into
+   in-between colors while real edges stay sharp. Runs on the DAC indices
+   before any scaling (and before xBRZ). Needs 8 bits a primary at bits
+   0, 8 and 16 of the framebuffer. A changed row redraws its neighbours. */
+static int color_opt = -1;                      /* bit 0: vivid, bit 1: deband */
+volatile int color_toggle_req;
+static u32 deband_t = 32;
+
+static void color_setup(void)
+{
+    if (color_opt >= 0) return;
+    color_opt = 0;
+    if (strstr(cmdline, "color=vivid")) color_opt = 1;
+    if (strstr(cmdline, "color=deband")) color_opt = 2;
+    if (strstr(cmdline, "color=all")) color_opt = 3;
+    const char *t = strstr(cmdline, "deband=");
+    if (t) {
+        u32 v = 0;
+        for (t += 7; *t >= '0' && *t <= '9'; t++) v = v * 10 + (u32)(*t - '0');
+        if (v) deband_t = v > 255 ? 255 : v;
+    }
+}
+
+static int deband_on(void)
+{
+    return color_opt > 0 && (color_opt & 2) && fb_bpp >= 24 && rsz == 8 && gsz == 8 && bsz == 8 &&
+           rpos <= 16 && gpos <= 16 && bpos <= 16 && !((rpos | gpos | bpos) & 7);
+}
+
+static u32 clamp255(int v) { return v < 0 ? 0 : v > 255 ? 255 : (u32)v; }
+
+/* vivid: one palette entry, 8 bits a primary in and out */
+static void color_grade(u32 *r, u32 *g, u32 *b)
+{
+    int R = (int)*r, G = (int)*g, B = (int)*b;
+    int mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+    int mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+    int avg = (R + G + B) / 3;
+    int amt = 112 * (255 - (mx - mn)) / 255;    /* up to +44% saturation, least for strong colors */
+    R += (R - avg) * amt / 256; G += (G - avg) * amt / 256; B += (B - avg) * amt / 256;
+    R = (int)clamp255(R); G = (int)clamp255(G); B = (int)clamp255(B);
+    R += 72 * R * (255 - R) >> 16;              /* lift: about +18 at mid grey, nothing at black or white */
+    G += 72 * G * (255 - G) >> 16;
+    B += 72 * B * (255 - B) >> 16;
+    *r = clamp255(R); *g = clamp255(G); *b = clamp255(B);
+}
+
+static int deband_close(u32 a, u32 b)
+{
+    u32 t = deband_t;
+    int d0 = (int)(a & 0xFF) - (int)(b & 0xFF);
+    int d1 = (int)(a >> 8 & 0xFF) - (int)(b >> 8 & 0xFF);
+    int d2 = (int)(a >> 16 & 0xFF) - (int)(b >> 16 & 0xFF);
+    return (u32)(d0 < 0 ? -d0 : d0) <= t && (u32)(d1 < 0 ? -d1 : d1) <= t && (u32)(d2 < 0 ? -d2 : d2) <= t;
+}
+
+/* Row mid (DAC indices, w wide) debanded into out, columns [x0, x1); up and
+   dn are the rows above and below (mid itself at the picture's edge). Half
+   the pixel, an eighth each neighbour close to it (the pixel instead where
+   one isn't), so a checkerboard dither comes out an even blend. */
+static void deband_row(const u8 *up, const u8 *mid, const u8 *dn, u32 w, u32 x0, u32 x1, u32 *out)
+{
+    for (u32 x = x0; x < x1; x++) {
+        u8 i = mid[x];
+        u32 c = pal[i];
+        u8 ni[4] = { x ? mid[x - 1] : i, x + 1 < w ? mid[x + 1] : i, up[x], dn[x] };
+        if (ni[0] == i && ni[1] == i && ni[2] == i && ni[3] == i) { out[x] = c; continue; }   /* flat */
+        u32 rb = (c & 0xFF00FF) * 4, gg = (c & 0xFF00) * 4;
+        for (int k = 0; k < 4; k++) {
+            u32 n = pal[ni[k]];
+            if (ni[k] != i && !deband_close(c, n)) n = c;
+            rb += n & 0xFF00FF; gg += n & 0xFF00;
+        }
+        out[x] = (rb >> 3 & 0xFF00FF) | (gg >> 3 & 0xFF00) | (c & 0xFF000000);
+    }
+}
+
 /* Source row y (s_w pixels, framebuffer format) has changed. */
 static void bl_row(u32 y, const u32 *src)
 {
@@ -1158,15 +1245,36 @@ static void fetch_row(int y, u8 *out)
 static u16 todo_y[4096], todo_x0[4096], todo_x1[4096];
 static struct { u32 w, h, B, bpp, rowb; int px, py; u32 black, white; } fr;   /* this frame's: a mode set may come meanwhile */
 
+/* Deband on: the rows next to a changed one change too (and a column either side). */
+static u32 deband_widen(u32 n, u32 h, u32 w)
+{
+    static u16 lo[4096], hi[4096];
+    if (!n || h > 4096) return n;
+    for (u32 y = 0; y < h; y++) lo[y] = 0xFFFF, hi[y] = 0;
+    for (u32 i = 0; i < n; i++) {
+        u32 x0 = todo_x0[i] ? todo_x0[i] - 1u : 0, x1 = todo_x1[i] + 1u < w ? todo_x1[i] + 1u : w;
+        for (u32 y = todo_y[i] ? todo_y[i] - 1u : 0; y <= todo_y[i] + 1u && y < h; y++) {
+            if (x0 < lo[y]) lo[y] = (u16)x0;
+            if (x1 > hi[y]) hi[y] = (u16)x1;
+        }
+    }
+    n = 0;
+    for (u32 y = 0; y < h; y++)
+        if (lo[y] < hi[y]) { todo_y[n] = (u16)y; todo_x0[n] = lo[y]; todo_x1[n] = hi[y]; n++; }
+    return n;
+}
+
 static void gfx_draw(u32 i, void *unused)
 {
     u32 y = todo_y[i], w = fr.w, h = fr.h;
     int px = fr.px, py = fr.py, slot = smp_slot();
     const u8 *row = shadow_gfx + y * w;
     int in_new = (int)y >= py && (int)y < py + 16;
+    int db = deband_on();
     if (smooth) {
         u32 *srow = sc_cvt[slot];
-        for (u32 x = 0; x < w; x++) srow[x] = pal[row[x]];
+        if (db) deband_row(y ? row - w : row, row, y + 1 < h ? row + w : row, w, 0, w, srow);
+        else for (u32 x = 0; x < w; x++) srow[x] = pal[row[x]];
         if (in_new) {
             const char *a = arrow[y - py];
             for (int k = 0; a[k] && px + k < (int)w; k++)
@@ -1181,6 +1289,11 @@ static void gfx_draw(u32 i, void *unused)
     dest_span(todo_x0[i], todo_x1[i], &X0, &X1);
     if (X0 >= X1) return;
     u32 *line = sc_line[slot];
+    if (db) {                                      /* debanded at the source's size, then spread */
+        u32 *srow = sc_cvt[slot], c0 = xmap[X0], c1 = xmap[X1 - 1] + 1u;
+        deband_row(y ? row - w : row, row, y + 1 < h ? row + w : row, w, c0, c1, srow);
+        for (u32 x = X0; x < X1; x++) line[x] = srow[xmap[x]];
+    } else
     for (u32 x = X0; x < X1; x++) line[x] = pal[row[xmap[x]]];
     if (in_new) {
         u8 *ovr = sc_ovr[slot];
@@ -1223,6 +1336,7 @@ static void refresh_gfx(void)
         memcpy(sh, rowbuf, w);
         todo_y[n] = (u16)y; todo_x0[n] = (u16)x0; todo_x1[n] = (u16)x1; n++;
     }
+    if (deband_on()) n = deband_widen(n, (u32)h, (u32)w);
     fr.w = (u32)w; fr.h = (u32)h; fr.px = px; fr.py = py;
     fr.black = pack(0, 0, 0); fr.white = pack(63, 63, 63);
     draw_out(n, gfx_draw);
@@ -2048,7 +2162,9 @@ static void vbe_draw(u32 i, void *unused)
         cx0 = xmap[X0]; cx1 = xmap[X1 - 1] + 1u;
     }
     u32 *cvt = sc_cvt[slot], *line = sc_line[slot];
-    for (u32 x = cx0; x < cx1; x++) {
+    int db = B == 1 && deband_on();
+    if (db) deband_row(y ? src - fr.rowb : src, src, y + 1 < h ? src + fr.rowb : src, w, cx0, cx1, cvt);
+    for (u32 x = cx0; x < cx1 && !db; x++) {
         u32 c;
         if (B == 1) c = pal[src[x]];
         else if (B == 2) {
@@ -2114,6 +2230,7 @@ static void refresh_vbe(void)
         if (g_y + y * g_h / h == g_y + (y + 1) * g_h / h && !smooth) continue;   /* no screen row of its own */
         todo_y[n] = (u16)y; todo_x0[n] = (u16)x0; todo_x1[n] = (u16)x1; n++;
     }
+    if (B == 1 && deband_on()) n = deband_widen(n, h < 4096 ? h : 4096, w);
     fr.w = w; fr.h = h; fr.B = B; fr.bpp = vbe_bpp; fr.rowb = rowb; fr.px = px; fr.py = py;
     fr.black = pack(0, 0, 0); fr.white = pack(63, 63, 63);
     draw_out(n, vbe_draw);
@@ -2363,6 +2480,27 @@ static void video_refresh_(void)
             last_layout_mode = -1;
         }
     }
+    color_setup();
+    {
+        static int last_vivid = -1;               /* a mode change between text and graphics regrades */
+        int v = color_opt > 0 && (color_opt & 1) && (vbe_on || vd_on || !is_text(video_mode));
+        if (v != last_vivid) { last_vivid = v; palette_dirty = 1; }
+    }
+    if (color_toggle_req) {                        /* Ctrl+Shift+F7: off, vivid, vivid+deband, deband */
+        color_toggle_req = 0;
+        static const int next[4] = { 1, 3, 0, 2 };
+        color_opt = next[color_opt & 3];
+        palette_dirty = 1;
+        full_redraw = 1;
+        static const char *const msg[4] = { "Color filters off", "Color: vivid", "Color: deband", "Color: vivid + deband" };
+        char m[48];
+        int k = 0;
+        for (const char *p = msg[color_opt]; *p && k < 40; ) m[k++] = *p++;
+        m[k] = 0;
+        if ((color_opt & 2) && !deband_on()) { const char *p = " (not on this screen)"; while (*p && k < 47) m[k++] = *p++; m[k] = 0; }
+        video_osd(m);
+        kprintf("video: %s\n", m);
+    }
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
@@ -2384,9 +2522,16 @@ static void video_refresh_(void)
         palette_dirty = 0;                       /* first: the DAC is written without video_lock */
         __asm__ volatile("" ::: "memory");
         int changed = 0;
+        int vivid = color_opt > 0 && (color_opt & 1) && (vbe_on || vd_on || !is_text(video_mode));
         for (int i = 0; i < 256; i++) {          /* the pixel mask (3C6h) gates the index first */
             const u8 *d = vga_dac[i & dac_mask];
             u32 c = dac8 ? pack8(d[0], d[1], d[2]) : pack(d[0], d[1], d[2]);
+            if (vivid) {
+                u32 r = d[0], g = d[1], b = d[2];
+                if (!dac8) r = (r << 2 | r >> 4) & 0xFF, g = (g << 2 | g >> 4) & 0xFF, b = (b << 2 | b >> 4) & 0xFF;
+                color_grade(&r, &g, &b);
+                c = pack8(r, g, b);
+            }
             pal_hit[i] = c != pal[i];
             changed |= pal_hit[i];
             pal[i] = c;
