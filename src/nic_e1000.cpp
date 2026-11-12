@@ -15,7 +15,7 @@ enum {
     RCTL = 0x100, TCTL = 0x400, TIPG = 0x410,
     RDBAL = 0x2800, RDBAH = 0x2804, RDLEN = 0x2808, RDH = 0x2810, RDT = 0x2818, RDTR = 0x2820,
     TDBAL = 0x3800, TDBAH = 0x3804, TDLEN = 0x3808, TDH = 0x3810, TDT = 0x3818, TIDV = 0x3820,
-    TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, RXDCTL0 = 0x2828, TARC0 = 0x3840, TARC1 = 0x3940,
+    TXDCTL0 = 0x3828, TXDCTL1 = 0x3928, RXDCTL0 = 0x2828, TARC0 = 0x3840, TARC1 = 0x3940, TADV = 0x382C, PBS = 0x1008,
     TDFH = 0x3410, TDFT = 0x3418, TDFHS = 0x3420, TDFTS = 0x3428, TDFPC = 0x3430,   // transmit FIFO
     RFCTL = 0x5008, KMRNCTRLSTA = 0x34, FEXTNVM4 = 0x24, FFLT_DBG = 0x5F04, MTA = 0x5200, RAL = 0x5400, RAH = 0x5404, PBA = 0x1000, MANC = 0x5820,
     // statistics (clear on read)
@@ -260,7 +260,14 @@ void pch_bits(Card& c)
     if (ich8) g |= 0x3F;
     else g = (g & ~0x3Fu) | ~0x3Fu;             // as Linux: e1000e_set_pcie_no_snoop(~PCIE_NO_SNOOP_ALL)
     w32(c, GCR, g);
-    w32(c, RDTR, 0); w32(c, TIDV, 0);           // no interrupt delays (no interrupts anyway)
+    // No receive delay. TIDV: the 6-series/82579 datasheet says 0 is not
+    // allowed (Linux's default is 8); TADV 0 turns the absolute timer off.
+    w32(c, RDTR, 0); w32(c, TIDV, 8); w32(c, TADV, 0);
+    // TARC0: COUNT 0 is forbidden and ENABLE (bit 10) must always be set for
+    // queue 0 (datasheet); firmware could have left either wrong.
+    uint32_t a = r32(c, TARC0);
+    if (!(a & 0x7F)) a |= 3;
+    w32(c, TARC0, a | (1u << 10));
 }
 
 // e1000=WORD[,WORD...] on the kernel command line, to find which of the
@@ -285,6 +292,35 @@ unsigned skip_opts()
     if (strstr(w, "nolink")) m |= SKIP_LINK;
     if (strstr(w, "noflag")) m |= SKIP_FLAG;
     return m;
+}
+
+// The packet buffer split, after the reset that applies it: PBA.TXA (bits
+// 20:16, read-only) is PBS minus RXA, and the datasheet wants it over 4 KB
+// with room for two full-size frames. With less, the MAC has nowhere to put
+// a frame and never fetches a transmit descriptor (TDH stays 0). If so, give
+// receive less and reset again so it takes effect.
+void pba_check(Card& c)
+{
+    uint32_t pba = r32(c, PBA), pbs = r32(c, PBS) & 0x3F;
+    unsigned rxa = pba & 0x1F, txa = (pba >> 16) & 0x1F;
+    dbg(1, "net: %s: packet buffer %u KB: %u KB receive, %u KB transmit\n", c.name, pbs, rxa, txa);
+    if (txa >= 6 || !pbs || pbs <= 12) return;
+    unsigned want = pbs - 10 < rxa ? pbs - 10 : rxa;   // 10 KB transmit
+    kprintf("net: %s: only %u KB of packet buffer for transmit, receive %u -> %u KB\n", c.name, txa, rxa, want);
+    w32(c, PBA, (pba & ~0x1Fu) | want);
+    if (!(skip & SKIP_FLAG)) {                  // as the first reset: DMA stopped, the flag held
+        w32(c, CTRL, r32(c, CTRL) | (1u << 2));
+        for (int i = 0; i < 800 && (r32(c, STATUS) & (1u << 19)); i++) udelay(100);
+        swflag(c);
+    }
+    w32(c, CTRL, r32(c, CTRL) | (1u << 26));    // SWRST: PBA applies on reset
+    udelay(20000);
+    for (int i = 0; i < 1000 && (r32(c, CTRL) & (1u << 26)); i++) udelay(100);
+    for (int i = 0; i < 150 && !(r32(c, STATUS) & (1u << 9)); i++) udelay(100);
+    w32(c, STATUS, r32(c, STATUS) & ~((1u << 9) | (1u << 10)));
+    w32(c, CTRL_EXT, r32(c, CTRL_EXT) | (1u << 28));
+    pba = r32(c, PBA);
+    dbg(1, "net: %s: now %u KB receive, %u KB transmit\n", c.name, pba & 0x1F, (pba >> 16) & 0x1F);
 }
 
 bool link(Card& c);
@@ -335,11 +371,16 @@ bool init(Card& c)
         w32(c, STATUS, r32(c, STATUS) & ~((1u << 9) | (1u << 10)));   // LAN_INIT_DONE, PHYRA (PHY reset asserted)
         w32(c, CTRL_EXT, r32(c, CTRL_EXT) | (1u << 28));        // DRV_LOAD: a driver has it (to the ME)
         if (r32(c, PHY_CTRL) & 0x40) w32(c, PHY_CTRL, r32(c, PHY_CTRL) & ~0x40u);   // GbE disable
+        pba_check(c);
     }
     w32(c, IMC, 0xFFFFFFFF);
     r32(c, ICR);
     uint32_t ctl = r32(c, CTRL);
-    ctl |= (1u << 6) | (1u << 5);               // SLU, ASDE
+    ctl |= 1u << 6;                             // SLU
+    // ASDE (bit 5) on the older MACs; on the ICH/PCH MAC bits 5:3 are
+    // reserved, write 0 (82579 datasheet, CTRL), and Linux leaves it clear.
+    if (!c.e.pch) ctl |= 1u << 5;
+    else ctl &= ~(1u << 5);
     ctl &= ~((1u << 2) | (1u << 3) | (1u << 7) | (1u << 30) | (1u << 31));   // GIO master disable, LRST, ILOS, VME, PHY_RST
     w32(c, CTRL, ctl);
     if (c.e.pch && !(skip & SKIP_BITS)) pch_bits(c);
@@ -383,11 +424,20 @@ bool init(Card& c)
     w32(c, TDH, 0); w32(c, TDT, 0);
     if (c.e.pch) w32(c, TXDCTL0, txdctl | (1u << 25));   // queue enable
     c.tx_cur = 0;
-    w32(c, TIPG, 0x0060200A);
+    // e1000e / the 6-series datasheet: IPGT 8, IPGR1 8, IPGR 7. The 0x0060200A
+    // of the 8254x is for those MACs only.
+    w32(c, TIPG, c.e.pch ? 0x00702008 : 0x0060200A);
     // PSP, CT, COLD, RTLC; enabled (EN) once there's a link and the link-up
     // workarounds are done, as Linux: an 82579 told to send before then
     // never fetches a descriptor.
-    w32(c, TCTL, (1u << 3) | (0x0Fu << 4) | (0x40u << 12) | (1u << 24));
+    // On ICH/PCH, as Linux, a read-modify-write: bits 30:29 (RRTHRESH,
+    // default 01) and 28 (MULR, read-only 1) keep their reset values instead
+    // of being written 0, and the collision distance is e1000e's 63.
+    if (c.e.pch) {
+        uint32_t t = r32(c, TCTL) & ~((1u << 1) | (0xFFu << 4) | (0x3FFu << 12) | (1u << 2) | (1u << 31));
+        w32(c, TCTL, t | (1u << 3) | (0x0Fu << 4) | (0x3Fu << 12) | (1u << 24));
+    } else
+        w32(c, TCTL, (1u << 3) | (0x0Fu << 4) | (0x40u << 12) | (1u << 24));
     c.e.was_up = false;
     if (r32(c, STATUS) & 2) link(c);
     if (c.e.pch && !(hi & 0x80000000u)) kprintf("net: %s: no address from the NVM\n", c.name);
@@ -427,9 +477,9 @@ void stats(Card& c, bool force)
             r32(c, STATUS), r32(c, CTRL), r32(c, RCTL), r32(c, TCTL), r32(c, GCR));
     if (c.e.dbg_n == 1 || force)                // the first time: what DMA depends on
         kprintf("net: %s: PCI command %x; TDBAL %x TDLEN %u RDBAL %x; TXDCTL %x TARC0 %x PBA %x CTRL_EXT %x; "
-                "FWSM %x MANC %x PHY_CTRL %x EXTCNF_CTRL %x; desc 0: addr %x len %u cmd %x\n",
+                "PBS %x TIPG %x TIDV %x; FWSM %x MANC %x PHY_CTRL %x EXTCNF_CTRL %x; desc 0: addr %x len %u cmd %x\n",
                 c.name, pci_read(c.pci, 4) & 0xFFFF, r32(c, TDBAL), r32(c, TDLEN), r32(c, RDBAL), r32(c, TXDCTL0),
-                r32(c, TARC0), r32(c, PBA), r32(c, CTRL_EXT), r32(c, FWSM), r32(c, MANC), r32(c, PHY_CTRL),
+                r32(c, TARC0), r32(c, PBA), r32(c, CTRL_EXT), r32(c, PBS), r32(c, TIPG), r32(c, TIDV), r32(c, FWSM), r32(c, MANC), r32(c, PHY_CTRL),
                 r32(c, EXTCNF_CTRL), (uint32_t)tx[0].addr, tx[0].len, tx[0].cmd);
     // Which side of transmit stopped: the FIFO tail moves (and its packet
     // count goes up) when DMA has fetched a frame into the card; the head
