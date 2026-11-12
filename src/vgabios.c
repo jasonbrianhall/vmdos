@@ -420,7 +420,7 @@ static void uefi_init(void)
             id & 0xFFFF, id >> 16, bus, dev, fn, mod_rom_len >> 10);
     card_bars();
     io_allow(0x3B0, 0x30);
-    io_allow(0x1CE, 2);
+    io_allow(0x1CE, 3);
     vga_native = 1;
 }
 
@@ -470,7 +470,9 @@ void vga_native_init(void)
         card_bars();
     } else kprintf("video=vbe: the card isn't on the PCI bus\n");
     io_allow(0x3B0, 0x30);                                /* the VGA */
-    io_allow(0x1CE, 2);                                   /* Bochs / QEMU VBE (SeaVGABIOS) */
+    io_allow(0x1CE, 3);                                   /* Bochs / QEMU VBE (SeaVGABIOS): 1CEh index, 1CFh data; a 16-bit
+                                                             access to 1CFh also covers 1D0h in the I/O bitmap, else it traps
+                                                             and is split into two byte accesses the DISPI registers ignore */
     vga_native = 1;
     if (rom_init < 0)
         kprintf("video=vbe: the card's own BIOS (%u KiB at C000h, INT 10h %04x:%04x), mode %02x\n",
