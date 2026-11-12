@@ -58,10 +58,22 @@ build() {
         make -f Makefile.dsg CC=i586-pc-msdosdjgpp-gcc CFLAGS=-O2 LDFLAGS=-s less > build.log 2>&1 || { tail -20 build.log; exit 1; }
         upx -q --best -o "$tmp/less.exe" less.exe > /dev/null
         cp "$tmp/less.exe" "$bin/LESS.EXE" ;;
+    format)                                 # its makefile wants .obj, which wcc on Linux doesn't name
+        for f in createfs floppy hdisk main savefs bcread prf userint driveio getopt init recordbc uformat msghlpr kitten; do
+            wcc -q -wx -0 -mc -fpc -zp1 -bt=dos -fo=$f.obj $f.c
+        done
+        wcl -q -bt=dos -mc -fpc -zp1 *.obj -fe=format.exe
+        rm -f "$bin/FORMAT.EXE"
+        upx -qq --best --8086 -o "$bin/FORMAT.EXE" format.exe ;;
+    fdisk)                                  # English only (FDISK.LNG not shipped)
+        cd source/fdisk
+        wmake -h -f Makefile fdisk.exe > build.log 2>&1 || { tail -20 build.log; exit 1; }
+        rm -f "$bin/FDISK.EXE"
+        upx -qq --best --8086 -o "$bin/FDISK.EXE" fdisk.exe ;;
     *) echo "unknown: $1" >&2; exit 1 ;;
     esac
     echo "built $1"
 }
 
-names=${*:-more find sort move choice label attrib deltree mem xcopy nansi mkeyb less}
+names=${*:-more find sort move choice label attrib deltree mem xcopy nansi mkeyb less format fdisk}
 for n in $names; do (build $n); done
