@@ -16,9 +16,9 @@
    ne2k=300,11 (hex base, IRQ; these are the default; ne2k=isa,300,11 for
    the ISA card), ne2k=off.
 
-   Modelled on QEMU's ne2000.c, which drivers have long been tested
+   Modeled on QEMU's ne2000.c, which drivers have long been tested
    against: the same memory map (PROM at 0, RAM at 4000h-BFFFh), PROM
-   contents and register behaviour (QEMU's ne2k_pci is this RTL8029 too).
+   contents and register behavior (QEMU's ne2k_pci is this RTL8029 too).
    The interrupt line is the 8390's INT (ISR & IMR) and raises the IRQ on
    its rising edge, as on the ISA bus; as a PCI card's level-triggered
    line, again if it stays up unserviced. */

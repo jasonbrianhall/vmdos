@@ -1,6 +1,6 @@
 ; DAC8.COM: the VESA 8-bit DAC (4F08h), as SVGA games use it. VESA mode
 ; 101h (640x480x256), DAC switched to 8 bits, then two ramps with 8-bit
-; palette values: rows 0-49 grey, set through ports 3C8h/3C9h; rows 50-99
+; palette values: rows 0-49 gray, set through ports 3C8h/3C9h; rows 50-99
 ; red, set through 4F09h. Both must run smoothly from black to full
 ; brightness; with a 6-bit-only DAC they repeat four times instead. Rows
 ; 100-101: the DAC width the BIOS reported (bar: 8 bits). Q: text mode.
@@ -12,7 +12,7 @@
         mov bx, 0800h               ; BL=0 set, BH=8 bits
         int 10h
         mov [width], bh
-        ; grey: indices 0-127 = 2*i, through the ports (8-bit values)
+        ; gray: indices 0-127 = 2*i, through the ports (8-bit values)
         mov dx, 3C8h
         xor al, al
         out dx, al

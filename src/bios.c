@@ -447,7 +447,7 @@ static int int15_ps2(struct regs *r)
     case 0x02: if (BH(r) > 6) err = 2; break;           /* sample rate */
     case 0x03: if (BH(r) > 3) err = 2; break;           /* resolution */
     case 0x04: BH(r) = 0; break;                        /* device ID: standard mouse */
-    case 0x05:                                          /* initialise, BH = packet size */
+    case 0x05:                                          /* initialize, BH = packet size */
         if (BH(r) < 1 || BH(r) > 8) { err = 2; break; }
         ps2_on = 0; ps2_n = 0; vaux_bios_reset();
         break;

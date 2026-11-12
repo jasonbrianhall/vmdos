@@ -11,7 +11,7 @@
 
 static struct pad {
     int on;
-    u8 x, y;                              /* 0 left/up, 128 centre, 255 right/down */
+    u8 x, y;                              /* 0 left/up, 128 center, 255 right/down */
     u8 btn;                               /* bits 0-3: game port buttons 1-4 */
 } pads[2];
 static u32 shot;                          /* pit_clock() of the last write to 201h */

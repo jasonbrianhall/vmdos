@@ -69,7 +69,7 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw vga_regtab_n                  ; 0230  INT 10h: register writes to replay (count, then port/value triples)
         dw lfn_open                      ; 0232  long-name open on a 9p drive (fs9p.cpp)
         dw bios32_dir                    ; 0234  BIOS32 service directory (vpci.c turns it on)
-        dw rom_post                      ; 0236  voodoo3: the card's BIOS initialised, then the boot sector
+        dw rom_post                      ; 0236  voodoo3: the card's BIOS initialized, then the boot sector
         dw vga_post                      ; 0238  video=vbe: text mode by the card's BIOS, then the boot sector
         dw dpmi_mousecb                  ; 023A  INT 33h 0Ch/14h from PM: the driver calls this, it calls the PM handler
         dw rom_post_ax                   ; 023C  rom_post's AX: the card's bus and device/function
@@ -103,7 +103,7 @@ rom_post:
 rom_post_ax: dw 0x0008
         db 0                             ; +2: 1 = then mode 3 (display=)
 
-; video=vbe: the PC's card has its own BIOS (initialised by the PC's); a
+; video=vbe: the PC's card has its own BIOS (initialized by the PC's); a
 ; clean text mode from it, as a BIOS leaves the screen at boot, then the
 ; boot sector.
 vga_post:

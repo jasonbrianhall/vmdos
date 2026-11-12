@@ -2,7 +2,7 @@ DOSLFN 0.42a by Henrik Haftmann and Jason Hood: the long-name API (INT 21h
 71xxh) for plain DOS, on FAT12/16/32 drives and (with SHSUCDX) CD-ROMs.
 Source: https://github.com/adoxa/doslfn, commit 7fd985d (Oct 2026), unmodified
 (src/ holds the files the build needs, its README.md and doslfn.txt, the
-documentation). Freeware with source; it has no licence file of its own, and
+documentation). Freeware with source; it has no license file of its own, and
 FreeDOS distributes it as "freeware w/sources".
 
 DOSLFN.COM is prebuilt so the normal build needs no extra tools; the build

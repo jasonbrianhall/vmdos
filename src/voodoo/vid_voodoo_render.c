@@ -292,7 +292,7 @@ voodoo_lod_bias(const voodoo_params_t *params, int tmu)
 }
 
 /*Number of pixels drawn with one base LOD when perspective-corrected textures are used.
-  With trilinear filtering even fractional LOD steps between neighbouring triangles are visible; 8 pixels keep the error below 0.2 mip levels in traces from Unreal and Forsaken.*/
+  With trilinear filtering even fractional LOD steps between neighboring triangles are visible; 8 pixels keep the error below 0.2 mip levels in traces from Unreal and Forsaken.*/
 #define VOODOO_LOD_SPAN_PART_PIXELS 8
 
 /*Sets state->tmu[].lod for the span part that starts at the current state position and ends span_part_offset pixels further in drawing direction.*/

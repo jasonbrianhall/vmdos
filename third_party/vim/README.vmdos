@@ -14,7 +14,7 @@ Vim 7.4.1398 for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), on C: only
   vim-7.4.1398-djgpp.patch   what it takes to build with today's DJGPP:
                      json.o in the makefile, reltimefloat() only with
                      FEAT_FLOAT, EMPTY_IF_NULL's type
-  LICENSE.txt        Vim's licence (runtime/doc/uganda.txt): charityware,
+  LICENSE.txt        Vim's license (runtime/doc/uganda.txt): charityware,
                      GPL-compatible
 
 RT/ goes in C:\VMDOS: Vim looks for $VIM\_VIMRC and $VIM\VIM74 and, with no

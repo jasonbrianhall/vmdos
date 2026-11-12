@@ -453,7 +453,7 @@ static int in_best() {
 }
 // "mic jack, rear pink", "line in, front blue", "internal mic"
 static void in_name(const HdaIn& in, char* o, int cap) {
-    static const char* const colors[16] = {"", "black", "grey", "blue", "green", "red", "orange", "yellow",
+    static const char* const colors[16] = {"", "black", "gray", "blue", "green", "red", "orange", "yellow",
                                            "purple", "pink", "", "", "", "", "white", ""};
     static const char* const places[8] = {"", "rear", "front", "left", "right", "top", "bottom", ""};
     int dev = (in.cfg >> 20) & 0xF, loc = (in.cfg >> 24) & 0x3F, color = (in.cfg >> 12) & 0xF;
@@ -1271,7 +1271,7 @@ static uint32_t hda_play_pos() {
 
 // ================================================================ Sound Blaster
 // The Sound Blaster Pro 2.0's DSP (version 3.xx; the SB16 and its clones
-// speak it too): 8-bit unsigned mono from an auto-initialising ISA DMA
+// speak it too): 8-bit unsigned mono from an auto-initializing ISA DMA
 // ring on an 8-bit channel, the rate set by a time constant. The DSP's
 // interrupt is left masked at the PIC; the play position comes from the
 // DMA controller's count, as with the other cards.

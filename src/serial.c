@@ -298,7 +298,7 @@ void serial_int14(struct regs *r)
     if (!b || slot_of(b) < 0) { AH(r) = 0x80; return; }   /* no such port (or one DOS moved elsewhere): time-out */
     freedos_comndread_fix();
     switch (AH(r)) {
-    case 0x00: {                                   /* initialise: AL = baud (7-5), parity (4-3), stop (2), length (1-0) */
+    case 0x00: {                                   /* initialize: AL = baud (7-5), parity (4-3), stop (2), length (1-0) */
         static const u16 div[8] = { 1047, 768, 384, 192, 96, 48, 24, 12 };   /* 110 ... 9600 */
         u16 d = div[AL(r) >> 5];
         u8 lcr = (AL(r) & 3) | (AL(r) & 4) | ((AL(r) & 0x18) == 0x08 ? 0x08 : (AL(r) & 0x18) == 0x18 ? 0x18 : 0);
@@ -323,7 +323,7 @@ void serial_int14(struct regs *r)
     case 0x03:                                     /* status: AH = line, AL = modem */
         AH(r) = inb(b + 5); AL(r) = inb(b + 6);
         return;
-    case 0x04: {                                   /* extended initialise (PS/2): up to 19200 baud */
+    case 0x04: {                                   /* extended initialize (PS/2): up to 19200 baud */
         /* AL break, BH parity (0 none, 1 odd, 2 even, 3 mark, 4 space),
            BL stop bits (0: 1, 1: 2), CH length (0-3: 5-8 bits), CL baud (0-8: 110 ... 19200) */
         static const u16 div[9] = { 1047, 768, 384, 192, 96, 48, 24, 12, 6 };

@@ -904,10 +904,10 @@ untested.
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
-| `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style licence) |
+| `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
 | `dos/edit/`, `dos/tree/`, `dos/bin/` | EDIT, vmdos's text editor, and TREE (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
-| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licences and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
-| `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, licence, notes in its README.vmdos; `tools/build-vim.sh`) |
+| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
+| `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 

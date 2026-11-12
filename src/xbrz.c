@@ -9,7 +9,7 @@
    Per source pixel F, the corner it shares with G, J and K (right, below,
    below right) is classified first (xbrz_corners, from a 4x4 window: rows
    y-1..y+2); then each pixel's block of k x k is filled with its color and
-   each of its four corners blended towards the neighbour color where the
+   each of its four corners blended towards the neighbor color where the
    corners say so (xbrz_row, from a 3x3 window and the corners of rows y-1
    and y). So a changed source row changes the scaled rows y-2..y+2. */
 #include "kernel.h"
@@ -180,7 +180,7 @@ static void blend_corner(const u32 *ker, u8 blend, int rot, u32 *blk, u32 pitch,
     else if (bot_l != NONE && !eq(e, c)) line = 0;
     else if (!eq(e, i) && eq(g, h) && eq(h, i) && eq(i, f) && eq(f, c)) line = 0;   /* L-shapes: the corner only */
     else line = 1;
-    u32 px = dist(e, f) <= dist(e, h) ? f : h;                    /* the more similar neighbour */
+    u32 px = dist(e, f) <= dist(e, h) ? f : h;                    /* the more similar neighbor */
     const struct scaler *s = &scalers[k];
     if (!line) { apply(s->corner, s->n_corner, 0, blk, pitch, k, rot, px); return; }
     u32 fg = dist(f, g), hc = dist(h, c);

@@ -1695,7 +1695,7 @@ svga_poll(void *priv)
         if ((svga->scanline == (svga->crtc[11] & 31)) || (svga->scanline == svga->rowcount))
             svga->cursorvisible = 0;
         if (svga->dispon) {
-            /* TODO: Verify real hardware behaviour for out-of-range fine vertical scroll
+            /* TODO: Verify real hardware behavior for out-of-range fine vertical scroll
                - S3 Trio64V2/DX: scanline == rowcount, wrapping 5-bit counter. */
             if (svga->linedbl && !svga->linecountff) {
                 svga->linecountff = 1;

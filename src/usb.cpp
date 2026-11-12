@@ -532,7 +532,7 @@ static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {
         x = hid_axis(p, n, L.x); y = hid_axis(p, n, L.y);
         if (L.hat.bit >= 0) {                                     // a hat switch steers too
             int32_t h = hid_bits(p, n, L.hat.bit, L.hat.size, false) - L.hat.lmin;
-            if (h >= 0 && h < 8) {                                // 0 up, clockwise; else centred
+            if (h >= 0 && h < 8) {                                // 0 up, clockwise; else centered
                 static const int8_t hx[8] = { 0, 1, 1, 1, 0, -1, -1, -1 }, hy[8] = { -1, -1, 0, 1, 1, 1, 0, -1 };
                 if (hx[h]) x = hx[h] < 0 ? 0 : 255;
                 if (hy[h]) y = hy[h] < 0 ? 0 : 255;

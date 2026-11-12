@@ -125,7 +125,7 @@ static void load_palette(int bits)
         outportb(0x3C9, 0);
         outportb(0x3C9, v);
     }
-    /* 192-255: greyscale       */
+    /* 192-255: grayscale       */
     for (i = 0; i < 64; i++) {
         int v = (bits == 8) ? (i * 255 / 63) : i;
         outportb(0x3C9, v);
@@ -144,7 +144,7 @@ static void draw_color_bars(void)
             if      (x <  80) idx = (x * 64) / 80;          /* red   0-63   */
             else if (x < 160) idx = 64 + ((x-80) * 64)/80; /* green 64-127 */
             else if (x < 240) idx = 128 + ((x-160)*64)/80;/* blue  128-191*/
-            else              idx = 192 + ((x-240)*64)/80;/* grey  192-255*/
+            else              idx = 192 + ((x-240)*64)/80;/* gray  192-255*/
 
             _farpokeb(_dos_ds, VGA_SEGMENT + y*320 + x, idx);
         }

@@ -138,7 +138,7 @@ static unsigned getkey(void)
     r.h.ah = ext16 ? 0x10 : 0x00;
     int86(0x16, &r, &r);
     unsigned k = r.x.ax;
-    if ((k & 0xFF) == 0xE0 && (k >> 8)) return k & 0xFF00;   /* grey keys: as the white ones */
+    if ((k & 0xFF) == 0xE0 && (k >> 8)) return k & 0xFF00;   /* gray keys: as the white ones */
     if (k & 0xFF) return k & 0xFF;                            /* a character (Ctrl+letters: 01h..1Ah) */
     return k & 0xFF00;
 }

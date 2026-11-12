@@ -177,9 +177,9 @@ static void default_palette(int kind)
         }
         memcpy(atc, ega_atc, 16);
     } else {
-        static const u8 grey[16] = { 0, 5, 8, 11, 14, 17, 20, 24, 28, 32, 36, 40, 45, 50, 56, 63 };
+        static const u8 gray[16] = { 0, 5, 8, 11, 14, 17, 20, 24, 28, 32, 36, 40, 45, 50, 56, 63 };
         memcpy(vga_dac, cga16, sizeof cga16);
-        for (int i = 0; i < 16; i++) vga_dac[16 + i][0] = vga_dac[16 + i][1] = vga_dac[16 + i][2] = grey[i];
+        for (int i = 0; i < 16; i++) vga_dac[16 + i][0] = vga_dac[16 + i][1] = vga_dac[16 + i][2] = gray[i];
         static const u8 hi[3] = { 63, 28, 16 };
         int n = 32;
         for (int v = 0; v < 3; v++)
@@ -543,12 +543,12 @@ static void smooth_setup(u32 w, u32 h)
    vibrance, more saturation for dull colors than for strong ones, then
    the shadows and midtones lifted a little. Graphics modes only.
 
-   deband: each pixel blended with its four neighbours, but only those
+   deband: each pixel blended with its four neighbors, but only those
    within deband_t (per channel, 0-255; deband=N sets it, 32 by default)
    of it, so the steps of a light ramp and dither patterns smooth into
    in-between colors while real edges stay sharp. Runs on the DAC indices
    before any scaling (and before xBRZ). Needs 8 bits a primary at bits
-   0, 8 and 16 of the framebuffer. A changed row redraws its neighbours. */
+   0, 8 and 16 of the framebuffer. A changed row redraws its neighbors. */
 static int color_opt = -1;                      /* bit 0: vivid, bit 1: deband */
 volatile int color_toggle_req;
 static u32 deband_t = 32;
@@ -586,7 +586,7 @@ static void color_grade(u32 *r, u32 *g, u32 *b)
     int amt = 112 * (255 - (mx - mn)) / 255;    /* up to +44% saturation, least for strong colors */
     R += (R - avg) * amt / 256; G += (G - avg) * amt / 256; B += (B - avg) * amt / 256;
     R = (int)clamp255(R); G = (int)clamp255(G); B = (int)clamp255(B);
-    R += 72 * R * (255 - R) >> 16;              /* lift: about +18 at mid grey, nothing at black or white */
+    R += 72 * R * (255 - R) >> 16;              /* lift: about +18 at mid gray, nothing at black or white */
     G += 72 * G * (255 - G) >> 16;
     B += 72 * B * (255 - B) >> 16;
     *r = clamp255(R); *g = clamp255(G); *b = clamp255(B);
@@ -603,7 +603,7 @@ static int deband_close(u32 a, u32 b)
 
 /* Row mid (DAC indices, w wide) debanded into out, columns [x0, x1); up and
    dn are the rows above and below (mid itself at the picture's edge). Half
-   the pixel, an eighth each neighbour close to it (the pixel instead where
+   the pixel, an eighth each neighbor close to it (the pixel instead where
    one isn't), so a checkerboard dither comes out an even blend. */
 static void deband_row(const u8 *up, const u8 *mid, const u8 *dn, u32 w, u32 x0, u32 x1, u32 *out)
 {

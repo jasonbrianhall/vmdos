@@ -1,4 +1,4 @@
-/* Gravis UltraSound: the GF1 wavetable chip and its 1 MB of DRAM, modelled
+/* Gravis UltraSound: the GF1 wavetable chip and its 1 MB of DRAM, modeled
  * on DOSBox's gus.cpp. The game uploads samples (DMA through the virtual
  * 8237, or poked through 3X7h) and plays them on up to 32 voices, each with
  * its own loop points, pitch, logarithmic volume ramp and pan. The voices

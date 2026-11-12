@@ -146,7 +146,7 @@ f_open: mov dx, [bp + F_DX]
         mov byte [bp + F_AX], 0
         ret
 
-; BX=1 close socket DX: its listening ECBs are cancelled
+; BX=1 close socket DX: its listening ECBs are canceled
 f_close:
         mov dx, [bp + F_DX]
         or dx, dx
@@ -594,13 +594,13 @@ got_frame:
         cmp bl, 0
         jne .other
         mov byte [seen_ii], 1
-        jmp .learnt
+        jmp .learned
 .other: cmp byte [fmt_fixed], 0
-        jne .learnt
+        jne .learned
         cmp byte [seen_ii], 0
-        jne .learnt
+        jne .learned
         mov [tx_fmt], bl
-.learnt:
+.learned:
         mov dx, [ds:bp + 16]
         call find_sock
         jc .x

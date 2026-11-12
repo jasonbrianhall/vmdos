@@ -648,7 +648,7 @@ void vkbd_real_scancode(u8 sc)
     else {
         if (k == 0x1D) ctrl = !up;
         else if (k == 0x38) alt = !up;
-        else if (k == 0x2A && !e0) lshift = !up;               /* E0 2A: a fake shift around grey keys */
+        else if (k == 0x2A && !e0) lshift = !up;               /* E0 2A: a fake shift around gray keys */
         else if (k == 0x36 && !e0) rshift = !up;
         e0 = 0;
     }

@@ -67,7 +67,7 @@
 ; After the directory entry is found, the entire FAT is loaded to
 ;  the kernel load address. It is assumed that the size of the FAT
 ;  in sectPerFat will not lead to a FAT larger than 128 KiB, which
-;  is the maximum size a FAT16 may fully utilise.
+;  is the maximum size a FAT16 may fully utilize.
 ; The kernel load segment may be patched using the SYS /L switch.
 ;  We support values between 0x60 and 0x200 here, with file size
 ;  of up to 128 KiB (rounded to cluster size). Default is 0x60.
@@ -220,7 +220,7 @@ cont:
                 mov     [drive], dl     ; rely on BIOS drive number in DL
 
                 mov     LBA_SIZE, 10h
-                mov     LBA_SECNUM,1    ; initialise LBA packet constants
+                mov     LBA_SECNUM,1    ; initialize LBA packet constants
                 mov     word [LBA_SEG],ds
                 mov     word [LBA_OFF],READBUF
 

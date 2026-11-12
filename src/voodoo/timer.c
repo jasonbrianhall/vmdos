@@ -172,7 +172,7 @@ timer_init(void)
     timer_target = 0ULL;
     tsc          = 0;
 
-    /* Initialise the CPU-independent timer */
+    /* Initialize the CPU-independent timer */
     rivatimer_init();
 
     timer_inited = 1;

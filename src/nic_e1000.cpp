@@ -64,7 +64,7 @@ bool match(uint32_t id)
     return pch_of(id) != 0;
 }
 
-// ICH/PCH: the software flag, which the ME honours, around a reset or PHY access
+// ICH/PCH: the software flag, which the ME honors, around a reset or PHY access
 bool swflag(Card& c)
 {
     for (int i = 0; i < 1000 && (r32(c, EXTCNF_CTRL) & 0x20); i++) udelay(1000);

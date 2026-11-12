@@ -18,7 +18,7 @@ and UNZIP (no room).
   NANSI.SYS    FDOS/ansi 129904f, NANSI 4.0d (Dan Kegel)              GPL          JWasm, wlink
   MKEYB.EXE    davidebreso/mkeyb 96edb1d (2026), 0.54 (Tom Ehlert)    GPL-2.0 (*)  Open Watcom, UPX
   LESS.EXE     gwsw/less v712 (Oct 2026), GNU less                    GPL-3.0 or   DJGPP (32-bit,
-                                                                      Less licence DPMI), UPX
+                                                                      Less license DPMI), UPX
   ZIP.EXE      Info-ZIP Zip 3.0, unmodified                           Info-ZIP     Open Watcom
   UNZIP.EXE    Info-ZIP UnZip 6.0, unmodified                         Info-ZIP     Open Watcom
   (*) with the exception that any executable packer may be used.
@@ -41,7 +41,7 @@ vmdos's changes (marked "vmdos:" in the source):
 ZIP and UNZIP: from https://github.com/kevin1024/infozip-dos16-builds,
 commit 0261a3f, built here with its build.sh (Open Watcom; the C sources
 unmodified, its Watcom makefiles adapted to a POSIX host), the same bytes as
-its release. Not in src/ (12 MB); the Info-ZIP licence (src/ of that repo)
+its release. Not in src/ (12 MB); the Info-ZIP license (src/ of that repo)
 asks for none. They warn that TZ isn't set (no UTC times): SET TZ=EST5EDT
 (or yours) in AUTOEXEC.BAT stops that.
 

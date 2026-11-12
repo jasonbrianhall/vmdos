@@ -919,7 +919,7 @@ svga_render_indexed_gfx(svga_t *svga, bool highres, bool combine8bits)
         uint32_t out_edat      = edat;
         /*
            Apply blink
-           FIXME: Confirm blink behaviour on real hardware
+           FIXME: Confirm blink behavior on real hardware
 
            The VGA 4bpp graphics blink logic was a pain to work out.
 

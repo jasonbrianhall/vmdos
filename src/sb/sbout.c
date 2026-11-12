@@ -205,7 +205,7 @@ void sb_irq_ack(int bits16)     { irq_stat &= bits16 ? ~2 : ~1; }
    for retrace with interrupts off). On a real card that takes a CLI longer
    than a block; here also a render batch that covers two block ends before
    the guest has run. So the stream holds at such a block end until the
-   acknowledgement comes (a short gap instead of lasting noise), at most
+   acknowledgment comes (a short gap instead of lasting noise), at most
    STALL_MAX output frames, then goes on as before. */
 #define STALL_MAX (OUT_RATE / 10)
 static int stall_n;

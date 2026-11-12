@@ -468,7 +468,7 @@ static void reg_write(int off, u32 v, u32 m)         /* m: the bytes written */
     case 0x1C: es.spdif = (es.spdif & ~m) | (v & m); break;
     case 0x20: {
         es.si = (((es.si & ~m) | (v & m)) & 0x007FFFFFu);
-        if (!(es.si & SI_P1_INT_EN)) es.status &= ~ST_DAC1;     /* the acknowledgement: enable off, on */
+        if (!(es.si & SI_P1_INT_EN)) es.status &= ~ST_DAC1;     /* the acknowledgment: enable off, on */
         if (!(es.si & SI_P2_INT_EN)) es.status &= ~ST_DAC2;
         if (!(es.si & SI_R1_INT_EN)) es.status &= ~ST_ADC;
         if ((old & ~sources()) & (ST_DAC1 | ST_DAC2 | ST_ADC)) es.st_acks++;

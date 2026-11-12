@@ -597,7 +597,7 @@ void reboot(void)
 
     /* 1. CF9 full reset first: the keyboard controller's reset (below) is
        only a warm CPU reset on many boards, which works, so nothing after it
-       ran and USB/AHCI were never re-initialised. FULL_RST (bit 3) is set
+       ran and USB/AHCI were never re-initialized. FULL_RST (bit 3) is set
        before RST_CPU (bit 2) goes 0 -> 1, as the chipset samples it then. */
     u8 cf9 = inb(0xCF9) & ~0x0E;
     outb(0xCF9, cf9 | 0x0A);          /* full + system reset requested */

@@ -1,6 +1,6 @@
 ; SUBST.COM: a folder as a drive letter, by changing DOS's current directory
 ; structure (CDS) as MS-DOS's SUBST does; FreeDOS's kernel follows a
-; substituted drive itself. Modelled on Steffen Kaiser's SWSUBST (GPL), which
+; substituted drive itself. Modeled on Steffen Kaiser's SWSUBST (GPL), which
 ; FreeDOS ships for SUBST and JOIN.
 ;   SUBST                 list the substituted drives
 ;   SUBST X: C:\FOLDER    X: shows C:\FOLDER (X: an unused letter up to
