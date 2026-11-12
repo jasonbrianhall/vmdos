@@ -194,6 +194,14 @@ menuentry "FreeDOS (vmdos.efi)" {
 }
 ```
 
+Some laptops (InsydeH2O firmware on certain Acer, HP and Lenovo models)
+ignore boot entries and only start `\EFI\Microsoft\Boot\bootmgfw.efi` or
+`\EFI\BOOT\BOOTX64.EFI`. esp.img has the boot program at both (`OEM_PATH=0`
+leaves the first out). On such a machine's own disk, copying vmdos.efi to
+`\EFI\Microsoft\Boot\bootmgfw.efi` replaces Windows's boot manager (back it
+up first); vmdos.efi takes dos.img and vmdos.cfg from `\EFI\vmdos\` or
+`\EFI\BOOT\` when they aren't next to it.
+
 The loader puts the 32-bit kernel at 16 MiB, leaves long mode and enters it
 as GRUB would. Load options go to the kernel (`debug=2`, `nopae`); `debug`
 alone pauses before leaving the firmware. A small ESP may need a smaller C:
