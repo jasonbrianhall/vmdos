@@ -639,9 +639,19 @@ static int n_cdmod;
 void kmain(u32 magic, struct mb_info *mb)
 {
     serial_init(magic == 0x2BADB002 && (mb->flags & 4) && mb->cmdline ? (const char *)(uintptr_t)mb->cmdline : 0);
-    if (magic == 0x2BADB002 && (mb->flags & (1 << 12)) && mb->fb_type == 1 &&
-        !((mb->flags & 4) && mb->cmdline && strstr((const char *)(uintptr_t)mb->cmdline, "bootlog=off")))
-        bootcon_start(mb->fb_addr, mb->fb_pitch, mb->fb_width, mb->fb_height, mb->fb_bpp, mb->rpos, mb->gpos, mb->bpos);
+    if (magic == 0x2BADB002 && !((mb->flags & 4) && mb->cmdline && strstr((const char *)(uintptr_t)mb->cmdline, "bootlog=off"))) {
+        if ((mb->flags & (1 << 12)) && mb->fb_type == 1)
+            bootcon_start(mb->fb_addr, mb->fb_pitch, mb->fb_width, mb->fb_height, mb->fb_bpp, mb->rpos, mb->gpos, mb->bpos);
+        else if ((mb->flags & (1 << 12)) && mb->fb_type == 2)          /* EGA text (gfxpayload=text: video=vbe) */
+            bootcon_start_text((u32)mb->fb_addr, mb->fb_width, mb->fb_height);
+        else if (!(mb->flags & (1 << 12))) {                          /* no word on video: the BIOS's text mode, if it is one */
+            u8 mode = *(volatile u8 *)0x449 & 0x7F;
+            u32 c = *(volatile u16 *)0x44A, r = *(volatile u8 *)0x484 + 1u;
+            if (r < 20) r = 25;
+            if (mode == 2 || mode == 3) bootcon_start_text(0xB8000, c, r);
+            else if (mode == 7) bootcon_start_text(0xB0000, c, r);
+        }
+    }
     kprintf("\nvmdos %s: 32-bit v86 monitor\n", VMDOS_VERSION);
     if (magic != 0x2BADB002) panic("not started by a Multiboot loader (magic %x)", magic);
 
