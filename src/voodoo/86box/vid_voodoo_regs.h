@@ -368,7 +368,7 @@ enum {
 };
 
 enum {
-    LFB_WRITE_COLOUR = 1,
+    LFB_WRITE_COLOR = 1,
     LFB_WRITE_DEPTH  = 2,
     LFB_WRITE_BOTH   = 4
 };

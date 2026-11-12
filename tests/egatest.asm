@@ -1,5 +1,5 @@
-; EGATEST.COM: 16-colour planar modes through the VGA's write logic.
-; Mode 12h: 16 colour bars with write mode 2, a white frame with set/reset,
+; EGATEST.COM: 16-color planar modes through the VGA's write logic.
+; Mode 12h: 16 color bars with write mode 2, a white frame with set/reset,
 ; a bit-masked checkerboard, a latch copy (write mode 1) of the bars, a
 ; write mode 3 band, BIOS pixels and text. Key: mode 0Dh, same bars, text.
 ; Key: back to text mode.
@@ -36,7 +36,7 @@
         mov di, 110 * 80
         mov cx, 80
         rep stosb                       ; data ignored
-        ; bit mask 0AAh: checkerboard-ish rows 120-139 in colour 15
+        ; bit mask 0AAh: checkerboard-ish rows 120-139 in color 15
         mov ax, 0AA08h
         out dx, ax
         push dx
@@ -67,7 +67,7 @@
         mov cx, 40 * 80
         rep movsb
         pop ds
-        ; write mode 3: set/reset colour 12, rows 200-209, pattern 0F0h
+        ; write mode 3: set/reset color 12, rows 200-209, pattern 0F0h
         mov ax, 0305h
         out dx, ax
         mov ax, 0C00h
@@ -80,7 +80,7 @@
         out dx, ax
         mov ax, 0000h
         out dx, ax
-        ; BIOS pixels: diagonal in colour 14
+        ; BIOS pixels: diagonal in color 14
         xor cx, cx
 .dg:    mov dx, cx
         shr dx, 1

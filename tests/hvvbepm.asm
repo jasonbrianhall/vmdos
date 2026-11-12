@@ -1,8 +1,8 @@
 ; HVVBEPM.COM: for VMHV (DOS in the VM without EMM386). Sets VESA mode
-; 101h (640x480, 256 colours, through the 64 KB window), copies the VESA
+; 101h (640x480, 256 colors, through the 64 KB window), copies the VESA
 ; protected-mode interface (4F0Ah) into its own code as games do (Warcraft
 ; II), switches to 32-bit protected mode and, for banks 0-4, calls the
-; copied set-window routine near and fills the window with colour bank+1.
+; copied set-window routine near and fills the window with color bank+1.
 ; Expect five horizontal stripes (blue, green, cyan, red, magenta); only
 ; blue means the bank switch didn't happen. A key ends it.
 ; Build: nasm -f bin tests/hvvbepm.asm -o HVVBEPM.COM

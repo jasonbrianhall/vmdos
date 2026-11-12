@@ -1,9 +1,9 @@
-; M12X.COM: a 256-colour unchained screen made from BIOS mode 12h, as
+; M12X.COM: a 256-color unchained screen made from BIOS mode 12h, as
 ; Ultrabots does: INT 10h AX=0012h, then the attribute controller and
-; graphics controller switched to 256 colours and the CRTC to 320x240
+; graphics controller switched to 256 colors and the CRTC to 320x240
 ; (double-scanned), chain-4 left off. Shows 16 vertical bars of 16
-; shades each (all 256 colours) over the whole 320x240, a white frame
-; round the edge. Stripes in a few dark colours: drawn as 16-colour.
+; shades each (all 256 colors) over the whole 320x240, a white frame
+; round the edge. Stripes in a few dark colors: drawn as 16-color.
         org 100h
         mov ax, 0012h
         int 10h
@@ -20,7 +20,7 @@
         xor al, al
         out dx, al
         mov dx, 3CEh
-        mov ax, 4005h               ; 256-colour shift
+        mov ax, 4005h               ; 256-color shift
         out dx, ax
         mov dx, 3D4h
         mov ax, 0011h               ; unprotect CRTC 0-7
@@ -42,7 +42,7 @@
         xor bx, bx                  ; y
 .row:   xor si, si                  ; x
 .px:    mov ax, si
-        mov cl, 4                   ; colour: (x / 20) * 16 + y / 15
+        mov cl, 4                   ; color: (x / 20) * 16 + y / 15
         xor dx, dx
         mov di, 20
         div di

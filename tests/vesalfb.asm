@@ -1,6 +1,6 @@
 ; VESALFB.COM: a 16-bit DPMI client draws through the VESA linear
 ; framebuffer: 4F01h for PhysBasePtr, 4F02h with the LFB bit, DPMI 0800h to
-; map it, a selector over it, then 480 lines of colour (y & 255) with
+; map it, a selector over it, then 480 lines of color (y & 255) with
 ; 32-bit addressing. Waits about 3 s, then returns to text mode.
         org 100h
         mov bx, 1000h

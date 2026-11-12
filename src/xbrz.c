@@ -1,15 +1,15 @@
 /* xBRZ (Zenju's pixel-art scaler, as in his xBRZ 1.8), 2x to 6x, for
-   scale=xbrz (video.c). Integer only: the colour distance (YCbCr, BT.2020
+   scale=xbrz (video.c). Integer only: the color distance (YCbCr, BT.2020
    weights) is in 1/16 units with an integer square root, and the
-   thresholds are scaled by 10. Distances between two colours are cached:
+   thresholds are scaled by 10. Distances between two colors are cached:
    a palette mode has few distinct pairs. Render helpers (smp.c) fill the
    cache at the same time, so an entry carries a check word: one read
    half from two writes fails it and is worked out again.
 
    Per source pixel F, the corner it shares with G, J and K (right, below,
    below right) is classified first (xbrz_corners, from a 4x4 window: rows
-   y-1..y+2); then each pixel's block of k x k is filled with its colour and
-   each of its four corners blended towards the neighbour colour where the
+   y-1..y+2); then each pixel's block of k x k is filled with its color and
+   each of its four corners blended towards the neighbour color where the
    corners say so (xbrz_row, from a 3x3 window and the corners of rows y-1
    and y). So a changed source row changes the scaled rows y-2..y+2. */
 #include "kernel.h"
@@ -31,7 +31,7 @@ static u32 isqrt(u32 v)
     return r;
 }
 
-/* The YCbCr distance of two colours, 16 = one step of 8-bit luma. */
+/* The YCbCr distance of two colors, 16 = one step of 8-bit luma. */
 static u32 dist(u32 a, u32 b)
 {
     if (a == b) return 0;
@@ -51,7 +51,7 @@ static u32 dist(u32 a, u32 b)
     return d;
 }
 
-static int eq(u32 a, u32 b) { return dist(a, b) < 30 * 16; }  /* equal colour tolerance 30 */
+static int eq(u32 a, u32 b) { return dist(a, b) < 30 * 16; }  /* equal color tolerance 30 */
 
 /* ---------------- corner classification ---------------- */
 enum { NONE, NORMAL, DOMINANT };
@@ -88,7 +88,7 @@ void xbrz_corners(const u32 *src, u32 w, u32 h, u32 y, u8 *out)
 
 /* ---------------- the scalers ----------------
    Each blend as cells (row, column) of the k x k block, for the bottom
-   right corner, with the weight of the new colour (num/den, kept as
+   right corner, with the weight of the new color (num/den, kept as
    1/256ths; 256: replace). Steep is shallow mirrored on the diagonal. */
 struct cell { u8 i, j; u16 w; };
 #define C(i, j, num, den) { i, j, ((num) * 256 + (den) / 2) / (den) }

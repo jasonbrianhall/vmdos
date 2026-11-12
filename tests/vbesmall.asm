@@ -1,5 +1,5 @@
 ; VBESMALL.COM: lists the VESA modes (4F00h, then 4F01h for each), as
-; Allegro does, then sets 320x200x8 (mode 120h) and draws colour bars
+; Allegro does, then sets 320x200x8 (mode 120h) and draws color bars
 ; through the A000h window for a few seconds.
         cpu 286
         org 100h

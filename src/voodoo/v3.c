@@ -775,7 +775,7 @@ int v3_io(u16 port, int size, int write, u32 *val)
     if (!v3_on) return 0;
     struct io_h *h = io_at(port);
     if (!h) {
-        if (port - 0x3B0u < 0x30) {            /* the VGA's ports the card doesn't decode now (mono/colour) */
+        if (port - 0x3B0u < 0x30) {            /* the VGA's ports the card doesn't decode now (mono/color) */
             if (!write) *val = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFFFFFFu;
             return 1;
         }

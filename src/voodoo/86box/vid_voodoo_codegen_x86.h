@@ -903,13 +903,13 @@ voodoo_generate(uint8_t *code_block, voodoo_t *voodoo, voodoo_params_t *params, 
 
     voodoo_combine = &code_block[block_pos];
 #endif
-    /*XMM0 = colour*/
+    /*XMM0 = color*/
     /*XMM2 = 0 (for unpacking*/
 
     /*EDI = state, ESI = params*/
 
     if ((params->textureMode[0] & TEXTUREMODE_LOCAL_MASK) == TEXTUREMODE_LOCAL || !voodoo->dual_tmus) {
-        /*TMU0 only sampling local colour or only one TMU, only sample TMU0*/
+        /*TMU0 only sampling local color or only one TMU, only sample TMU0*/
         block_pos = codegen_texture_fetch(code_block, voodoo, params, state, block_pos, 0);
 
         addbyte(0x66); /*MOVD XMM0, EAX*/
@@ -3162,7 +3162,7 @@ voodoo_jit_can(voodoo_t *voodoo, voodoo_params_t *params)
     if (params->fbzMode & (FBZ_STIPPLE | FBZ_ALPHA_MASK | FBZ_ALPHA_ENABLE | FBZ_DEPTH_SOURCE))
         return 0;
     if ((params->alphaMode & (1 << 4)) && (((params->alphaMode >> 8) & 15) == 15 || ((params->alphaMode >> 12) & 15) >= 8))
-        return 0;                                  /* blending: source ASATURATE, the destination's colour before fog */
+        return 0;                                  /* blending: source ASATURATE, the destination's color before fog */
     if ((params->fogMode & (FOG_ENABLE | FOG_CONSTANT)) == FOG_ENABLE && (params->fogMode & (FOG_ALPHA | FOG_Z)))
         return 0;                                  /* fog from the iterated alpha or Z */
     for (int t = 0; t < 2; t++)
@@ -3171,18 +3171,18 @@ voodoo_jit_can(voodoo_t *voodoo, voodoo_params_t *params)
     for (int t = 0; t < 2; t++) {
         uint32_t tm = params->textureMode[t];
         if (((tm >> 13) & 1) && ((tm >> 18) & 3))
-            return 0;                              /* the texture combine subtracting the local colour, then adding */
+            return 0;                              /* the texture combine subtracting the local color, then adding */
         if (((tm >> 22) & 1) && ((tm >> 27) & 3))
             return 0;                              /* the same for alpha */
     }
     if (((params->fbzColorPath >> 14) & 3) == 2 || (params->fbzColorPath & 3) == 3)
-        return 0;                                  /* the colour combine adding the local alpha; RGB select 3 (reserved) */
+        return 0;                                  /* the color combine adding the local alpha; RGB select 3 (reserved) */
     if ((params->fbzColorPath >> 18) & 1)
         return 0;                                  /* the alpha combine subtracting the local alpha */
     if (((params->fbzColorPath >> 10) & 7) == 2 || ((params->fbzColorPath >> 10) & 7) >= 6)
-        return 0;                                  /* the colour combine scaled by the other alpha; reserved scales */
+        return 0;                                  /* the color combine scaled by the other alpha; reserved scales */
     if ((params->fbzColorPath >> 7) & 1)
-        return 0;                                  /* the local colour picked by the texture's alpha */
+        return 0;                                  /* the local color picked by the texture's alpha */
     if ((params->alphaMode & (1 << 4)) && (params->fbzMode & FBZ_DITHER_SUB))
         return 0;                                  /* blending with the dither subtracted first */
     return 1;

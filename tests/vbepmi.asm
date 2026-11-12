@@ -1,7 +1,7 @@
 ; VBEPMI.COM: the VBE 2.0 protected-mode interface (4F0Ah). Sets 640x480x8,
 ; copies the interface table into its own segment, enters protected mode
 ; (16-bit DPMI client) and calls the copied SetPalette routine to make
-; colour 0 red: the whole screen turns red for about 2 seconds.
+; color 0 red: the whole screen turns red for about 2 seconds.
         org 100h
         mov bx, 1000h
         mov ah, 4Ah

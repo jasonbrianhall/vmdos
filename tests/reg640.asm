@@ -1,6 +1,6 @@
-; REG640.COM: 640x480 16-colour screens set up through the VGA registers,
+; REG640.COM: 640x480 16-color screens set up through the VGA registers,
 ; as some games (Genesia) do, not with INT 10h AX=0012h. Each shows a white
-; frame round all 640x480, colour bars along the top and a red block in the
+; frame round all 640x480, color bars along the top and a red block in the
 ; bottom-right corner: if the corner block is missing, the screen was taken
 ; for a smaller one and blown up. Key after each.
 ;  1. BIOS mode 0Dh (320x200), then the clock, sequencer and CRTC set for 640x480.
@@ -98,7 +98,7 @@ atct:   db 0,1,2,3,4,5,14h,7,38h,39h,3Ah,3Bh,3Ch,3Dh,3Eh,3Fh
         db 01h,00h,0Fh,00h,00h
 
 ; draw: white frame round 640x480, red block in the bottom-right corner,
-; colour bars across the top. Planar, write mode 2, 80 bytes a row.
+; color bars across the top. Planar, write mode 2, 80 bytes a row.
 draw:
         mov ax, 0A000h
         mov es, ax
@@ -123,7 +123,7 @@ draw:
         mov di, 479*80
         mov cx, 80
         rep stosb
-        ; colour bars rows 8-63
+        ; color bars rows 8-63
         mov bx, 8
 .bars:  mov ax, 80
         mul bx

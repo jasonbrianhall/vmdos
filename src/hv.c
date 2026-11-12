@@ -1068,7 +1068,7 @@ static void vm_go(struct regs *r0)
     vmcb_init(r0);
     if (vmx) vmx_guest_init();
     hv_active = 1;
-    video_b000_map();                                             /* B000h: empty bus, as on a colour VGA */
+    video_b000_map();                                             /* B000h: empty bus, as on a color VGA */
 }
 
 /* VMFD A: /BOOT in the VM: it restarts from the floppy, on a machine as at

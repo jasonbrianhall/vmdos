@@ -327,7 +327,7 @@ syn region perlQQ		matchgroup=perlStringStartEnd start=+\<\%(::\|'\|->\)\@<!qr\s
 
 " Constructs such as print <<EOF [...] EOF, 'here' documents
 "
-" XXX Any statements after the identifier are in perlString colour (i.e.
+" XXX Any statements after the identifier are in perlString color (i.e.
 " 'if $a' in 'print <<EOF if $a'). This is almost impossible to get right it
 " seems due to the 'auto-extending nature' of regions.
 if exists("perl_fold")

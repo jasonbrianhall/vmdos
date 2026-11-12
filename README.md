@@ -574,16 +574,16 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   its own kernel (test: `tests/iopltest.asm`). Its debugger SD/32A, which
   needs DOS/32A's own kernel, refuses as it does under Windows.
 - Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
-  3.1's SVGA256/VDDSVGA): its 256-colour BIOS modes 2Eh, 30h, 38h and its
+  3.1's SVGA256/VDDSVGA): its 256-color BIOS modes 2Eh, 30h, 38h and its
   segment select register (3CDh, separate read and write segments), 1 MB.
 - VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 (power-of-two line
   pitch, so no pixel crosses a bank) and 32 bits per pixel,
-  800x600 in 16 colours (102h / 6Ah, planar), widescreen 848x480,
+  800x600 in 16 colors (102h / 6Ah, planar), widescreen 848x480,
   1280x720, 1280x800 (138h-146h, all depths) and 1920x1080 (147h-149h,
   8/15/16 bits), stretched to fill the whole screen (no bars),
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
-  switchable to 8 bits a colour (4F08h, as most SVGA cards; test:
+  switchable to 8 bits a color (4F08h, as most SVGA cards; test:
   `tests/dac8.asm`), state save/restore (4F04h), and the protected-mode
   interface (4F00h-4F0Bh). VBE 3: CRTC timings on mode set (a
   CRTCInfoBlock, doublescan and interlace included) program the CRTC and
@@ -605,7 +605,7 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   screen a game sets up through the registers itself, from mode 0Dh or from
   text mode, is shown whole (Genesia; test: `tests/reg640.asm`). A graphics
   mode turned on through the registers with no INT 10h mode set is picked
-  up too, as is a 16-colour BIOS mode switched to unchained 256 colours
+  up too, as is a 16-color BIOS mode switched to unchained 256 colors
   (Ultrabots: mode 12h made 320x240; test: `tests/m12x.asm`). INT 10h draws pixels and text in all of them, with the
   program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
 - Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)

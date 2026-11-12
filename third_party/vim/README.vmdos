@@ -3,7 +3,7 @@ Vim 7.4.1398 for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), on C: only
 
   bin/VIM.EXE        github.com/vim/vim tag v7.4.1398, the last with the DJGPP
                      makefile (src/Make_djg.mak); DJGPP gcc 12, "normal"
-                     features (syntax colouring, undo, search/replace, :s, ...),
+                     features (syntax coloring, undo, search/replace, :s, ...),
                      UPX --best
   bin/VI.BAT         @C:\VMDOS\VIM.EXE %1 ... %9
   RT/_VIMRC          vmdos's settings (nocompatible, backspace, ruler, syntax on)

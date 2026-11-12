@@ -228,7 +228,7 @@ static int vgalog = -1;
 static u32 vdd_code_at;                   /* vgalog: where the VGA VxD's check ran, dumped when Windows gives up */
 
 /* Graphics mode size in pixels. */
-/* 256-colour (mode 13h based) screens as the CRTC describes them, so
+/* 256-color (mode 13h based) screens as the CRTC describes them, so
    tweaked modes come out right: Nesticle's 256x256, Mode X's 320x240,
    360x240 ... Width from the horizontal display end (4 pixels a character
    clock), height from the vertical display end over the scan lines per
@@ -243,7 +243,7 @@ static void m13_geom(int *w, int *h)
     if (ww < 128 || ww > 640 || hh < 100 || hh > 480 || !crtc[0x13]) { ww = 320; hh = 200; }
     *w = ww; *h = hh;
 }
-/* 16-colour planar screens (0Dh, 0Eh, 10h, 12h) as the CRTC describes them
+/* 16-color planar screens (0Dh, 0Eh, 10h, 12h) as the CRTC describes them
    too: games that program the registers themselves (640x480 from mode 0Dh
    or from text mode, 640x400, 320x240 ...) come out at the size they set.
    Width: 8 pixels a character clock (the 320-wide modes halve the dot
@@ -376,7 +376,7 @@ static void video_set_mode_(int mode, int clear)
     crtc[0x37] = 0x0F;                             /* ET4000 video system configuration 2: 1 MB, 32-bit DRAM */
     misc_out = mode == 7 ? 0x66 : is_text(mode) ? 0x67 : mode == 0x10 ? 0xA3 : mode == 0x12 ? 0xE3 : 0x63;
     memset(gc, 0, sizeof gc);
-    gc[5] = is_text(mode) ? 0x10 : mode == 4 || mode == 5 ? 0x30 : mode == 0x13 ? 0x40 : 0x00;   /* odd/even, CGA shift, 256-colour */
+    gc[5] = is_text(mode) ? 0x10 : mode == 4 || mode == 5 ? 0x30 : mode == 0x13 ? 0x40 : 0x00;   /* odd/even, CGA shift, 256-color */
     gc[6] = mode == 7 ? 0x0A : is_text(mode) || is_cga(mode) ? 0x0E : 0x05;   /* memory map: B000h / B800h / A000h 64K */
     gc[7] = 0x0F; gc[8] = 0xFF;                    /* color don't care, bit mask */
     seq[0] = 0x03;                                 /* not in reset */
@@ -913,7 +913,7 @@ static void apply_map_mask(void)
     }
 }
 
-static int planes_live;                   /* the planes hold the screen already (a 16-colour mode went 256-colour) */
+static int planes_live;                   /* the planes hold the screen already (a 16-color mode went 256-color) */
 static void planar_check(void)
 {
     int want = video_mode == 0x13 && !(seq[4] & 8);
@@ -926,7 +926,7 @@ static void planar_check(void)
         mapped_plane = -1;
         apply_map_mask();
         full_redraw = 1;
-        dbg(1, "video: unchained 256-colour (planar)\n");
+        dbg(1, "video: unchained 256-color (planar)\n");
     } else if (!want && planar_on) {
         map_window(guest_phys(0xA0000));
         planar_on = 0;
@@ -937,7 +937,7 @@ static void planar_check(void)
     }
 }
 
-/* ---------------- 16-colour planar modes (0Dh, 0Eh, 10h, 12h) ----------------
+/* ---------------- 16-color planar modes (0Dh, 0Eh, 10h, 12h) ----------------
    The A000h window is left unmapped: each access faults and the instruction
    is emulated (mememu.c) against the four planes through the VGA's logic:
    latches, write modes 0-3, set/reset, rotate and function, bit mask, map
@@ -972,7 +972,7 @@ static void ega_bmap(void)
 }
 
 /* B0000h-B7FFFh when the planes aren't there: the monochrome text buffer
-   in mode 7, else nothing answers on a colour VGA (reads FFh, writes go
+   in mode 7, else nothing answers on a color VGA (reads FFh, writes go
    nowhere) - Windows 3.1's VGA VxD writes and reads back B000h to see
    whether a second, monochrome adapter is there, and gives up if it finds
    memory. In VMHV only (the v86 monitor keeps it as RAM). */
@@ -1028,14 +1028,14 @@ int vga16_window(u32 lin)
 /* Offset in the planes for lin through the memory map, -1: not decoded. */
 static int vga16_off(u32 lin)
 {
-    if (!ega_on) return (int)((lin - 0xA0000) & 0xFFFF);          /* unchained 256-colour: A000h */
+    if (!ega_on) return (int)((lin - 0xA0000) & 0xFFFF);          /* unchained 256-color: A000h */
     static const u32 base[4] = { 0xA0000, 0xA0000, 0xB0000, 0xB8000 }, size[4] = { 0x20000, 0x10000, 0x8000, 0x8000 };
     int map = (gc[6] >> 2) & 3;
     if (lin < base[map] || lin - base[map] >= size[map]) return -1;
     return (int)((lin - base[map]) & 0xFFFF);
 }
 
-/* Unchained 256-colour: emulate unless writes go plainly to one plane. */
+/* Unchained 256-color: emulate unless writes go plainly to one plane. */
 static void modex_check(void)
 {
     u8 m = seq[2] & 15;
@@ -1071,7 +1071,7 @@ static u8 vga16_read_(u32 lin)
     u32 o = (u32)oo;
     for (int p = 0; p < 4; p++) latch[p] = planes[p * 65536 + o];
     if (!(gc[5] & 8)) return latch[gc[4] & 3];
-    u8 r = 0;                                      /* read mode 1: colour compare */
+    u8 r = 0;                                      /* read mode 1: color compare */
     for (int p = 0; p < 4; p++)
         if (gc[7] & (1 << p)) r |= latch[p] ^ ((gc[2] & (1 << p)) ? 0xFF : 0);
     return (u8)~r;
@@ -1363,7 +1363,7 @@ static void refresh_fallback(void)
    real address (DPMI 0800h hands that back), real-mode ones through the
    A000h window, which function 05h (or the WinFuncPtr far call) maps onto
    a 64 KB bank. 8-bit modes use the VGA DAC; 15/16/32-bit ones are direct
-   colour. Tables live in the BIOS segment at F000:C000. */
+   color. Tables live in the BIOS segment at F000:C000. */
 #define VRAM_SIZE (4u << 20)
 #define VBE_DATA 0xFC000u
 #define VBE_MIN_CLOCK 1000000u                  /* VBE 3 pixel clocks taken (4F02h, 4F0Bh), Hz */
@@ -1385,11 +1385,11 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
     { 0x12A, 512, 384, 8 }, { 0x12B, 512, 384, 15 }, { 0x12C, 512, 384, 16 }, { 0x12D, 512, 384, 32 },
     { 0x12E, 640, 400, 15 }, { 0x12F, 640, 400, 16 }, { 0x130, 640, 400, 32 },
     /* 24 bits a pixel, packed (3 bytes, blue first), for programs that
-       want true colour that way rather than as 32 (GTA): 10Fh is VBE 1.2's
+       want true color that way rather than as 32 (GTA): 10Fh is VBE 1.2's
        own 320x200x24, the rest numbered on past the ones above */
     { 0x10F, 320, 200, 24 }, { 0x131, 320, 240, 24 }, { 0x132, 400, 300, 24 }, { 0x133, 512, 384, 24 },
     { 0x134, 640, 400, 24 }, { 0x135, 640, 480, 24 }, { 0x136, 800, 600, 24 }, { 0x137, 1024, 768, 24 },
-    /* VBE 1.2's 800x600 in 16 colours: four planes, as mode 12h (see vbe_planar) */
+    /* VBE 1.2's 800x600 in 16 colors: four planes, as mode 12h (see vbe_planar) */
     { 0x102, 800, 600, 4 },
     /* widescreen, square pixels, shown at their own shape (layout): 16:9
        848x480 (as DOSBox Staging's vesa_modes=all, which Doom's -widescreen
@@ -1409,7 +1409,7 @@ static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
    no line, and so no 3-byte pixel, ever crosses a 64 KB bank, which banked
    24-bit code relies on (it writes a pixel's three bytes with no bank
    check between, and counts window space as if pixels were 2 bytes:
-   with 1920 bytes a line the colours shift at every bank). */
+   with 1920 bytes a line the colors shift at every bank). */
 static u32 vbe_mode_pitch(int m)
 {
     u32 p = vmodes[m].w * vbe_bytespp(vmodes[m].bpp);
@@ -1525,9 +1525,9 @@ static void vbe_mode_info(int m, u32 a)
     u32 bpp = vmodes[m].bpp, pitch = vbe_mode_pitch(m);
     if (bpp == 4) {                             /* planar: bytes a line in each plane */
         pitch = vmodes[m].w / 8;
-        wr16(a + 0x00, 0x11F);                  /* supported, TTY, colour, graphics; doublescan; no LFB */
+        wr16(a + 0x00, 0x11F);                  /* supported, TTY, color, graphics; doublescan; no LFB */
     } else
-        /* supported, TTY, colour, graphics, LFB; VBE 3: doublescan, interlace
+        /* supported, TTY, color, graphics, LFB; VBE 3: doublescan, interlace
            (both through a CRTCInfoBlock) and triple buffering (4F07h BL=02h/04h) */
         wr16(a + 0x00, 0x79F);
     wr8(a + 0x02, 7);                           /* window A: exists, readable, writable */
@@ -1539,13 +1539,13 @@ static void vbe_mode_info(int m, u32 a)
     wr8(a + 0x16, 8); wr8(a + 0x17, 16);
     wr8(a + 0x18, bpp == 4 ? 4 : 1);            /* planes */
     wr8(a + 0x19, (u8)bpp); wr8(a + 0x1A, 1);
-    wr8(a + 0x1B, bpp == 4 ? 3 : bpp == 8 ? 4 : 6);   /* EGA planar / packed pixel / direct colour */
+    wr8(a + 0x1B, bpp == 4 ? 3 : bpp == 8 ? 4 : 6);   /* EGA planar / packed pixel / direct color */
     u32 mem = bpp == 4 ? 65536 : VRAM_SIZE;     /* planar: one 64 KB plane holds the screen's bytes */
     u32 pages = mem / (pitch * vmodes[m].h);
     u8 last = (u8)(pages > 256 ? 255 : pages - 1);   /* image pages, less one */
     wr8(a + 0x1D, last);
     wr8(a + 0x1E, 1);
-    if (bpp == 4) return;                       /* no direct colour, no linear framebuffer */
+    if (bpp == 4) return;                       /* no direct color, no linear framebuffer */
     static const u8 masks[4][8] = {
         { 5, 10, 5, 5, 5, 0, 1, 15 },           /* 15: x:1 r:5 g:5 b:5 */
         { 5, 11, 6, 5, 5, 0, 0, 0 },            /* 16: r:5 g:6 b:5 */
@@ -1557,7 +1557,7 @@ static void vbe_mode_info(int m, u32 a)
     wr32(a + 0x28, hv_active ? hv_lfb() : (u32)(uintptr_t)vram);   /* PhysBasePtr (VMHV: where the VM sees it) */
     /* VBE 3: the linear framebuffer's own layout. The same as the banked
        one here, but VBE 3 clients read these fields (AdvanceMAME takes its
-       colour masks from them), so left zero they'd see no colour at all. */
+       color masks from them), so left zero they'd see no color at all. */
     wr16(a + 0x32, (u16)pitch);                 /* LinBytesPerScanLine */
     wr8(a + 0x34, last);                        /* BnkNumberOfImagePages */
     wr8(a + 0x35, last);                        /* LinNumberOfImagePages */
@@ -1573,7 +1573,7 @@ static void vbe_set(int m, int clear)
        default palette it loads is widened to match. */
     int keep8 = dac8;
     vbe_setting = 1;
-    video_set_mode(0x13, 0);                    /* VGA state, default 256-colour palette */
+    video_set_mode(0x13, 0);                    /* VGA state, default 256-color palette */
     vbe_setting = 0;
     if (keep8) {
         for (int i = 0; i < 256; i++)
@@ -1622,7 +1622,7 @@ static void video_vbe_window_(struct regs *r)
 /* ---------------- Tseng ET4000 ----------------
    For drivers that know SVGA chips rather than VESA (Windows 3.1's
    SVGA256/VDDSVGA, games' ET4000 support): the ET4000's BIOS modes 2Eh,
-   30h, 38h (640x480, 800x600, 1024x768 in 256 colours) are the VESA modes
+   30h, 38h (640x480, 800x600, 1024x768 in 256 colors) are the VESA modes
    of that size, with the CRTC as the ET4000 programs it (drivers check the
    width and height a mode set leaves there), and its segment select
    register at 3CDh banks the A000h window: bits 0-3 the 64 KB segment
@@ -1656,7 +1656,7 @@ static void et_segment(u8 v)
     et_remap();
 }
 /* The ET4000's line pitch and display start, from the CRTC: offset (13h,
-   bit 8 in 3Fh bit 7) in 8-byte units, as its 256-colour modes count it;
+   bit 8 in 3Fh bit 7) in 8-byte units, as its 256-color modes count it;
    start address (0Ch, 0Dh, bits 16-17 in 33h) in 4-byte units. Drivers set
    their own pitch (Windows' SVGA256: 1024 bytes for a 640-wide screen). */
 static void et_crtc(void)
@@ -1679,7 +1679,7 @@ u8 video_et_read(u32 lin)
         u8 *b = et_planar(lin, et_seg >> 4);
         for (int p = 0; p < 4; p++) latch[p] = b[p];
         if (!(gc[5] & 8)) return latch[gc[4] & 3];
-        u8 r = 0;                                  /* read mode 1: colour compare */
+        u8 r = 0;                                  /* read mode 1: color compare */
         for (int p = 0; p < 4; p++)
             if (gc[7] & (1 << p)) r |= latch[p] ^ ((gc[2] & (1 << p)) ? 0xFF : 0);
         return (u8)~r;
@@ -1735,11 +1735,11 @@ static int et_mode(int mode, int clear)
    48h set display start (BL=00h/80h: CX:DX = byte offset / 4; VBE 3's
    BL=02h/82h: ECX = byte offset, a scheduled flip), 49h set palette. */
 static void vbe_flip(u32 st);
-/* ---------------- VESA 102h: 800x600 in 16 colours ----------------
+/* ---------------- VESA 102h: 800x600 in 16 colors ----------------
    VBE 1.2's planar mode: mode 12h's four planes and VGA write logic with
    an 800x600 CRTC. 100 bytes a line in each plane, 60000 of its 64 KB, so
    the A000h window holds the whole screen and banking stays at 0. The
-   16-colour renderer (ega_row) draws it from the CRTC as it draws any
+   16-color renderer (ega_row) draws it from the CRTC as it draws any
    reprogrammed planar mode: line pitch from the offset register (13h),
    start from 0Ch/0Dh, pel panning from the attribute controller, so the
    logical line length (4F06h) and display start (4F07h) are those. */
@@ -1757,7 +1757,7 @@ static void planar_set(int m, int clear)
     wr16(BDA + 0x4C, (u16)(text_cols * vmodes[m].h));   /* the page: one screen of a plane */
     wr8(BDA + 0x84, (u8)(text_rows - 1));
     full_redraw = 1; last_layout_mode = -1;
-    kprintf("video: VESA mode %x, %ux%u, 16 colours (planar)\n", planar_vbe, vmodes[m].w, vmodes[m].h);
+    kprintf("video: VESA mode %x, %ux%u, 16 colors (planar)\n", planar_vbe, vmodes[m].w, vmodes[m].h);
 }
 
 /* Its line length in bytes a plane: the offset register counts words. */
@@ -2098,7 +2098,7 @@ static void vbe_call(struct regs *r)
         AX(r) = 0x004F; return; }
     case 0x08:
         /* BL=0: set the width (BH: 8 for 8 bits, anything less: 6), BL=1: get it.
-           Switching rescales what's loaded, so the colours on screen stay. */
+           Switching rescales what's loaded, so the colors on screen stay. */
         if (BL(r) == 0) {
             int want = BH(r) >= 8;
             if (want != dac8) {
@@ -2778,11 +2778,11 @@ static u32 video_port_in_(u16 port)
 
 /* A program that sets a graphics mode through the registers itself, with
    no INT 10h (or from text mode with one): graphics on in both the graphics
-   controller and the attribute controller. 256-colour (attribute mode bit 6)
-   is drawn as mode 13h, else as 16-colour planar; its size then comes from
+   controller and the attribute controller. 256-color (attribute mode bit 6)
+   is drawn as mode 13h, else as 16-color planar; its size then comes from
    the CRTC (ega_geom, m13_geom). Turned back off: text mode 3. A BIOS
-   16-colour mode (12h, 0Dh ...) switched to 256 colours by the attribute
-   controller is unchained 256-colour too (Ultrabots: mode 12h, then
+   16-color mode (12h, 0Dh ...) switched to 256 colors by the attribute
+   controller is unchained 256-color too (Ultrabots: mode 12h, then
    Mode X style 320-wide): its planes, already unchained, carry over. */
 static void reg_mode_check(void)
 {
@@ -2793,12 +2793,12 @@ static void reg_mode_check(void)
                video_mode == 0x13 && !c256 ? 0x12 :
                is_ega(video_mode) && c256 ? 0x13 : -1;
     if (want < 0 || want == video_mode) return;
-    kprintf("video: mode set through the registers: %s\n", want == 3 ? "back to text" : want == 0x13 ? "256-colour" : "16-colour planar");
+    kprintf("video: mode set through the registers: %s\n", want == 3 ? "back to text" : want == 0x13 ? "256-color" : "16-color planar");
     int from_ega = ega_on;
     video_mode = want;
     reg_mode = want != 3;
     if (want == 3) { text_cols = 80; text_base = 0xB8000; }
-    if (want == 0x13) {                            /* the 16-colour window off first, then the planar one on */
+    if (want == 0x13) {                            /* the 16-color window off first, then the planar one on */
         ega_check();
         planes_live = from_ega;
         planar_check();
@@ -2842,7 +2842,7 @@ static void video_port_out_(u16 port, u8 v)
         return;
     case 0x3C2: misc_out = v; return;
     case 0x3CD: if (et_ext()) et_segment(v); return;   /* ET4000 segment select */
-    case 0x3D9: cga_color_select(v); return;           /* CGA colour select */
+    case 0x3D9: cga_color_select(v); return;           /* CGA color select */
     case 0x3C4: seq_idx = v; return;
     case 0x3C5:
         if (seq_idx >= 8) return;                   /* another chip's register (a chipset probe): none here */
@@ -3069,7 +3069,7 @@ static void state_info(u32 a)
     wr8(a + 0x20, rd8(BDA + 0x65)); wr8(a + 0x21, rd8(BDA + 0x66));
     wr8(a + 0x22, (u8)text_rows);
     wr16(a + 0x23, rd16(BDA + 0x85) ? rd16(BDA + 0x85) : 16);
-    wr8(a + 0x25, 0x08);                          /* VGA, colour */
+    wr8(a + 0x25, 0x08);                          /* VGA, color */
     wr16(a + 0x27, video_mode == 0x13 ? 256 : is_cga(video_mode) ? (video_mode == 6 ? 2 : 4) : 16);
     wr8(a + 0x29, is_text(video_mode) ? 8 : 1);
     wr8(a + 0x2A, video_mode == 0x12 || video_mode == 0x11 ? 3 : video_mode == 0x10 || video_mode == 0x0F ? 1 : is_text(video_mode) ? 2 : 0);

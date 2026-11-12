@@ -1,5 +1,5 @@
 ; HVPLANAR.COM: for VMHV (DOS booted in the VM without EMM386). Sets mode
-; 12h (640x480, 16 colours, planar: every VGA access is emulated), switches
+; 12h (640x480, 16 colors, planar: every VGA access is emulated), switches
 ; to 32-bit protected mode with paging, and from code above 1 MB writes the
 ; VGA window through a different linear address than its physical one:
 ; linear 4-8 MB maps physical 0-4 MB (4 MB pages), the code runs at linear

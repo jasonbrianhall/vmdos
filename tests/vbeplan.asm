@@ -1,7 +1,7 @@
-; VBEPLAN.COM: VESA 102h, 800x600 in 16 colours (planar). Checks 4F03h
+; VBEPLAN.COM: VESA 102h, 800x600 in 16 colors (planar). Checks 4F03h
 ; reports 102h, sets a logical line of 1024 pixels (4F06h: 128 bytes a
 ; plane), fills each plane through the map mask so that the byte at
-; line r, column c has colour (c + r / 4) & 15, then moves the display
+; line r, column c has color (c + r / 4) & 15, then moves the display
 ; start to (9, 20) with 4F07h: one byte and one pixel of pan across.
         org 100h
         cpu 386
@@ -33,7 +33,7 @@
         shl al, cl
         out dx, al
         xor di, di
-.byte:  mov ax, di                      ; colour = (column + line / 4) & 15
+.byte:  mov ax, di                      ; color = (column + line / 4) & 15
         and ax, 127
         mov bx, di
         shr bx, 9                       ; line / 4 (128 bytes a line)

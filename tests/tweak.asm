@@ -1,6 +1,6 @@
-; TWEAK.COM: tweaked 256-colour VGA modes, to check how they are drawn.
+; TWEAK.COM: tweaked 256-color VGA modes, to check how they are drawn.
 ; 256x256 chained (as Nesticle), a key, then Mode X 320x240, a key.
-; Each shows 16x16-pixel colour blocks with a white border.
+; Each shows 16x16-pixel color blocks with a white border.
         org 100h
         mov ax, 13h
         int 10h
@@ -59,7 +59,7 @@
         call crtc
         xor cx, cx                      ; y
 .y:     xor bx, bx                      ; x
-.x:     mov ax, bx                      ; colour: (x/16) | (y/16)*16
+.x:     mov ax, bx                      ; color: (x/16) | (y/16)*16
         shr ax, 4
         mov dx, cx
         shr dx, 4

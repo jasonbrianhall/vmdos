@@ -277,8 +277,8 @@ typedef struct svga_t {
     uint8_t scrblank;
     uint8_t plane_mask;
     uint8_t writemask;
-    uint8_t colourcompare;
-    uint8_t colournocare;
+    uint8_t colorcompare;
+    uint8_t colornocare;
     uint8_t dac_mask;
     uint8_t dac_status;
     uint8_t dpms;

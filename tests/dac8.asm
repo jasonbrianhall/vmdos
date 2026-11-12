@@ -68,7 +68,7 @@
         inc bx
         cmp bx, 100
         jb .row
-        ; width bar: rows 100-101, 8 pixels per reported bit, colour 127 (white)
+        ; width bar: rows 100-101, 8 pixels per reported bit, color 127 (white)
         mov cl, [width]
         xor ch, ch
         shl cx, 3

@@ -271,9 +271,9 @@ lfb_y_origin_flip(const voodoo_t *voodoo, int y)
     return y;
 }
 
-/*Colour combine for LFB writes with the pixel pipeline enabled. This isn't
+/*Color combine for LFB writes with the pixel pipeline enabled. This isn't
   obviously documented in any 3dfx/Glide documentation, but has been verified
-  on hardware. It functions as in normal rendering, except the written colour
+  on hardware. It functions as in normal rendering, except the written color
   data is unconditionally used as Cother/Aother.*/
 static inline void
 voodoo_fb_cca_process(const voodoo_params_t *params, rgba8_t *write_data, uint16_t new_depth)
@@ -466,12 +466,12 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
     uint32_t               write_addr;
     uint32_t               write_addr_aux;
     uint32_t               lfb_addr = addr;
-    rgba8_t                colour_data;
+    rgba8_t                color_data;
     uint16_t               depth_data;
     uint8_t                alpha_data;
     int                    write_mask = 0;
 
-    colour_data.r = colour_data.g = colour_data.b = colour_data.a = 0;
+    color_data.r = color_data.g = color_data.b = color_data.a = 0;
 
     depth_data = voodoo->params.zaColor & 0xffff;
     alpha_data = voodoo->params.zaColor >> 24;
@@ -487,19 +487,19 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
 
     switch (voodoo->lfbMode & LFB_FORMAT_MASK) {
         case LFB_FORMAT_RGB565:
-            colour_data = lfb_decode_565(voodoo, val);
+            color_data = lfb_decode_565(voodoo, val);
             alpha_data  = 0xff;
-            write_mask  = LFB_WRITE_COLOUR;
+            write_mask  = LFB_WRITE_COLOR;
             break;
         case LFB_FORMAT_RGB555:
-            colour_data = lfb_decode_1555(voodoo, val);
+            color_data = lfb_decode_1555(voodoo, val);
             alpha_data  = 0xff;
-            write_mask  = LFB_WRITE_COLOUR;
+            write_mask  = LFB_WRITE_COLOR;
             break;
         case LFB_FORMAT_ARGB1555:
-            colour_data = lfb_decode_1555(voodoo, val);
-            alpha_data  = colour_data.a;
-            write_mask  = LFB_WRITE_COLOUR;
+            color_data = lfb_decode_1555(voodoo, val);
+            alpha_data  = color_data.a;
+            write_mask  = LFB_WRITE_COLOR;
             break;
         case LFB_FORMAT_DEPTH:
             depth_data = val;
@@ -512,8 +512,8 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
                 depth_data = val;
                 write_mask = LFB_WRITE_DEPTH;
             } else {
-                colour_data = lfb_decode_565(voodoo, val);
-                write_mask  = LFB_WRITE_COLOUR;
+                color_data = lfb_decode_565(voodoo, val);
+                write_mask  = LFB_WRITE_COLOR;
             }
             break;
         case LFB_FORMAT_DEPTH_RGB555:
@@ -522,9 +522,9 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
                 depth_data = val;
                 write_mask = LFB_WRITE_DEPTH;
             } else {
-                colour_data = lfb_decode_1555(voodoo, val);
+                color_data = lfb_decode_1555(voodoo, val);
                 alpha_data  = 0xff;
-                write_mask  = LFB_WRITE_COLOUR;
+                write_mask  = LFB_WRITE_COLOR;
             }
             break;
         case LFB_FORMAT_DEPTH_ARGB1555:
@@ -533,9 +533,9 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
                 depth_data = val;
                 write_mask = LFB_WRITE_DEPTH;
             } else {
-                colour_data = lfb_decode_1555(voodoo, val);
-                alpha_data  = colour_data.a;
-                write_mask  = LFB_WRITE_COLOUR;
+                color_data = lfb_decode_1555(voodoo, val);
+                alpha_data  = color_data.a;
+                write_mask  = LFB_WRITE_COLOR;
             }
             break;
 
@@ -577,7 +577,7 @@ voodoo_fb_writew(uint32_t addr, uint16_t val, void *priv)
 
     if (voodoo->lfbMode & 0x100) {
         {
-            rgba8_t  write_data = colour_data;
+            rgba8_t  write_data = color_data;
             uint16_t new_depth  = depth_data;
             int      colbfog_r  = 0;
             int      colbfog_g  = 0;
@@ -657,8 +657,8 @@ skip_pixel:
             return;
         }
     } else {
-        if (write_mask & LFB_WRITE_COLOUR)
-            *(uint16_t *) (&voodoo->fb_mem[write_addr & voodoo->fb_mask]) = do_dither(&voodoo->params, colour_data, x >> 1, y);
+        if (write_mask & LFB_WRITE_COLOR)
+            *(uint16_t *) (&voodoo->fb_mem[write_addr & voodoo->fb_mask]) = do_dither(&voodoo->params, color_data, x >> 1, y);
         if (write_mask & LFB_WRITE_DEPTH)
             *(uint16_t *) (&voodoo->fb_mem[write_addr_aux & voodoo->fb_mask]) = depth_data;
     }
@@ -673,7 +673,7 @@ voodoo_fb_writel(uint32_t addr, uint32_t val, void *priv)
     int                    y;
     uint32_t               write_addr;
     uint32_t               write_addr_aux;
-    rgba8_t                colour_data[2];
+    rgba8_t                color_data[2];
     uint16_t               depth_data[2];
     uint8_t                alpha_data[2];
     int                    write_mask = 0;
@@ -692,58 +692,58 @@ voodoo_fb_writel(uint32_t addr, uint32_t val, void *priv)
 
     switch (voodoo->lfbMode & LFB_FORMAT_MASK) {
         case LFB_FORMAT_RGB565:
-            colour_data[0] = lfb_decode_565(voodoo, val & 0xffff);
-            colour_data[1] = lfb_decode_565(voodoo, val >> 16);
-            write_mask     = LFB_WRITE_COLOUR;
+            color_data[0] = lfb_decode_565(voodoo, val & 0xffff);
+            color_data[1] = lfb_decode_565(voodoo, val >> 16);
+            write_mask     = LFB_WRITE_COLOR;
             count          = 2;
             break;
         case LFB_FORMAT_RGB555:
-            colour_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
-            colour_data[1] = lfb_decode_1555(voodoo, val >> 16);
-            write_mask     = LFB_WRITE_COLOUR;
+            color_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
+            color_data[1] = lfb_decode_1555(voodoo, val >> 16);
+            write_mask     = LFB_WRITE_COLOR;
             count          = 2;
             break;
         case LFB_FORMAT_ARGB1555:
-            colour_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
-            alpha_data[0]  = colour_data[0].a;
-            colour_data[1] = lfb_decode_1555(voodoo, val >> 16);
-            alpha_data[1]  = colour_data[1].a;
-            write_mask     = LFB_WRITE_COLOUR;
+            color_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
+            alpha_data[0]  = color_data[0].a;
+            color_data[1] = lfb_decode_1555(voodoo, val >> 16);
+            alpha_data[1]  = color_data[1].a;
+            write_mask     = LFB_WRITE_COLOR;
             count          = 2;
             break;
 
         case LFB_FORMAT_ARGB8888:
-            lfb_decode_8888(voodoo, val, &colour_data[0], &alpha_data[0]);
-            write_mask = LFB_WRITE_COLOUR;
+            lfb_decode_8888(voodoo, val, &color_data[0], &alpha_data[0]);
+            write_mask = LFB_WRITE_COLOR;
             addr >>= 1;
             break;
 
         case LFB_FORMAT_XRGB8888: {
             uint8_t unused_alpha;
 
-            lfb_decode_8888(voodoo, val, &colour_data[0], &unused_alpha);
-            write_mask = LFB_WRITE_COLOUR;
+            lfb_decode_8888(voodoo, val, &color_data[0], &unused_alpha);
+            write_mask = LFB_WRITE_COLOR;
             addr >>= 1;
             break;
         }
 
         case LFB_FORMAT_DEPTH_RGB565:
-            colour_data[0] = lfb_decode_565(voodoo, val & 0xffff);
+            color_data[0] = lfb_decode_565(voodoo, val & 0xffff);
             depth_data[0]  = val >> 16;
             write_mask     = LFB_WRITE_BOTH;
             count          = 1;
             addr >>= 1;
             break;
         case LFB_FORMAT_DEPTH_RGB555:
-            colour_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
+            color_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
             depth_data[0]  = val >> 16;
             write_mask     = LFB_WRITE_BOTH;
             count          = 1;
             addr >>= 1;
             break;
         case LFB_FORMAT_DEPTH_ARGB1555:
-            colour_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
-            alpha_data[0]  = colour_data[0].a;
+            color_data[0] = lfb_decode_1555(voodoo, val & 0xffff);
+            alpha_data[0]  = color_data[0].a;
             depth_data[0]  = val >> 16;
             write_mask     = LFB_WRITE_BOTH;
             count          = 1;
@@ -797,7 +797,7 @@ voodoo_fb_writel(uint32_t addr, uint32_t val, void *priv)
 
     if (voodoo->lfbMode & 0x100) {
         for (int c = 0; c < count; c++) {
-            rgba8_t  write_data = colour_data[c];
+            rgba8_t  write_data = color_data[c];
             uint16_t new_depth  = depth_data[c];
             int      colbfog_r  = 0;
             int      colbfog_g  = 0;
@@ -879,14 +879,14 @@ skip_pixel:
         }
     } else {
         for (int c = 0; c < count; c++) {
-            if (write_mask & LFB_WRITE_COLOUR)
+            if (write_mask & LFB_WRITE_COLOR)
                 *(uint16_t *) (&voodoo->fb_mem[write_addr & voodoo->fb_mask]) =
-                              do_dither(&voodoo->params, colour_data[c], (x >> 1) + c, y);
+                              do_dither(&voodoo->params, color_data[c], (x >> 1) + c, y);
             if (write_mask & LFB_WRITE_DEPTH)
                 *(uint16_t *) (&voodoo->fb_mem[write_addr_aux & voodoo->fb_mask]) = depth_data[c];
             if (write_mask & LFB_WRITE_BOTH) {
                 *(uint16_t *) (&voodoo->fb_mem[write_addr & voodoo->fb_mask]) =
-                              do_dither(&voodoo->params, colour_data[c], (x >> 1) + c, y);
+                              do_dither(&voodoo->params, color_data[c], (x >> 1) + c, y);
                 *(uint16_t *) (&voodoo->fb_mem[write_addr_aux & voodoo->fb_mask]) = depth_data[c];
             }
 

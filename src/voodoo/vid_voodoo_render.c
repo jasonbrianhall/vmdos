@@ -796,7 +796,7 @@ voodoo_codegen_tiled_key(const voodoo_params_t *params)
 }
 
 /*Whether a block needs a_other, a_local and the combined alpha: for the alpha test, alpha blending,
-  the alpha mask, the colour combine, or the alpha planes.*/
+  the alpha mask, the color combine, or the alpha planes.*/
 static inline int
 voodoo_codegen_alpha_used(const voodoo_params_t *params)
 {
@@ -1232,7 +1232,7 @@ voodoo_half_triangle(voodoo_t *voodoo, voodoo_params_t *params, voodoo_state_t *
 
                     if (params->fbzColorPath & FBZCP_TEXTURE_ENABLED) {
                         if ((params->textureMode[0] & TEXTUREMODE_LOCAL_MASK) == TEXTUREMODE_LOCAL || !voodoo->dual_tmus) {
-                            /*TMU0 only sampling local colour or only one TMU, only sample TMU0*/
+                            /*TMU0 only sampling local color or only one TMU, only sample TMU0*/
                             voodoo_tmu_fetch(voodoo, params, state, 0, x);
                         } else if ((params->textureMode[0] & TEXTUREMODE_MASK) == TEXTUREMODE_PASSTHROUGH) {
                             /*TMU0 in pass-through mode, only sample TMU1*/

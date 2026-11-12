@@ -193,7 +193,7 @@ static void vga_640x480(void)
     inb(0x3DA); outb(0x3C0, 0x20);                         /* the attribute controller: palette on */
 }
 
-/* "random": triangles with modes picked at random (colour path, alpha
+/* "random": triangles with modes picked at random (color path, alpha
    blending and test, depth test, fog, textures in several formats), the
    frame and depth buffers checksummed every 25: the JIT ("jit") must give
    the C loop's sums. */
@@ -238,7 +238,7 @@ static void random_tris(int n)
         else if (nd) {
             bad++;
             printf("jitcmp %d: cp %08x fbz %08x am %08x fog %02x tm %08x:", i, m_cp, m_fbz, m_am, m_fm, m_tm);
-            printf(" %u words differ, first at %s %u,%u: C %04x JIT %04x\n", nd, first >= 0x200000 ? "aux" : "colour",
+            printf(" %u words differ, first at %s %u,%u: C %04x JIT %04x\n", nd, first >= 0x200000 ? "aux" : "color",
                    (first % 0x200000) % STRIDE / 2, (first % 0x200000) / STRIDE, *(u16 *)(res + first), *(u16 *)(v + first));
         }
         memcpy(v, res, len);                  /* go on from the C loop's */

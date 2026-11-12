@@ -1450,7 +1450,7 @@ struct regs *dpmi_exception(struct regs *r)
     if (!client) panic("protected-mode fault without a DPMI client (vector %u at %x:%x)", r->vec, r->cs, r->eip);
     switch (r->vec) {
     case 13: return pm_gp(&c, r->err);
-    case 14: {                                        /* the 16-colour VGA window? */
+    case 14: {                                        /* the 16-color VGA window? */
         u32 cr2;
         __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
         if (vga16_window(cr2) || v3_window(cr2)) {   /* or the Voodoo 3's registers and frame buffer */

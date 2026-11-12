@@ -1,12 +1,12 @@
 ; CGATEST.COM: CGA modes 4 and 6 through INT 10h and direct B800h writes.
-; Mode 4: colour bars written to video memory, a diagonal via AH=0Ch, text
+; Mode 4: color bars written to video memory, a diagonal via AH=0Ch, text
 ; via AH=0Eh, palette/background via AH=0Bh. Keys step through; Esc quits.
         org 100h
         mov ax, 0004h
         int 10h
         mov ax, 0B800h
         mov es, ax
-        ; bars: rows 0-99, four 80-pixel bands of colours 0-3 (20 bytes each)
+        ; bars: rows 0-99, four 80-pixel bands of colors 0-3 (20 bytes each)
         xor bx, bx                      ; row
 bars:   mov ax, bx
         shr ax, 1

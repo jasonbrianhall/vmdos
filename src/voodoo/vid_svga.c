@@ -402,7 +402,7 @@ svga_out(uint16_t addr, uint8_t val, void *priv)
             o = svga->gdcreg[svga->gdcaddr & 15];
             switch (svga->gdcaddr & 15) {
                 case 2:
-                    svga->colourcompare = val;
+                    svga->colorcompare = val;
                     break;
                 case 4:
                     svga->readplane = val & 3;
@@ -442,7 +442,7 @@ svga_out(uint16_t addr, uint8_t val, void *priv)
                     }
                     break;
                 case 7:
-                    svga->colournocare = val;
+                    svga->colornocare = val;
                     break;
 
                 default:
@@ -662,7 +662,7 @@ svga_in(uint16_t addr, void *priv)
             /*
              * IBM's VGA diagnostic programs graphics mode, enables the
              * attribute palette, and writes a non-zero test pattern to
-             * palette register 0 before sampling the colour-plane diagnostic
+             * palette register 0 before sampling the color-plane diagnostic
              * outputs.  Keep the legacy status approximation for normal VGA
              * operation (including the Model 80 POST, which tests with a zero
              * pattern), and expose the selected palette bits only during that
@@ -918,7 +918,7 @@ svga_recalctimings(svga_t *svga)
                 } else {
                     switch (svga->gdcreg[5] & 0x60) {
                         case 0x40:
-                        case 0x60: /*256+ colours*/
+                        case 0x60: /*256+ colors*/
                             switch (svga->bpp) {
                             case 15:
                                     if (svga->lowres)
@@ -2343,9 +2343,9 @@ svga_read_common(uint32_t addr, uint8_t linear, void *priv)
 
         for (uint8_t pixel = 0; pixel < 8; pixel++) {
             for (uint8_t plane = 0; plane < count; plane++) {
-                if (svga->colournocare & (1 << plane)) {
+                if (svga->colornocare & (1 << plane)) {
                     /* If we care about a plane, and the pixel has a mismatch on it, clear its bit. */
-                    if (((svga->latch.b[plane] >> pixel) & 1) != ((svga->colourcompare >> plane) & 1))
+                    if (((svga->latch.b[plane] >> pixel) & 1) != ((svga->colorcompare >> plane) & 1))
                         temp &= ~(1 << pixel);
                 }
             }

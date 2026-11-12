@@ -1,6 +1,6 @@
 ; VESATEST.COM: VBE from real mode. Checks 4F00h ("VESA"), sets 640x480x8
 ; (101h) and fills it through the 64 KB window, switching banks with 4F05h:
-; colour = (x + y) & 255 with a white frame. Key: 640x480x16 (111h), red /
+; color = (x + y) & 255 with a white frame. Key: 640x480x16 (111h), red /
 ; green / blue / white bands. Key: text mode.
         org 100h
         mov ax, 4F00h
@@ -59,14 +59,14 @@
         int 10h
         mov word [bank], 0FFFFh
         xor bp, bp
-.row16: mov ax, bp                      ; colour by band
+.row16: mov ax, bp                      ; color by band
         mov cx, 120
         xor dx, dx
         div cx
         mov bx, ax
         shl bx, 1
-        mov cx, [colours + bx]
-        mov [colour], cx
+        mov cx, [colors + bx]
+        mov [color], cx
         xor si, si
 .px16:  mov ax, 1280
         mul bp
@@ -82,7 +82,7 @@
         xor bx, bx
         int 10h
 .same16:
-        mov ax, [colour]
+        mov ax, [color]
         stosw
         inc si
         cmp si, 640
@@ -100,7 +100,7 @@ novesa: mov dx, nomsg
         int 21h
         ret
 bank    dw 0
-colour  dw 0
-colours dw 0F800h, 07E0h, 001Fh, 0FFFFh
+color  dw 0
+colors dw 0F800h, 07E0h, 001Fh, 0FFFFh
 nomsg   db 'No VESA', 13, 10, '$'
 info    times 512 db 0

@@ -1,4 +1,4 @@
-; MODEXTST.COM: unchained 256-colour plane writes. Writes pixel x of row 0
+; MODEXTST.COM: unchained 256-color plane writes. Writes pixel x of row 0
 ; (value x & 0FFh) one column at a time, setting the map mask for each
 ; column as DOOM's patch drawing does, then reads every plane back through
 ; the read map select and counts mismatches. Prints "OK" or "BAD nnnn".

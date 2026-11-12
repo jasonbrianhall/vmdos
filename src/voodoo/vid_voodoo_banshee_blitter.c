@@ -173,15 +173,15 @@ colorkey(voodoo_t *voodoo, uint32_t src, int src_notdst, int color_format)
 }
 
 static uint32_t
-MIX(voodoo_t *voodoo, uint32_t dest, uint32_t src, uint32_t pattern, int colour_format_src, int colour_format_dest)
+MIX(voodoo_t *voodoo, uint32_t dest, uint32_t src, uint32_t pattern, int color_format_src, int color_format_dest)
 {
     int      rop_nr = 0;
     uint32_t result = 0;
     uint32_t rop;
 
-    if (colorkey(voodoo, src, 1, colour_format_src))
+    if (colorkey(voodoo, src, 1, color_format_src))
         rop_nr |= 2;
-    if (colorkey(voodoo, dest, 0, colour_format_dest))
+    if (colorkey(voodoo, dest, 0, color_format_dest))
         rop_nr |= 1;
 
     rop = voodoo->banshee_blt.rops[rop_nr];
