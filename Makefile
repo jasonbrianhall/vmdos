@@ -123,7 +123,7 @@ $(BUILD)/fat16.bin: boot/boot.asm boot/magic.mac | $(BUILD)
 $(BUILD)/fat12.bin: boot/boot.asm boot/magic.mac | $(BUILD)
 	nasm -f bin -DISFAT12 -i boot/ $< -o $@
 
-$(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM:
+$(FREEDOS)/KERNEL.SYS $(FREEDOS)/COMMAND.COM &:
 	sh tools/fetch-freedos.sh $(FREEDOS)
 
 # Rebuild C: when EXTRA names another folder or anything in it changes
