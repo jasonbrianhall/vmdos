@@ -1,0 +1,94 @@
+# This Makefile is for Free FDISK and I16-GCC, Mac (probably Linux as well)
+
+HOST_CC=cc
+HOST_CFLAGS=-Wall -pedantic -O2
+
+CC=ia16-elf-gcc
+LD=ia16-elf-gcc
+LIBS = -li86
+CFLAGS = -Wall -mcmodel=small -Os
+
+NASM=nasm
+CP=cp
+
+FDISK_OBJS = main.o cmd.o helpscr.o compat.o pdiskio.o fdiskio.o pcompute.o \
+             display.o ui.o kbdinput.o ansicon.o printf.o \
+             svarlang/svarlang.o svarlang/auto_exe.o svarlang/auto_nls.o \
+             deflang.o bootnorm.o
+
+fdisk.exe : $(FDISK_OBJS) fdisk.lng
+	$(LD) -Xlinker -Map=fdisk.map -Os -mcmodel=small -o $@ $(FDISK_OBJS) $(LIBS)
+
+bootnorm.c : bootnorm.bin bintoc/bintoc
+	bintoc/bintoc bootnorm.bin bootnorm.c bootnormal_code
+
+bootnorm.bin : bootnorm.asm
+	$(NASM) -f bin -o $@ $<
+
+
+svarlang/svarlang.o: svarlang/svarlang.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DWITHSTDIO -c -o $@ $<
+
+# --- translations ----------------------------------------------------------
+
+fdisk.lng : nls/out.lng
+	$(CP) $< $@
+
+deflang.c : nls/deflang.c
+	$(CP) $< $@
+
+nls/deflang.c nls/out.lng : svarlang/tlumacz nls/en.txt nls/de.txt nls/es.txt nls/fr.txt nls/it.txt nls/pl.txt nls/tr.txt
+	cd nls; ../svarlang/tlumacz /excref en de es fr it pl tr
+
+nls/out.lng : nls/deflang.c
+
+nls/en.txt : nls/en_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 437 $< $@
+
+nls/de.txt : nls/de_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 858 $< $@
+
+nls/es.txt : nls/es_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 858 $< $@
+
+nls/fr.txt : nls/fr_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 858 $< $@
+
+nls/it.txt : nls/it_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 858 $< $@
+
+nls/pl.txt : nls/pl_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp maz $< $@
+
+nls/tr.txt : nls/tr_utf8.txt utf8tocp/utf8tocp
+	utf8tocp/utf8tocp 857 $< $@
+
+# --- build tools -----------------------------------------------------------
+
+bintoc/bintoc : bintoc/bintoc.c
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+
+svarlang/tlumacz : svarlang/tlumacz.c
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+
+utf8tocp/utf8tocp : utf8tocp/utf8tocp.c
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+
+
+# --- clean up --------------------------------------------------------------
+
+clean:
+	rm -f *.o *.obj *.OBJ *.bin *.BIN
+	rm -f *.exe
+	rm -f *.map *.MAP
+	rm -f fdisk.lng out.lng
+	rm -f nls/en.txt nls/de.txt nls/out.lng nls/DEFLANG.C
+	rm -f bintoc/bintoc bintoc/*.o
+	rm -f bintoc/*.exe bintoc/*.obj
+	rm -f bintoc/*.EXE bintoc/*.OBJ
+	rm -f svarlang/tlumacz svarlang/*.o
+	rm -f svarlang/*.exe svarlang/*.obj
+	rm -f svarlang/*.EXE svarlang/*.OBJ
+	rm -f utf8tocp/utf8tocp utf8tocp/*.o
+	rm -f utf8tocp/*.exe utf8tocp/*.obj
+	rm -f utf8tocp/*.EXE utf8tocp/*.OBJ

@@ -102,7 +102,7 @@ vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
 CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
 DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
 (Vim 7.4, also as VI; on C: only), MORE,
-LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM,
+LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM, FORMAT, FDISK,
 CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
 FDCONFIG.SYS to take the `;` off). WHICH is built into FreeCOM.
 `third_party/dosutils/README.vmdos` and `third_party/vim/README.vmdos` say where each comes from.
@@ -163,9 +163,9 @@ another drive. One with FAT but a partition type that isn't DOS's (an EFI
 system partition, a Linux- or hidden-typed one, a GPT partition other than
 basic data) needs a Y first.
 
-FDISK (FreeDOS's, not included) works as on any PC: the BIOS shows every
+FDISK (FreeDOS's Free FDISK, in C:\VMDOS and on the boot floppy, as is FreeDOS's FORMAT) works as on any PC: the BIOS shows every
 other disk as hard disk 81h, 82h ... (C:'s disk is 80h, a one-partition
-view of C:). They appear once the DOS kernel has set up its drives, so DOS
+view of C:; booted from the floppy, with no C:, the disks start at 80h). They appear once the DOS kernel has set up its drives, so DOS
 never gives their partitions letters by itself. A partition FDISK made
 gets its letter from VMHD (`VMHD D: 2`; no file system yet: a Y first),
 and `FORMAT D:` formats it (VMHD.SYS gives FORMAT the device parameters,
@@ -951,7 +951,7 @@ untested.
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
 | `dos/edit/`, `dos/tree/`, `dos/bin/` | EDIT, vmdos's text editor, and TREE (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
-| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
+| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |

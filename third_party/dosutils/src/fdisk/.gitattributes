@@ -1,0 +1,11 @@
+* text eol=crlf
+*.com binary
+*.COM binary
+*.exe binary
+*.EXE binary
+*.lib binary
+*.LIB binary
+*.prj binary
+*.PRJ binary
+*.zip binary
+*.ZIP binary
