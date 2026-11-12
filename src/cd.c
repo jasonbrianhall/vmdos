@@ -928,6 +928,10 @@ static u16 play_request(int unit, u32 rh)
 
 static void put(u32 *o, const char *s) { for (; *s; s++) wr8((*o)++, (u8)*s); }
 
+/* The drives' DOS letters, as VMCD.COM last learned them from MSCDEX (0:
+   not known yet): the media console (media.c) takes "F:" for a drive. */
+static char unit_letter[MAX_UNITS + MAX_PHYS];
+
 /* INT 2Fh AX=5644h. BX=0: number of drives. BX=1: ES:DI = request header,
    DX = driver segment. BX=2: VMCD.COM: CX=0 list (ES:DI <- text), else
    put image DL (1..n, 0 = empty) in drive CL (1..). BX=3: put the ISO
@@ -964,6 +968,7 @@ void cd_api(struct regs *r)
             char nm[MAX_UNITS + MAX_PHYS][12];
             for (int u = 0; u < n_units + n_phys; u++) {
                 u8 l = DX(r) == 0x4C45 ? rd8(LIN(r->v86_ds, SI(r)) + u) : 0xFF;
+                if (l < 26) unit_letter[u] = (char)('A' + l);           /* for the media console */
                 if (l < 26) { nm[u][0] = (char)('A' + l); nm[u][1] = ':'; nm[u][2] = 0; }
                 else snprintf(nm[u], sizeof nm[u], "drive %d", u + 1);
             }
@@ -1081,4 +1086,65 @@ int cd_unit_audio(int unit, u32 *pos)
     int p = playing(unit);
     *pos = pl.state ? play_pos() : pl.end;
     return p ? 1 : pl.state == 2 ? 2 : 0;
+}
+
+/* ---------------- for the media console (Ctrl+Shift+F6, media.c) ----------------
+   Run from the timer tick with the disk and USB quiet; units as VMCD
+   numbers them, from 0. Nothing here starts the drives up (units_init
+   waits for USB): before VMCD.SYS has asked, there are no drives yet. */
+int cd_con_ready(void) { return n_units >= 0; }
+int cd_con_units(void) { return n_units < 0 ? 0 : n_units + n_phys; }
+int cd_con_unit_of(char letter)
+{
+    letter &= ~32;
+    for (int u = 0; u < cd_con_units(); u++) if (unit_letter[u] == letter) return u;
+    return -1;
+}
+char cd_con_letter(int u) { return u >= 0 && u < MAX_UNITS + MAX_PHYS ? unit_letter[u] : 0; }
+int cd_con_modules(void) { return n_mod; }
+const char *cd_con_module_name(int i) { return i >= 0 && i < n_mod ? img[i].name : ""; }
+/* What's in unit u, in words. */
+void cd_con_describe(int u, char *b, int n)
+{
+    int d = phys_of(u);
+    if (d >= 0) snprintf(b, n, "real %s drive %s, %s", ph[d].usb ? "USB" : ph[d].ide ? "IDE" : "SATA", pmodel(d),
+                         ph[d].present ? "disc in" : "no disc");
+    else if (unit_img[u] < 0) snprintf(b, n, "empty");
+    else {
+        int i = unit_img[u];
+        snprintf(b, n, "%s (%u MiB%s)", img[i].name, img[i].sectors >> 9, img[i].cue ? ", CUE" : i < n_mod ? ", in RAM" : "");
+    }
+}
+/* The ISO or CUE sheet at path in image unit u: 0, or mount_file's errors
+   (5: a real drive, or no such unit). */
+int cd_con_insert(int u, const char *path)
+{
+    if (n_units < 0 || u < 0 || u >= n_units) return 5;
+    audio_unit_gone(u);
+    return mount_file(u, path);
+}
+/* Boot-module image i (0-based) in image unit u, as VMCD 1 2. */
+int cd_con_module(int u, int i)
+{
+    if (n_units < 0 || u < 0 || u >= n_units || i < 0 || i >= n_mod) return 5;
+    audio_unit_gone(u);
+    unit_img[u] = i;
+    CHANGED(u);
+    kprintf("cd: drive %d now holds %s\n", u + 1, img[i].name);
+    return 0;
+}
+/* Empty an image unit; open a real drive's tray. */
+int cd_con_eject(int u)
+{
+    if (n_units < 0 || u < 0 || u >= n_units + n_phys) return 5;
+    audio_unit_gone(u);
+    int d = phys_of(u);
+    if (d >= 0) {
+        u8 cdb[12] = { 0x1B, 0, 0, 0, 2 };                             /* START STOP UNIT, LoEj: eject */
+        pkt(d, cdb, 0, 0);
+        ph[d].present = 0;
+    } else unit_img[u] = -1;
+    CHANGED(u);
+    kprintf("cd: drive %d %s (media console)\n", u + 1, d >= 0 ? "ejected" : "now holds nothing");
+    return 0;
 }

@@ -299,6 +299,10 @@ void disk_tick(void)
     wb_ran = ticks;
 }
 
+/* A disk transfer or a write-back run is under way (an interrupt came in
+   the middle of it): the media console (media.c) waits for the next tick. */
+int disk_busy(void) { return in_io || flushing; }
+
 /* DOS is idle (spinning on the keyboard, INT 28h, INT 2Fh AX=1680h): a run out now costs nobody anything. */
 void disk_idle(void)
 {

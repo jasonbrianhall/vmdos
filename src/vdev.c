@@ -657,6 +657,23 @@ void vkbd_real_scancode(u8 sc)
         return;
     }
     int hot = ctrl && (lshift || rshift);                     /* Ctrl+Shift: games rarely use it with F-keys */
+    if (hot && k == 0x40) {                                   /* Ctrl+Shift+F6: the media console (media.c) */
+        if (!up) {
+            int was = media_on();
+            media_toggle();
+            if (!was && media_on()) {                         /* it has the keyboard now: the guest's modifiers up */
+                if (ctrl) kq_put(0x9D);
+                if (lshift) kq_put(0xAA);
+                if (rshift) kq_put(0xB6);
+                if (alt) kq_put(0xB8);
+            }
+        }
+        return;
+    }
+    if (media_on()) {                                         /* every other key is the console's while it's open */
+        if (sc != 0xE0) media_key(k, up, lshift || rshift, ctrl);
+        return;
+    }
     if (hot && (k == 0x57 || k == 0x58)) {
         if (!up) speed_step(k == 0x58 ? 1 : -1);
         return;

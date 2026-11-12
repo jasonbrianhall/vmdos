@@ -486,10 +486,11 @@ void hd_int13(struct regs *r)
 
 /* Put partition k (0-based, of the last scan) in unit u. 0, or an error:
    2 no such partition, 3 it's C:, 4 in another drive, 5 no FAT and not
-   a DOS partition, 6 confirm first (the warning in warn), 7 disk error,
+   a DOS partition, 6 confirm first (the warning in msg), 7 disk error,
    8 the drive holds another partition. */
-static int attach(int u, int k, int ro, int confirmed, u32 warn)
+static int attach(int u, int k, int ro, int confirmed, char *msg, int msgn)
 {
+    msg[0] = 0;
     if (k < 0 || k >= n_parts) return 2;
     struct part *p = &parts[k];
     if (is_c(p)) return 3;
@@ -511,8 +512,7 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
                      "holds a FAT file system, but its partition type says it belongs to\r\n"
                      "something else: the firmware or another operating system. Changing\r\n"
                      "files on it from DOS could stop that system from working.", disk_no(p->dev), p->num, c);
-        put(&warn, b);
-        wr8(warn, '$');
+        snprintf(msg, msgn, "%s", b);
         return 6;
     }
     if (disk_dev_rw(p->dev, p->start, 1, sec, 0)) return 7;
@@ -523,11 +523,10 @@ static int attach(int u, int k, int ro, int confirmed, u32 warn)
     t->in = 1;
     t->changed = 1;
     if (!p->fat)
-        snprintf(b, sizeof b, "%c: now holds %s.\r\nIt has no file system yet. Next, type  FORMAT %c:  to make one.\r\n$", U, d, U);
+        snprintf(msg, msgn, "%c: now holds %s.\r\nIt has no file system yet. Next, type  FORMAT %c:  to make one.\r\n", U, d, U);
     else
-        snprintf(b, sizeof b, "%c: now holds %s:\r\n%s%s.\r\nType  DIR %c:  to see its files. VMHD %c: /E takes it out again.\r\n$",
+        snprintf(msg, msgn, "%c: now holds %s:\r\n%s%s.\r\nType  DIR %c:  to see its files. VMHD %c: /E takes it out again.\r\n",
                  U, d, c, ro ? ", read-only" : "", U, U);
-    put(&warn, b);
     if (p->fat) kprintf("hd: %c: is %s, FAT%d%s\n", 'A' + first_drive + u, d, p->fat, ro ? ", read-only" : "");
     else kprintf("hd: %c: is %s, not formatted%s\n", 'A' + first_drive + u, d, ro ? ", read-only" : "");
     return 0;
@@ -653,7 +652,13 @@ void hd_api(struct regs *r)
         if (u < 0 || u >= n_units) { AX(r) = 1; return; }
         drop_gone();
         scan();
-        AX(r) = (u16)attach(u, DL(r) - 1, DH(r) & 1, DH(r) & 2, LIN(r->v86_es, DI(r)));
+        static char msg[600];
+        AX(r) = (u16)attach(u, DL(r) - 1, DH(r) & 1, DH(r) & 2, msg, sizeof msg);
+        if (msg[0]) {                                               /* the warning (6) or what was done (0) */
+            u32 o = LIN(r->v86_es, DI(r));
+            put(&o, msg);
+            wr8(o, '$');
+        }
         return; }
     case 4: {
         int u = CL(r) - first_drive;
@@ -671,4 +676,47 @@ void hd_api(struct regs *r)
         return; }
     }
     AX(r) = 0xFFFF;
+}
+
+/* ---------------- for the media console (Ctrl+Shift+F6, media.c) ----------------
+   Drives by DOS number (0 = A:); partitions numbered as VMHD lists them. */
+int hd_con_units(int *first) { *first = first_drive; return n_units; }
+int hd_con_scan(void) { drop_gone(); scan(); return n_parts; }
+void hd_con_describe_unit(int u, char *b, int n)
+{
+    if (!units[u].in) { snprintf(b, n, "empty"); return; }
+    char d[96];
+    describe(d, sizeof d, &units[u].p);
+    snprintf(b, n, "%s%s", d, units[u].ro ? ", read-only" : "");
+}
+/* Partition k (0-based): "disk 2, partition 1: FAT32, 100 MiB, label DATA" and where it is. */
+void hd_con_describe_part(int k, char *b, int n)
+{
+    const struct part *p = &parts[k];
+    char c[96], w[24] = "";
+    contents(c, sizeof c, p);
+    int u = unit_of(p);
+    if (is_c(p)) snprintf(w, sizeof w, "  (C:)");
+    else if (u >= 0) snprintf(w, sizeof w, "  (in %c:)", 'A' + first_drive + u);
+    if (p->num) snprintf(b, n, "disk %d, partition %d: %s%s", disk_no(p->dev), p->num, c, w);
+    else snprintf(b, n, "disk %d, whole disk: %s%s", disk_no(p->dev), c, w);
+}
+/* 0, 1 not a VMHD drive, or attach's errors; msg says what was done (or the warning for 6). */
+int hd_con_attach(int drive, int k, int ro, int confirmed, char *msg, int msgn)
+{
+    msg[0] = 0;
+    int u = drive - first_drive;
+    if (u < 0 || u >= n_units) return 1;
+    drop_gone();
+    scan();
+    return attach(u, k, ro, confirmed, msg, msgn);
+}
+int hd_con_eject(int drive)
+{
+    int u = drive - first_drive;
+    if (u < 0 || u >= n_units) return 1;
+    if (units[u].in) kprintf("hd: %c: emptied (media console)\n", 'A' + first_drive + u);
+    units[u].in = 0;
+    units[u].changed = 1;
+    return 0;
 }

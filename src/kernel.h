@@ -87,6 +87,11 @@ int snprintf(char *buf, size_t n, const char *fmt, ...);
 void serial_init(const char *cmd);            /* the log on COM1 (or not: serial=off / serial=dos) */
 extern volatile int log_save_req;             /* Ctrl+Shift+S with the log open: log_save at the next tick */
 int log_tail(char *out, int rows, int scroll);   /* the log's last lines, for the overlay (lib.c) */
+int media_on(void);                           /* media.c: the media console (Ctrl+Shift+F6) is open */
+void media_toggle(void);
+void media_key(u8 k, int up, int shift, int ctrl);   /* a key while it's open (keyboard interrupt) */
+int media_pending(void);                      /* a command waits ... */
+void media_run(void);                         /* ... for the timer tick to run it */
 void video_log_toggle(void);                  /* Ctrl+Shift+F10: the log over the running game (video.c) */
 int video_log_on(void);
 void video_log_scroll(int lines);             /* + up (older), - down; big numbers: to the top / the end */
@@ -206,6 +211,7 @@ const char *dos_kind(struct fatvol *v);       /* disk.c: "FreeDOS", "MS-DOS", ..
 int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size);
 int fat_extents(struct fatvol *v, u32 clus, u32 bytes, struct extent *ext, int max);
 int fat_dir(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx);   /* the files in a folder */
+int fat_dir_all(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx);   /* folders too ("NAME\\") */
 
 /* ---- disk.c: drive C: (AHCI partition or RAM disk) ---- */
 extern u32 disk_sectors;
@@ -214,6 +220,7 @@ int disk_read(u32 lba, u32 n, void *buf);     /* 0 or a BIOS INT 13h status */
 int disk_write(u32 lba, u32 n, const void *buf);
 int disk_volume(struct fatvol *v);            /* mount C:'s FAT partition */
 void disk_flush(void);                        /* the write-back cache out to the disk, all of it */
+int disk_busy(void);                          /* a transfer or write-back under way */
 void disk_flush_soon(void);                   /* INT 13h reset: start writing back now */
 void disk_tick(void);                         /* timer: write back a run once writes stop */
 void disk_idle(void);                         /* DOS idle: write back a run */

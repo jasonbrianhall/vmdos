@@ -2298,15 +2298,20 @@ void video_log_scroll(int lines)
 int video_log_page(void) { return logov_rows > 2 ? logov_rows - 2 : 1; }
 
 static void draw_log_box(void);
+static void draw_media_box(void);
+int media_on(void);
+void media_text(char *out, int rows, int w, int cursor);
+/* The media console (media.c) can be drawn: vmdos draws the screen. */
+int video_overlay_ok(void) { return fb && !vga_native && !text_fallback; }
 static void draw_log_overlay(void)             /* in video_refresh_, under video_lock */
 {
-    static int was_on;
-    if (!logov_on) {
-        if (was_on) { was_on = 0; full_redraw = 1; last_layout_mode = -1; }   /* what it covered, next frame */
-        return;
-    }
-    was_on = 1;
-    if (!draw_late) draw_log_box();             /* else after the helper's rows (video_refresh_late) */
+    static int was;                             /* bit 0 the log, bit 1 the media console */
+    int now = (logov_on ? 1 : 0) | (media_on() ? 2 : 0);
+    if (was & ~now) { full_redraw = 1; last_layout_mode = -1; }   /* what one covered, next frame */
+    was = now;
+    if (!now || draw_late) return;              /* else after the helper's rows (video_refresh_late) */
+    if (logov_on) draw_log_box();
+    if (media_on()) draw_media_box();
 }
 static void draw_log_box(void)
 {
@@ -2342,6 +2347,41 @@ static void draw_log_box(void)
     }
     for (u32 x = 0; x < w; x++) line[x] = bg;                        /* what's left under the last row */
     for (u32 y = h; y < fb_h; y++) put_row(line, w, x0, y);
+}
+
+/* The media console (Ctrl+Shift+F6, media.c): a box at the top, over the
+   game, at most 26 rows of text; the last is the command line. */
+static void draw_media_box(void)
+{
+    static char text[26][LOGOV_W + 1];
+    static u32 line[4096];
+    int s = fb_w >= 1280 && fb_h >= 800 ? 2 : 1;
+    int rows = (int)fb_h / (16 * s);
+    if (rows > 26) rows = 26;
+    if (rows < 4) return;
+    media_text(&text[0][0], rows, LOGOV_W, (ticks / 400) & 1);
+    u32 w = fb_w < 4096 ? fb_w : 4096;
+    u32 fg = pack(58, 58, 58), bg = pack(0, 10, 4), tfg = pack(63, 63, 63), tbg = pack(0, 30, 12);
+    u32 pfg = pack(63, 63, 32);
+    for (int r = 0; r < rows; r++) {
+        const char *t = text[r];
+        u32 f = r == 0 ? tfg : r == rows - 1 ? pfg : fg, b = r == 0 ? tbg : bg;
+        for (int gy = 0; gy < 16 * s; gy++) {
+            int fy = gy / s;
+            int ended = 0;
+            for (u32 x = 0; x < w; x++) {
+                int c = (int)(x / (8 * s)) - 1, bit = (int)(x / s) & 7;
+                char ch = ' ';
+                if (c >= 0 && !ended) { ch = t[c]; if (!ch) { ended = 1; ch = ' '; } }
+                if (c < 0 || c >= LOGOV_W) ch = ' ';
+                line[x] = (font8x16[(u8)ch * 16 + fy] & (0x80 >> bit)) ? f : b;
+            }
+            put_row(line, w, 0, (u32)(r * 16 * s + gy));
+        }
+    }
+    u32 y = (u32)(rows * 16 * s);                                    /* a line under it */
+    for (u32 x = 0; x < w; x++) line[x] = tbg;
+    for (int i = 0; i < 2 * s && y < fb_h; i++, y++) put_row(line, w, 0, y);
 }
 
 static void draw_osd_text(void);
@@ -2442,6 +2482,7 @@ void video_refresh_late(void)
     draw_rows();
     if (shot_req) take_shot();
     if (logov_on) draw_log_box();
+    if (media_on()) draw_media_box();
     if (osd_msg[0] && (int32_t)(ticks - osd_until) < 0) draw_osd_text();
     draw_late = 0;
 }

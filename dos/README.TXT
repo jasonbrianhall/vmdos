@@ -7,6 +7,9 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F3    Volume down 10%
   Ctrl+Shift+F4    Volume up 10%
   Ctrl+Shift+F5    Mute / unmute
+  Ctrl+Shift+F6    Media console over the game, on / off: change CD
+                     images, floppies and VMHD drives without leaving it
+                     (type help; Esc closes it; the game keeps running)
   Ctrl+Shift+F8    Smooth scaling on / off (games like Warcraft 2 look much better but games like DOOM do not)
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
   Ctrl+Shift+F10   vmdos log over the game, on / off (the game keeps

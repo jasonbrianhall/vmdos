@@ -386,3 +386,25 @@ void fd_api(struct regs *r)
     }
     AX(r) = 0xFFFF;
 }
+
+/* ---------------- for the media console (Ctrl+Shift+F6, media.c) ---------------- */
+int fd_con_insert(int d, const char *path, int ro)
+{
+    fd_boot();
+    if (d < 0 || d >= FD_DRIVES) return 5;
+    return fd_mount(d, path, ro);
+}
+int fd_con_eject(int d)
+{
+    fd_boot();
+    if (d < 0 || d >= FD_DRIVES) return 5;
+    fd_eject(d);
+    return 0;
+}
+void fd_con_describe(int d, char *b, int n)
+{
+    fd_boot();
+    if (!fd[d].in) snprintf(b, n, "empty");
+    else snprintf(b, n, "%s (%uK%s%s)", fd[d].path, fd[d].size >> 10, fd[d].ro ? ", read-only" : "",
+                  fd[d].nodos ? ", not a DOS disk" : "");
+}

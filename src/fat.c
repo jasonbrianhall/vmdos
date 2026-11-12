@@ -116,7 +116,17 @@ int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size)
 /* The files in folder dir ("\EFI\VMDOS"): fn(ctx, "NAME.EXT", first
    cluster, size) for each (not folders, labels or deleted entries); fn
    returning nonzero stops. 0, or -1 if there is no such folder. */
+static int fat_dir_(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx, int dirs);
 int fat_dir(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx)
+{
+    return fat_dir_(v, dir, fn, ctx, 0);
+}
+/* The same, folders included: their names end in '\' (size 0). */
+int fat_dir_all(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx)
+{
+    return fat_dir_(v, dir, fn, ctx, 1);
+}
+static int fat_dir_(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx, int dirs)
 {
     u32 c = 0, size;
     int isdir = 1;
@@ -140,14 +150,17 @@ int fat_dir(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *
                 u8 d[32];
                 memcpy(d, v->sec + e, 32);                       /* fn may read the disk (v->sec) */
                 if (d[0] == 0) return 0;
-                if (d[0] == 0xE5 || d[0] == '.' || d[11] == 0x0F || (d[11] & 0x18)) continue;
-                char name[13];
+                if (d[0] == 0xE5 || d[0] == '.' || d[11] == 0x0F || (d[11] & 0x08)) continue;
+                int isd = (d[11] & 0x10) != 0;
+                if (isd && !dirs) continue;
+                char name[14];
                 int k = 0;
                 for (int i = 0; i < 8 && d[i] != ' '; i++) name[k++] = (char)d[i];
                 if (d[8] != ' ') { name[k++] = '.'; for (int i = 8; i < 11 && d[i] != ' '; i++) name[k++] = (char)d[i]; }
+                if (isd) name[k++] = '\\';
                 name[k] = 0;
                 u32 fc = *(u16 *)(d + 26) | (v->type == 32 ? (u32)*(u16 *)(d + 20) << 16 : 0);
-                if (fn(ctx, name, fc, *(u32 *)(d + 28))) return 0;
+                if (fn(ctx, name, fc, isd ? 0 : *(u32 *)(d + 28))) return 0;
                 if (vol_read(v, lba + s, v->sec)) return 0;      /* (fn may have used it) */
             }
         }

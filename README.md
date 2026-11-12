@@ -444,6 +444,36 @@ arrow keys, PgUp/PgDn or Home/End scrolls it, and Ctrl+Shift+S saves it
 to C:\VMDOS\VMDOS.LOG (made by `DMESG /K`). The "vmdos stopped" screen
 shows the same log.
 
+Ctrl+Shift+F6 opens the media console: a command line over whatever is
+running, to swap discs and disks without quitting the game (an installer
+or a game asking for disc 2, a floppy for a booter's save disk). While it
+is open it has the keyboard; the game keeps running underneath, and Esc
+or Ctrl+Shift+F6 closes it. It opens with what every drive holds.
+Commands (paths are 8.3 names, on C: unless another drive is given, and
+relative to the current folder unless they start with a backslash):
+
+    status                     what every drive holds
+    cd \ISOS, cd .., cd\, cd   change the current folder on C:, or show it (the prompt does too)
+    dir [FOLDER]               files and folders (the current one; dir D:\ for a VMHD drive)
+    vmcd                       the CD drives (1, 2 ...; their letters once VMCD has run)
+    vmcd 1 DISC2.ISO           an ISO or CUE sheet in CD drive 1 (vmcd F: ... works too)
+    vmcd 1 eject               empty it (a real drive: open its tray)
+    vmcd 1 #2                  boot-module image 2, as VMCD 1 2
+    vmfd A: DISK2.IMG [/R]     a floppy image in A:, read-only with /R
+    vmfd A: eject              empty A:
+    vmhd                       VMHD's drives and the partitions of the other disks
+    vmhd D: 3 [/R] [/Y]        partition 3 in D: (/Y confirms a non-DOS one)
+    vmhd D: eject              take it out of D:
+
+They do what the DOS commands VMCD, VMFD and VMHD do (`cdrom`, `fd` and
+`hd` work as short names), so DOS and Windows see a disk change as usual. Up/Down bring
+back earlier lines, PgUp/PgDn scroll, Ctrl+U clears the line, Ctrl+L the
+screen. Keys only edit the line; a command runs at the next timer tick
+with no disk or USB transfer under way, as Ctrl+Shift+S's log save does
+(`src/media.c`). It is drawn where vmdos draws the screen (the
+framebuffer: GOP, GRUB's mode, Bochs VBE); with `video=vbe` it doesn't
+open (a note says so).
+
 CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
 ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
 it, the master being VMCD's drive 1 and the slave its drive 2 (an image or a
@@ -916,6 +946,7 @@ untested.
 | `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
 | `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
+| `src/media.c` | the media console (Ctrl+Shift+F6): CD, floppy and VMHD changes from a command line over the game |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |

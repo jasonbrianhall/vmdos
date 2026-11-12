@@ -772,6 +772,8 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             const char *e = log_save();
             video_osd(e ? e : "Log saved to C:\\VMDOS\\VMDOS.LOG");
         }
+        if (irq == 0 && media_pending() && !in_usb && usb_quiet() && !disk_busy())   /* Ctrl+Shift+F6's commands */
+            media_run();
         if (irq == 0 && debug_level >= 2 && ticks % 5000 == 0) {
             extern int vif;
             void vpic_debug(char *buf, int n);
