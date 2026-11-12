@@ -336,7 +336,7 @@ GRUB_MODS := part_msdos part_gpt fat normal configfile search search_fs_file tes
 VMDOS_EFI_DIR := $(if $(filter 1,$(GRUB)),EFI/vmdos,EFI/BOOT)
 # Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list, GRUB).
 $(BUILD)/esp.opts: FORCE | $(BUILD)
-	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT)' > $@.new
+	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT) $(OEM_PATH)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
@@ -436,6 +436,13 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+# OEM_PATH=1 (default): the same boot program also as
+# EFI/Microsoft/Boot/bootmgfw.efi, for firmware (some InsydeH2O Acer/HP/Lenovo
+# laptops) that ignores boot entries and only starts the Windows Boot Manager
+# path or EFI/BOOT/BOOTX64.EFI. vmdos.efi finds dos.img / vmdos.cfg in
+# EFI/vmdos or EFI/BOOT when they aren't next to it; GRUB searches for its files.
+OEM_PATH ?= 1
+ESP_OEM_FILE = $(if $(filter 1,$(OEM_PATH)),$(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI,vmdos.efi)=EFI/Microsoft/Boot/bootmgfw.efi)
 ESP_GRUB_DEPS  := $(if $(filter 1,$(GRUB)),vmdos.elf $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/grub/grub.cfg)
 ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BOOTX64.EFI vmdos.elf=boot/vmdos.elf \
                     $(BUILD)/grub/grub.cfg=boot/grub/grub.cfg --bios=$(GRUB_LIB)/i386-pc/boot.img$(comma)$(BUILD)/grub/core.img)
@@ -445,7 +452,7 @@ esp.img: vmdos.efi $(RAM_IMG) $(FLOPPY) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/
 	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF $(if $(filter 16,$(ESP_FAT)),--boot16=$(BUILD)/fat16.bin) $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
 	    $(DOS_FILES) vmdos.efi=$(VMDOS_EFI_DIR)/$(if $(filter 1,$(GRUB)),vmdos.efi,BOOTX64.EFI) \
 	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(FLOPPY)=$(VMDOS_EFI_DIR)/floppy.img $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
-	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
+	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ESP_OEM_FILE) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
 	$(if $(USE_RAM),,@MTOOLS_SKIP_CHECK=1 mdel -i $@@@1M ::/EFI/BOOT/dos.img ::/EFI/vmdos/dos.img 2>/dev/null || true)
 	@touch $@
 
