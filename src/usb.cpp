@@ -982,9 +982,13 @@ static int scsi(Keyboard& k, const uint8_t* cdb, int cdb_len, bool in, uint32_t 
     return csw[12] ? 1 : 0;
 }
 
-static void request_sense(Keyboard& k) {
+// The sense key, ASC and ASCQ as key << 16 | asc << 8 | ascq; -1: no answer.
+static int request_sense(Keyboard& k) {
     uint8_t cdb[6] = { 0x03, 0, 0, 0, 18, 0 };
-    scsi(k, cdb, 6, true, 18);
+    for (int i = 0; i < 18; i++) msd_buf[i] = 0;
+    if (scsi(k, cdb, 6, true, 18) != 0) return -1;
+    if ((msd_buf[0] & 0x7E) != 0x70) return -1;           // not fixed-format sense data
+    return (msd_buf[2] & 0xF) << 16 | msd_buf[12] << 8 | msd_buf[13];
 }
 
 // USB CD/DVD drives (SCSI peripheral type 5): no medium needed to attach;
@@ -1056,18 +1060,49 @@ static bool msd_setup(Keyboard& k) {
     }
     if ((msd_buf[0] & 0x1F) == 5) return ucd_setup(k);       // CD/DVD drive: cd.c's, through usb_cd_*
     if (msd_buf[0] & 0x1F) { printf("USB: %s: storage device type %d, not a disk\n", k.where, msd_buf[0] & 0x1F); k.active = false; return false; }
+    // Up to ~10 s to spin up / settle. The sense data says what's wrong:
+    // UNIT ATTENTION (6/xx) is just "reset or plugged in", asked again;
+    // NOT READY with "initializing command required" (2/04/02), "stopped"
+    // or "no medium" (2/3A, which some sticks say after firmware let go of
+    // them) gets a START STOP UNIT (start, load), as Linux and Windows send.
     bool ready = false;
-    for (int i = 0; i < 50 && !ready; i++) {            // up to ~5 s to spin up / settle
+    int sense = -1, tur_r = 0, starts = 0;
+    for (int i = 0; i < 100 && !ready; i++) {
         uint8_t tur[6] = { 0 };
-        int r = scsi(k, tur, 6, false, 0);
-        if (r == 0) ready = true;
-        else if (k.timeouts) break;
-        else { request_sense(k); delay_ms(100); }
+        tur_r = scsi(k, tur, 6, false, 0);
+        if (tur_r == 0) { ready = true; break; }
+        if (k.timeouts) break;
+        sense = request_sense(k);
+        if (k.timeouts) break;
+        int key = sense >> 16 & 0xF, asc = sense >> 8 & 0xFF, ascq = sense & 0xFF;
+        if (sense >= 0 && key == 6) continue;                          // unit attention: once more at once
+        if (sense >= 0 && key == 2 && starts < 3 &&
+            ((asc == 0x04 && (ascq == 0x02 || ascq == 0x00)) || asc == 0x3A)) {
+            uint8_t ssu[6] = { 0x1B, 0, 0, 0, 0x01 | 0x02, 0 };       // START, LOEJ: start and load
+            int rs = scsi(k, ssu, 6, false, 0);
+            dbg(1, "USB: %s: START STOP UNIT after sense %x: %d\n", k.where, sense, rs);
+            if (rs && !k.timeouts) request_sense(k);
+            starts++;
+        }
+        delay_ms(100);
     }
+    if (!ready && !k.timeouts)
+        printf("USB: %s: %s: not ready (TUR %d, sense %x/%02x/%02x)\n", k.where, k.model, tur_r,
+               sense < 0 ? 0xF : sense >> 16 & 0xF, sense < 0 ? 0xFF : sense >> 8 & 0xFF, sense < 0 ? 0xFF : sense & 0xFF);
     uint8_t rc[10] = { 0x25 };
     int r = -1;
-    for (int i = 0; i < 3 && r != 0 && !k.timeouts; i++) { r = scsi(k, rc, 10, true, 8); if (r && !k.timeouts) request_sense(k); }
-    if (r != 0) { printf("USB: %s: %s: no capacity (no medium? ready: %d)\n", k.where, k.model, ready); k.active = false; return false; }
+    for (int i = 0; i < 5 && r != 0 && !k.timeouts; i++) {
+        r = scsi(k, rc, 10, true, 8);
+        if (r && !k.timeouts) { sense = request_sense(k); delay_ms(100); }
+    }
+    if (r != 0) {
+        printf("USB: %s: %s: no capacity (ready: %d, READ CAPACITY %d, sense %x/%02x/%02x, timeouts %d)\n",
+               k.where, k.model, ready, r,
+               sense < 0 ? 0xF : sense >> 16 & 0xF, sense < 0 ? 0xFF : sense >> 8 & 0xFF, sense < 0 ? 0xFF : sense & 0xFF,
+               k.timeouts);
+        k.active = false;
+        return false;
+    }
     uint32_t last = (uint32_t)msd_buf[0] << 24 | msd_buf[1] << 16 | msd_buf[2] << 8 | msd_buf[3];
     k.bsize = (uint32_t)msd_buf[4] << 24 | msd_buf[5] << 16 | msd_buf[6] << 8 | msd_buf[7];
     k.blocks = (uint64_t)last + 1;
