@@ -1,0 +1,50 @@
+name: Build master (Linux)
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-watcom:
+
+    runs-on: [self-hosted, watcom]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with wmake
+      run: |
+        cd source/fdisk
+        wmake
+
+    - name: Build distribution ZIP
+      run: |
+        cd source/fdisk
+        wmake dist dist-svardos
+
+    - name: Upload distribution files
+      uses: actions/upload-artifact@v4
+      with:
+        name: fdisk.zip
+        path: fdisk.zip
+
+    - name: Upload SvarDOS package
+      uses: actions/upload-artifact@v4
+      with:
+        name: fdisk.svp
+        path: fdisk.svp
+
+  build-ia16-gcc:
+
+    runs-on: [self-hosted, ia16-gcc]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with IA16-GCC and GNU Make
+      run: |
+        cd source/fdisk
+        make -f Makefile.gcc

@@ -375,12 +375,14 @@ int hd_drive_part(int drive, int *dev, u32 *start)
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 #define BIOS_MAX 15
 
-/* Disk d's BIOS number (81h ...), 0 for none (C:'s disk, or before DOS is up). */
+/* Disk d's BIOS number (81h ...), 0 for none (C:'s disk, or before DOS is up).
+   With no C: (booted from the floppy) the disks start at 80h, so FDISK on the
+   boot floppy sees them. */
 static int bios_num(int d)
 {
     if (!bios_on || !present(d)) return 0;
     u32 cs, cz;
-    int cd = disk_c_dev(&cs, &cz), n = 0x81;
+    int cd = disk_c_dev(&cs, &cz), n = disk_on_a ? 0x80 : 0x81;
     for (int i = 0; i < d; i++) if (i != cd && present(i)) n++;
     return d == cd || n > 0x80 + BIOS_MAX ? 0 : n;
 }
@@ -394,11 +396,12 @@ static int bios_disk(int dl)
 }
 int hd_bios_disks(void)
 {
-    if (disk_on_a) return 0;                    /* no C:, no BIOS hard disks */
+    if (disk_on_a && !bios_on) return 0;        /* no C:: no BIOS hard disks while DOS starts */
     if (!bios_on) return 1;
     u32 cs, cz;
     int nd = disk_dev_count(), n = -(disk_c_dev(&cs, &cz) >= 0);
     for (int d = 0; d < nd; d++) n += present(d);
+    if (disk_on_a) return n > BIOS_MAX + 1 ? BIOS_MAX + 1 : n;   /* then all from 80h on */
     return 1 + (n > BIOS_MAX ? BIOS_MAX : n);
 }
 /* The DOS kernel has its drives: from now on the BIOS shows the other disks. */

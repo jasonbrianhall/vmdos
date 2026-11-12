@@ -283,7 +283,7 @@ static int int13_(struct regs *r)
     int st = 0;
     u8 fn = AH(r);
     if (DL(r) < 0x80) { fd_int13(r); return BIOS_DONEF; }   /* A:, B: (floppy.c) */
-    if (DL(r) > 0x80 && DL(r) < 0x80 + hd_bios_disks()) { hd_int13(r); wr8(BDA + 0x74, AH(r)); return BIOS_DONEF; }   /* the other disks (hd.c) */
+    if (DL(r) >= (disk_on_a ? 0x80 : 0x81) && DL(r) < 0x80 + hd_bios_disks()) { hd_int13(r); wr8(BDA + 0x74, AH(r)); return BIOS_DONEF; }   /* the other disks (hd.c) */
     if (DL(r) != 0x80 || disk_on_a) {                         /* no such disk (with no C:, not 80h either) */
         if (fn == 0x15) { AH(r) = 0; set_cf(r, 0); return BIOS_DONEF; }
         if (fn == 0x08) { DL(r) = (u8)hd_bios_disks(); AH(r) = 0x07; set_cf(r, 1); return BIOS_DONEF; }

@@ -1,0 +1,478 @@
+# program: FreeDOS FORMAT.EXE message set - version 0.92a and later
+# language:Turkish
+# display codepage:CP857
+# catalog codepage:CP857
+# translators:Berki Yenig├╝n
+
+# version (on help screen)
+0,0:FreeDOS - %6s S├╝r├╝m %s\n
+0,1:Brian E. Reifsnyder, Eric Auer ve ba┼şkalar─▒ taraf─▒ndan yaz─▒lm─▒┼şt─▒r.\n
+0,2:Telif hakk─▒ 1999 - 2024 GNU GPL, S├╝r├╝m 2+ kapsam─▒nda.\n\n
+# 0.3 or 0.4 shown depending on if /Z:longhelp option used or not
+0,3:S├Âz dizimi (daha fazla ayr─▒nt─▒ i├ğin belgelendirmeye bak─▒n):\n\n
+0,4:S├Âz dizimi (belgelendirmeye bak─▒n veya /Z:longhelp kullan─▒n):\n\n
+
+# common
+1,0:\n
+# these two options for Yes and No are only 1 character and must be upper case
+1,1:E
+1,2:H
+# user has to type full word matching this
+1,3:EVET
+1,4:HAYIR
+# other possibly common bits
+1,5:Ba┼şar─▒s─▒z oldu!\n
+1,6:Ba┼şar─▒s─▒z oldu.\n
+1,7:─░ptal ediliyor.\n
+
+# short help screen (shown if compiled without LEGACY_HELP)
+# Use as many messages as needed, 1 message per max 79 column line
+# but if possible keep to less than 23 lines
+# message numbers do not need to match up for messages for different languages
+# Each message should end with a newline \n
+# after every 23 messages user will be prompted to press a key to continue
+2,0:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/F:boyut] [/S] [/D]\n
+2,1:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/T:par├ğa /N:sekt├Âr] [/S] [/D]\n
+#  /* the /4 option is a legacy shorthand for size selection: 360k in 1.2M drive */
+#  /* (drive type detection and "double stepping" setting are automatic on ATs.) */
+2,2:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/4] [/S] [/D]\n
+2,3:\n
+2,4: /V:etiket  Disk i├ğin birim etiketi belirtir, saat ve tarihini kaydeder.\n
+2,5: /S          Diski ba┼şlat─▒labilir yapmak ve sistem dosyalar─▒n─▒ eklemek\n
+2,6:               i├ğin SYS kullan─▒r.\n
+2,7: /D          ├çok ayr─▒nt─▒l─▒ hata ay─▒klama ├ğ─▒kt─▒s─▒ g├Âster. Hata raporlar─▒ i├ğin.\n
+2,8: /Q          Diski h─▒zl─▒ bi├ğimlendirir. /U ile kullan─▒lmazsa, UNFORMAT i┼şe\n
+2,9:             yarar ve bozuk k├╝me i┼şaretlerini muhafaza eder (/Q /U etmez).\n
+2,10: /U         Diski ko┼şulsuz bi├ğimlendirir. Disketse d├╝┼ş├╝k seviye bi├ğimlendirme.\n
+2,11: /F:boyut   Bi├ğimlendirilecek disketin boyutunu belirtir. Normal boyutlar:\n
+2,12:               360, 720, 1200, 1440, veya 2880 (birim: kilobayt). /F:0\n
+2,13:               liste g├Âsterir.\n
+2,14: /4         1,2 MB disket s├╝r├╝c├╝s├╝nde 360K disket bi├ğimlendirir.\n
+2,15: /T:par├ğa   Bir disketteki par├ğa (yani track) say─▒s─▒n─▒ belirtir.\n
+2,16: /N:sekt├Âr  Bir disketteki sekt├Âr say─▒s─▒n─▒ belirtir.\n
+
+# short help screen (shown if compiled _with_ LEGACY_HELP)
+# Use as many messages as needed, 1 message per max 79 column line
+# but if possible keep to less than 23 lines
+# message numbers do not need to match up for messages for different languages
+# Each message should end with a newline \n
+# after every 23 messages user will be prompted to press a key to continue
+20,0:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/F:boyut] [/B | /S] [/D]\n
+20,1:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/T:par├ğa /N:sekt├Âr] [/B | /S] [/D]\n
+20,2:FORMAT s├╝r├╝c├╝: [/V[:etiket]] [/Q] [/U] [/4] [/B | /S] [/D]\n
+20,3:FORMAT s├╝r├╝c├╝: [/Q] [/U] [/1] [/4] [/8] [/B | /S] [/D]\n
+20,4:\n
+20,5: /V:etiket  Disk i├ğin birim etiketi belirtir, saat ve tarihini kaydeder.\n\n
+20,6: /S         Diski ba┼şlat─▒labilir yapmak ve sistem dosyalar─▒n─▒ eklemek\n
+20,7:             i├ğin SYS kullan─▒r.\n
+20,8: /B         Uyumluluk i├ğin muhafaza edildi, eskiden ba┼şlatma dosyalar─▒\n
+20,9:             i├ğin alan ay─▒r─▒rd─▒.\n
+20,10: /D        Hata ay─▒klama ├ğ─▒kt─▒s─▒ g├Âster. Hata raporlar─▒ i├ğin.\n
+20,11: /Q        Diski h─▒zl─▒ bi├ğimlendirir. /U ile kullan─▒lmazsa, UNFORMAT i┼şe\n
+20,12:            yarar ve bozuk k├╝me i┼şaretlerini muhafaza eder (/Q /U etmez).\n
+20,13: /U        Diski ko┼şulsuz bi├ğimlendirir. Disketse d├╝┼ş├╝k seviye bi├ğimlendirir.\n
+20,14: /F:boyut  Bi├ğimlendirilecek disketin boyutunu belirtir. Normal boyutlar:\n
+20,15:            360, 720, 1200, 1440, veya 2880 (birim: kilobayt).\n
+20,16:            /F:0 liste g├Âsterir.\n
+20,17: /4         1,2 MB disket s├╝r├╝c├╝s├╝nde 360K disket bi├ğimlendirir.\n
+20,18: /T:par├ğa   Bir disketteki par├ğa (yani track) say─▒s─▒n─▒ belirtir.\n
+20,19: /N:sekt├Âr  Bir disketteki sekt├Âr say─▒s─▒n─▒ belirtir.\n
+20,20: /1         Bir disketin tek taraf─▒n─▒ bi├ğimlendirir (160k / 180k).\n
+20,21: /8         5.25\" bir diski par├ğa ba┼ş─▒ 8 sekt├Ârle bi├ğimlendirir\n
+20,22:             (160k / 320k).\n
+
+# detailed help screen
+# Use as many messages as needed, 1 message per max 79 column line
+# message numbers do not need to match up for messages for different languages
+# Each message should end with a newline \n
+# after every 23 messages user will be prompted to press a key to continue
+3,0:Bu FORMAT http://www.freedos.org/ projesi i├ğin yaz─▒lm─▒┼şt─▒r.\n
+3,1:  GNU GPL lisans─▒na dair bilgi i├ğin  http://www.gnu.org/ sitesine bak─▒n.\n
+3,2:1999-2003 senelerinde Brian E. Reifsnyder <reifsnyderb@mindspring.com>\n
+3,3:  taraf─▒ndan yaz─▒lm─▒┼şt─▒r.\n
+3,4:  0.90 / 0.91 2003-2006 i├ğin bak─▒mc─▒: Eric Auer <eric@coli.uni-sb.de>\n
+3,5:Katk─▒da bulunanlar: Jan Verhoeven, John Price, James Clark, Tom Ehlert,\n
+3,6:  Bart Oldeman, Jim Hall ve ba┼şkalar─▒. Deneyenleri de unutmayal─▒m!\n\n
+3,7:\n
+3,8:Se├ğenekler ve ilave i┼şlevlerin a├ğ─▒klamalar─▒:\n
+3,9:/D (debug) ve /Y (teyit talebini atla) se├ğeneklerine daima izin verilir.\n
+3,10:/B (sys i├ğin alan ay─▒r) bo┼ştur ve /S ile birle┼ştirilemez (sys)\n
+3,11:/V:etiket 160k/320k diskleri i├ğin de─şildir. Etiket bi├ğimlendirme\n
+3,12:   tarih/saatini kaydeder.\n
+3,13:\n
+3,14:Boyut belirtimi sadece disketler i├ğin ├ğal─▒┼ş─▒r. Ya /F:boyut (kilobayt\n
+3,15:olarak, 0 boyutu izin verilen boyutlar─▒n listesini g├Âr├╝nt├╝ler), ya\n
+3,16:       /T:par├ğa /N:par├ğa_ba┼ş─▒_sekt├Âr\n
+3,17:ya da ┼şunlar─▒n herhangi bir birle┼şimi /1 (tek tarafl─▒, 160k/180k),\n
+3,18:                      /8 (par├ğa ba┼ş─▒ 8 sekt├Âr, 160k/320k, DOS 1.x)\n
+3,19:                  ve  /4 (160-360k diskleri 1200k s├╝r├╝c├╝de bi├ğimlendir)\n
+3,20:\n
+3,21:Sabit disk bi├ğimlendirme teyit talebini susturmak i├ğin /Z:seriously kullan─▒n\n
+3,22:Bi├ğimlendirmeden sadece unformat (mirror) verilerini kaydetmek i├ğin\n
+3,23: /Z:mirror kullan─▒n\n
+3,24:Taze mirror verilerinin bulundu─şu bir diski geri almak i├ğin /Z:unformat\n
+3,25: kullan─▒n\n
+3,26:D─░SKETLER i├ğin kipler: h─▒zl─▒ g├╝venli bi├ğimlendirmeyi dener. D├╝┼ş├╝k seviye\n
+3,27:  bi├ğimlendirme sadece gerekti─şinde kullan─▒l─▒r. H─▒zl─▒ g├╝venli bi├ğimlendirme\n
+3,28:  unformat i├ğin mirror verilerini kaydeder.\n
+3,29:SAB─░T D─░SKLER i├ğin kipler: h─▒zl─▒ g├╝venli bi├ğimlendirmeyi dener. H─▒zl─▒ tam\n
+3,30:bi├ğimlendirme sadece gerekti─şinde kullan─▒l─▒r. H─▒zl─▒ tam bi├ğimlendirme sadece\n
+3,31:   dosya sistemini s─▒f─▒rlar\n
+3,32:D├╝┼ş├╝k seviye bi├ğimlendirmeyi zorlamak istiyorsan─▒z (disket) veya t├╝m y├╝zeyin\n
+3,33:   taranmas─▒n─▒ ve t├╝m i├ğeri─şin silinmesini (sabit disk) istiyorsan─▒z,\n
+3,34:   /U kullan─▒n.\n
+3,35:  FORMAT /Q /U h─▒zl─▒ tam bi├ğimlendirmedir (d├╝┼ş├╝k seviye bi├ğimlendirme /\n
+3,36:   tarama / silme yok!)\n
+3,37:  FORMAT /Q h─▒zl─▒ g├╝venli bi├ğimlendirmedir (m├╝mk├╝nse mirror verilerini kaydet)\n
+3,38:   mirror verileri daima veri alan─▒n sonunu ezecektir!\n
+3,39:  FORMAT otomatik olarak bir kip se├ğer (yukar─▒ya bak─▒n), ne /Q ne de /U\n
+3,40:  se├ğmezseniz\n
+3,41:\n
+3,42:Desteklenen FAT t├╝rleri: FAT12, FAT16, FAT32, t├╝m├╝ mirror / unformat ile.\n
+3,43:Desteklenen disket boyutlar─▒: 160k 180k 320k 360k ve 1200k, 5.25 in├ğ i├ğin\n
+3,44:  ve 720k ile 1440k (2880k ┼şimdiye dek hi├ğ denenmedi) 3.5 in├ğ s├╝r├╝c├╝ler i├ğin.\n
+#3,?:DD drives are limited to 360k/720k respectively. 2880k is ED drives only.\n
+3,45:Desteklenen a┼ş─▒r─▒ bi├ğimlendirmeler: 400k 800k 1680k (ve 3660k) daha fazla\n
+3,46: sekt├Ârle ve 1494k (1200k yerine) ve 1743k (ve 3486k) daha fazla par├ğayla da.\n
+3,47:  Daha fazla par├ğa t├╝m s├╝r├╝c├╝lerde ├ğal─▒┼şmaz, riski siz ├╝stlenerek kullan─▒n.\n
+3,48:  ─░kaz: eski DOS s├╝r├╝mleri a┼ş─▒r─▒ bi├ğimlendirmeyi sadece bir s├╝r├╝c├╝\n
+3,49:  program─▒yla kullanabilir.\n
+3,50:  1440k'da 720k, 720k ortam gerektirir. 360k bi├ğimlendirmek i├ğin 360k\n
+3,51:  s├╝r├╝c├╝ kullan─▒n.\n
+3,52:\n
+3,53:FAT32 bi├ğimlendirmede, 4k hizalamay─▒ zorlamak i├ğin /A se├ğene─şini\n
+3,54:  kullanabilirsiniz.\n
+
+# main()
+4,0:Birim etiketinde ge├ğersiz karakter: %c\n
+4,1:─░zin verilen karakterler 0-9, A-Z, bo┼şluk, ├Âzel / ├╝lkeye-├Âzel karakterler\n
+4,2:128-255 ve ┼şunlar─▒n t├╝m├╝:
+# the following is printed for valid label characters from ordinal(' ')+1 through 127
+4,3: %c
+4,4:\nfakat hi├ğbir kontrol karakterine ve ┼şunlardan hi├ğbirine izin verilmez
+# and now for enumerating illegal characters from ordinal(' ')+1 through 127
+4,5: %c"
+# /F:size
+4,6:Standart: 160, 180, 320, 360, 720, 1200, 1440, 2880.\n
+4,7:├ûzel:  400, 800, 1680, 3360,    1494, 1743, 3486.\n
+# /T tracks (cylinders)
+4,8:Tamam: 40, 80. ???: 83.\n
+# /N sectors per track
+4,9:Standart: 8, 9, 15, 18, 36.\n
+4,10:├ûzel:  10, 21, 42.\n
+# other options
+4,11:Tan─▒nmayan se├ğenek: /%c\n
+4,12:S├╝r├╝c├╝ harfi belirtilmeli.\n
+4,13:/T ve /N birle┼ştirilemez.\n
+4,14:Boyut bi├ğimlendirmeyle de─şi┼şecek - tam bi├ğimlendirme zorlan─▒yor\n
+4,15:Eski: par├ğa ba┼ş─▒na %d sekt├Âr, %d kafa. Yeni: %d sekt. %d kafa\n
+4,16:Mevcut bi├ğim bulunamad─▒ - tam bi├ğimlendirme zorlan─▒yor\n
+4,17:Mevcut bi├ğim bulunamad─▒ - UNFORMAT verileri kaydedilmiyor.\n
+4,18:Sistem sekt├Ârlerinin bir kopyas─▒ s├╝r├╝c├╝ sonuna yaz─▒l─▒yor:\n
+4,19:Ba┼şlatma sekt├Âr├╝, bir FAT, k├Âk dizin. UNFORMAT i├ğin kullan─▒┼şl─▒d─▒r.\n
+4,20:Ba┼şlatma sekt├Âr├╝, FAT ve k├Âk dizini ┼şununla eziliyor:\n
+4,21:├Ânceden kaydetti─şiniz MIRROR/UNFORMAT verileri.\n
+# message 4,22 should never be reached/shown
+4,22:/Z:Ne???\n
+4, 23: Tam bi├ğimlendirme (t├╝m verileri siler)\n
+4, 24: H─▒zl─▒ bi├ğimlendirme (sadece ├╝st veriler temizlenir)\n
+4, 25: ─░kaz: bozuk k├╝me i┼şaretleri varsa s─▒f─▒rlan─▒r.\n
+4, 26: G├╝venli h─▒zl─▒ bi├ğimlendirme (UnFormat verileri kaydedilmeye ├ğal─▒┼ş─▒l─▒r)\n
+# 4,27 through 4,32 display: <action> complete\n
+4,27:Bi├ğimlendirme
+4,28:H─▒zl─▒ Bi├ğimlendirme
+4,29:G├╝venli H─▒zl─▒ Bi├ğimlendirme
+4,30:Mirror
+4,31:UnFormat
+4,32: tamamland─▒.\n
+# 4,33 thru 4,35 are to ask user to repeat previous action
+4,33:Bi├ğimlendir
+4,34:─░┼şle
+4,35: ba┼şka bir disket (e/h)?
+# 4,36 thru 4,38 tell user we are repeating action
+4,36:─░┼şleniyor
+4,37:Bi├ğimlendiriliyor
+4,38:%s sonraki disket...\n
+
+# the following are long option keywords /Z:keyword
+5,0:Ge├ğersiz /Z:kipi - ge├ğerli: MIRROR, UNFORMAT, SERIOUSLY\n"));
+# take a new mirror data snapshot
+5,1:mirror
+# revert to mirrored state, dangerous!
+5,2:unformat
+# User MEANS to format harddisk
+5,3:seriously
+# display LONG (detailed) version of help
+5,4:longhelp
+
+# Check_Remote_Subst()
+6,0:SUBST komutunun kullan─▒ld─▒─ş─▒ veya uzaktaki s├╝r├╝c├╝ler bi├ğimlendirilemez (kod %04x). ─░ptal ediliyor.\n
+6,1:Ge├ğersiz s├╝r├╝c├╝! ─░ptal ediliyor.\n
+6,2:ASSIGN, JOIN veya SUBST komutlar─▒n─▒n kullan─▒ld─▒─ş─▒ s├╝r├╝c├╝ler bi├ğimlendirilemez. ─░ptal ediliyor.\n
+
+# Check_For_Format()
+7,0:  Ba┼şlatma sekt├Âr├╝ okunamaz, disk hen├╝z bi├ğimlendirilmemi┼ş\n
+7,1: Ba┼şlatma sekt├Âr├╝ i├ğeri─şi makul de─şil, disk hen├╝z FAT ile bi├ğimlendirilmemi┼ş\n
+7,2:Ge├ğersiz %sBPB (kod 0x%x). Hen├╝z bi├ğimlendirilmemi┼ş.\n
+
+# Write_System_Files()
+8,0:\n─░KAZ: PATH de─şi┼şkeninde SYS yok - sistem dosyalar─▒ kurulamad─▒!\n
+8,1:\nSYS ├ğal─▒┼şt─▒r─▒l─▒yor: %s %s\n
+8,2:\nSYS bir kabukta ├ğal─▒┼şt─▒r─▒l─▒yor: %s\n
+8,3:\nSYS %d hata seviyesini geri g├Ânderdi.\n
+8,4:\n─░KAZ: SYS ├ğal─▒┼şt─▒r─▒lmas─▒ ba┼şar─▒s─▒z oldu.\n
+
+# Ask_User_To_Insert_Disk()
+9,0: %c s├╝r├╝c├╝s├╝ i├ğin yeni disket tak─▒n:\n
+9,1: L├╝tfen yeni bir disk tak─▒n,\n
+9,2: Do─şru disk s├╝r├╝c├╝de oldu─şunda ENTER tu┼şuna bas─▒n...
+
+# Confirm_Hard_Drive_Formatting()
+10,0:UNFORMAT k├Âk dizininiz ile FAT'i daha ├Ânce kaydedilen bir duruma geri\n
+10,1:getirecektir.  Bu, i┼şleri ciddi ┼şekilde kar─▒┼şt─▒rabilir!\n
+10,2: UYARI: %s\n
+10,3:SAB─░T D─░SK
+10,4:D─░SKET
+10,5: S├£R├£C├£ %c: ├£ZER─░NDEK─░ T├£M VER─░LER KAYBOLACAKTIR!
+10,6: S├£R├£C├£ %c: ├£ZER─░NDEK─░ T├£M VER─░LER KAYBOLAB─░L─░R!
+10,7: L├£TFEN TEY─░T ED─░N!\n
+# note: will be followed by " (YES/NO)? " from msg 1.3 & 1.4
+10,8: Format komutuyla bi├ğimlendirmeye devam edilsin mi?
+10,9: Unformat ile geri getirmeye devam edilsin mi?
+# %s will be replaced with msg from 1.3
+10,10:Teyit etmek i├ğin %s kelimesinin tamam─▒n─▒ yazman─▒z gerekmektedir.
+
+# Ask_Label()
+11,0:L├╝tfen birim etiketini girin (azami 11 karakter):
+11,1:Etiket yok, diskin olu┼şturma tarih damgas─▒ olmayacak.\n
+
+# Critical_Error_Handler()
+12,0:\n %s disk eri┼şimi esnas─▒nda kritik hata\n
+12,1:\n Program sonland─▒r─▒ld─▒.\n
+
+# Display_Drive_Statistics()
+13,0:\n Birimin seri numaras─▒ ┼şudur: %04X-%04X\n
+13,1:bayt
+13,2:kbayt
+13,3:mbayt
+13,4:Sekt├Âr ba┼ş─▒na 512 bayt de─şil - istatistikler yanl─▒┼ş olacak.\n
+# %13s%c%s %s becomes <number><decimal separator>[0|5] [kbytes|bytes]
+13,5 :%13s%c%s %s toplam disk alan─▒ (disk boyutu)\n
+13,6 :%13s%c%s %s bozuk sekt├Ârlerde\n
+13,7 :%13s%c%s %s bozuk sekt├Âr i├ğeren k├╝melerde\n
+13,8 :%13s%c%s %s disk ├╝zerinde mevcut (bo┼ş k├╝me)\n
+13,9 :%13s%c%s %s her atama biriminde.\n
+# second %s replaced with "  " for FAT32 or "" otherwise
+13,10:Disk ├╝zerinde %13s%s atama birimi.\n
+13,11:Atama birimlerinden %13s%s unsur bozuk olarak i┼şaretlendi\n
+# FAT32, 2 spaces, see 13.10 & 13.11
+13,12:
+# FAT12/FAT16, no spaces, see 13.10 & 13.11
+13,13:
+
+# misc messages
+14,0:\n Ge├ğersiz se├ğenek birle┼şimi... L├╝tfen yard─▒m─▒ okuyun. ─░ptal ediliyor.\n
+14,1:-- sonraki sayfay─▒ g├Ârmek i├ğin Enter'a veya ├ğ─▒kmak i├ğin ESC'e bas─▒n  --
+14,2:\nKullan─▒c─▒ iste─şine istinaden iptal edildi.\n
+14,3:Parametre de─şerine izin verilmez - %s%s\n
+14,4:Y├╝zde %3d tamamland─▒.
+
+# Create_File_System()
+15,0:0x%04x FAT32 bayraklar─▒ 0 olarak sabitlendi.\n
+15,1:0x%04x FAT32 s├╝r├╝m├╝ 0 de─şerine zorland─▒.\n
+15,2:Ba┼şlatma / DS Bilgi Sekt├Âr├╝
+15,3:zorland─▒.\n
+15,4:varsay─▒lan konum ge├ğersiz.\n
+15,5: Sekt├Âr 6 ve 1 kullan─▒l─▒yor.\n
+15,6:devre d─▒┼ş─▒ (yer yok).\n
+
+# Get_FS_Info()
+16,0:K├Âk dizin boyutu %u unsura yuvarland─▒, %u katlar─▒.\n
+16,1:Sekt├Âr ba┼ş─▒ 512 bayt de─şil. ─░ptal ediliyor!\n
+16,2:Ge├ğersiz FAT say─▒m─▒. ─░ptal ediliyor!\n
+
+# Write_Boot_Sectors()
+17,0:Ba┼şlatma Yedekleme Sekt├Âr├╝ Yok.\n
+17,1:Ge├ğersiz Ba┼şlatma Yedekleme Sekt├Âr konumu %u??\n
+17,2:DS Bilgi Sekt├Âr├╝ Yok.\n
+17,3:Ge├ğersiz DS Bilgi Sekt├Âr konumu %u??\n
+
+# Write_FAT_Tables()
+18,0:Ge├ğersiz FAT say─▒m─▒. ─░ptal ediliyor!\n
+18,1:UYARI: her FAT %lu sekt├Ârd├╝r, > 16MB-64k, Win9x uyumsuz!\n
+18,2: FAT alan─▒ haz─▒rlan─▒yor...\n
+18,3: Optimize edilmi┼ş ilk K├Âk Dizin boyutu: %lu k├╝me.\n
+18,4:K├Âk Dizini 125 k├╝meye k─▒rp─▒ld─▒!\n
+
+# drivio.c
+19,0: [Hata %d]\n
+19,1: Ge├ğersiz s├╝r├╝c├╝! ─░ptal ediliyor.\n
+19,2: FreeDOS l. kilitleme hatas─▒ 0x%x dikkate al─▒nmad─▒.\n
+19,3: Mant─▒ksal s├╝r├╝c├╝ kilitlenemedi (hata 0x%x)! ─░ptal ediliyor.\n
+19,4: FreeDOS p. kilitleme hatas─▒ 0x%x dikkate al─▒nmad─▒.\n
+19,5: Fizik├« disket s├╝r├╝c├╝s├╝ kilitlenemedi (hata 0x%x)!?\n
+# maybe a better error message? Drive_IO() Invalid request for 0 sectors?
+19,6:Drive_IO(x,y,0)?\n
+# last %s for 19.7 & 19.8 replaced with READ or WRITE from 19.9 or 19.10
+19,7:* bozuk sekt├Âr: %ld (kod 0x%x) ┼şu esnada %s *\n
+19,8:Drive_IO(%s %ld, say─▒ %d ) [%s] [s├╝r├╝c├╝ %c%c]\n
+19,9:YAZMA
+19,10:OKUMA
+19,11:\nEri┼şim bayraklar─▒ al─▒namaz (hata %02x). ─░ptal ediliyor.\n
+19,12:\nEri┼şim bayraklar─▒ etkinle┼ştirilemez (hata %02x). ─░ptal ediliyor.\n
+
+# see above for set 20
+
+# hdisk.c
+21,0:Varsay─▒lan BPB *FAT1x* %u sekt├Âr/FAT, %u k├Âk boyutu. FAT32 zorland─▒.\n
+21,1:Ge├ğersiz S├╝r├╝c├╝! ─░ptal ediliyor.\n
+21,2:Eri┼şim Reddedildi! K─░L─░T sorunu mu? ─░ptal ediliyor.\n
+21,3:GENIOCTL/0860 hatas─▒ %02x. FAT32 deneniyor.\n
+21,4:GENIOCTL/4860 hatas─▒ %02x. FAT32 ├ğekirde─şi yok mu?\n
+21,5:FAT1x FAT boyutu %u sekt├Âr m├╝?\n
+21,6:WinNT/XP/2k DOS istem kutusu. Bi├ğimlendiremez.\n
+21,7:Varsay─▒lan BPB FAT32 k├Âk dizin konumu 2 olarak d├╝zeltildi.\n
+# GDP = Get_Device_Parameters()
+21,8:GDP kendi kendini d├╝zeltme: FAT12 olmal─▒! FAT1x boyutu: %u\n
+21,9:GDP kendi kendini d├╝zeltme: FAT16 olmal─▒! FAT1x boyutu: %u\n
+21,10:GDP kendi kendini d├╝zeltme: hakikaten FAT32! FAT boyutu: %u\n
+21,11:GDP kendi kendini d├╝zeltme: FAT32 diskten FAT1x FAT (%u) / k├Âk (%u) kald─▒r─▒l─▒yor.\n
+21,12:GDP kendi kendini d├╝zeltme: FAT1x olamaz.\n
+21,13:GDP kendi kendini d├╝zeltme: FAT1x olamaz, FAT1x FAT mevcut de─şil\n
+21,14:GDP kendi kendini d├╝zeltme: FAT1x olamaz, FAT1x k├Âk mevcut de─şil.\n
+21,15:GDP varsay─▒lan BPB okuma hatas─▒ %02x.\n
+21,16: Tek say─▒da FAT32 FAT'ler i├ğin hizalama yap.\n
+21,17:Birimin boyutu yok mu!? ─░ptal ediliyor.\n
+21,18:%d bayt / sekt├Âr, 512 de─şil mi!? ─░ptal ediliyor.\n
+21,19:1 veya 2 FAT de─şil ama %hu!? ─░ptal ediliyor.\n
+21,20:UYARI: k├╝meler 64k de─şerinden b├╝y├╝k. Bu son derece uyumsuzdur!\n
+# 21.21 & 21.22 go together
+21,21:UYARI: k├╝meler 32k de─şerinden b├╝y├╝k. MS-DOS veya Win9x ile ├ğal─▒┼şmayacakt─▒r!\n
+21,22:  Ancak WinME, WinNT/2k/XP/2003 ve FreeDOS i├ğin sorun ├ğ─▒kmaz.\n
+21,23:├ûNEML─░ HATA: k├╝me boyutu 0,5, 1, 2, 4, 8, 16, 32, 64k veya 128k de─şil ama %d.%dk!\n
+21,24:  FAT32 s├╝r├╝c├╝y├╝ neredeyse FAT1x olarak bi├ğimlendiriyorduk, aman...\n
+# 21.25 & 21.26 go together
+21.25:UYARI: FAT32 boyutu ┼şundan daha b├╝y├╝k olacakt─▒r: (16 MB - 64 kB)!\n
+21,26:  Win9x, bu s├╝r├╝c├╝y├╝ kullanamayacakt─▒r. Di─şer ─░S'ler daha fazla bellek/i┼şlemci kullanacaklar.\n
+21,27: FAT1x s├╝r├╝c├╝y├╝ neredeyse FAT32 olarak bi├ğimlendiriyorduk, aman...\n
+# 21.28 or 21.29 followed by "FAT12.\n" or "FAT16.\n"
+# with %lu %s size, e.g. 999 kbytes  -- see 13.1 and similar
+21,28: Disk boyutu: %lu %s, 
+21,29: Uyar─▒: Diskin sekt├Âr boyutu standart de─şil, 
+
+# floppy.c
+22,0:Format_Floppy_Cylinder( kafa=%d silindir=%d ) sekt├Âr=%d [int 13.5]\n
+22,1:Par├ğa ba┼ş─▒ sadece ilk %d sekt├Âr kontrol ediliyor\n
+22,2:\nBi├ğimlendirme ba┼şar─▒s─▒z, ilk 7 sekt├Ârde hata!\n
+22,3:Sekt├Âr %4ld CHS=[%2d:%d:%2d] bozuk\n
+22,4:Sabit disk s├╝r├╝c├╝ numaras─▒! ─░ptal ediliyor.\n
+22,5:%ldk olarak bi├ğimlendiriliyor (Sil=%ld Kafa=%ld Sek=%2ld)\n
+22,6:%ldk bi├ğimi i├ğin bilinen ortam t├╝r├╝ yok\n
+22,7:%ldk bi├ğimi (Sil=%ld Kafa=%ld Sek=%2ld) i├ğin bilinen ortam t├╝r├╝ yok\n
+22,8:0x%x t├╝r├╝ int 13.8 s├╝r├╝c├╝ 1440k olarak ele al─▒n─▒yor.\n
+22,9:S├╝r├╝c├╝ varsay─▒lan─▒ kullan─▒l─▒yor: %ldk (Sil=%ld Kafa=%ld Sek=%2ld)\n
+22,10:%ldk boyutu tan─▒mlanmam─▒┼ş m─▒!??\n
+22,11:%dk s├╝r├╝c├╝de %ldk de─şeri mi istiyorsunuz? ├çok fazla. ─░ptal ediliyor.\n
+22,12:A┼ŞIRI B─░├ç─░MLEND─░RME: %dk s├╝r├╝c├╝de %ldk. ─░yi ┼şanslar!\n
+22,13:Bu, 720k bir s├╝r├╝c├╝: /1, /4 veya /8 m├╝mk├╝n de─şil.\n
+22,14:Bu s├╝r├╝c├╝ t├╝r├╝ i├ğin asgari boyut ┼şudur: 720k\n
+22,15:Bu, 3,25 in├ğ bir s├╝r├╝c├╝d├╝r: /1, /4 veya /8 m├╝mk├╝n de─şildir.\n
+22,16:Bu s├╝r├╝c├╝ t├╝r├╝ i├ğin asgari boyut ┼şudur: 720k.\n
+22,17:Bu, 3,25 in├ğ bir s├╝r├╝c├╝d├╝r: 1200k bi├ğimlendirme yoktur.\n
+22,18:S├╝r├╝c├╝ kipi (boyut s─▒n─▒f─▒ %d) ayarlamas─▒ ba┼şar─▒s─▒z, %02x hex hatas─▒\n
+22,19:S├╝r├╝c├╝de disk yok!\n
+22,20:Yine de devam ediliyor.\n
+22,21:S├╝r├╝c├╝de disk yok (zaman a┼ş─▒m─▒)!\n
+22,22:Ortam t├╝r├╝ %ldk  (%d x %ld x %2d)  bu s├╝r├╝c├╝ taraf─▒ndan desteklenmez mi!?\n
+22,23:Geometri set (int 13.18) hatas─▒ (%02x). 
+22,24:Vazge├ğiliyor.\n
+22,25:Dikkate al─▒nmad─▒.\n
+22,26:DDPT ROM'da - sadece standart boyutlar m├╝mk├╝n.\n
+22,27:PAR├çA BA┼ŞI SEKT├ûRLER %d de─şerinde tak─▒ld─▒, %d istenmi┼şti. Yine de devam ediliyor.\n
+22,28:DDPT ayar─▒ imk├óns─▒z: DDPT ROM'da\n
+22,29:%d sek/sil. i├ğin bilinen bo┼şluk uzunlu─şu yok. BIOS de─şeriyle iyi ┼şanslar!\n
+22,30:AYAR: DDPT'de silindir ba┼ş─▒ sekt├Âr ┼şu de─şere ayarland─▒: %d\n
+22,31:AYAR: silindir ba┼ş─▒ %d sekt├Âr, bi├ğim bo┼şluk uzunlu─şu %d!\n
+22,32:Disket kontrolc├╝s├╝ s─▒f─▒rlamas─▒ ba┼şar─▒s─▒z oldu (kod %x) - DDPT ret mi edildi?\n
+22,33:-- Diski bi├ğimlendirmek i├ğin ENTER tu┼şuna bas─▒n (─░ptal etmek i├ğin ESCAPE) --\n
+22,34:[doublestepping] 
+22,35:[yap─▒land─▒r─▒lan t├╝r %hu] 
+22,36: 500 kbps (HD 1xx0k)\n
+22,37: 300 kbps (DD  360k)\n
+22,38: 250 kbps (DD  720k)\n
+22,39:1000 kbps (ED 2880k)\n
+
+# savefs.c
+23,0:MIRROR HAR─░TA sekt├Âr├╝ %lu yaz─▒lam─▒yor - UNFORMAT bozuldu!\n
+23,1:512 bayt / sekt├Âr de─şil. UNFORMAT verileri kaydedilemez.\n
+23,2:1 veya 2 FAT kopyas─▒ de─şil. UNFORMAT verileri kaydedilemez.\n
+23,3:UYARI: ayr─▒lm─▒┼ş / ba┼şlatma sekt├Âr says─▒ 1 de─şil %u.\n
+23,4:UYARI: ayr─▒lm─▒┼ş sekt├Âr say─▒s─▒ %u fakat bi├ğimlendirme sonras─▒ %u olacak.\n
+23,5: FAT32 olmal─▒, %s de─şil!\n
+23,6: UNFORMAT verileri kaydedilmiyor, bozuk k├╝me listesi muhafaza edilmiyor.\n
+23,7:UYARI: FAT1x tarz─▒ ilave K├Âk Dizin ile FAT32 mi???\n
+23,8: FAT32 olmal─▒, FAT1x de─şil!\n
+23,9: FAT32 K├Âk Dizini fakat FAT1x FAT!\n
+23,10: %s boyut fakat FAT32 olmal─▒yd─▒!\n
+23,11: Makul Olmayan K├Âk Dizini, FAT veya s├╝r├╝c├╝ boyutu! Ba┼şlatma sekt├Âr├╝ bozuk mu?\n
+23,12: K├╝├ğ├╝k veriler i├ğin b├╝y├╝k FAT mi? Ba┼şlatma sekt├Âr├╝ bozuk mu?\n
+23,13:K├Âk Dizin ilk k├╝mede DE─Ş─░L, kaydedilmiyor!\n
+23,14: S├╝r├╝c├╝ bi├ğimlendirilmemi┼ş g├Âr├╝n├╝yor, UNFORMAT verileri kaydedilmemi┼ş.\n
+23,15:Ayr─▒lm─▒┼ş sekt├Âr say─▒s─▒ farkl─▒: BULUNAN %lu / PLANLANAN %u.\n
+23,16:FAT say─▒s─▒ farkl─▒: BULUNAN %lu / PLANLANAN %hu\n
+23,17:K├╝me say─▒s─▒ farkl─▒: BULUNAN %lu / PLANLANAN %hu (sekt├Âr)\n
+#  FOUND # FAT?? / PLANNED # FAT??
+23,18:FAT boyutu farkl─▒: BULUNAN %lu %s / PLANLANAN %lu %s\n
+23,19:MIRROR verileri kullan─▒lan k├╝meleri ezerdi. ─░ptal ediliyor.
+23,20:G├╝venli bi├ğimlendirme: %lu kullan─▒lm─▒┼ş veri sekt├Âr├╝ silinmeli!\n
+23,21:Mirror harita i┼şaret├ğisi yazma hatas─▒ - UNFORMAT sizin i├ğin ba┼şar─▒s─▒z olacak!\n
+23,22:UNFORMAT / mirror verilerinin yedeklenmesi ad─▒m─▒ atlan─▒yor.\n
+23,23:%lu sekt├Âr├╝nde okuma hatas─▒ - UNFORMAT verisi hasarl─▒\n
+23,24:%lu sekt├Âr├╝nde yazma hatas─▒ - UNFORMAT verisi hasarl─▒\n
+23,25: Mirror haritas─▒ %lu bayt boyutunda, 
+23,26: %lu sekt├Âr yans─▒t─▒ld─▒.\n
+23,27:MIRROR / UNDELETE verisi yok: yanl─▒┼ş sihir.\n
+23,28:\n mirror haritas─▒n─▒n sonu. UNFORMAT tamamland─▒.\n
+23,29: Ba┼şlatma sekt├Âr├╝ yedeklemeye klonlan─▒yor.\n
+23,30: Dosya sistemi bilgi sekt├Âr├╝ verileri ge├ğersiz k─▒l─▒n─▒yor.\n
+23,31:*** Yedekleme sekt├Âr├╝ %lu sekt├Âr %lu unsuruna kopyalanamad─▒ ***\n
+23,32:Ba┼şlatma sekt├Âr├╝ sa├ğma verilerle ezilecekti, 0 veya > 7 FAT.\n
+23,33:*** %lu sekt├Âr├╝ geri getirilemedi ***\n
+23,34:*** FAT sekt├Âr├╝ %lu sekt├Âr %lu unsuruna klonlanamad─▒ ***\n
+23,35:UYARI: %hu FAT kopyas─▒ talep edildi, yerine %hu kullan─▒l─▒yor.\n
+23,36:UYARI: UNFORMAT FAT1x s├╝r├╝c├╝y├╝ FAT32 olarak de─şi┼ştiriyor.\n
+23,37:UYARI: UNFORMAT FAT32 s├╝r├╝c├╝y├╝ FAT1x olarak de─şi┼ştiriyor!?\n
+23,38:\n Ba┼şlatma sekt├Âr├╝ verileri: %hu FAT kopyas─▒ (kayma %lu), FAT ba┼ş─▒na %lu sekt├Âr\n
+
+# savefs.c unable to save filesystem properties error message
+# Use as many messages as needed, 1 message per max 79 column line
+# message numbers do not need to match up for messages for different languages
+# Each message should end with a newline \n
+# after every 23 messages user will be prompted to press a key to continue
+24,0:Dosya sistemi ├Âzellikleri de─şi┼şecek, eski bozuk k├╝me listesi (ki belki\n
+24,1:bo┼ş) muhafaza edilemez. Bozuk k├╝me listesini g├╝ncellemek istiyorsan─▒z\n
+24,2:bir y├╝zey tarama arac─▒ veya FORMAT /U kullan─▒n.\n
+
+# recordbc.c
+25,0:Kullan─▒lamaz disk: sistem verilerinde bozuk sekt├Âr. Bi├ğimlendirme sonland─▒r─▒ld─▒.\n
+25,1:\nBa┼şlatma sekt├Âr├╝ bozuk.\n
+25,2:\nFAT sekt├Âr├╝ bozuk.\n
+25,3:\nK├Âk dizin sekt├Âr├╝ bozuk.\n
+25,4:\nBa┼şlatma sekt├Âr├╝ bozuk.\n
+25,5:\nFAT sekt├Âr├╝ bozuk..\n
+25,6:\nK├Âk dizin sekt├Âr├╝ bozuk.\n
+25,7:\nAyr─▒lm─▒┼ş sekt├Âr (ba┼şlatma, bilgi, her birinin yedeklemesi...) bozuk.\n
+25,8:\nFAT sekt├Âr├╝ bozuk.\n
+25,9:*** Bozuk sekt├Âr %lu, %lu k├╝mesi FAT i├ğinde bozuk olarak i┼şaretlendi! ***\n
+25,10:UYARI: KULLANILMI┼Ş %lu k├╝mesinin bozuk olarak i┼şaretlenmesi gerekiyor!\n
+25,11:*** %u bozuk sekt├Âr bulundu. %lu k├╝me bozuk olarak i┼şaretlendi. ***\n
+
+# bcread.c (bad clusters)
+26,0:\n *** ├çok fazla bozuk k├╝me! B─░├ç─░MLEND─░RME sonras─▒ y├╝zey taramas─▒ yap─▒n! ***\n
+26,1:BadClustPreserve iptal edildi: 512 bayt/sekt├Âr de─şil!\n
+26,2: FAT sekt├Ârleri %lu unsurundan %lu unsuruna taran─▒yor...\n
+26,3: Mevcut FAT taran─▒yor...\n
+26,4:\n K├╝me istatistikleri: %lu kullan─▒lm─▒┼ş, %lu bozuk, %lu unsur, %lu son.\n
+26,5:\n K├╝me istatistikleri: %lu kullan─▒lm─▒┼ş, %lu bozuk, %lu unsur, %lu son.\n
+26,6: Mevcut FAT12 i┼şlenemez, ├ğok b├╝y├╝k!\n
+26,7:\n K├╝me istatistikleri: %lu kullan─▒lm─▒┼ş, %lu bozuk, %lu unsur, %lu son.\n
