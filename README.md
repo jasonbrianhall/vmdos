@@ -105,6 +105,11 @@ DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
 LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM, FORMAT, FDISK,
 CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
 FDCONFIG.SYS to take the `;` off). WHICH is built into FreeCOM.
+ZCOPY is vmdos's own XCOPY: the same switches (and COPYCMD), with long file
+names (quoted, spaces and all, where DOSLFN is loaded; 8.3 names otherwise),
+a progress bar for the whole copy (current file, total, speed, time left;
+`/NP` turns it off), `/EXCLUDE:list.txt` and Ctrl-C that removes the half-written
+file: `ZCOPY "C:\My Games" D:\BACKUP /S /E /I`.
 `third_party/dosutils/README.vmdos` and `third_party/vim/README.vmdos` say where each comes from.
 
 AUTOEXEC.BAT loads DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
@@ -950,7 +955,7 @@ untested.
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
-| `dos/edit/`, `dos/tree/`, `dos/bin/` | EDIT, vmdos's text editor, and TREE (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
+| `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
 | `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
