@@ -59,6 +59,14 @@ def main():
         if have and have != want:
             print("mkdisk: %s is FAT%d, kept (updated in place); FRESH=1 makes it anew as FAT%d" % (out, have, want),
                   file=sys.stderr)
+        if ptype is not None:     # the partition type (and active flag) as asked, in place
+            with open(out, "r+b") as f:
+                f.seek(446)
+                e = bytearray(f.read(16))
+                if e[4] and (e[4] != ptype or e[0] != 0x80):
+                    e[0], e[4] = 0x80, ptype
+                    f.seek(446)
+                    f.write(e)
         copy_files(out, files, True)
         if bios: bios_boot(out, *bios)
         return
