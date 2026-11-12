@@ -56,7 +56,13 @@ most ~4 GB; for MS-DOS 6.22 booting from C:).
 esp.img boots both ways through GRUB: on UEFI, `EFI/BOOT/BOOTX64.EFI` is
 GRUB, which chainloads `EFI/vmdos/vmdos.efi`; on a legacy BIOS (or CSM),
 GRUB's boot code in the MBR and in the gap before the partition boots
-`boot/vmdos.elf`. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
+`boot/vmdos.elf`. The partition is FAT32 (type 0C) and active, as on
+Windows install sticks: some InsydeH2O (HP, Acer) and other CSMs skip a
+stick in legacy mode without the active flag or with an EFI-typed (EF)
+partition (`ESP_TYPE=EF` for that anyway). If the stick still doesn't show
+in the legacy boot menu: enable Legacy Support, disable Secure Boot, put
+"USB Diskette on Key/USB Hard Drive" first, and on some older HP Pavilions
+enable floppy boot and put "USB Floppy" first. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
 own entries go in `boot/grub/custom.cfg` on the stick, which nothing
 overwrites. The menu waits 5 s; its second entry boots with `noxms` (no
 XMS driver):

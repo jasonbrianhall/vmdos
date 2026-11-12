@@ -336,7 +336,7 @@ GRUB_MODS := part_msdos part_gpt fat normal configfile search search_fs_file tes
 VMDOS_EFI_DIR := $(if $(filter 1,$(GRUB)),EFI/vmdos,EFI/BOOT)
 # Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list, GRUB).
 $(BUILD)/esp.opts: FORCE | $(BUILD)
-	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT) $(OEM_PATH)' > $@.new
+	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT) $(OEM_PATH) $(ESP_TYPE)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
@@ -442,6 +442,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 # path or EFI/BOOT/BOOTX64.EFI. vmdos.efi finds dos.img / vmdos.cfg in
 # EFI/vmdos or EFI/BOOT when they aren't next to it; GRUB searches for its files.
 OEM_PATH ?= 1
+# ESP_TYPE: esp.img's MBR partition type. 0C (FAT32 LBA, active) with GRUB,
+# as on Windows and Rufus BIOS+UEFI sticks: some InsydeH2O and other CSMs
+# won't legacy-boot a disk whose active partition is EF, while UEFI firmware
+# reads EFI/BOOT from any FAT partition. EF without GRUB (UEFI only).
+ESP_TYPE ?= $(if $(filter 1,$(GRUB)),$(if $(filter 16,$(ESP_FAT)),0E,0C),EF)
 ESP_OEM_FILE = $(if $(filter 1,$(OEM_PATH)),$(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI,vmdos.efi)=EFI/Microsoft/Boot/bootmgfw.efi)
 ESP_GRUB_DEPS  := $(if $(filter 1,$(GRUB)),vmdos.elf $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/grub/grub.cfg)
 ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BOOTX64.EFI vmdos.elf=boot/vmdos.elf \
@@ -449,7 +454,7 @@ ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BO
 esp: esp.img
 esp.img: vmdos.efi $(RAM_IMG) $(FLOPPY) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
 	$(if $(filter 1,$(GRUB)),,@echo "esp.img: UEFI only (GRUB=0, or grub-mkimage / GRUB's i386-pc and x86_64-efi modules not found)")
-	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=EF $(if $(filter 16,$(ESP_FAT)),--boot16=$(BUILD)/fat16.bin) $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
+	python3 tools/mkdisk.py $(if $(FRESH),,--update) $(filter --bios=%,$(ESP_GRUB_FILES)) --type=$(ESP_TYPE) $(if $(filter 16,$(ESP_FAT)),--boot16=$(BUILD)/fat16.bin) $@ $(ESP_MB) $(BUILD)/fat32lba.bin \
 	    $(DOS_FILES) vmdos.efi=$(VMDOS_EFI_DIR)/$(if $(filter 1,$(GRUB)),vmdos.efi,BOOTX64.EFI) \
 	    $(if $(USE_RAM),dos.img=$(VMDOS_EFI_DIR)/dos.img) $(FLOPPY)=$(VMDOS_EFI_DIR)/floppy.img $(BUILD)/vmdos.cfg=$(VMDOS_EFI_DIR)/vmdos.cfg \
 	    $(filter-out --bios=%,$(ESP_GRUB_FILES)) $(ESP_OEM_FILE) $(ISO_C) $(if $(EXTRA),"--contents=$(EXTRA)")
