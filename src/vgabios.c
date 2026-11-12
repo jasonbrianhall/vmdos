@@ -190,6 +190,7 @@ static int pick_card(int cur)
     if (!strncmp(v, "ask", 3)) {
         static char line[100];
         tscr = phys_low(0xB8000);
+        bootcon_hold(1);                          /* the log off the screen while the menu is up */
         trow = 0;
         for (int r = 0; r < 25; r++) tline("");
         trow = 0;
@@ -204,12 +205,13 @@ static int pick_card(int cur)
             tline(line);
             kprintf("%s\n", line);
         }
-        if (n_cards < 2) { tline(""); tline("Only one card: nothing to choose."); kprintf("video=vbe: one card\n"); sleep_ms(2000); return cur; }
+        if (n_cards < 2) { tline(""); tline("Only one card: nothing to choose."); kprintf("video=vbe: one card\n"); sleep_ms(2000); bootcon_hold(0); return cur; }
         tline("");
         snprintf(line, sizeof line, "Press 1-%d (Enter or 15 s: keep %d)", n_cards, cur + 1);
         tline(line);
         kprintf("%s\n", line);
         int k = read_digit(n_cards, 15);
+        bootcon_hold(0);                          /* the log back */
         return k ? k - 1 : cur;
     }
     int k = 0;

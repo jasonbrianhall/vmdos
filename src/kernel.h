@@ -415,6 +415,8 @@ void video_console_restore(void);
 extern int bootcon_on;
 int bootcon_start(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp, u8 rpos, u8 gpos, u8 bpos);
 void log_to_bootcon(void);
+int bootcon_start_text(u32 phys, u32 cols, u32 rows);   /* the VGA text screen (video=vbe: GRUB keeps text mode) */
+void bootcon_hold(int on);                   /* a menu on the text screen: the log stops drawing (1), back (0) */
 void bootcon_remap(u32 lin);
 void bootcon_stop(void);
 void bootcon_dos_started(void);               /* the log screen (video=vbe on another card): new title, black till Ctrl+Shift+F10 */
