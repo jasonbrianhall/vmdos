@@ -7,8 +7,11 @@
    It draws straight into the framebuffer the loader set up, before paging
    (at its physical address) and after (at its mapping), with its own font
    cells and nothing from video.c, so it works before the video code is
-   up. 32-bit pixels only (UEFI GOP and GRUB's mode are); anything else:
-   the log stays on serial and the stop screen. When the screen fills, it
+   up. 32-bit pixels (UEFI GOP and GRUB's mode are), or the VGA text
+   screen the PC's BIOS left (GRUB keeps text mode for video=vbe: the log
+   goes there, character cells at B8000h, till DOS starts and the card's
+   own BIOS sets its mode); anything else: the log stays on serial and the
+   stop screen. When the screen fills, it
    jumps up by half a screen (one redraw per half screen: framebuffer
    writes before paging are uncached and slow). */
 #include "kernel.h"
@@ -25,11 +28,17 @@ static char text[MAX_ROWS][MAX_COLS];         /* what is on screen, for the jump
 static int dos_on_other;                      /* video=vbe on another card: DOS runs there, the log stays here */
 static int hidden;                            /* that screen kept black (Ctrl+Shift+F10 shows it); text[] still kept */
 static volatile int want_shown = -1;          /* a show/hide not yet done (busy when asked) */
+static int textmode;                          /* a VGA text screen: fb is its cells (char, attribute) */
+static u32 text_phys;                         /* its physical address (B8000h) */
 
 static u32 rgb(u8 r, u8 g, u8 b) { return (u32)r << rpos | (u32)g << gpos | (u32)b << bpos; }
 
 static void glyph(int r, int c, u8 ch, u32 fg, u32 bg)
 {
+    if (textmode) {                               /* fg, bg: the attribute's halves */
+        ((volatile u16 *)fb)[r * (int)(pitch / 2) + c] = (u16)((bg << 4 | fg) << 8 | ch);
+        return;
+    }
     const u8 *f = vga_font16 + ch * 16;
     u32 x0 = (u32)c * 8 * scale, y0 = (u32)r * 16 * scale;
     for (u32 y = 0; y < 16 * scale; y++) {
@@ -49,8 +58,8 @@ static void glyph_px(u32 x0, u32 y0, u32 sc, u8 ch, u32 fg, u32 bg)
     }
 }
 
-static u32 fg_of(int r) { return r == 0 ? rgb(255, 255, 255) : rgb(200, 200, 200); }
-static u32 bg_of(int r) { return r == 0 ? rgb(0, 0, 170) : 0; }
+static u32 fg_of(int r) { return textmode ? (r == 0 ? 15 : 7) : r == 0 ? rgb(255, 255, 255) : rgb(200, 200, 200); }
+static u32 bg_of(int r) { return textmode ? (r == 0 ? 1 : 0) : r == 0 ? rgb(0, 0, 170) : 0; }
 
 static void draw_row(int r)
 {
@@ -92,10 +101,41 @@ int bootcon_start(u64 addr, u32 p, u32 w, u32 h, u32 bpp, u8 rp, u8 gp, u8 bp)
     return 1;
 }
 
+/* The VGA text screen the PC's BIOS (and GRUB) left: c x r cells at phys
+   (B8000h), before paging. The cursor goes off: the log moves on its own. */
+int bootcon_start_text(u32 phys, u32 c, u32 r)
+{
+    if (phys != 0xB8000 && phys != 0xB0000) return 0;
+    if (c < 40 || c > MAX_COLS || r < 20 || r > MAX_ROWS) return 0;
+    textmode = 1; text_phys = phys;
+    fb = (volatile u8 *)(uintptr_t)phys; pitch = c * 2; width = c; height = r; scale = 1;
+    cols = (int)c; rows = (int)r;
+    u16 crtc = phys == 0xB0000 ? 0x3B4 : 0x3D4;
+    outb(crtc, 0x0A); outb(crtc + 1, (u8)(inb(crtc + 1) | 0x20));   /* cursor off */
+    for (u32 i = 0; i < c * r; i++) ((volatile u16 *)fb)[i] = 0x0720;
+    memset(text, 0, sizeof text);
+    row = 1; col = 0;
+    bootcon_on = 1;
+    title();
+    return 1;
+}
+
+/* A menu on the text screen (display=ask): the log stops drawing (1), then
+   comes back over it (0). What's logged meanwhile is kept. */
+void bootcon_hold(int on)
+{
+    if (!bootcon_on || dos_on_other) return;
+    while (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) ;
+    hidden = on;
+    if (!on) for (int r = 0; r < rows; r++) draw_row(r);
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+}
+
 /* Paging is on: the framebuffer is at lin now (0: not mapped; stop). */
 void bootcon_remap(u32 lin)
 {
     if (!bootcon_on) return;
+    if (textmode) { fb = (volatile u8 *)phys_low(text_phys); return; }   /* low memory: through LOW_ALIAS */
     if (!lin) { bootcon_on = 0; return; }
     fb = (volatile u8 *)(uintptr_t)lin;
 }
@@ -104,6 +144,7 @@ void bootcon_stop(void) { bootcon_on = 0; }
 
 static void clear_fb(void)
 {
+    if (textmode) { for (u32 i = 0; i < width * height; i++) ((volatile u16 *)fb)[i] = 0x0720; return; }
     for (u32 y = 0; y < height; y++) {
         volatile u32 *q = (volatile u32 *)(fb + y * pitch);
         for (u32 x = 0; x < width; x++) q[x] = 0;
