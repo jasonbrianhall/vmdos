@@ -710,6 +710,33 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         img_path[n_p++] = c;
     }
     for (UINTN i = 0; i < n_p; i++) if (img_path[i] == L'\\') cut = i + 1;
+    // Started from a path the firmware insists on (some InsydeH2O laptops
+    // only boot \EFI\Microsoft\Boot\bootmgfw.efi or \EFI\BOOT\BOOTX64.EFI)
+    // with nothing of ours next to it: use the folder that has dos.img,
+    // floppy.img or vmdos.cfg, so they needn't be copied there too.
+    {
+        static const CHAR16* dirs[] = { NULL, L"\\EFI\\vmdos\\", L"\\EFI\\BOOT\\" };
+        static const CHAR16* files[] = { L"dos.img", L"floppy.img", L"vmdos.cfg" };
+        static CHAR16 own[512];
+        img_path[cut] = 0;
+        StrCpy(own, img_path);
+        UINTN own_cut = cut;
+        int found = 0;
+        for (int d = 0; d < 3 && !found; d++) {
+            if (dirs[d]) {
+                if (!StriCmp(own, (CHAR16*)dirs[d])) continue;   // already looked there
+                StrCpy(img_path, (CHAR16*)dirs[d]);
+                cut = StrLen(img_path);
+            }
+            for (int f = 0; f < 3 && !found; f++) {
+                StrCpy(img_path + cut, (CHAR16*)files[f]);
+                found = file_exists(image, img_path);
+            }
+            img_path[cut] = 0;
+            if (found && dirs[d]) Print(L"  files from    %s (not next to %s)\r\n", img_path, own);
+        }
+        if (!found) { StrCpy(img_path, own); cut = own_cut; }   // nowhere: our own folder, as before
+    }
     StrCpy(img_path + cut, L"dos.img");
 
     // Load options -> command line; "debug" alone pauses here.
