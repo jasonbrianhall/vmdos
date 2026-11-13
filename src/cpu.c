@@ -71,6 +71,10 @@ void phys_release(void *p, u32 bytes)
 u32 phys_free(void) { u32 n = 0; for (int i = 0; i < nfr; i++) n += fr[i].hi - fr[i].lo; return n; }
 u32 phys_largest(void) { u32 n = 0; for (int i = 0; i < nfr; i++) if (fr[i].hi - fr[i].lo > n) n = fr[i].hi - fr[i].lo; return n; }
 u32 ram_top_addr(void) { return ram_top; }
+static u32 ram_usable;
+static u64 ram_high;                           /* RAM above 4 GiB: out of reach, never touched */
+u32 phys_total(void) { return ram_usable; }
+u64 phys_unreachable(void) { return ram_high; }
 u32 phys_spare(void) { u32 f = phys_free(); return f > HEAP_RESERVE ? f - HEAP_RESERVE : 0; }
 
 #define LOW_END 0x1000000u
@@ -708,8 +712,10 @@ void kmain(u32 magic, struct mb_info *mb)
         u8 *p = (u8 *)(uintptr_t)mb->mmap_addr, *e = p + mb->mmap_length;
         for (; p < e && nr < 128; p += *(u32 *)p + 4) {
             u64 b = *(u64 *)(p + 4), l = *(u64 *)(p + 12);
-            if (*(u32 *)(p + 20) != 1 || b >= 0xFFFFF000ull) continue;
+            if (*(u32 *)(p + 20) != 1) continue;
             u64 top = b + l;
+            if (top > 0x100000000ull) ram_high += top - (b > 0x100000000ull ? b : 0x100000000ull);
+            if (b >= 0xFFFFF000ull) continue;
             if (top > 0xFFFFF000ull) top = 0xFFFFF000ull;
             rgn[nr].b = (u32)b; rgn[nr].t = (u32)top; nr++;
         }
@@ -719,6 +725,7 @@ void kmain(u32 magic, struct mb_info *mb)
     for (int r = 0; r < nr; r++) {
         u32 lo = (rgn[r].b + 4095) & ~4095u, hi = rgn[r].t & ~4095u;
         if (hi > ram_top) ram_top = hi;
+        if (hi > lo) ram_usable += hi - lo;
         if (lo < LOW_END) lo = LOW_END;              /* below 16 MiB: the guest and DPMI window */
         for (int i = 0; i <= nex && lo < hi; i++) {
             u32 end = i < nex && ex[i].lo < hi ? ex[i].lo : hi;
@@ -820,6 +827,7 @@ void kmain(u32 magic, struct mb_info *mb)
     v3_init();                                    /* voodoo3: its memory before EMS, XMS and DPMI take the heap */
     ems_init();                                   /* before XMS: the page frame takes E000h from the UMBs */
     xms_init();
+    balloon_init();
     mouse_ps2_init();
     usb_ready = 1;
     smp_start(tramp);

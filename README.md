@@ -795,6 +795,14 @@ every packet (DMESG).
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
+### Memory statistics for the host (virtio-balloon)
+
+With a virtio-balloon device (QEMU `-device virtio-balloon-pci,id=bal`), vmdos reports
+total, free and available memory (what XMS, EMS and DPMI can still get) on its statistics
+queue. QMP: `qom-set bal guest-stats-polling-interval 2`, then `qom-get bal guest-stats`;
+libvirt: `virsh dommemstat`. Inflating isn't supported (the balloon stays empty);
+`balloon=off` skips the device.
+
 ### Host folders: VMDOSNET (9P: QEMU's virtio-9p, or a server on the network)
 
 A folder as a DOS drive, over 9P2000.L: one QEMU shares (virtio-9p), or a

@@ -135,6 +135,8 @@ u32 phys_largest(void);                       /* the biggest piece phys_alloc co
 #define HEAP_RESERVE (4u << 20)                /* kept for the kernel: EMS, XMS, DPMI stop short of it */
 u32 phys_spare(void);                         /* phys_free less HEAP_RESERVE */
 u32 ram_top_addr(void);                       /* the end of RAM below 4 GiB */
+u32 phys_total(void);                         /* usable RAM below 4 GiB (the firmware's map) */
+u64 phys_unreachable(void);                   /* usable RAM above 4 GiB, which vmdos never uses */
 void set_user(u32 lin, u32 len, int user);    /* ring 3 access to these pages */
 void *map_mmio64_user(u64 phys, u32 len);
 u32 guest_phys(u32 lin);                      /* physical page behind guest linear lin */
@@ -367,6 +369,8 @@ void fs9p_idle(void);                         /* DOS idle: gathered writes out *
 /* ---- net.cpp: the PC's Ethernet card for VMPKT.COM (INT 2Fh AX=564Eh) ---- */
 extern int net_ready;
 void net_init(void);
+void balloon_init(void);                      /* balloon_virtio.cpp: memory statistics for the host */
+void balloon_tick(void);
 void net_tick(void);                          /* every timer tick: poll the card */
 void net_api(struct regs *r);
 void info_api(struct regs *r);                /* INT 2Fh AX=5649h: LSPCI.COM / LSUSB.COM (sysinfo.cpp) */
