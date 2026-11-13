@@ -454,12 +454,14 @@ running, to swap discs and disks without quitting the game (an installer
 or a game asking for disc 2, a floppy for a booter's save disk). While it
 is open it has the keyboard; the game keeps running underneath, and Esc
 or Ctrl+Shift+F6 closes it. It opens with what every drive holds.
-Commands (paths are 8.3 names, on C: unless another drive is given, and
-relative to the current folder unless they start with a backslash):
+Commands (paths are long or 8.3 names, on the current drive unless another is
+given, and relative to that drive's current folder unless they start with a
+backslash; quote names with spaces, except after cd):
 
     status                     what every drive holds
-    cd \ISOS, cd .., cd\, cd   change the current folder on C:, or show it (the prompt does too)
-    dir [FOLDER]               files and folders (the current one; dir D:\ for a VMHD drive)
+    A:, D:, F:                 make it the current drive (C:, floppy images, VMHD drives, CDs)
+    cd \ISOS, cd .., cd\, cd   change the current folder, or show it (each drive has its own)
+    dir [FOLDER]               files and folders (the current one; dir A:, dir F:\GAMES ...)
     vmcd                       the CD drives (1, 2 ...; their letters once VMCD has run)
     vmcd 1 DISC2.ISO           an ISO or CUE sheet in CD drive 1 (vmcd F: ... works too)
     vmcd 1 eject               empty it (a real drive: open its tray)
@@ -469,6 +471,8 @@ relative to the current folder unless they start with a backslash):
     vmhd                       VMHD's drives and the partitions of the other disks
     vmhd D: 3 [/R] [/Y]        partition 3 in D: (/Y confirms a non-DOS one)
     vmhd D: eject              take it out of D:
+    rescan                     look at every disk again (formatted since, plugged in since)
+    lspci [-v] [-x], lsusb [-v]  what LSPCI.COM and LSUSB.COM show
 
 They do what the DOS commands VMCD, VMFD and VMHD do (`cdrom`, `fd` and
 `hd` work as short names), so DOS and Windows see a disk change as usual. Up/Down bring

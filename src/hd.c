@@ -46,12 +46,27 @@ static struct unit {
     struct part p;
     u8 ro, changed;
     u32 gen;                              /* disk_dev_gen when it went in */
+    u32 bsum;                             /* its boot sector as DOS last read it (a checksum; see refresh) */
+    u32 checked;                          /* ticks at the last look at it from a media check */
 } units[HD_MAX];
+static int refresh(int u);
+int hd_con_scan(void);
 static int bios_on;                       /* the other disks are BIOS disks 81h ... (the DOS kernel is up) */
 static int bios_num(int d);
 static int n_units, first_drive;          /* first_drive: 0 = A: */
 
 static u8 sec[512], sec2[512], ents[512];
+
+/* A checksum of the first sector of partition p (0 when it can't be read):
+   whether it was formatted (or reformatted) behind DOS's back. */
+static u32 boot_sum(int dev, u32 start)
+{
+    static u8 b[512];
+    if (disk_dev_rw(dev, start, 1, b, 0)) return 0;
+    u32 h = 2166136261u;
+    for (int i = 0; i < 512; i++) h = (h ^ b[i]) * 16777619u;
+    return h | 1;
+}
 
 static int probe_dev;
 static int probe_rd(u32 lba, u32 n, void *buf) { return disk_dev_rw(probe_dev, lba, n, buf, 0); }
@@ -414,6 +429,18 @@ void hd_dos_up(void)
                                      hd_bios_disks() > 2 ? "s" : "");
 }
 
+/* A write to disk dev through the BIOS (a formatter, a disk editor) over
+   the first sector of a partition that is in a VMHD drive: DOS reads its
+   BPB again. */
+static void boot_written(int dev, u32 lba, u32 n)
+{
+    for (int u = 0; u < n_units; u++)
+        if (units[u].in && units[u].p.dev == dev && units[u].p.start >= lba && units[u].p.start - lba < n) {
+            units[u].changed = 1;
+            kprintf("hd: %c: its boot sector was written through the BIOS, DOS reads it again\n", 'A' + first_drive + u);
+        }
+}
+
 static int bios_rw(int dev, u32 lba, u32 n, u32 buf, int write)
 {
     u64 total = disk_dev_sectors(dev);
@@ -423,9 +450,12 @@ static int bios_rw(int dev, u32 lba, u32 n, u32 buf, int write)
     if (vga_span(buf, n * 512)) {
         int e;
         VGA_BOUNCED_IO(e, lba, n, 512, buf, write, disk_dev_rw(dev, lba_, cnt_, p_, write));
+        if (write && !e) boot_written(dev, lba, n);
         return e ? (write ? 0x03 : 0x04) : 0;
     }
-    return disk_dev_rw(dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
+    int e = disk_dev_rw(dev, lba, n, gptr(buf), write) ? (write ? 0x03 : 0x04) : 0;
+    if (write && !e) boot_written(dev, lba, n);
+    return e;
 }
 
 void hd_int13(struct regs *r)
@@ -523,6 +553,7 @@ static int attach(int u, int k, int ro, int confirmed, char *msg, int msgn)
     t->p = *p;
     t->ro = (u8)ro;
     t->gen = disk_dev_gen(p->dev);
+    t->bsum = boot_sum(p->dev, p->start);
     t->in = 1;
     t->changed = 1;
     if (!p->fat)
@@ -581,6 +612,11 @@ static void request(struct regs *r)
     else switch (cmd) {
     case 1:                                                         /* media check */
         if (!t->in) { st = ST_ERR(2); break; }
+        if (!t->changed && ticks - t->checked >= 2000) {             /* formatted behind DOS's back? (every 2 s at most) */
+            t->checked = ticks;
+            u32 b = boot_sum(t->p.dev, t->p.start);
+            if (b && b != t->bsum) refresh(u);
+        }
         wr8(rh + 14, t->changed ? 0xFF : 1);
         break;
     case 2: {                                                       /* build BPB */
@@ -592,6 +628,7 @@ static void request(struct regs *r)
         wr16(rh + 18, (u16)(SI(r) + u * 64));
         wr16(rh + 20, DX(r));
         t->changed = 0;
+        t->bsum = boot_sum(t->p.dev, t->p.start);
         break; }
     case 4: case 8: case 9: {                                       /* input, output, output with verify */
         u32 n = rd16(rh + 18), s = rd16(rh + 20);
@@ -645,7 +682,7 @@ void hd_api(struct regs *r)
         request(r);
         return;
     case 2:
-        scan();
+        hd_con_scan();                                              /* the drives' partitions looked at again too */
         list(LIN(r->v86_es, DI(r)));
         AX(r) = (u16)n_units;
         DL(r) = (u8)first_drive;
@@ -684,7 +721,46 @@ void hd_api(struct regs *r)
 /* ---------------- for the media console (Ctrl+Shift+F6, media.c) ----------------
    Drives by DOS number (0 = A:); partitions numbered as VMHD lists them. */
 int hd_con_units(int *first) { *first = first_drive; return n_units; }
-int hd_con_scan(void) { drop_gone(); scan(); return n_parts; }
+
+/* Look at unit u's partition again: its file system (formatted since it
+   went in?) and, when its boot sector isn't the one DOS read, tell DOS the
+   disk changed so it reads the new BPB. 1 when it changed. */
+static int refresh(int u)
+{
+    struct unit *t = &units[u];
+    if (!t->in) return 0;
+    char label[12] = "";
+    int was = t->p.fat;
+    t->p.fat = (u8)fat_at(t->p.dev, t->p.start, t->p.size, label);
+    memcpy(t->p.label, label, sizeof label);
+    u32 b = boot_sum(t->p.dev, t->p.start);
+    if (!b || b == t->bsum) return 0;
+    t->bsum = b;
+    t->changed = 1;
+    if (t->p.fat != was)
+        kprintf("hd: %c: %s now\n", 'A' + first_drive + u, t->p.fat ? "has a FAT file system" : "has no FAT file system");
+    else kprintf("hd: %c: its boot sector changed, DOS reads it again\n", 'A' + first_drive + u);
+    return 1;
+}
+/* drive (0 = A:) as a VMHD drive: -1 not one, 0 empty, 1 holds a partition (looked at again). */
+int hd_con_refresh(int drive)
+{
+    int u = drive - first_drive;
+    if (u < 0 || u >= n_units) return -1;
+    drop_gone();
+    if (!units[u].in) return 0;
+    refresh(u);
+    return 1;
+}
+/* Every disk again (USB disks plugged in since, new partition tables, new
+   file systems), and the partitions in VMHD's drives. */
+int hd_con_scan(void)
+{
+    drop_gone();
+    scan();
+    for (int u = 0; u < n_units; u++) refresh(u);
+    return n_parts;
+}
 void hd_con_describe_unit(int u, char *b, int n)
 {
     if (!units[u].in) { snprintf(b, n, "empty"); return; }

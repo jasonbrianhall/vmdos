@@ -1,7 +1,10 @@
 /* A small read-only FAT12/16/32 reader for the monitor: finds a file by its
    DOS path (8.3 names, as INT 21h AH=60h gives them) and lists the disk
    sectors it occupies. Used to pick C:'s partition (it must hold
-   KERNEL.SYS) and to read CD images straight from files on C: (cd.c). */
+   KERNEL.SYS) and to read CD images straight from files on C: (cd.c).
+   Long (VFAT) names are understood too: a path component matches an
+   entry's 8.3 name or, without regard to case, its long name; listings
+   give the long name when an entry has one. */
 #include "kernel.h"
 
 static int vol_read(struct fatvol *v, u32 lba, void *buf)
@@ -64,9 +67,47 @@ static int name83(const char *p, int n, u8 out[11])
     return k || out[0] != ' ' ? 0 : -1;
 }
 
-/* Search directory (cluster c, 0 = root) for name; fills entry fields. */
-static int dir_find(struct fatvol *v, u32 c, const u8 name[11], u32 *clus, u32 *size, int *isdir)
+/* A long name being gathered from the VFAT entries before an 8.3 entry. */
+struct lfn { char name[256]; u8 sum; int ok; };
+static void lfn_entry(struct lfn *l, const u8 *d)
 {
+    static const u8 at[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+    int ord = d[0] & 0x3F;
+    if (d[0] & 0x40) { memset(l->name, 0, sizeof l->name); l->sum = d[13]; l->ok = 1; }   /* the last part comes first */
+    if (!l->ok || !ord || ord > 20 || d[13] != l->sum) { l->ok = 0; return; }
+    for (int i = 0; i < 13; i++) {
+        u16 c = d[at[i]] | d[at[i] + 1] << 8;
+        if (c == 0 || c == 0xFFFF) break;
+        l->name[(ord - 1) * 13 + i] = c < 0x80 ? (char)c : '?';           /* outside ASCII: '?' */
+    }
+}
+/* The long name that goes with 8.3 entry d, or NULL. */
+static const char *lfn_for(struct lfn *l, const u8 *d)
+{
+    u8 sum = 0;
+    for (int i = 0; i < 11; i++) sum = (u8)(((sum & 1) << 7) + (sum >> 1) + d[i]);
+    int ok = l->ok && sum == l->sum && l->name[0];
+    l->ok = 0;
+    return ok ? l->name : 0;
+}
+static int same_ci(const char *a, const char *b, int n)                    /* a (n chars) == b, case aside */
+{
+    for (int i = 0; i < n; i++) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x -= 32;
+        if (y >= 'a' && y <= 'z') y -= 32;
+        if (x != y || !y) return 0;
+    }
+    return !b[n];
+}
+
+/* Search directory (cluster c, 0 = root) for the component p (n chars):
+   its 8.3 name or its long name; fills entry fields. */
+static int dir_find(struct fatvol *v, u32 c, const char *p, int n, u32 *clus, u32 *size, int *isdir)
+{
+    u8 name[11];
+    int is83 = !name83(p, n, name);
+    struct lfn l = { "", 0, 0 };
     u32 nsec = (c == 0 && v->type != 32) ? v->root_secs : v->spc;
     if (c == 0 && v->type == 32) c = v->root_clus;
     for (int guard = 0; guard < 65536; guard++) {
@@ -76,8 +117,11 @@ static int dir_find(struct fatvol *v, u32 c, const u8 name[11], u32 *clus, u32 *
             for (int e = 0; e < 512; e += 32) {
                 u8 *d = v->sec + e;
                 if (d[0] == 0) return -1;
-                if (d[0] == 0xE5 || d[11] == 0x0F || (d[11] & 8)) continue;
-                if (memcmp(d, name, 11)) continue;
+                if (d[0] == 0xE5) { l.ok = 0; continue; }
+                if (d[11] == 0x0F) { lfn_entry(&l, d); continue; }
+                if (d[11] & 8) { l.ok = 0; continue; }
+                const char *ln = lfn_for(&l, d);
+                if (!(is83 && !memcmp(d, name, 11)) && !(ln && same_ci(p, ln, n))) continue;
                 *clus = *(u16 *)(d + 26) | (v->type == 32 ? (u32)*(u16 *)(d + 20) << 16 : 0);
                 *size = *(u32 *)(d + 28);
                 *isdir = (d[11] & 0x10) != 0;
@@ -91,7 +135,7 @@ static int dir_find(struct fatvol *v, u32 c, const u8 name[11], u32 *clus, u32 *
     return -1;
 }
 
-/* Path like "\ISOS\WAR2.ISO" (or "C:\..." or with '/'); a file, not a folder. */
+/* Path like "\ISOS\WAR2.ISO" (or "C:\..." or with '/', long names too); a file, not a folder. */
 int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size)
 {
     if (path[0] && path[1] == ':') path += 2;
@@ -103,9 +147,7 @@ int fat_lookup(struct fatvol *v, const char *path, u32 *clus, u32 *size)
         if (!*path) break;
         int n = 0;
         while (path[n] && path[n] != '\\' && path[n] != '/') n++;
-        u8 nm[11];
-        if (!isdir || name83(path, n, nm)) return -1;
-        if (dir_find(v, c, nm, &c, size, &isdir)) return -1;
+        if (!isdir || dir_find(v, c, path, n, &c, size, &isdir)) return -1;
         path += n;
     }
     if (isdir) return -1;
@@ -121,7 +163,8 @@ int fat_dir(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *
 {
     return fat_dir_(v, dir, fn, ctx, 0);
 }
-/* The same, folders included: their names end in '\' (size 0). */
+/* The same, folders included: their names end in '\' (size 0), and with
+   long names where entries have them. */
 int fat_dir_all(struct fatvol *v, const char *dir, int (*fn)(void *ctx, const char *name, u32 clus, u32 size), void *ctx)
 {
     return fat_dir_(v, dir, fn, ctx, 1);
@@ -136,12 +179,13 @@ static int fat_dir_(struct fatvol *v, const char *dir, int (*fn)(void *ctx, cons
         if (!*dir) break;
         int n = 0;
         while (dir[n] && dir[n] != '\\' && dir[n] != '/') n++;
-        u8 nm[11];
-        if (name83(dir, n, nm) || dir_find(v, c, nm, &c, &size, &isdir) || !isdir) return -1;
+        if (dir_find(v, c, dir, n, &c, &size, &isdir) || !isdir) return -1;
         dir += n;
     }
     u32 nsec = (c == 0 && v->type != 32) ? v->root_secs : v->spc;
     if (c == 0 && v->type == 32) c = v->root_clus;
+    static struct lfn l;
+    l.ok = 0;
     for (int guard = 0; guard < 65536; guard++) {
         u32 lba = (c == 0) ? v->root_start : clus_lba(v, c);
         for (u32 s = 0; s < nsec; s++) {
@@ -150,13 +194,18 @@ static int fat_dir_(struct fatvol *v, const char *dir, int (*fn)(void *ctx, cons
                 u8 d[32];
                 memcpy(d, v->sec + e, 32);                       /* fn may read the disk (v->sec) */
                 if (d[0] == 0) return 0;
-                if (d[0] == 0xE5 || d[0] == '.' || d[11] == 0x0F || (d[11] & 0x08)) continue;
+                if (d[11] == 0x0F && d[0] != 0xE5) { lfn_entry(&l, d); continue; }
+                if (d[0] == 0xE5 || d[0] == '.' || (d[11] & 0x08)) { l.ok = 0; continue; }
+                const char *ln = lfn_for(&l, d);
                 int isd = (d[11] & 0x10) != 0;
                 if (isd && !dirs) continue;
-                char name[14];
+                static char name[258];
                 int k = 0;
-                for (int i = 0; i < 8 && d[i] != ' '; i++) name[k++] = (char)d[i];
-                if (d[8] != ' ') { name[k++] = '.'; for (int i = 8; i < 11 && d[i] != ' '; i++) name[k++] = (char)d[i]; }
+                if (ln && dirs) while (ln[k] && k < 255)                   /* fat_dir (boot images): 8.3 names */ { name[k] = ln[k]; k++; }
+                else {
+                    for (int i = 0; i < 8 && d[i] != ' '; i++) name[k++] = (char)d[i];
+                    if (d[8] != ' ') { name[k++] = '.'; for (int i = 8; i < 11 && d[i] != ' '; i++) name[k++] = (char)d[i]; }
+                }
                 if (isd) name[k++] = '\\';
                 name[k] = 0;
                 u32 fc = *(u16 *)(d + 26) | (v->type == 32 ? (u32)*(u16 *)(d + 20) << 16 : 0);

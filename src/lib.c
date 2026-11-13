@@ -61,6 +61,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
         int zero = 0, width = 0, left = 0;
         if (*fmt == '-') { left = 1; fmt++; }
         if (*fmt == '0') { zero = 1; fmt++; }
+        if (*fmt == '*') { width = va_arg(ap, int); fmt++; if (width < 0) { left = 1; width = -width; } }
         while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
         if (*fmt == 'l') fmt++;
         char tmp[16]; int len = 0; const char *s = tmp;

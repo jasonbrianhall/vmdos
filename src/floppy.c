@@ -401,6 +401,14 @@ int fd_con_eject(int d)
     fd_eject(d);
     return 0;
 }
+/* Sectors of drive d's image, for the console's DIR: 0, or -1 (empty, or a read error). */
+int fd_con_read(int d, u32 lba, u32 n, void *buf)
+{
+    fd_boot();
+    if (d < 0 || d >= FD_DRIVES || !fd[d].in) return -1;
+    return img_io(&fd[d], lba, n, buf, 0) ? -1 : 0;
+}
+int fd_con_in(int d) { fd_boot(); return d >= 0 && d < FD_DRIVES && fd[d].in; }
 void fd_con_describe(int d, char *b, int n)
 {
     fd_boot();

@@ -236,6 +236,20 @@ int lspci(char* buf, int max, int flags)
 
 } // namespace
 
+// For the media console (media.c): the same text into buf. It runs from the
+// timer tick, which may have cut in between someone's write to the PCI
+// address port (CF8h) and their read of the data: the address is put back.
+extern "C" int sysinfo_text(int which, int flags, char* buf, int max)
+{
+    if (which == 0) {
+        uint32_t a = inl(0xCF8);
+        int n = lspci(buf, max, flags);
+        outl(0xCF8, a);
+        return n;
+    }
+    return usb_list(buf, max, flags & 1);
+}
+
 extern "C" void info_api(struct regs* r)
 {
     int fn = BL(r), flags = r->ebx >> 8 & 0xFF;
