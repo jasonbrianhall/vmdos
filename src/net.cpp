@@ -21,13 +21,16 @@
 // RTL8169/8110 (every chip Linux's r8169 drives) on real PCs, Broadcom Tigon3
 // (BCM570x/575x/578x/5906/5717-5762 NetXtreme and NetLink, Linux's tg3), Atheros/Killer AR8161/8162/8171/8172
 // and E2200/E2400/E2500 (alx), Atheros AR8131/8132/8151/8152 (atl1c), virtio-net (QEMU,
-// -nic model=virtio-net-pci). Kernel options: net=off (none), nic=N,
+// -nic model=virtio-net-pci), the DEC 21140 "Tulip" (Hyper-V Gen 1's Legacy Network
+// Adapter; nic_tulip.cpp), Hyper-V's synthetic network adapter (VMBus, nic_netvsc.cpp;
+// netvsc=off skips it). Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log), e1000=plain|nobits,nophy,nolink,noflag
 // (leave out the ICH/PCH setup steps, to find one a card won't send with).
 //
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
 //   0  query: AX = 1 card / 0 none, CL = link up, CH = card kind
-//      (1 e1000, 2 RTL8139, 3 RTL8168/8125, 4 USB, 5 Broadcom, 6 igb, 7 igc, 8 alx, 9 atl1c, 10 virtio), DX = frames waiting,
+//      (1 e1000, 2 RTL8139, 3 RTL8168/8125, 4 USB, 5 Broadcom, 6 igb, 7 igc, 8 alx, 9 atl1c, 10 virtio,
+//      11 Hyper-V, 12 DEC 21140), DX = frames waiting,
 //      ES:DI <- the MAC (6 bytes). From then on that MAC stays.
 //   1  CL = IRQ to raise while frames wait (FFh: none)
 //   2  send DS:SI, CX bytes (14..1514): AX = 0 sent, 1 failed
@@ -171,7 +174,7 @@ uint8_t dos_mac[6];
 
 // ---------------- the cards ----------------
 // Probed in this order: the first whose match() claims the PCI ID drives it.
-const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio };
+const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio, &nic_tulip };
 
 // Asking the driver can mean several PHY reads over MDIO (Broadcom: about a
 // millisecond), and the packet driver asks with every poll: at most every 100 ms.
@@ -351,6 +354,17 @@ static void net_init_cards(void)
             log_mac(", MAC ", c.mac);
             kprintf(", link %s\n", card_link(c) ? "up" : "down");
         } else kprintf("net: card %d (%04x:%04x) didn't start\n", ncards, c.vendor, c.device);
+    }
+    for (int i = 0; ncards < MAXCARDS; i++) {   // Hyper-V's synthetic adapters (VMBus, not PCI)
+        Card& c = cards[ncards];
+        if (!netvsc_card(i, c)) break;
+        ncards++;
+        c.drv = &nic_netvsc; c.vendor = 0x1414; c.device = 0;   // Microsoft
+        if (card_start(c)) {
+            kprintf("net: card %d: %s", ncards, c.name);
+            log_mac(", MAC ", c.mac);
+            kprintf(", link %s\n", card_link(c) ? "up" : "down");
+        } else kprintf("net: card %d (Hyper-V) didn't start\n", ncards);
     }
     qbuf = (uint8_t*)phys_alloc(QLEN * FRAME_MAX);
     net_ready = 1;                              // a USB adapter may come later

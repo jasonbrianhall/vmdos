@@ -594,6 +594,7 @@ void reboot(void)
     disk_flush();
     cli();
     usb_shutdown();                   /* hand USB back to the firmware, devices off the bus */
+    vmbus_shutdown();                 /* Hyper-V: the host lets go of our rings and buffers */
 
     /* 1. CF9 full reset first: the keyboard controller's reset (below) is
        only a warm CPU reset on many boards, which works, so nothing after it

@@ -13,3 +13,4 @@ tools/t/
 tests/voodoo/obj/
 tests/voodoo/hosttest
 tests/voodoo/emutest
+tests/hvsim/hvsim

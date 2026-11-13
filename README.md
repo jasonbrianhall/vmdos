@@ -128,7 +128,7 @@ EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
 The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
 (parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them), virtio
 disks (QEMU `-drive if=virtio`, `make run DISK=virtio`; `virtio=off` skips them), NVMe disks (`make run DISK=nvme`; `nvme=off` skips them; namespaces
-with 512-byte sectors) and USB
+with 512-byte sectors), Hyper-V's synthetic SCSI disks (see "Hyper-V" below; `storvsc=off` skips them) and USB
 sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
 Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
 started from (it passes the partition's start and disk signature);
@@ -731,7 +731,9 @@ drives) and RTL8139, Broadcom NetXtreme/NetLink (every chip
 Linux's tg3 drives: BCM570x, 575x, 578x, 5906, 5717-5762), the Qualcomm Atheros
 laptop chips (AR8161/8162/8171/8172 and Killer E2200/E2400/E2500, Linux's alx;
 AR8131/8132/8151/8152, Linux's atl1c), QEMU's virtio-net (legacy and
-virtio 1.0), and USB Ethernet adapters
+virtio 1.0), the DEC 21140 "Tulip" (Hyper-V Gen 1's Legacy Network Adapter, and PCI
+cards like the DE500; `tulip=21143` also takes QEMU's `-nic model=tulip`, a 21143), Hyper-V's
+synthetic network adapter (see "Hyper-V" below), and USB Ethernet adapters
 that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
 them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
 
@@ -917,6 +919,36 @@ Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
 PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
 untested.
 
+## Hyper-V
+
+In a Hyper-V virtual machine (Gen 1 or Gen 2) vmdos talks to the host over
+VMBus, as Linux's hv_vmbus does (`src/vmbus.cpp`): the hypercall page and
+the SynIC, then VMBus protocol 6.0 down to the one Server 2008 spoke, the
+channel offers, GPADLs, and each channel's ring buffers, polled. On it:
+
+- **SCSI disks** (`src/blk_storvsc.cpp`, after Linux's storvsc): every disk on
+  the VM's SCSI controllers (up to 4 controllers, LUN 0-63 each, 512-byte
+  sectors, over 2 TiB too), for VMHD like any other disk, and for C: if one
+  holds DOS. A Gen 1 VM boots from IDE, so C: is normally on its IDE disk,
+  which vmdos drives through Hyper-V's emulated IDE controller as on a PC;
+  put the disks you want under DOS on the SCSI controller.
+  `storvsc=off` skips them.
+- **Legacy Network Adapter** (Gen 1): an emulated DEC 21140, driven by
+  `src/nic_tulip.cpp` (after Linux's tulip) like a PCI card. Slower than
+  the synthetic adapter but needs nothing from VMBus. Hyper-V drops frames
+  from other MAC addresses here too unless spoofing is enabled.
+- **Network adapter** (`src/nic_netvsc.cpp`, after Linux's netvsc and
+  rndis_filter): Hyper-V Manager's "Network Adapter" (not "Legacy Network
+  Adapter"), for VMPKT/VMIPX/mTCP like a PCI card (VMNIC lists it as
+  "Hyper-V"). Hyper-V drops frames sent from any MAC address but the
+  adapter's own unless "Enable MAC address spoofing" is on in its advanced
+  features. `netvsc=off` skips it.
+
+`vmbus=off` leaves VMBus alone; `vmbuslog` logs its messages. The drivers
+are tested against a simulated Hyper-V host (`tests/hvsim`: `make -C
+tests/hvsim`, a 32-bit Linux program), which checks everything they send
+with Linux's own structures; not yet on a real Hyper-V host.
+
 ## Not yet
 
 - Mode X's 240-line timing, EMS, SB16 (16-bit)
@@ -944,9 +976,11 @@ untested.
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
 | `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP) |
 | `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
-| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, USB (CDC-ECM) |
-| `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, USB), FAT reader |
+| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, DEC 21140 Tulip, Hyper-V netvsc, USB (CDC-ECM) |
+| `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / NVMe / Hyper-V / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, NVMe, Hyper-V storvsc, USB), FAT reader |
 | `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |
+| `src/vmbus.cpp` | Hyper-V's VMBus (hypercalls, SynIC, channels, ring buffers), for storvsc and netvsc |
+| `tests/hvsim/` | a simulated Hyper-V host to test the VMBus drivers against (Linux's structures in `linux_hv.h`) |
 | `src/dpmi.c` | DPMI host |
 | `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
 | `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
