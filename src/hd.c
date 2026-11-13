@@ -458,7 +458,7 @@ static int bios_rw(int dev, u32 lba, u32 n, u32 buf, int write)
     return e;
 }
 
-void hd_int13(struct regs *r)
+static void hd_int13_(struct regs *r)
 {
     static u8 status;
     int st = 0;
@@ -668,7 +668,7 @@ static void request(struct regs *r)
    (see attach; 1: not a VMHD drive), a warning in ES:DI for 6, what was
    done for 0. BX=4: take drive CL's partition out; AX = 0 (and what was
    done in ES:DI) or 1. */
-void hd_api(struct regs *r)
+static void hd_api_(struct regs *r)
 {
     switch (BX(r)) {
     case 0:
@@ -720,6 +720,14 @@ void hd_api(struct regs *r)
 
 /* ---------------- for the media console (Ctrl+Shift+F6, media.c) ----------------
    Drives by DOS number (0 = A:); partitions numbered as VMHD lists them. */
+/* DOS inside hd.c (a VMHD request, VMHD.COM, INT 13h 81h...): the
+   console (media.c, at a timer tick) waits, for the buffers here (sec,
+   sec2, ents, fat_at's volume) are the ones its rescans use. */
+static int busy;
+int hd_busy(void) { return busy; }
+void hd_api(struct regs *r) { busy++; hd_api_(r); busy--; }
+void hd_int13(struct regs *r) { busy++; hd_int13_(r); busy--; }
+
 int hd_con_units(int *first) { *first = first_drive; return n_units; }
 
 /* Look at unit u's partition again: its file system (formatted since it
