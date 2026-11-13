@@ -583,7 +583,9 @@ static const u8 *acpi_table(u32 phys)
     return t && sum_ok(t, len) ? t : 0;
 }
 
-static const u8 *madt_find(void)
+/* The ACPI table with this signature (FACP, APIC, ...), or 0. The DSDT
+   isn't in the RSDT: FACP's +40 points to it. */
+const u8 *acpi_find(const char *sig)
 {
     u32 rp = rsdp_find();
     if (!rp) return 0;
@@ -597,10 +599,13 @@ static const u8 *madt_find(void)
         u64 a = xsdt ? *(const u64 *)(sdt + 36 + i * 8) : *(const u32 *)(sdt + 36 + i * 4);
         if (!a || a >= 0x100000000ull) continue;
         const u8 *h = map_firmware((u32)a, 36);
-        if (h && !memcmp(h, "APIC", 4)) return acpi_table((u32)a);
+        if (h && !memcmp(h, sig, 4)) return acpi_table((u32)a);
     }
     return 0;
 }
+
+const u8 *acpi_table_at(u32 phys) { return acpi_table(phys); }
+static const u8 *madt_find(void) { return acpi_find("APIC"); }
 
 /* The APIC ID of an enabled CPU that isn't this one, or -1. */
 static int pick_cpus(const u8 *madt, u32 self, int *ncpu, u32 *ids, int max)

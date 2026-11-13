@@ -58,6 +58,9 @@ uint32_t usb_net_gen(void);
 }
 
 // ---- what the drivers share (net.hpp) ----
+void net_snoop_in(const uint8_t* f, unsigned len);    // DOS's address for the guest agent (end of file)
+void net_snoop_out(const uint8_t* f, unsigned len);
+
 namespace {
 uint8_t* qbuf;                                  // the receive queue
 uint16_t qlen_of[net::QLEN];
@@ -87,6 +90,7 @@ void enqueue(const uint8_t* f, unsigned len)
 static void enqueue_dos(const uint8_t* f, unsigned len)
 {
     if (rx_mode == 1) return;
+    net_snoop_in(f, len);
     if (q_count == QLEN) { st.dropped++; return; }
     int i = (q_head + q_count) % QLEN;
     memcpy(qbuf + i * FRAME_MAX, f, len);
@@ -202,6 +206,7 @@ void poll_card()
 bool send_frame(const uint8_t* f, unsigned len)
 {
     if (active < 0) return false;
+    if (len >= 14) net_snoop_out(f, len);
     Card& c = cards[active];
     return c.drv->send(c, f, len);
 }
@@ -523,3 +528,53 @@ extern "C" void net_api(struct regs* r)
     AX(r) = 0xFFFF;
 }
 
+// ---- DOS's IPv4 address, for the guest agent (agent.cpp) ----
+// DOS's TCP/IP stack is its own: vmdos learns the address from what goes by.
+// A DHCP ACK to DOS's MAC gives address and netmask; DOS's own ARP and IPv4
+// frames give the address (a static one: netmask unknown, /24 then).
+static uint8_t dos_ip[4], dos_mask_bits;
+
+void net_snoop_out(const uint8_t* f, unsigned len)
+{
+    const uint8_t* m = cur_mac();
+    if (memcmp(f + 6, m, 6)) return;
+    const uint8_t* a = 0;
+    if (f[12] == 0x08 && f[13] == 0x06 && len >= 42 && !memcmp(f + 22, m, 6)) a = f + 28;   // ARP: sender
+    else if (f[12] == 0x08 && f[13] == 0x00 && len >= 34 && (f[14] >> 4) == 4) a = f + 26;  // IPv4: source
+    if (!a || !(a[0] | a[1] | a[2] | a[3]) || a[0] == 169 || a[0] >= 224) return;
+    if (memcmp(dos_ip, a, 4)) { memcpy(dos_ip, a, 4); if (!dos_mask_bits) dos_mask_bits = 24; }
+}
+
+void net_snoop_in(const uint8_t* f, unsigned len)
+{
+    // Ethernet, IPv4 (no options assumed beyond IHL), UDP 67 -> 68, BOOTP reply
+    if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00 || (f[14] >> 4) != 4 || f[23] != 17) return;
+    unsigned ip = 14, udp = ip + (f[14] & 15) * 4, bp = udp + 8;
+    if (bp + 240 > len || f[udp] != 0 || f[udp + 1] != 67 || f[udp + 2] != 0 || f[udp + 3] != 68 || f[bp] != 2) return;
+    if (memcmp(f + bp + 28, cur_mac(), 6) || memcmp(f + bp + 236, "\x63\x82\x53\x63", 4)) return;
+    int type = 0, bits = -1;
+    for (unsigned o = bp + 240; o + 2 <= len && f[o] != 255;) {
+        if (f[o] == 0) { o++; continue; }
+        unsigned n = f[o + 1];
+        if (o + 2 + n > len) break;
+        if (f[o] == 53 && n >= 1) type = f[o + 2];
+        if (f[o] == 1 && n == 4) {
+            uint32_t mk = (uint32_t)f[o + 2] << 24 | f[o + 3] << 16 | f[o + 4] << 8 | f[o + 5];
+            bits = 0;
+            while (mk & 0x80000000u) { bits++; mk <<= 1; }
+        }
+        o += 2 + n;
+    }
+    if (type != 5) return;                      // ACK
+    memcpy(dos_ip, f + bp + 16, 4);             // yiaddr
+    dos_mask_bits = bits >= 0 ? (uint8_t)bits : 24;
+}
+
+extern "C" int net_guest_addr(uint8_t* mac, uint8_t* ip, int* prefix)   // 0: no card
+{
+    if (active < 0) return 0;
+    memcpy(mac, cur_mac(), 6);
+    memcpy(ip, dos_ip, 4);
+    *prefix = dos_mask_bits;
+    return 1;
+}

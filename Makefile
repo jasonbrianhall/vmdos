@@ -53,7 +53,7 @@ VOODOO_OBJS := $(addprefix voodoo/,vid_voodoo.o vid_voodoo_banshee_blitter.o vid
               vid_voodoo_display.o vid_voodoo_fb.o vid_voodoo_fifo.o vid_voodoo_reg.o vid_voodoo_render.o \
               vid_voodoo_setup.o vid_voodoo_texture.o vid_svga.o vid_svga_render.o timer.o \
               v3card.o v3.o v3sched.o v3rom.o)
-OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o balloon_virtio.o blk_nvme.o blk_storvsc.o blk_usb.o virtio.o vmbus.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o atapi.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_netvsc.o nic_tulip.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
+OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o balloon_virtio.o acpi.o pvpanic.o agent.o blk_nvme.o blk_storvsc.o blk_usb.o virtio.o vmbus.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o atapi.o net.o ipxnet.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_netvsc.o nic_tulip.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o gus.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o vpci.o es1371.o vgabios.o media.o $(VOODOO_OBJS))
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
@@ -67,7 +67,7 @@ all: vmdos.elf $(RAM_IMG) $(FLOPPY)
 $(BUILD)/version.h: FORCE | $(BUILD)
 	@echo '#define VMDOS_VERSION "$(VERSION)"' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
-$(BUILD)/cpu.o $(BUILD)/bootcon.o: $(BUILD)/version.h
+$(BUILD)/cpu.o $(BUILD)/bootcon.o $(BUILD)/agent.o: $(BUILD)/version.h
 
 $(BUILD):
 	mkdir -p $@
@@ -160,6 +160,9 @@ $(BUILD)/VMHV.COM: dos/vmhv.asm | $(BUILD)
 $(BUILD)/REBOOT.COM: dos/reboot.asm | $(BUILD)
 	nasm -f bin $< -o $@
 
+$(BUILD)/POWEROFF.COM: dos/reboot.asm | $(BUILD)
+	nasm -f bin -DPOWEROFF $< -o $@
+
 $(BUILD)/hvasm.o: src/hvasm.S | $(BUILD)
 	$(CC) -m32 -c $< -o $@
 
@@ -210,7 +213,7 @@ $(BUILD)/VMEMS.SYS: dos/vmems.asm | $(BUILD)
 
 # C:\ root: FreeDOS and the two configuration files; vmdos's tools and
 # drivers go in C:\VMDOS (on the PATH).
-VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMMIC.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SERTEST.COM $(BUILD)/SHSUCDX.COM $(BUILD)/REBOOT.COM \
+VMDOS_FILES := $(BUILD)/VMXMS.SYS $(BUILD)/VMEMS.SYS $(BUILD)/VMCD.SYS $(BUILD)/VMCD.COM $(BUILD)/VMFD.COM $(BUILD)/VMHD.SYS $(BUILD)/VMHD.COM $(BUILD)/VMSPEED.COM $(BUILD)/VMSHOT.COM $(BUILD)/VMSB.COM $(BUILD)/VMMIC.COM $(BUILD)/VMHV.COM $(BUILD)/DMESG.COM $(BUILD)/LSPCI.COM $(BUILD)/LSUSB.COM $(BUILD)/VMPKT.COM $(BUILD)/VMIPX.COM $(BUILD)/VMNIC.COM $(BUILD)/PKTTEST.COM $(BUILD)/IPXTEST.COM $(BUILD)/SERTEST.COM $(BUILD)/SHSUCDX.COM $(BUILD)/REBOOT.COM $(BUILD)/POWEROFF.COM \
                third_party/ctmouse/CTMOUSE.COM third_party/himemx/HIMEMX.EXE third_party/jemm/JEMM386.EXE \
                third_party/doslfn/DOSLFN.COM third_party/doslfn/CP437UNI.TBL \
                dos/bin/EDIT.EXE dos/bin/TREE.EXE dos/bin/ZCOPY.EXE $(BUILD)/SUBST.COM \

@@ -422,6 +422,27 @@ static int stop_key(void)
     return vkbd_take();
 }
 
+/* After a panic, Ctrl+Alt+Del restarts (nothing else does: pvpanic.c leaves
+   the VM to the user). k: a scan code (set 1, break codes too). */
+static void reset_combo(int k)
+{
+    static int ctrl, alt;
+    if (k < 0 || k == 0xE0 || k == 0xE1) return;
+    int up = k & 0x80;
+    k &= 0x7F;
+    if (k == 0x1D) ctrl = !up;
+    else if (k == 0x38) alt = !up;
+    else if (k == 0x53 && !up && ctrl && alt) hw_reset();
+}
+
+static void __attribute__((noreturn)) panic_wait(void)
+{
+    for (;;) {
+        int k = stop_key();
+        if (k < 0) kdelay_us(2000); else reset_combo(k);
+    }
+}
+
 /* closable: the Ctrl+Shift+F10 log, which Esc (or F10) closes; else the
    "vmdos stopped" screen, which never returns. */
 static void log_screen(const char *msg, int closable)
@@ -433,14 +454,14 @@ static void log_screen(const char *msg, int closable)
         if (*q == '\n' || col >= 76) { msg_rows++; col = 0; if (*q == '\n') continue; }
         col++;
     }
-    int rows = 24 - 3 - msg_rows - 3;
+    int rows = 24 - 3 - msg_rows - 3 - !closable;
     if (rows < 3) rows = 3;
     int top = n_lines > rows ? n_lines - rows : 0, last = -1;
     const char *saved = 0;
     for (;;) {
         if (top != last) {
-            int n = snprintf(screen, sizeof screen, "%s\n\nLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End, S: save%s):%s%s\n",
-                             msg, top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines, closable ? ", Esc: back" : "",
+            int n = snprintf(screen, sizeof screen, "%s\n\n%sLog, lines %d-%d of %d (arrows, PgUp/PgDn, Home/End, S: save%s):%s%s\n",
+                             msg, closable ? "" : "Ctrl+Alt+Del: restart\n", top + 1, top + rows < n_lines ? top + rows : n_lines, n_lines, closable ? ", Esc: back" : "",
                              saved ? " " : "", saved ? saved : "");
             for (int i = top; i < top + rows && i < n_lines && n < (int)sizeof screen - 80; i++)
                 n += snprintf(screen + n, sizeof screen - n, "%s\n", loglin + line_at[i]);
@@ -450,6 +471,7 @@ static void log_screen(const char *msg, int closable)
         }
         int k = stop_key();
         if (k < 0) { kdelay_us(2000); continue; }
+        if (!closable) reset_combo(k);
         int max = n_lines > rows ? n_lines - rows : 0;
         switch (k) {
         case 0x48: top--; break;                                     /* up */
@@ -487,14 +509,16 @@ void panic(const char *fmt, ...)
     va_end(ap);
     disk_flush();                                 /* don't lose gathered writes (no-op while flushing) */
     kprintf("\n*** vmdos stopped: %s\n", buf);
+    pvpanic_signal();                             /* the host logs it; the VM stays up */
+    kprintf("Press Ctrl+Alt+Del to restart\n");
     const char *se = log_save();                  /* into C:\VMDOS\VMDOS.LOG, if DMESG /K made it */
     kprintf(se ? "log not saved: %s\n" : "log saved to C:\\VMDOS\\VMDOS.LOG\n", se);
-    if (bootcon_on && !video_fb_ready()) for (;;) __asm__ volatile("cli; hlt");   /* the boot console shows it */
+    if (bootcon_on && !video_fb_ready()) panic_wait();   /* the boot console shows it */
     bootcon_stop();
     void audio_silence(void);
     audio_silence();                              /* not the last bit of sound on a loop */
     log_screen(buf, 0);
-    for (;;) __asm__ volatile("cli; hlt");
+    panic_wait();
 }
 
 int perf_on;

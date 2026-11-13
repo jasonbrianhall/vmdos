@@ -803,6 +803,18 @@ queue. QMP: `qom-set bal guest-stats-polling-interval 2`, then `qom-get bal gues
 libvirt: `virsh dommemstat`. Inflating isn't supported (the balloon stays empty);
 `balloon=off` skips the device.
 
+### Shutdown, guest agent and pvpanic (QEMU/KVM, libvirt)
+
+- ACPI power button: virt-manager's Shut Down, `virsh shutdown` or QMP `system_powerdown` turn vmdos
+  off once the disks are quiet (vmdos's write caches flushed first). `POWEROFF.COM` does the same from
+  DOS, after DOS's own buffers and SMARTDRV. `acpi=off` skips it.
+- QEMU guest agent on virtio-serial (`org.qemu.guest_agent.0`, which virt-manager adds): sync, ping,
+  info, shutdown (powerdown/reboot), get-time, get-osinfo, get-host-name (`hostname=`) and
+  network-get-interfaces (DOS's address, learned from its DHCP or traffic). `agent=off` skips it.
+- pvpanic (`<panic model='isa'/>` or PCI): a vmdos panic is reported as CRASH_LOADED, so the host
+  logs it but leaves the VM on the panic screen until Ctrl+Alt+Del. `pvpanic=panic` reports
+  PANICKED instead (libvirt then applies `<on_crash>`, destroy by default); `pvpanic=off` skips it.
+
 ### Host folders: VMDOSNET (9P: QEMU's virtio-9p, or a server on the network)
 
 A folder as a DOS drive, over 9P2000.L: one QEMU shares (virtio-9p), or a

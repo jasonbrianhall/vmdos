@@ -720,6 +720,8 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             if (usb_ready && (ticks & 7) == 4) { void cdaudio_pump(void); cdaudio_pump(); }   /* CD audio: refill */
             if ((ticks & 31) == 16) kbc_unstick();
             if ((ticks & 63) == 32) balloon_tick();
+            if ((ticks & 63) == 48) acpi_tick();
+            if ((ticks & 7) == 2) agent_tick();
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
                been off for a few ms with an interrupt waiting, take that as
@@ -772,6 +774,12 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             log_save_req = 0;
             const char *e = log_save();
             video_osd(e ? e : "Log saved to C:\\VMDOS\\VMDOS.LOG");
+        }
+        if (irq == 0 && power_req && !in_usb && usb_quiet() && !disk_busy() && !hd_busy()) {   /* power button, guest agent */
+            int what = power_req;
+            power_req = 0;
+            if (what == 2) reboot();
+            acpi_poweroff();
         }
         if (irq == 0 && media_pending() && !in_usb && usb_quiet() && !disk_busy() && !hd_busy())   /* Ctrl+Shift+F6's commands */
             media_run();

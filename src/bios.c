@@ -574,7 +574,9 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
         else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
         else if (AX(r) == 0x5657) {                             /* REBOOT.COM: the write caches onto the disks, now */
+            int off = BX(r) == 1;                               /* POWEROFF.COM: then off */
             fs9p_flush_all(); disk_flush(); BX(r) = 0x564D;
+            if (off) { acpi_poweroff(); BX(r) = 0; }           /* back: it couldn't */
         }
         else if (AX(r) == 0x5646) {                             /* VMFD.COM: likewise (VMHV reaches only this way) */
             bios_restarted = 0;

@@ -599,7 +599,13 @@ void reboot(void)
     cli();
     usb_shutdown();                   /* hand USB back to the firmware, devices off the bus */
     vmbus_shutdown();                 /* Hyper-V: the host lets go of our rings and buffers */
+    hw_reset();
+}
 
+/* The machine restarted, nothing flushed or handed back (panic, reboot). */
+void hw_reset(void)
+{
+    cli();
     /* 1. CF9 full reset first: the keyboard controller's reset (below) is
        only a warm CPU reset on many boards, which works, so nothing after it
        ran and USB/AHCI were never re-initialized. FULL_RST (bit 3) is set
@@ -816,6 +822,7 @@ void kmain(u32 magic, struct mb_info *mb)
                           fbi.rpos, fbi.rsz, fbi.gpos, fbi.gsz, fbi.bpos, fbi.bsz);
     video_init();
 
+    pvpanic_init();                               /* first: a panic finding C: is told too */
     if (!strstr(cmdline, "usb=off")) usb_start(cmdline);   /* before C:, which may be a USB stick */
     disk_init();
     vdev_init();
@@ -828,6 +835,8 @@ void kmain(u32 magic, struct mb_info *mb)
     ems_init();                                   /* before XMS: the page frame takes E000h from the UMBs */
     xms_init();
     balloon_init();
+    acpi_init();
+    agent_init();
     mouse_ps2_init();
     usb_ready = 1;
     smp_start(tramp);

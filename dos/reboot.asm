@@ -1,4 +1,5 @@
 ; REBOOT.COM: get everything onto the disk, then restart the machine.
+; POWEROFF.COM (-DPOWEROFF): the same, then off (vmdos: ACPI S5) instead of 5.
 ;   1. DOS's buffers out (INT 21h AH=0Dh)
 ;   2. a disk cache's (SMARTDRV and compatibles: INT 2Fh AX=4A10h BX=1)
 ;   3. DOS's buffers again (anything the cache flush left behind)
@@ -23,6 +24,16 @@
         mov ah, 0Dh                     ; 3. DOS's buffers again
         int 21h
 
+%ifdef POWEROFF
+        mov ax, 5657h                   ; 4+5. vmdos: its write cache out, then off (ACPI S5)
+        mov bx, 1
+        call vmapi
+        mov dx, cant                    ; back: not under vmdos, or no way to turn it off
+        mov ah, 09h
+        int 21h
+        mov ax, 4C01h
+        int 21h
+%endif
         mov ax, 5657h                   ; 4. vmdos's write cache, synchronously
         xor bx, bx
         call vmapi
@@ -75,5 +86,10 @@ vmapi:  push ds
         ret
 
 vmapi_ptr: dd 0
+%ifdef POWEROFF
+msg:    db 'Turning off...', 13, 10, '$'
+cant:   db 'This machine could not be turned off (not under vmdos, or no ACPI power-off).', 13, 10, '$'
+%else
 msg:    db 'Restarting...', 13, 10, '$'
+%endif
 done:   db 'Disk cache written.', 13, 10, '$'

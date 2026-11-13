@@ -163,6 +163,17 @@ int io_allowed(u16 port);                     /* cpu.c: a port io_allow gave to 
 void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */
 void *map_mmio64(u64 phys, u32 len);          /* any address; NULL if it can't be mapped */
 void usb_start(const char *cmdline);
+void hw_reset(void) __attribute__((noreturn));   /* cpu.c: reset now, nothing flushed */
+const unsigned char *acpi_find(const char *sig);  /* smp.c: an ACPI table by signature, or 0 */
+const unsigned char *acpi_table_at(u32 phys);     /* smp.c: the whole table at phys (checksum good), or 0 */
+void acpi_init(void);                         /* acpi.c: the power button, S5 */
+void acpi_tick(void);                         /* acpi.c: the power button pressed? */
+int  acpi_poweroff(void);                     /* acpi.c: flush, then off (returns: couldn't) */
+extern volatile int power_req;                /* 1 power off, 2 restart: asked for (button, agent), done when quiet */
+void pvpanic_init(void);                      /* pvpanic.c */
+void pvpanic_signal(void);                    /* pvpanic.c: tell the host (from panic) */
+void agent_init(void);                        /* agent.cpp: the QEMU guest agent on virtio-serial */
+void agent_tick(void);
 void usb_shutdown(void);                      /* usb.cpp: before a reboot */
 void vmbus_shutdown(void);                    /* vmbus.cpp: before a reboot (VMBus UNLOAD) */
 void usb_tick(void);
