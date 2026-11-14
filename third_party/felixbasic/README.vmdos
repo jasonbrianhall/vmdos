@@ -25,4 +25,4 @@ or a fresh clone of felixterminal, REF=branch/tag). Every night
 .github/workflows/felixbasic.yml checks felixterminal and, when its BASIC has
 changed, rebuilds and opens a pull request (branch felixbasic-update).
 Built from (felixterminal commit, date, source id; the script keeps this line):
-felixterminal b0ba7cf 2026-11-13 source 43f9d9504610
+felixterminal b0ba7cf 2026-11-13 source 3cd28963c450
