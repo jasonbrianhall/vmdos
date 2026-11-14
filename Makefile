@@ -227,8 +227,14 @@ C_ONLY_FILES += third_party/fsck/bin/FSCK.EXE
 # Vim (DJGPP) and vi; its _VIMRC and a few runtime files (VIM74\) next to it
 VIM_RT := $(shell cd third_party/vim/RT && find . -type f | sed 's|^./||' | sort)
 C_ONLY_FILES += third_party/vim/bin/VIM.EXE third_party/vim/bin/VI.BAT
-C_ONLY_DEPS  := $(C_ONLY_FILES) $(addprefix third_party/vim/RT/,$(VIM_RT))
+# Felix BASIC (DJGPP) in its own folder, C:\VMDOS\BASIC; BASIC.BAT (C:\VMDOS,
+# on the PATH) starts it: third_party/felixbasic/README.vmdos
+C_ONLY_FILES += third_party/felixbasic/bin/BASIC.BAT
+FELIX_FILES  := third_party/felixbasic/bin/FELIXBAS.EXE third_party/felixbasic/README.vmdos third_party/felixbasic/LICENSE.md
+C_ONLY_DEPS  := $(C_ONLY_FILES) $(addprefix third_party/vim/RT/,$(VIM_RT)) $(FELIX_FILES)
 C_ONLY_MAP   := $(foreach f,$(VIM_RT),third_party/vim/RT/$(f)=VMDOS/$(f))
+C_ONLY_MAP   += third_party/felixbasic/bin/FELIXBAS.EXE=VMDOS/BASIC/FELIXBAS.EXE \
+                third_party/felixbasic/README.vmdos=VMDOS/BASIC/README.TXT third_party/felixbasic/LICENSE.md=VMDOS/BASIC/LICENSE.TXT
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \

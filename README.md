@@ -101,7 +101,8 @@ C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
 CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
 DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
-(Vim 7.4, also as VI; on C: only), MORE,
+(Vim 7.4, also as VI; on C: only), BASIC (Felix BASIC, a QBasic-style BASIC with
+graphics and sound, in C:\VMDOS\BASIC; on C: only), MORE,
 LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM, FORMAT, FDISK,
 CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
 FDCONFIG.SYS to take the `;` off). WHICH is built into FreeCOM.
@@ -110,7 +111,7 @@ names (quoted, spaces and all, where DOSLFN is loaded; 8.3 names otherwise),
 a progress bar for the whole copy (current file, total, speed, time left;
 `/NP` turns it off), `/EXCLUDE:list.txt` and Ctrl-C that removes the half-written
 file: `ZCOPY "C:\My Games" D:\BACKUP /S /E /I`.
-`third_party/dosutils/README.vmdos` and `third_party/vim/README.vmdos` say where each comes from.
+`third_party/dosutils/README.vmdos`, `third_party/vim/README.vmdos` and `third_party/felixbasic/README.vmdos` say where each comes from.
 
 AUTOEXEC.BAT loads DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
 `DIR /LFN`, DJGPP programs and file managers use) on FAT drives and CDs; an
@@ -1016,6 +1017,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
 | `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
+| `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
 

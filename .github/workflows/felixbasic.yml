@@ -1,0 +1,67 @@
+# Keeps C:\VMDOS\BASIC\FELIXBAS.EXE up to date with felixterminal: every night
+# (and on demand, Actions > Felix BASIC > Run workflow) it checks whether
+# felixterminal's wopr/wopr_basic has changed since the committed build
+# (third_party/felixbasic/README.vmdos records the source), and if so rebuilds
+# it with tools/build-felixbasic.sh (DJGPP in Docker) and opens a pull request
+# from the branch felixbasic-update. A later change updates that same PR.
+#
+# Needs Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests". PRs opened with the workflow's token don't start
+# other workflows; close and reopen the PR if checks should run on it.
+name: Felix BASIC
+
+on:
+  schedule:
+    - cron: '23 7 * * *'     # 02:23 New York (EST)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: felixbasic-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check felixterminal
+        id: check
+        run: |
+          git clone -q --depth 1 https://github.com/jasonbrianhall/felixterminal "$RUNNER_TEMP/felix"
+          r=$(FELIXSRC="$RUNNER_TEMP/felix" tools/build-felixbasic.sh check)
+          echo "$r"
+          case "$r" in new*) echo "rev=${r#new }" >> "$GITHUB_OUTPUT";; esac
+
+      - name: Rebuild
+        if: steps.check.outputs.rev
+        run: |
+          sudo apt-get install -y -q upx-ucl
+          FELIXSRC="$RUNNER_TEMP/felix" DOCKER=1 tools/build-felixbasic.sh
+
+      - name: Open or update the pull request
+        if: steps.check.outputs.rev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.check.outputs.rev }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898+github-actions[bot]@users.noreply.github.com'
+          git checkout -B felixbasic-update
+          git add third_party/felixbasic
+          git commit -q -m "Felix BASIC: rebuild from felixterminal $REV"
+          git push -f origin felixbasic-update
+          body="FELIXBAS.EXE rebuilt from felixterminal [$REV](https://github.com/jasonbrianhall/felixterminal/commit/$REV) by tools/build-felixbasic.sh (DJGPP in Docker, UPX).
+
+          Changes in felixterminal's wopr/wopr_basic: https://github.com/jasonbrianhall/felixterminal/commits/main/wopr/wopr_basic"
+          n=$(gh pr list --head felixbasic-update --state open --json number -q '.[0].number')
+          if [ -n "$n" ]; then
+            gh pr edit "$n" --title "Felix BASIC: update to felixterminal $REV" --body "$body"
+          else
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head felixbasic-update \
+              --title "Felix BASIC: update to felixterminal $REV" --body "$body"
+          fi
