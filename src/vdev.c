@@ -222,6 +222,7 @@ static void fast_pit_arm(u32 now);
 static void pit_write(int n, u8 v)
 {
     struct pitch *c = &pit[n];
+    u32 old_rl = reload_of(c);
     int done = 0;
     switch (c->access) {
     case 1: c->reload = v; done = 1; break;
@@ -231,7 +232,22 @@ static void pit_write(int n, u8 v)
         else { c->reload = c->wlo | (u32)v << 8; c->wflip = 0; done = 1; }
     }
     if (done) {
-        c->start = pit_clock();
+        u32 now = pit_clock();
+        if (n == 2 && !c->wait && (c->mode & 3) >= 2) {
+            /* Channel 2 running a square/rate wave, a new count with no control
+               word: the 8254 takes it at the end of the current cycle, the wave
+               goes on without a break. Music drivers (Caveman Ugh-Lympics,
+               Dynamix's) rewrite the count every timer IRQ, the same note too:
+               restarting the wave each time is a click per IRQ, a buzz. The same
+               count: nothing changes. A new one: the same point of the cycle. */
+            if (old_rl == reload_of(c)) return;
+            u32 ph = (now - c->start) % old_rl;
+            c->start = now - ph * reload_of(c) / old_rl;      /* < 2^32: ph < 65536 */
+            spk_count_written(now);
+            spk_event(now);
+            return;
+        }
+        c->start = now;
         c->wait = c->mode == 1;                   /* mode 1 counts from the gate's next rising edge */
         if (n == 2) { spk_count_written(c->start); spk_event(c->start); }
         if (n == 0) {
