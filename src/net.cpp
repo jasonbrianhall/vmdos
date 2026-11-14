@@ -49,6 +49,8 @@
 //   8  IPXNET (DOSBox's IPX over UDP, ipxnet.cpp): set up from ES:DI, or stop
 //   9  IPXNET status into ES:DI
 //  10  the IPX node DOS should use into ES:DI (IPXNET's in CONNECT, else the MAC)
+//  11  DHCP renewal (dhcpc.cpp): DOS's lease from ES:DI, kept renewed; or stop
+//  12  DHCP renewal status into ES:DI
 #include "net.hpp"
 #include "tcp9p.hpp"
 
@@ -81,6 +83,7 @@ void enqueue(const uint8_t* f, unsigned len)
 {
     if (len < 14 || len > FRAME_MAX) { st.rx_err++; return; }
     if (tcp9p_active() && tcp9p_rx(f, len)) return;
+    if (dhcpc_active() && dhcpc_rx(f, len)) return;
     if (ipxnet_active() && ipxnet_rx(f, len)) return;
     if (promisc && rx_mode < 6 && !(f[0] & 1) && memcmp(f, net_cur_mac(), 6)) return;   // not for DOS
     if (promisc && rx_mode < 4 && (f[0] & 1) && memcmp(f, "\xff\xff\xff\xff\xff\xff", 6)) return;
@@ -441,6 +444,7 @@ extern "C" void net_tick(void)
     if (ne2k_running()) ne2k_tick();
     ipxnet_tick();
     tcp9p_tick();
+    dhcpc_tick();
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 
@@ -517,6 +521,9 @@ extern "C" void net_api(struct regs* r)
         return; }
     case 8: case 9: case 10:
         ipxnet_api(r, fn);
+        return;
+    case 11: case 12:
+        dhcpc_api(r, fn);
         return;
     case 7: {
         if (CL(r) == 0xFF) { auto_pick = true; AX(r) = 0; kprintf("net: auto\n"); return; }

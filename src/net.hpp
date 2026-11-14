@@ -144,3 +144,9 @@ const uint8_t* net_cur_mac();                       // the address DOS uses
 bool net_wire_send(const uint8_t* f, unsigned len);
 void net_dos_inject(const uint8_t* f, unsigned len);
 void net_promisc(bool on);                          // the card takes everything (DOS still gets its own)
+
+// DHCP renewal (dhcpc.cpp): DOS's IPv4 lease, kept renewed under DOS.
+bool dhcpc_active();
+bool dhcpc_rx(const uint8_t* f, unsigned len);     // true: an answer to vmdos's request, not for DOS
+void dhcpc_tick();
+void dhcpc_api(struct regs* r, int fn);            // INT 2Fh AX=564Eh BL=11, 12
