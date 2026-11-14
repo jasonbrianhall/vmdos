@@ -932,9 +932,12 @@ void vdev_init(void)
 void vpic_debug(char *buf, int n)
 {
     /* and the 8042: a byte nobody reads blocks the keyboard and the mouse */
-    snprintf(buf, n, "PIC irr %02x/%02x isr %02x/%02x imr %02x/%02x, 8042 %s %02x%s ccb %02x, queued keys %u mouse %u, IRQ 1 again %u",
+    /* and the BIOS's key buffer: keys reaching DOS that nobody takes */
+    u16 bh = rd16(BDA + 0x1A), bt = rd16(BDA + 0x1C), bs = rd16(BDA + 0x80), be = rd16(BDA + 0x82);
+    unsigned inbuf = be > bs ? (unsigned)((bt - bh + (be - bs)) % (be - bs)) / 2 : 0;
+    snprintf(buf, n, "PIC irr %02x/%02x isr %02x/%02x imr %02x/%02x, 8042 %s %02x%s ccb %02x, queued keys %u mouse %u, IRQ 1 again %u, BIOS keys %u",
              pm.irr, ps.irr, pm.isr, ps.isr, pm.imr, ps.imr,
              !kbd_full ? "empty" : kbd_aux ? "mouse" : kbd_key ? "key" : "reply", kbd_obuf,
              kbd_full && kbd_key ? " unread" : "", ccb,
-             (unsigned)(u8)(kq_tail - kq_head) % sizeof kq, (unsigned)(u8)(mq_tail - mq_head) % sizeof mq, vkbd_rekicks);
+             (unsigned)(u8)(kq_tail - kq_head) % sizeof kq, (unsigned)(u8)(mq_tail - mq_head) % sizeof mq, vkbd_rekicks, inbuf);
 }
