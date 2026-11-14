@@ -40,7 +40,7 @@ jobs:
       - name: Rebuild
         if: steps.check.outputs.rev
         run: |
-          sudo apt-get install -y -q upx-ucl
+          sudo apt-get install -y -q upx-ucl unzip
           FELIXSRC="$RUNNER_TEMP/felix" DOCKER=1 tools/build-felixbasic.sh
 
       - name: Open or update the pull request
