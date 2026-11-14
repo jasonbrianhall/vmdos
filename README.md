@@ -778,7 +778,8 @@ neighbor discovery, ICMPv6, UDP over IPv6). STARTNET.BAT runs DHCP; the
 settings are mTCP's config file (`MTCPCFG`, C:\VMDOS\NET\VMTCP.CFG), so
 mTCP's own FTP, TELNET, etc. work with it too.
 
-    DHCP [-4 | -6]              DHCPv4, then router discovery, SLAAC, DHCPv6
+    DHCP [-4 | -6] [-norenew]   DHCPv4, then router discovery, SLAAC, DHCPv6
+    DHCP -status | -stop        how vmdos's renewal of the IPv4 lease is going / stop it
     VMTCP                       show the settings (VMTCP KEY value sets one)
     PING [-4 | -6] host
     NSLOOKUP [-type=T] name [server]
@@ -793,6 +794,16 @@ In CONNECT mode vmdos checks the link every 5 s and registers again if the
 server stops answering (it restarted, a NAT mapping changed). It logs nothing
 unless the kernel command line has `ipxlog`, which logs its events and
 every packet (DMESG).
+DHCP hands the IPv4 lease to vmdos, which keeps it renewed underneath DOS
+(`src/dhcpc.cpp`), so nothing stays resident and games or long sessions
+keep their address: at T1 (half the lease unless the server says) it asks
+the server that gave it, from T2 (7/8) any server, and after the lease runs
+out it keeps asking for the same address every 60 s. Its own answers never
+reach DOS. While vmdos renews it, VMTCP.CFG has no LEASE_TIME, so mTCP's
+programs don't warn about a lease that was only renewed. If the server
+refuses (NAK) or gives another address, vmdos stops and `DHCP -status`
+says to run DHCP again. `DHCP -norenew` leaves renewal out; `dhcplog` on
+the kernel command line logs each step. (IPv6 addresses aren't renewed.)
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 

@@ -28,6 +28,11 @@
    router asks for it (dhcp6.cpp), and writes the IPV6* keys. -4 / -6 do
    one family only.
 
+   vmdos also keeps the IPv4 lease renewed: once DHCP has it, it hands it
+   to vmdos (INT 2Fh AX=564Eh BL=11, src/dhcpc.cpp), which renews it at T1
+   and T2 underneath DOS with nothing resident. -norenew leaves that out,
+   -status shows how it's going, -stop ends it.
+
    Changes:
 
    2011-05-27: Initial release as open source software
@@ -77,6 +82,7 @@
 #include "dhcp.h"
 #include "vmnet.h"
 #include "dhcp6.h"
+#include "vmapi.h"
 
 
 
@@ -107,6 +113,8 @@ IpAddr_t GatewayAddr;
 IpAddr_t NameServer;
 IpAddr_t PreferredNameServer;
 uint32_t OfferedLeaseTime = 0;
+uint32_t OfferedT1 = 0, OfferedT2 = 0;      // options 58, 59 (0: not sent)
+EthAddr_t ServerMac;                        // where the ACK came from (the server, or a relay)
 
 
 // These are responses from the router.
@@ -131,6 +139,94 @@ uint32_t RequestedLeaseSecs = 28800; // Eight hours
 
 // vmdos: which families to configure
 bool Want4 = true, Want6 = true;
+
+// vmdos: lease renewal under DOS (src/dhcpc.cpp)
+bool NoRenew = false;
+bool DoStatus = false, DoStop = false;
+bool Renewing = false;                      // vmdos took the lease
+
+#pragma pack(push, 1)
+typedef struct {                            // INT 2Fh AX=564Eh BL=11
+  uint8_t  mode;                            // 0 stop, 1 keep renewing
+  uint8_t  ip[4], server[4], serverMac[6];
+  uint32_t lease, t1, t2, want;
+  char     host[33];
+} VmLease_t;
+typedef struct {                            // BL=12
+  uint8_t  state, ip[4], server[4];
+  uint32_t lease, age, next, renewals, sent;
+  uint8_t  why;
+} VmLeaseStatus_t;
+#pragma pack(pop)
+
+// INT 2Fh AX=564Eh BL=fn with ES:DI -> buf. False: not under vmdos.
+static bool vmLeaseApi( uint8_t fn, void *buf, uint16_t *ax ) {
+  union REGS r;
+  struct SREGS sr;
+  segread( &sr );
+  r.x.ax = 0x564e; r.x.bx = fn; r.x.cx = 0; r.x.dx = 0;
+  sr.es = FP_SEG( (void __far *)buf ); r.x.di = FP_OFF( (void __far *)buf );
+  vmapi( &r, &sr );
+  if ( ax ) *ax = r.x.ax;
+  return r.x.bx == 0x564d;
+}
+
+static void vmLeaseStop( void ) {
+  VmLease_t l;
+  memset( &l, 0, sizeof( l ) );
+  vmLeaseApi( 11, &l, NULL );
+}
+
+// Hand the new lease to vmdos. True: vmdos renews it from now on.
+static bool vmLeaseHandOver( void ) {
+  if ( OfferedLeaseTime == 0 || OfferedLeaseTime == 0xFFFFFFFFul ) return false;   // nothing to renew
+  VmLease_t l;
+  memset( &l, 0, sizeof( l ) );
+  l.mode = 1;
+  memcpy( l.ip, MyIpAddr, 4 );
+  memcpy( l.server, ServerIdentity, 4 );
+  memcpy( l.serverMac, ServerMac, 6 );
+  l.lease = OfferedLeaseTime; l.t1 = OfferedT1; l.t2 = OfferedT2;
+  l.want = RequestedLeaseSecs;
+  strncpy( l.host, MyHostname, sizeof( l.host ) - 1 );
+  uint16_t ax;
+  return vmLeaseApi( 11, &l, &ax ) && ax == 0;
+}
+
+static void printSecs( uint32_t s ) {
+  if ( s >= 86400ul ) printf( "%lud %luh %lum", s / 86400ul, (s / 3600ul) % 24, (s / 60) % 60 );
+  else if ( s >= 3600ul ) printf( "%luh %lum %lus", s / 3600ul, (s / 60) % 60, s % 60 );
+  else if ( s >= 60 ) printf( "%lum %lus", s / 60, s % 60 );
+  else printf( "%lus", s );
+}
+
+static int vmLeaseShow( void ) {
+  static const char *names[] = { "off", "bound", "renewing", "rebinding", "expired (still asking for it)", "stopped" };
+  VmLeaseStatus_t st;
+  memset( &st, 0, sizeof( st ) );
+  if ( !vmLeaseApi( 12, &st, NULL ) ) {
+    puts( "Not running under vmdos: nothing renews the lease (run DHCP again before it runs out)." );
+    return 1;
+  }
+  if ( st.state == 0 ) {
+    puts( "vmdos isn't renewing a DHCP lease (DHCP hands it one when it gets an address)." );
+    return 1;
+  }
+  printf( "DHCP lease renewal (vmdos): %s\n", st.state < 6 ? names[st.state] : "?" );
+  printf( "  Address    %u.%u.%u.%u\n", st.ip[0], st.ip[1], st.ip[2], st.ip[3] );
+  printf( "  Server     %u.%u.%u.%u\n", st.server[0], st.server[1], st.server[2], st.server[3] );
+  printf( "  Lease      " ); printSecs( st.lease ); printf( ", renewed " ); printSecs( st.age ); puts( " ago" );
+  if ( st.state >= 1 && st.state <= 4 ) {
+    printf( "  Next try   in " ); printSecs( st.next ); puts( "" );
+  }
+  printf( "  Renewals   %lu (%lu requests sent)\n", st.renewals, st.sent );
+  if ( st.state == 5 ) {
+    puts( st.why == 2 ? "\nThe server gave another address. Run DHCP again."
+                      : "\nThe server refused to renew the lease. Run DHCP again." );
+    return 1;
+  }
+  return 0;
+}
 
 
 
@@ -189,9 +285,21 @@ static char *CopyrightMsg = "vmdos DHCP (IPv4 + IPv6), from the mTCP DHCP Client
 
 int main( int argc, char *argv[] ) {
 
+  parseArgs( argc, argv );
+
+  if ( DoStatus ) exit( vmLeaseShow( ) );
+  if ( DoStop ) {
+    VmLease_t l;
+    memset( &l, 0, sizeof( l ) );
+    if ( !vmLeaseApi( 11, &l, NULL ) ) { puts( "Not running under vmdos." ); exit( 1 ); }
+    puts( "vmdos no longer renews the DHCP lease." );
+    exit( 0 );
+  }
+
   printf( CopyrightMsg );
 
-  parseArgs( argc, argv );
+  // A new lease replaces the one vmdos may be renewing.
+  if ( Want4 ) vmLeaseStop( );
 
   // Random number generator: used for setting up sequence numbers
   srand((unsigned) time( NULL ));
@@ -267,8 +375,11 @@ int main( int argc, char *argv[] ) {
 
   if ( DhcpStatusFlag == Dhcp_Ack ) {
 
+    Renewing = !NoRenew && vmLeaseHandOver( );
+
     int8_t rc = createNewCfg( );
     if ( rc ) {
+      if ( Renewing ) { vmLeaseStop( ); Renewing = false; }
       fprintf( stderr, "\n"
                        "Error: DHCP address was assigned but we had a problem writing the config file.\n"
                        "No changes were made.\n" );
@@ -286,6 +397,7 @@ int main( int argc, char *argv[] ) {
       printIpAddr( stdout, Parm_Gateway,    Gateway );
       printIpAddr( stdout, Parm_Nameserver, NameServer );
       printf( "LEASE_TIME %lu seconds\n",   OfferedLeaseTime );
+      if ( Renewing ) puts( "vmdos renews the lease from now on (DHCP -status shows how)." );
 
       if ( stricmp( MyHostname, Hostname_assigned ) != 0 ) {
         printf("\nWarning: Your DHCP server may not have honored your hostname request.\n" );
@@ -543,7 +655,9 @@ int8_t createNewCfg( void ) {
        (printIpAddr( newFile, Parm_Netmask,    Netmask ) < 0 )    ||
        (printIpAddr( newFile, Parm_Gateway,    Gateway ) < 0 )    ||
        (printIpAddr( newFile, Parm_Nameserver, NameServer ) < 0 ) ||
-       (fprintf( newFile, "LEASE_TIME %lu\n", OfferedLeaseTime ) < 0 ) )
+       // vmdos: while vmdos renews the lease, leave LEASE_TIME out, or
+       // mTCP's programs would say it ran out when it was only renewed
+       (!Renewing && fprintf( newFile, "LEASE_TIME %lu\n", OfferedLeaseTime ) < 0 ) )
   {
     printErrno( Msg_writing_to_temp_file );
     return -1;
@@ -906,6 +1020,7 @@ void udpHandler2( Dhcp_t *resp ) {
       case 58: { // Renewal Time
         uint32_t tmp = *((uint32_t *)&(resp->options[current+2]));
         tmp = ntohl( tmp );
+        OfferedT1 = tmp;
         current += 6;
         TRACE(( "Dhcp Option:  58 Lease renewal time: %lu seconds\n", tmp ));
         break;
@@ -914,6 +1029,7 @@ void udpHandler2( Dhcp_t *resp ) {
       case 59: { // Rebinding Time
         uint32_t tmp = *((uint32_t *)&(resp->options[current+2]));
         tmp = ntohl( tmp );
+        OfferedT2 = tmp;
         current += 6;
         TRACE(( "Dhcp Option:  59 Lease rebinding time: %lu seconds\n", tmp ));
         break;
@@ -1020,6 +1136,7 @@ void udpHandler2( Dhcp_t *resp ) {
   } else {
 
     // DHCP ACK message
+    memcpy( ServerMac, resp->udpHdr.eh.src, 6 );   // vmdos: renewals go here
     Ip::setMyIpAddr( NewIpAddr );
     Ip::setMyNetmask( SubnetMask );
     Ip::copy( Gateway, GatewayAddr );
@@ -1092,7 +1209,10 @@ void usage( FILE *stream ) {
     "  -4             IPv4 only\n"
     "  -6             IPv6 only (router discovery, SLAAC, DHCPv6)\n"
     "  -retries <n>   Retry n times before giving up\n"
-    "  -timeout <n>   Set timeout for each attempt to n seconds\n\n"
+    "  -timeout <n>   Set timeout for each attempt to n seconds\n"
+    "  -norenew       Don't have vmdos renew the lease\n"
+    "  -status        How vmdos's renewal of the lease is going\n"
+    "  -stop          vmdos stops renewing the lease\n\n"
   );
   exit( 1 );
 }
@@ -1133,6 +1253,15 @@ void parseArgs( int argc, char *argv[] ) {
     }
     else if ( stricmp( argv[i], "-6" ) == 0 || stricmp( argv[i], "/6" ) == 0 ) {
       Want4 = false;
+    }
+    else if ( stricmp( argv[i], "-norenew" ) == 0 || stricmp( argv[i], "/norenew" ) == 0 ) {
+      NoRenew = true;
+    }
+    else if ( stricmp( argv[i], "-status" ) == 0 || stricmp( argv[i], "/status" ) == 0 ) {
+      DoStatus = true;
+    }
+    else if ( stricmp( argv[i], "-stop" ) == 0 || stricmp( argv[i], "/stop" ) == 0 ) {
+      DoStop = true;
     }
     else if ( stricmp( argv[i], "-help" ) == 0 || stricmp( argv[i], "/?" ) == 0 ) {
       printf( "Options and usage ...\n" );
