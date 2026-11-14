@@ -2,9 +2,12 @@
 # Rebuild third_party/felixbasic/bin/FELIXBAS.EXE (see
 # third_party/felixbasic/README.vmdos). The normal build doesn't need this:
 # the binary is committed. Needs:
-#   DJGPP   a cross g++ i586-pc-msdosdjgpp-g++ on PATH, or DJGPP=dir with bin/
-#           (github.com/andrewwutw/build-djgpp releases)
-#   git, make, upx (apt install upx-ucl)
+#   Docker  felixterminal's msdos Makefile builds in the djfdyuruiry/djgpp image
+#           when there is no local DJGPP: nothing else to install. Or a local
+#           cross g++ i586-pc-msdosdjgpp-g++ on PATH, or DJGPP=dir with bin/
+#           (github.com/andrewwutw/build-djgpp releases); DOCKER=1 / DOCKER=0
+#           forces one or the other.
+#   git, make; upx (apt install upx-ucl) to pack it, else it goes in unpacked
 #   FELIXSRC=dir  an existing checkout of github.com/jasonbrianhall/felixterminal
 #                 to use (else cloned, REF=branch/tag, default main)
 set -e
@@ -20,10 +23,21 @@ else
     git clone -q --depth 1 --branch "$ref" https://github.com/jasonbrianhall/felixterminal "$tmp/felix"
     rev=$(git -C "$tmp/felix" rev-parse --short HEAD)
 fi
-cd "$tmp/felix/wopr/wopr_basic/msdos"
-# The plain DJGPP stub (no CWSDPMI): vmdos is the DPMI host, as for LESS and VIM.
-make DOCKER=0 felixbas.coff > build.log 2>&1 || { tail -30 build.log; exit 1; }
+cd "$tmp/felix/wopr/wopr_basic"
+# wopr.h and msvc_posix_compat.h are links into ../, which the Docker build
+# (it mounts only wopr_basic) can't follow: make them copies.
+for f in $(find . -maxdepth 1 -type l); do cp --remove-destination "$(readlink -f "$f")" "$f"; done
+cd msdos
+# felixbas.coff's step leaves felixbas.exe with the plain DJGPP stub (no
+# CWSDPMI, which the default target embeds): vmdos is the DPMI host, as for
+# LESS and VIM.
+make ${DOCKER:+DOCKER="$DOCKER"} felixbas.coff > build.log 2>&1 || { tail -30 build.log; exit 1; }
 rm -f "$root/third_party/felixbasic/bin/FELIXBAS.EXE"
-upx -q --best -o "$root/third_party/felixbasic/bin/FELIXBAS.EXE" felixbas.exe > /dev/null
+if command -v upx > /dev/null; then
+    upx -q --best -o "$root/third_party/felixbasic/bin/FELIXBAS.EXE" felixbas.exe > /dev/null
+else
+    echo "upx not found: FELIXBAS.EXE not packed"
+    cp felixbas.exe "$root/third_party/felixbasic/bin/FELIXBAS.EXE"
+fi
 ls -l "$root/third_party/felixbasic/bin/FELIXBAS.EXE"
 echo "felixterminal $rev"

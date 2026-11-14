@@ -20,6 +20,6 @@ Video: VESA 640x480 in more than 16 colours when there is one, else VGA
 mode 12h; SET FELIXVID=800x600x16 picks another mode, SET FELIXFPS=30 the
 frame rate (1-200).
 
-Rebuild: tools/build-felixbasic.sh (DJGPP, upx; FELIXSRC=checkout or a fresh
+Rebuild: tools/build-felixbasic.sh (Docker, or a local DJGPP; upx; FELIXSRC=checkout or a fresh
 clone of felixterminal, REF=branch/tag). Built from felixterminal b0ba7cf
 (2026-11-13).
