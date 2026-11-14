@@ -758,7 +758,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             {   /* why a hung program gets no interrupts: the PICs, its nesting, the timer */
                 void vpic_debug(char *buf, int n);
                 int dpmi_depth(char *buf, int n);
-                char b1[64], b2[64];
+                char b1[192], b2[96];
                 vpic_debug(b1, sizeof b1);
                 dpmi_depth(b2, sizeof b2);
                 kprintf("log: %s, DPMI %s, IRQ 0 raised %u delivered %u, pm %u refl %u rm %u\n",
@@ -787,7 +787,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             extern int vif;
             void vpic_debug(char *buf, int n);
             int dpmi_depth(char *buf, int n);
-            char b1[64], b2[64];
+            char b1[192], b2[96];
             vpic_debug(b1, sizeof b1);
             dpmi_depth(b2, sizeof b2);
             static u32 last_irq0, last_vec8;

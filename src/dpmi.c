@@ -1735,7 +1735,8 @@ void dpmi_timer_report(void)
 int dpmi_depth(char *buf, int n)
 {
     int o = snprintf(buf, n, "x%d:", xdepth);
-    for (int i = 0; i < xdepth && o < n - 4; i++) o += snprintf(buf + o, n - o, " %d", xs[i].kind);
+    for (int i = 0; i < xdepth && o < n - 12; i++)          /* kind, and the INT it runs (0300h: which call is stuck) */
+        o += xs[i].intn >= 0 ? snprintf(buf + o, n - o, " %d:INT%02x", xs[i].kind, xs[i].intn) : snprintf(buf + o, n - o, " %d", xs[i].kind);
     return xdepth;
 }
 
