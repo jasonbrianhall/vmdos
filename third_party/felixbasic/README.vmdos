@@ -6,9 +6,10 @@ C:\VMDOS, on the PATH, starts it. The boot floppy has no room for it.
 
 It is the MS-DOS build of wopr/wopr_basic from
 github.com/jasonbrianhall/felixterminal (wopr/wopr_basic/msdos; MIT license,
-LICENSE.md here), built with DJGPP (32-bit, so it runs under vmdos's DPMI
-host, like LESS, VIM and FSCK) with the plain DJGPP stub instead of
-CWSDPMI's, and packed with UPX. Unmodified.
+LICENSE.md here), built with DJGPP, packed with UPX, with CWSDPMI's stub
+(CWSDSTUB, from csdpmi7b.zip) in front, as felixterminal's own build does:
+it uses vmdos's DPMI host, and where there is none (VMHV, plain DOS)
+starts the CWSDPMI r7 built into it. Unmodified.
 
   BASIC                 the editor (F5 runs, F6 the Ok prompt, F1 help)
   BASIC PROG.BAS        run PROG.BAS and exit
