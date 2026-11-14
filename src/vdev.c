@@ -401,6 +401,9 @@ static u8 mq_head, mq_tail;
 static u8 aux_stream, aux_param;      /* reporting on; command waiting for its parameter */
 static int aux_dx, aux_dy, aux_b, aux_moved;
 static u32 aux_since;                 /* when the unread mouse byte arrived */
+static u8 kbd_key;                    /* the byte in the output buffer came from kq, with an IRQ 1 */
+static u32 key_since;                 /* ... since when (ms) */
+static u32 vkbd_rekicks;              /* IRQ 1s raised again for a key byte left unread (vkbd_refill) */
 
 u32 vaux_drops;                       /* bios.c's packet assembly starts over after one */
 static u8 mq_cont[64];                /* 1: the 2nd or 3rd byte of a movement packet */
@@ -736,6 +739,20 @@ void vkbd_refill(void)
         while (mq_head != mq_tail && mq_cont[mq_head]) mq_head = (mq_head + 1) % sizeof mq;
         MLOG("mouse: a byte nobody read in 250 ms dropped, with the rest of its packet\n");
     }
+    /* A key's byte with its IRQ 1 gone: not requested, not in service,
+       yet nobody has read port 60h. The 8042 hands nothing more over until
+       it is read, so the keyboard and the mouse were both dead for good
+       while the timer went on (Felix BASIC, now and then, under KVM).
+       Request it again, as its arrival did; the key isn't lost. A program
+       polling port 60h with IRQ 1 masked or interrupts off still has the
+       request pending, so it never gets here. */
+    if (kbd_full && kbd_key && !(pm.irr & 2) && !vpic_in_service(1) && ticks - key_since > 100) {
+        key_since = ticks;
+        if (vkbd_rekicks++ < 5)
+            kprintf("kbd: a key byte (%02x) waited unread with no IRQ 1: requested again%s\n", kbd_obuf,
+                    vkbd_rekicks == 5 ? " (not logged again)" : "");
+        vpic_raise(1);
+    }
     if (kbd_full) return;
     if (aux_moved && mq_head == mq_tail && !(ccb & 0x20)) aux_packet();
     /* A real PS/2 mouse sends a byte about every millisecond (11 bits at
@@ -757,7 +774,7 @@ void vkbd_refill(void)
         aux_last = pit_clock();
         kbd_obuf = mq[mq_head];
         mq_head = (mq_head + 1) % sizeof mq;
-        kbd_full = 1; kbd_aux = 1;
+        kbd_full = 1; kbd_aux = 1; kbd_key = 0;
         aux_since = ticks;
         MLOG("mouse: byte %02x to the 8042, %s (ccb %02x, slave mask %02x)\n", kbd_obuf, ccb & 2 ? "IRQ 12" : "no IRQ (ccb bit 1 off)", ccb, ps.imr);
         if (ccb & 2) vpic_raise(12);
@@ -766,7 +783,8 @@ void vkbd_refill(void)
     if (kq_head == kq_tail || vpic_in_service(1)) return;
     kbd_obuf = kq[kq_head];
     kq_head = (kq_head + 1) % sizeof kq;
-    kbd_full = 1; kbd_aux = 0;
+    kbd_full = 1; kbd_aux = 0; kbd_key = 1;
+    key_since = ticks;
     vpic_raise(1);
 }
 
@@ -775,7 +793,7 @@ int vkbd_read_data(void)
     /* reading the byte takes back its interrupt request, as the 8042's
        line drops (a program polling with IRQs masked doesn't see it twice) */
     if (kbd_full) { if (kbd_aux) ps.irr &= ~(1 << 4); else pm.irr &= ~(1 << 1); }
-    kbd_full = 0;
+    kbd_full = 0; kbd_key = 0;
     return kbd_obuf;
 }
 
@@ -785,13 +803,13 @@ static void kbd_command(u8 v)
     case 0xD1: case 0x60: case 0xD3: case 0xD4: kbd_cmd = v; break;
     case 0xDD: guest_a20(0); break;
     case 0xDF: guest_a20(1); break;
-    case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; break;
+    case 0x20: kbd_obuf = ccb; kbd_full = 1; kbd_aux = 0; kbd_key = 0; break;
     case 0xA7: ccb |= 0x20; MLOG("mouse: 8042 A7h: mouse port off\n"); break;   /* mouse port off */
     case 0xA8: ccb &= ~0x20; break;                 /* mouse port on */
-    case 0xA9: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;   /* mouse port test: OK */
-    case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; kbd_aux = 0; break;
-    case 0xAA: kbd_obuf = 0x55; kbd_full = 1; kbd_aux = 0; break;
-    case 0xAB: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; break;
+    case 0xA9: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; kbd_key = 0; break;   /* mouse port test: OK */
+    case 0xD0: kbd_obuf = 0x01 | (a20_on ? 2 : 0); kbd_full = 1; kbd_aux = 0; kbd_key = 0; break;
+    case 0xAA: kbd_obuf = 0x55; kbd_full = 1; kbd_aux = 0; kbd_key = 0; break;
+    case 0xAB: kbd_obuf = 0x00; kbd_full = 1; kbd_aux = 0; kbd_key = 0; break;
     case 0xFE: reboot();
     }
 }
@@ -913,5 +931,13 @@ void vdev_init(void)
 
 void vpic_debug(char *buf, int n)
 {
-    snprintf(buf, n, "PIC irr %02x/%02x isr %02x/%02x imr %02x/%02x", pm.irr, ps.irr, pm.isr, ps.isr, pm.imr, ps.imr);
+    /* and the 8042: a byte nobody reads blocks the keyboard and the mouse */
+    /* and the BIOS's key buffer: keys reaching DOS that nobody takes */
+    u16 bh = rd16(BDA + 0x1A), bt = rd16(BDA + 0x1C), bs = rd16(BDA + 0x80), be = rd16(BDA + 0x82);
+    unsigned inbuf = be > bs ? (unsigned)((bt - bh + (be - bs)) % (be - bs)) / 2 : 0;
+    snprintf(buf, n, "PIC irr %02x/%02x isr %02x/%02x imr %02x/%02x, 8042 %s %02x%s ccb %02x, queued keys %u mouse %u, IRQ 1 again %u, BIOS keys %u",
+             pm.irr, ps.irr, pm.isr, ps.isr, pm.imr, ps.imr,
+             !kbd_full ? "empty" : kbd_aux ? "mouse" : kbd_key ? "key" : "reply", kbd_obuf,
+             kbd_full && kbd_key ? " unread" : "", ccb,
+             (unsigned)(u8)(kq_tail - kq_head) % sizeof kq, (unsigned)(u8)(mq_tail - mq_head) % sizeof mq, vkbd_rekicks, inbuf);
 }
