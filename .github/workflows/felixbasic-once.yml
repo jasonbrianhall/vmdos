@@ -1,0 +1,23 @@
+# One-off (removed again): build FELIXBAS.EXE with CWSDSTUB on this branch.
+name: Felix BASIC (one-off CWSDSTUB build)
+on:
+  push:
+    branches: [felix-basic]
+    paths: [.github/workflows/felixbasic-once.yml]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get install -y -q upx-ucl
+      - run: DOCKER=1 tools/build-felixbasic.sh
+      - run: |
+          sha256sum third_party/felixbasic/bin/FELIXBAS.EXE
+          head -c 64 third_party/felixbasic/bin/FELIXBAS.EXE | strings
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898+github-actions[bot]@users.noreply.github.com'
+          git add third_party/felixbasic
+          git commit -m "Felix BASIC: FELIXBAS.EXE with CWSDSTUB (CWSDPMI built in)"
+          git push origin HEAD:felix-basic
