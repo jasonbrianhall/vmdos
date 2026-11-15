@@ -287,6 +287,8 @@ static void do_int(struct regs *r, int n, u16 ip0)
         bios_service(r, 0x2F, 0);
         return;
     }
+    if (n == 0x10 && AX(r) == 0x4F05 && v3_on && rd16(0x10 * 4 + 2) == 0xC000 &&   /* voodoo3: a bank switch into */
+        v3_vbe_bank(BX(r), DX(r))) { AX(r) = 0x004F; return; }                     /* the card's BIOS, done here */
     if (n == 0x2F && AX(r) == 0x1687) { dpmi_detect(r); return; }    /* DPMI host */
     if (n == 0x2F && AX(r) == 0x1680) { disk_idle(); idle_wait(); AL(r) = 0; return; }   /* release time slice: idle */
     if (n == 0x21 && AH(r) == 0x4B) hd_dos_up();                        /* a program runs: DOS has its drives */

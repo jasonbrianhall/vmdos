@@ -23,11 +23,13 @@ void v3_tick(void);                           /* every timer tick (boot CPU) */
 void v3_mode_set(void);                       /* (the card's BIOS sets modes now: nothing) */
 void v3_hv_sync(void);                        /* VMHV made its nested page tables: map the frame buffer there */
 void v3_mp_start(void);                       /* after smp_start: its triangles drawn on render helper CPUs */
-void v3_settle(void);                         /* after a batch of trapped frame-buffer accesses: the card's catch-up */
+void v3_settle(void);
+int v3_vbe_bank(uint16_t bx, uint16_t dx);   /* INT 10h AX=4F05h into the card's BIOS: done here (1) */                         /* after a batch of trapped frame-buffer accesses: the card's catch-up */
 /* The picture, when the Voodoo's video processor owns the screen. */
 int v3_display(uint32_t *w, uint32_t *h);
 void v3_row(uint32_t y, uint32_t *out);       /* 0x00RRGGBB, w pixels */
 const uint8_t *v3_rom(uint32_t *len);         /* its BIOS, for C000h (0: voodoo3 off) */
+void v3_rom_patch(uint8_t *rom, uint32_t n, uint16_t int10_stub, uint16_t win_stub);   /* its copy: 4F05h to vmdos's stubs */
 
 /* vpci.c: the PCI bus the guest sees (configuration mechanism 1, the PCI BIOS) */
 int vpci_port(uint16_t port, int size, int write, uint32_t *val);

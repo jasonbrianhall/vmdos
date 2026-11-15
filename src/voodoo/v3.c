@@ -34,6 +34,8 @@ u32 linear_hole(u32 len, u32 align);
 void map_page(u32 lin, u32 phys, u32 flags);
 void tlb_flush_range(u32 lin, u32 len);
 void hv_map_gpa(u32 gpa, u32 host);
+u32 page_dirty_scan(u32 lin, u32 n, u8 *out);
+extern int hv_active;
 void v3_run(void);
 void v3_poll_timers(void);
 double v3_sched_init(void);
@@ -491,6 +493,11 @@ static void fifo_mark(void)
         f->last_rp = rp;
     }
 }
+static u32 redraw_n;                           /* ticks (v3_tick) */
+/* The 3D engine's own drawing (triangles, fast fills, its LFB writes)
+   doesn't mark changed vram as the 2D engine's does: for a second after
+   it last did anything, every frame is drawn anew as well. */
+static u32 used_3d = 0x80000000u, last_tri;
 /* What the driver has written since: to the card, in order. */
 static void fifo_feed(void)
 {
@@ -510,6 +517,7 @@ static void fifo_feed(void)
             if (a == b) f->base_free = 0;
             u32 v = *vw(a);
             map_write(bar + a, v, 4);                              /* the card's own write path: counts it */
+            used_3d = redraw_n;                                    /* commands: maybe 3D (dirty_pages) */
             if (*f->amax != a) break;                              /* it didn't take it in order: stop */
         }
     }
@@ -517,7 +525,7 @@ static void fifo_feed(void)
 
 static u8 *lfb_mapped;
 static int lfb_direct, lfb_pages;
-static u32 redraw_n;
+static u32 lfb_end;                           /* the last page mapped, + 1 */
 static u32 lfb_key[8];
 static void lfb_remap(int all)
 {
@@ -544,8 +552,45 @@ static void lfb_remap(int all)
     }
     if (hi) tlb_flush_range(bar1_lin + lo, hi - lo);
     lfb_pages = 0;
-    for (u32 a = 0; a < (u32)svga->vram_max; a += 4096) lfb_pages += lfb_mapped[a >> 12];
+    lfb_end = 0;
+    for (u32 a = 0; a < (u32)svga->vram_max; a += 4096)
+        if (lfb_mapped[a >> 12]) { lfb_pages++; lfb_end = (a >> 12) + 1; }
+    if (hi) svga->fullchange = changeframecount;   /* pages remapped: what was written there unseen (dirty_pages) */
     if (hi && v3_log_on) kprintf("voodoo3: frame buffer %x-%x remapped (%u pages direct)\n", lo, hi, n);
+}
+
+/* What the guest wrote through the mapped pages, which the card doesn't
+   see: the pages' dirty bits (cleared as read) mark the card's changed
+   vram, as its own write path does, so it redraws the lines that show
+   them and nothing else; a still screen costs no redraw, where every
+   frame was drawn whole (on the boot CPU, inside its tick: a 640x480 one
+   is 300,000 pixels through the palette, 60 times a second). Each tick,
+   and the VGA window's before it moves to another bank. In VMHV the VM's
+   writes go through its nested tables, so there (and with v3redraw) every
+   frame is drawn anew, 30 times a second, as before. */
+static u8 dirty_buf[4096];
+static int dirty_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = !strstr(cmdline, "v3redraw");
+    return on && !hv_active;
+}
+static void dirty_mark(u32 lin, u32 off, u32 n)
+{
+    if (!n || !page_dirty_scan(lin, n, dirty_buf)) return;
+    for (u32 i = 0; i < n; i++)
+        if (dirty_buf[i]) {
+            u32 p = ((off + i * 4096) & svga->vram_mask) >> 12;
+            svga->changedvram[p] = changeframecount;
+        }
+}
+static u32 leg_key[4];
+static int leg_pages;
+static void dirty_pages(void)
+{
+    if (!dirty_on()) return;
+    if (leg_pages) dirty_mark(leg_key[0], leg_key[2], (u32)leg_pages);
+    if (lfb_pages) dirty_mark(bar1_lin, 0, lfb_end);
 }
 
 /* The VGA's window (A0000h-BFFFFh) mapped straight onto vram too while a
@@ -554,8 +599,6 @@ static void lfb_remap(int all)
    one bank for reads and writes); trapped otherwise (text, planar modes,
    write modes, latches). Its frames then are drawn anew, as with BAR1. */
 extern int v3_map_own;                         /* cpu.c: map_page may map A0000h-BFFFFh now */
-static u32 leg_key[4];
-static int leg_pages;
 static void legacy_remap(int all)
 {
     u32 base = 0, len = 0, off = 0;
@@ -573,6 +616,7 @@ static void legacy_remap(int all)
     }
     u32 key[4] = { base, len, off, 0 };
     if (!all && !memcmp(key, leg_key, sizeof key)) return;
+    if (dirty_on() && leg_pages) dirty_mark(leg_key[0], leg_key[2], (u32)leg_pages);   /* the bank's writes so far */
     memcpy(leg_key, key, sizeof key);
     v3_map_own = 1;
     for (u32 a = 0xA0000; a < 0xC0000; a += 4096) {
@@ -757,9 +801,72 @@ void v3_mmio_write(u32 phys, u32 val, int size)
     for (int i = 0; i < 2; i++)                /* a FIFO's base written through the trap (unmapped yet, v3trap's */
         if (fv[i].on && phys - v3_card_bar(card, 1) == *fv[i].base) fv[i].base_free = 0;   /* tests): counted already */
     map_write(phys, val, size);
+    {
+        u32 b0 = cur_bar0 ? cur_bar0 : bar0_lin;
+        if (phys - b0 - 0x200000u < 0x1E00000u) used_3d = redraw_n;   /* its registers, LFB, textures (3D) */
+    }
     if (is_mem(phys)) mem_owed = 1;            /* after the batch, at a register access or the tick (v3_settle) */
     else { mem_owed = 0; catch_up(); }         /* a register: at once (the time-sliced tests need it) */
     v3_leave();
+}
+
+/* VBE 4F05h (window A's position) without the card's BIOS: its code makes
+   five port accesses for it (3CCh, the CRTC index and 1Ch, where it keeps
+   the I/O base's high byte, then vgaInit1 read and written: DL's 64 KB
+   bank, as 32 KB units, in both its write and its read bank), each a trap
+   and a catch-up of the card, with the INT and the BIOS's own flag
+   instructions trapped around them: a 640x480 frame drawn through the
+   window took some forty traps. Here the same five accesses in one go,
+   from the card's INT 10h entry and its WinFuncPtr (bios.asm v3_int10,
+   v3_win; v3_rom_patch) and from an INT 10h that goes straight into the
+   card's BIOS (v86.c). Only set (BH=0) for window A (BL=0), as the BIOS
+   does it. v3vbebios: the BIOS does it all, as before. */
+static int vbe_fast = -1;
+static int vbe_fast_on(void)
+{
+    if (vbe_fast < 0) vbe_fast = !strstr(cmdline, "v3vbebios");
+    return vbe_fast;
+}
+int v3_vbe_bank(uint16_t bx, uint16_t dx)
+{
+    if (!v3_on || !vbe_fast_on() || bx != 0) return 0;
+    v3_enter();                                /* (no catch-up: nothing here needs the card's time) */
+    u16 crtc = (io_read(0x3CC, 1) & 1) ? 0x3D4 : 0x3B4;
+    io_write(crtc, 0x1C, 1);
+    u16 base = (u16)(io_read(crtc + 1, 1) << 8);
+    u32 v = io_read(base + 0x2C, 4), bank = (u32)(dx & 0xFF) * 2;   /* the BIOS takes DL */
+    io_write(base + 0x2C, (v & 0xFFF00000u) | bank << 10 | bank, 4);
+    legacy_remap(0);
+    v3_leave();
+    return 1;
+}
+
+/* The card's BIOS as copied to C0000h (vpci.c, at every restart): its INT
+   10h entry and its WinFuncPtr jump to vmdos's stubs (bios.asm), which do
+   4F05h's set here and send everything else back. Only on the BIOS these
+   offsets are from (3k12sd.rom: the bytes there checked); the checksum
+   kept. */
+static const u8 rom_int10[6] = { 0xFB, 0xFC, 0x56, 0x1E, 0x8B, 0xF0 };            /* sti cld push si push ds mov si,ax */
+static const u8 rom_win[21] = { 0x84, 0xDB, 0x75, 0x0C, 0x80, 0xFF, 0x01, 0x74, 0x08, 0x84, 0xFF, 0x75, 0x03,
+                                0xE8, 0xD9, 0x0E, 0xCB, 0xE8, 0x00, 0x0F, 0xCB };    /* test bl,bl ... call set; retf; call get; retf */
+static void far_jmp(u8 *p, u16 off) { p[0] = 0xEA; p[1] = (u8)off; p[2] = (u8)(off >> 8); p[3] = 0x00; p[4] = 0xF0; }
+void v3_rom_patch(uint8_t *rom, uint32_t n, uint16_t int10_stub, uint16_t win_stub)
+{
+    static int said;
+    if (!v3_on || !vbe_fast_on() || n < 0x3000 || !int10_stub || !win_stub) return;   /* (v3_init: before the BIOS is there) */
+    if (memcmp(rom + 0x135, rom_int10, 6) || memcmp(rom + 0x2E2A, rom_win, 21) ||
+        rom[0x15B] != 0xC7 || rom[0x15F] != 0x35 || rom[0x160] != 0x01) {   /* mov word [40h],0135h: the entry INT 10h gets */
+        if (!said++) kprintf("voodoo3: not the BIOS vmdos knows: VBE bank switches through it, slower\n");
+        return;
+    }
+    u8 sum = 0;
+    for (u32 i = 0; i < n; i++) sum += rom[i];
+    far_jmp(rom + 0x135, int10_stub);
+    far_jmp(rom + 0x2E2A, win_stub);
+    u8 after = 0;
+    for (u32 i = 0; i < n; i++) after += rom[i];
+    rom[n - 1] += (u8)(sum - after);                       /* the checksum byte: the sum as it was */
+    if (!said++) kprintf("voodoo3: VBE bank switches (4F05h) done by vmdos, not the card's BIOS (v3vbebios: the BIOS)\n");
 }
 
 static int acc_left = 4000;                    /* v3log: the card's own I/O registers and its configuration space */
@@ -837,8 +944,12 @@ void v3_tick(void)
     static u32 tr_tick;
     if (tr_n && !(++tr_tick & 255)) trace_flush();   /* a long run of one access: out now and then */
     if (irq_level && ++irq_stuck >= 50) { irq_stuck = 0; irq_raise("still up, raised again"); }   /* the level line, not serviced */
-    if (((lfb_pages && svga->fb_only) || leg_pages) && !(++redraw_n % 32))   /* the frame buffer written past the card: */
-        svga->fullchange = changeframecount;                 /* all of it drawn anew, 30 times a second */
+    ++redraw_n;
+    if (vdo->tri_count != last_tri) { last_tri = vdo->tri_count; used_3d = redraw_n; }
+    if (dirty_on()) dirty_pages();                           /* the frame buffer written past the card: what changed */
+    if ((!dirty_on() || redraw_n - used_3d < 1000) &&        /* or all of it, drawn anew 30 times a second: also */
+        ((lfb_pages && svga->fb_only) || leg_pages) && !(redraw_n % 32))   /* while the 3D engine draws (used_3d) */
+        svga->fullchange = changeframecount;
     v3_leave();
 }
 
@@ -997,13 +1108,17 @@ int v3_mp_kick(int k)
     return 0;
 }
 
-/* Each render helper woken if it's halted, from voodoo_queue_triangle and
-   at every look at the card. One that faulted: its green render thread
-   draws what's queued for it. */
+/* Each render helper with triangles queued woken if it's halted, from
+   voodoo_queue_triangle and at every look at the card. One that faulted:
+   its green render thread draws what's queued for it. Not one with
+   nothing to draw: that was an IPI (and on xAPIC a wait for its delivery)
+   per helper at every port access and tick, and helpers woken only to
+   spin and halt again, all through a game polling 3DAh or switching
+   banks. */
 static void mp_wake(void)
 {
     for (int k = 0; k < mp_n; k++)
-        if (!smp_render_kick(k) && voodoo_render_pending(vdo, k)) thread_set_event(vdo->wake_render_thread[k]);
+        if (voodoo_render_pending(vdo, k) && !smp_render_kick(k)) thread_set_event(vdo->wake_render_thread[k]);
 }
 void v3_mp_queued(void) { if (mp_n) mp_wake(); }
 

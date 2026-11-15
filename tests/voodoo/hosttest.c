@@ -54,6 +54,8 @@ int video_vretrace(void) { return 0; }
 void map_page(u32 lin, u32 phys, u32 flags) { (void)lin; (void)phys; (void)flags; }   /* no paging here: */
 void tlb_flush_range(u32 lin, u32 len) { (void)lin; (void)len; }                   /* every access traps */
 void hv_map_gpa(u32 gpa, u32 host) { (void)gpa; (void)host; }
+u32 page_dirty_scan(u32 lin, u32 n, u8 *out) { (void)lin; memset(out, 0, n); return 0; }   /* nothing mapped: */
+int hv_active;                                                                              /* nothing dirty */
 void vpci_bios_patch(void) { }
 void vpic_raise(int irq) { (void)irq; }
 int v3_map_own;
