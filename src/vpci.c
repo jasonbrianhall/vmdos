@@ -299,6 +299,7 @@ void vpci_bios_patch(void)
     u32 n;
     const u8 *rom = v3_rom(&n);                          /* and the card's BIOS at C000h, as a PC's BIOS copies it */
     memcpy(gptr(0xC0000), rom, n);
+    v3_rom_patch(gptr(0xC0000), n, rd16(0xF0246), rd16(0xF0248));   /* VBE bank switches in vmdos (bios.asm v3_int10) */
 }
 
 static void done(struct regs *r, u8 ah)

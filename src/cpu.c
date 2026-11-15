@@ -277,6 +277,30 @@ int page_dirty(u32 lin, int clear)
     return d;
 }
 
+/* The dirty bits of the n pages from lin, cleared, each one that was set
+   also out of the TLB (else writes through a cached entry wouldn't set it
+   again); out[i] = 1 for those. How many. */
+u32 page_dirty_scan(u32 lin, u32 n, u8 *out)
+{
+    u32 got = 0;
+    for (u32 i = 0; i < n; ) {
+        u32 a = lin + i * 4096, per = pae ? 512 : 1024, idx = (a >> 12) & (per - 1), m = per - idx;
+        if (m > n - i) m = n - i;
+        void *pt = pt_for(a);
+        for (u32 j = 0; j < m; j++, i++) {
+            u32 *e = pae ? (u32 *)&((u64 *)pt)[idx + j] : &((u32 *)pt)[idx + j];
+            u8 d = 0;
+            if (*(volatile u32 *)e & 0x40) {
+                __asm__ volatile("lock btrl $6,%0; setc %1" : "+m"(*e), "=q"(d) :: "memory");
+                if (d) tlb_flush_range(lin + i * 4096, 4096);
+            }
+            out[i] = d;
+            got += d;
+        }
+    }
+    return got;
+}
+
 /* SSE for DOS programs: the CPU runs SSE instructions only once the OS
    says it saves their state (CR4.OSFXSR) and takes their exceptions
    (CR4.OSXMMEXCPT); without, every one is an invalid opcode (AdvanceMAME's

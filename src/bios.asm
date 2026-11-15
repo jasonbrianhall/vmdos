@@ -77,6 +77,8 @@ mouse_handler: dd 0                      ; 020A: the program's INT 33h/0Ch handl
         dw redir_old                     ; 0240  its next handler (DOS's)
         dw pnp_hdr                       ; 0242  Plug and Play BIOS header (vpci.c turns it on)
         dw pnp_nodes                     ; 0244  its device nodes (vpci.c writes them)
+        dw v3_int10                      ; 0246  voodoo3: the card's INT 10h entry comes here first (v3.c v3_rom_patch)
+        dw v3_win                        ; 0248  voodoo3: and its WinFuncPtr
 
 ; ---- stubs ----
 dummy:  iret
@@ -234,6 +236,32 @@ redir_hook:
         TRAP 0x5C
 .chain: jmp far [cs:redir_old]
 redir_old: dd 0
+
+; voodoo3: VBE 4F05h (the window's bank) in the monitor (v3.c v3_vbe_bank)
+; instead of the card's BIOS, whose code makes five port accesses, each a
+; trap. The card's INT 10h entry (C000:0135) and its WinFuncPtr (C000:2E2A)
+; jump here (v3_rom_patch); everything else goes back to the BIOS, the
+; entry's first instructions done here.
+v3_int10:
+        cmp ax, 4F05h
+        jne .bios
+        TRAP 0x5D                ; done: IRET with AX=004Fh; else on to the BIOS
+.bios:  sti
+        cld
+        push si
+        push ds
+        mov si, ax
+        jmp 0xC000:0x013B
+v3_win:                          ; as the BIOS's: BL = 0 only, BH = 0 set, 1 get
+        test bl, bl
+        jnz .ret
+        cmp bh, 1
+        je .get
+        test bh, bh
+        jnz .ret
+        TRAP 0x5E                ; set, DX = bank (registers kept)
+.ret:   retf
+.get:   jmp 0xC000:0x2E3B        ; its "call get; retf"
 
 int33:  TRAP 0x33                ; mouse driver (in the monitor)
         iret
