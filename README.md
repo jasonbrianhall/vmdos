@@ -156,7 +156,10 @@ Partitions of the other disks (SATA, IDE, USB, sticks plugged in later
 too) become DOS drives only when you ask. VMHD.SYS reserves empty drive
 letters at boot (`DEVICE=C:\VMDOS\VMHD.SYS` in FDCONFIG.SYS: D: and E:;
 `VMHD.SYS 4` for four, up to 8; an install updated from an older one has to
-add the line), and VMHD.COM fills them:
+add the line), and VMHD.COM fills them. It loads in every menu choice, VMHV's
+too, so the drive letters after it (the CD drives from F:) are the same
+whichever one boots; an older FDCONFIG.SYS with `1?DEVICE=C:\VMDOS\VMHD.SYS`
+wants `123?` there:
 
     VMHD                 lists the drives and every disk's partitions
     VMHD D: 3            puts partition 3 in D:
