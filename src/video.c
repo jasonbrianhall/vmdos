@@ -1404,6 +1404,19 @@ static const struct { u16 no, w, h; u8 bpp; } vmodes[] = {
 
 static int vbe_bytespp(u32 bpp) { return (bpp + 7) / 8; }
 
+/* 320x200 in more than 8 bits (10Dh, 10Eh, 10Fh, 121h) is offered only
+   with vesa320hi on the command line. Need for Speed SE plays its in-game
+   videos in a 320x200 mode of the deepest color it finds, then writes them
+   8 bits a pixel (garbled: the screen black under a band of repeated
+   stripes); with none it uses 256 colors, as on most cards of its day.
+   DOS MAME (Allegro) wants them, and finds other sizes without. */
+static int vbe_hidden(int m)
+{
+    static int hi = -1;
+    if (hi < 0) hi = strstr(cmdline, "vesa320hi") != 0;
+    return !hi && vmodes[m].w == 320 && vmodes[m].h == 200 && vmodes[m].bpp > 8;
+}
+
 /* A mode's bytes a line as it is set. 24-bit ones get the next power of
    two up (640: 2048, 800 and 1024: 4096), as SVGA BIOSes give them: then
    no line, and so no 3-byte pixel, ever crosses a 64 KB bank, which banked
@@ -1490,8 +1503,9 @@ static void vbe_tables(void)
         for (int j = 0; str[i][j]; j++) wr8(a + j, (u8)str[i][j]);
         wr8(a + 0x1F, 0);
     }
-    for (int i = 0; i < N_VMODES; i++) wr16(VBE_DATA + 0x80 + i * 2, vmodes[i].no);
-    wr16(VBE_DATA + 0x80 + N_VMODES * 2, 0xFFFF);
+    int n = 0;
+    for (int i = 0; i < N_VMODES; i++) if (!vbe_hidden(i)) wr16(VBE_DATA + 0x80 + n++ * 2, vmodes[i].no);
+    wr16(VBE_DATA + 0x80 + n * 2, 0xFFFF);
 }
 
 /* DPMI 0800h: the framebuffer is mapped already, at its own address. */
@@ -1515,7 +1529,7 @@ static void vbe_map_bank(u32 b)
 
 static int vbe_find(u32 no)
 {
-    for (int i = 0; i < N_VMODES; i++) if (vmodes[i].no == (no & 0x1FF)) return i;
+    for (int i = 0; i < N_VMODES; i++) if (vmodes[i].no == (no & 0x1FF)) return vbe_hidden(i) ? -1 : i;
     return -1;
 }
 

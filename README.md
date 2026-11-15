@@ -638,6 +638,10 @@ dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt
   800x600 in 16 colors (102h / 6Ah, planar), widescreen 848x480,
   1280x720, 1280x800 (138h-146h, all depths) and 1920x1080 (147h-149h,
   8/15/16 bits), stretched to fill the whole screen (no bars),
+  except 320x200 in 15, 16, 24 and 32 bits (10Dh, 10Eh, 10Fh, 121h),
+  offered only with `vesa320hi`: Need for Speed SE plays its videos in a
+  320x200 high or true color mode whenever there is one, but draws them
+  8 bits a pixel,
   4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
   0800h maps it), scan line length, display start, palette, the DAC
   switchable to 8 bits a color (4F08h, as most SVGA cards; test:
