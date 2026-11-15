@@ -397,10 +397,18 @@ void smp_tick(void)
    render helper is inside one (job_active) and claims are blocked
    (job_next past any chunk count), so a late one can't take a chunk of
    the wrong job. Everything runs on this CPU when there are no render
-   helpers, on the boot CPU, or for a handful of rows. */
+   helpers, or for a handful of rows.
+   The boot CPU posts jobs too: the Voodoo 3's scan lines at the end of
+   each frame (vid_svga.c svga_defer_flush), which it drew alone inside
+   its tick or a trapped access, the guest stopped meanwhile. One job at a
+   time (job_owner): a CPU that finds one already out (the helper's
+   redraw, or the boot CPU's own from an interrupt) does its rows itself,
+   as before. nobsppar: the boot CPU never posts (but in VMHV). */
 #define JOB_BLOCKED 0x80000000u
 static struct { void (*fn)(u32, void *); void *arg; u32 n, chunk, nchunks; } job;
-static volatile u32 job_gen, job_next = JOB_BLOCKED, job_done, job_active;
+static volatile u32 job_gen, job_next = JOB_BLOCKED, job_done, job_active, job_owner;
+static int bsp_par = -1;
+static int par_post(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg, int me);
 
 static u32 xadd(volatile u32 *p, u32 v)
 {
@@ -421,18 +429,27 @@ static void run_chunks(void)
 }
 
 /* 0: a render helper faulted part way (some rows may be undrawn). The
-   helper's redraw; or in VMHV, with the helper parked, the boot CPU's
-   (inside its tick, the guest stopped): its scratch is slot 0, the
-   helper's, and the render helpers' page table gets the boot CPU's
-   changes first (the helper, which did that each round, is parked). */
+   helper's redraw; or the boot CPU's: in VMHV, with the helper parked, its
+   redraw (inside its tick, the guest stopped), and the Voodoo's scan lines
+   (above). Its scratch is slot 0, as the helper's (their jobs are each
+   their own data), and the render helpers' page table gets the boot CPU's
+   changes first when the helper isn't there to (in VMHV it's parked). */
 int par_for(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg)
 {
     int me = smp_cpu();
-    if (!n_render || rh_fault || !(me == 1 || (me == 0 && bsp_rows)) || n < 2 * chunk) {
+    if (bsp_par < 0) bsp_par = !strstr(cmdline, "nobsppar");
+    if (!n_render || rh_fault || !(me == 1 || (me == 0 && (bsp_rows || bsp_par))) || n < 2 * chunk ||
+        __atomic_exchange_n(&job_owner, 1, __ATOMIC_ACQUIRE)) {
         for (u32 i = 0; i < n; i++) fn(i, arg);
         return 1;
     }
-    if (me == 0) ap_tables_sync();
+    int r = par_post(n, chunk, fn, arg, me);
+    __atomic_store_n(&job_owner, 0, __ATOMIC_RELEASE);
+    return r;
+}
+static int par_post(u32 n, u32 chunk, void (*fn)(u32, void *), void *arg, int me)
+{
+    if (me == 0 && (bsp_rows || !smp_active)) ap_tables_sync();   /* else the helper does, each tick */
     while (job_active && !rh_fault) __asm__ volatile("pause");
     job_next = JOB_BLOCKED;
     job.fn = fn; job.arg = arg; job.n = n; job.chunk = chunk; job.nchunks = (n + chunk - 1) / chunk;

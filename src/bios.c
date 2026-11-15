@@ -593,6 +593,12 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x50: case 0x54: case 0x55: case 0x56: case 0x5B: return dpmi_rm_trap(r, id);
     case 0x34: mouse_cb_regs(r); return BIOS_CONT;
     case 0x46: video_vbe_window(r); return BIOS_CONT;         /* VESA WinFuncPtr */
+    case 0x5D:                                                /* voodoo3: INT 10h AX=4F05h (bios.asm v3_int10) */
+        if (v3_vbe_bank(BX(r), DX(r))) { AX(r) = 0x004F; return BIOS_DONE; }
+        return BIOS_CONT;                                     /* the card's BIOS does it */
+    case 0x5E:                                                /* voodoo3: its WinFuncPtr, set (bios.asm v3_win) */
+        if (!v3_vbe_bank(0, DX(r))) kprintf("voodoo3: VBE window function: not done\n");
+        return BIOS_CONT;
     case 0x35: mouse_cb_done(); return BIOS_CONT;
     case 0x74: ps2_irq(r); return BIOS_CONT;
     case 0x67: ems_int67(r); return BIOS_DONE;
