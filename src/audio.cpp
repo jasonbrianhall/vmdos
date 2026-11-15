@@ -1468,7 +1468,10 @@ static AudioOut* add_out(OutKind k, const PciDevice* d, const char* name) {
     return &o;
 }
 
+extern "C" void speaker_real(int on);            // vdev.c: the guest's speaker to the real one
+
 static void stop_current() {
+    speaker_real(0);
     switch (driver) {
     case AUDIO_HDA:  hda_stop(); break;
     case AUDIO_AC97: ac97_stop(); break;
@@ -1494,7 +1497,7 @@ static bool start_out(int i) {
     case OUT_AC97:        ok = ac97_init();         if (ok) driver = AUDIO_AC97; break;
     case OUT_SB:          ok = sb_init(boot_cmdline); if (ok) driver = AUDIO_SB; break;
     case OUT_USB:         ok = usb_audio_start(ring, RING_FRAMES); if (ok) driver = AUDIO_USB; break;
-    case OUT_SPEAKER:     ok = true; break;
+    case OUT_SPEAKER:     ok = true; speaker_real(1); break;
     }
     if (!ok) return false;
     cur_out = i;

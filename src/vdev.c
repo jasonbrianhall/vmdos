@@ -219,10 +219,44 @@ static void spk_event(u32 t)
 
 static void fast_pit_arm(u32 now);
 
+/* The real PC speaker as the sound output (Ctrl+Shift+F2 to "PC speaker",
+   audio=speaker, or no card): the guest's channel 2 writes and 61h bits
+   0-1 go straight to the real 8254 and 61h, so the real chip makes the
+   tones, and PWM, itself. audio.cpp asks (from either CPU); the boot CPU
+   applies it at its next tick (vdev_tick), muted being off. The emulated
+   channel 2 goes on as before: the guest reads it (61h bit 5, 42h). */
+int audio_is_muted(void);
+static volatile int spk_real_want;
+static int spk_real_on;
+void speaker_real(int on) { spk_real_want = on; }
+
+static void real61(u8 v) { outb(0x61, (inb(0x61) & 0x0C) | (v & 3)); }   /* keep the NMI bits */
+
+static void spk_real_sync(void)
+{
+    struct pitch *c = &pit[2];
+    u8 acc = c->access ? c->access : 3;
+    outb(0x43, 0x80 | acc << 4 | c->mode << 1);
+    if (!c->wait || c->mode == 1) {                  /* a count written: the same again */
+        if (acc & 1) outb(0x42, (u8)c->reload);
+        if (acc & 2) outb(0x42, (u8)(c->reload >> 8));
+    }
+    real61(port61);
+}
+
+static void spk_real_tick(void)
+{
+    int want = spk_real_want && !audio_is_muted();
+    if (want == spk_real_on) return;
+    spk_real_on = want;
+    if (want) spk_real_sync(); else real61(0);
+}
+
 static void pit_write(int n, u8 v)
 {
     struct pitch *c = &pit[n];
     u32 old_rl = reload_of(c);
+    if (n == 2 && spk_real_on) outb(0x42, v);
     int done = 0;
     switch (c->access) {
     case 1: c->reload = v; done = 1; break;
@@ -289,7 +323,7 @@ static void pit_control(u8 v)
     c->mode = (v >> 1) & 7;
     c->rflip = c->wflip = 0;
     c->latched = 0;
-    if (n == 2) { c->wait = 1; spk_per = 0; spk_event(pit_clock()); }   /* mode 0: OUT low until the count */
+    if (n == 2) { c->wait = 1; spk_per = 0; spk_event(pit_clock()); if (spk_real_on) outb(0x43, v); }   /* mode 0: OUT low until the count */
 }
 
 /* Channel 0 faster than the host's 1 kHz tick: the APIC timer (smp.c)
@@ -321,7 +355,7 @@ static void irq0_check(void)
     if (per < PIT_PER_TICK) fast_pit_arm(now);
 }
 
-void vdev_tick(void) { fast_timer_tick(); irq0_check(); }   /* the host's tick */
+void vdev_tick(void) { fast_timer_tick(); irq0_check(); spk_real_tick(); }   /* the host's tick */
 void vdev_fast_tick(void) { irq0_check(); }        /* the APIC timer */
 
 /* PC speaker, PIT time [t0, t1) into frames of 48 kHz. The speaker's
@@ -883,7 +917,7 @@ static void out8(u16 port, u8 v)
         if ((v & 1) && !(port61 & 1)) { pit[2].start = now; if (pit[2].mode == 1) pit[2].wait = 0; }   /* the gate's rising edge */
         u8 old = port61;
         port61 = v;
-        if ((old ^ v) & 3) spk_event(now);
+        if ((old ^ v) & 3) { spk_event(now); if (spk_real_on) real61(v); }
         return; }
     case 0x64: kbd_command(v); return;
     case 0x70: cmos_index = v; return;
