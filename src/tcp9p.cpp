@@ -38,6 +38,7 @@ struct Conn {
     bool reset;                                // the server reset it (or refused it)
     bool api;                                  // opened by a DOS program (sock_api)
     u32 api_seen;                              // its last call about it (ticks)
+    bool peer_mac;                             // hop_mac from the server's segments (IPv6)
     u8 *tx, *rx;
 };
 Conn conns[NCONN];
@@ -241,7 +242,7 @@ void neighbors(const u8* f, unsigned len)
             if (!mac) return;
             nb_learn(6, target, mac);
             for (auto& k : conns)
-                if (k.state != CLOSED && k.c.family == 6 && !memcmp(target, k.c.hop6, 16)) {
+                if (k.state != CLOSED && k.c.family == 6 && !k.peer_mac && !memcmp(target, k.c.hop6, 16)) {
                     if (k.state == SYN_SENT && zero(k.c.hop_mac, 6)) k.progress = ticks - k.rto;
                     if (memcmp(k.c.hop_mac, mac, 6))
                         tlog("tcp: next hop's MAC %02x:%02x:%02x:%02x:%02x:%02x (neighbor advertisement)\n",
@@ -387,7 +388,21 @@ void process()
         const u8* t;
         unsigned tl;
         int i = ours(f, len, &t, &tl);
-        if (i >= 0) segment_in(conns[i], t, tl);
+        if (i >= 0) {
+            // IPv6: send to whoever brings the server's segments. A router
+            // may forward our SYN to a server on the same link that then
+            // answers us directly; a router that tracks connections then
+            // drops the rest of ours (it never saw the SYN-ACK). The MAC
+            // the answers come from reaches the server either way.
+            Conn& k = conns[i];
+            if (k.c.family == 6 && memcmp(k.c.hop_mac, f + 6, 6)) {
+                tlog("tcp: the server's segments come from %02x:%02x:%02x:%02x:%02x:%02x: sending there\n",
+                     f[6], f[7], f[8], f[9], f[10], f[11]);
+                memcpy(k.c.hop_mac, f + 6, 6);
+            }
+            if (k.c.family == 6) k.peer_mac = true;
+            segment_in(k, t, tl);
+        }
         else neighbors(f, len);
         rxq_head = (rxq_head + 1) % RXQ;
         rxq_n--;
