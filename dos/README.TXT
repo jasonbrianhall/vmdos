@@ -25,6 +25,8 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
 
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
                           (default VMSHOT.BMP)
+  VMRES [COLSxROWS]     Show or set the text screen size, for SSH and the rest
+                          (VMRES 80x50, VMRES 132x43, VMRES 25 goes back)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 0.05, VMSPEED 100)
   DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
   DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
