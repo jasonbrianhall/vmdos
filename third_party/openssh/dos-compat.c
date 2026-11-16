@@ -378,19 +378,73 @@ socketpair(int d, int type, int protocol, int sv[2])
  * them through as characters; dos-compat.h sends tcsetattr here.
  */
 #undef tcsetattr
+static int
+is_console(int fd)
+{
+	int info = _get_dev_info(fd);	/* (not isatty: fd 0 has our FSEXT hook) */
+
+	return fd >= 0 && !dos_is_pipe(fd) && !dos_is_sock(fd) && info != -1 &&
+	    (info & 0x80) && (info & 0x03);
+}
+
 int
 dos_tcsetattr(int fd, int act, const struct termios *t)
 {
 	int r = tcsetattr(fd, act, t);
 
-	if (r == 0 && isatty(fd)) {
+	if (is_console(fd)) {
+		/* Ctrl-C a character in raw mode (ISIG off), SIGINT otherwise */
 		__djgpp_set_ctrl_c((t->c_lflag & ISIG) ? 1 : 0);
 		dos_term_mode(t);
+		r = 0;		/* dos-term.c does the console's modes */
 	}
 	return r;
 }
 
 void dos_term_hook_stdin(void);
+
+/*
+ * Ctrl-C is the program's, not DOS's: DOS's BREAK off, and its INT 23h
+ * (which ends the program when DOS sees ^C during one of its calls)
+ * pointed at an IRET, both put back at exit. (Watt-32 used to do this.)
+ * In raw mode Ctrl-C goes to the remote side; at prompts dos-term.c raises
+ * SIGINT for it.
+ */
+static int old_break = -1;
+static __dpmi_raddr old_int23;
+static int iret_sel;
+
+static void
+ctrl_c_restore(void)
+{
+	if (iret_sel) {
+		__dpmi_set_real_mode_interrupt_vector(0x23, &old_int23);
+		__dpmi_free_dos_memory(iret_sel);
+		iret_sel = 0;
+	}
+	if (old_break >= 0)
+		setcbrk(old_break);
+}
+
+static void
+ctrl_c_ours(void)
+{
+	__dpmi_raddr iret;
+	int seg;
+	unsigned char op = 0xcf;	/* IRET */
+
+	old_break = getcbrk();
+	setcbrk(0);
+	if ((seg = __dpmi_allocate_dos_memory(1, &iret_sel)) != -1) {
+		dosmemput(&op, 1, seg * 16);
+		__dpmi_get_real_mode_interrupt_vector(0x23, &old_int23);
+		iret.segment = seg;
+		iret.offset16 = 0;
+		__dpmi_set_real_mode_interrupt_vector(0x23, &iret);
+	} else
+		iret_sel = 0;
+	atexit(ctrl_c_restore);
+}
 
 __attribute__((constructor)) static void
 dos_init(void)
@@ -400,6 +454,7 @@ dos_init(void)
 	   (sftp and scp copy files byte for byte). */
 	_fmode = O_BINARY;
 	dos_term_hook_stdin();	/* line editing for libc's console reads */
+	ctrl_c_ours();
 	setmode(STDOUT_FILENO, O_BINARY);
 	/* ~/.ssh (known_hosts, keys): C:\HOME unless HOME says otherwise. */
 	if (getenv("HOME") == NULL) {
@@ -539,6 +594,8 @@ dos_isatty(int fd)
 {
 	if (dos_is_pipe(fd) || dos_is_sock(fd))
 		return 0;
+	if (is_console(fd))
+		return 1;
 	return isatty(fd);
 }
 

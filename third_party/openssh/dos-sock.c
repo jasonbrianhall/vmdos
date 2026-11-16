@@ -35,6 +35,7 @@
 #include <sys/movedata.h>
 
 #include "log.h"
+#include "xmalloc.h"
 #include "dos-co.h"
 #include "dos-sock.h"
 
@@ -76,6 +77,17 @@ kernel(__dpmi_regs *r, int fn)
 	r->x.ax = 0x564e;
 	r->h.bl = fn;
 	__dpmi_int(0x2f, r);
+}
+
+/* At exit (fatal errors too): the kernel's connections closed, not left. */
+static void
+close_all(void)
+{
+	__dpmi_regs r;
+
+	memset(&r, 0, sizeof r);
+	r.x.dx = 0xffff;
+	kernel(&r, 14);
 }
 
 /* Read VMTCP.CFG once: exit with a message if there is nothing to go on. */
@@ -152,10 +164,9 @@ dos_sock_config(void)
 		    "or set one with VMTCP IPADDR\n", path);
 		exit(255);
 	}
-	/* Close what a program before us left open. */
-	memset(&r, 0, sizeof r);
-	r.x.dx = 0xffff;
-	kernel(&r, 14);
+	/* Close what a program before us left open; ours at exit. */
+	close_all();
+	atexit(close_all);
 }
 
 /* --- the kernel's connection settings (src/tcp9p.hpp, Tcp9pCfg) --- */
@@ -261,6 +272,14 @@ struct sk {
 	unsigned short lport;
 };
 static struct sk sks[NSOCK_FDS];
+
+/*
+ * How long a blocking connect() waits for an answer: 60 s, or 10 s while
+ * getaddrinfo()'s last answer has more addresses to try after this one
+ * (ssh tries them in turn).
+ */
+static int connect_wait = 60;
+static int addrs_left;
 
 static struct sk *
 sk_get(int fd)
@@ -372,9 +391,10 @@ connect(int fd, const struct sockaddr *sa, socklen_t len)
 		errno = EINPROGRESS;
 		return -1;
 	}
+	connect_wait = addrs_left-- > 1 ? 10 : 60;
 	t0 = _farpeekl(_dos_ds, 0x46c);
 	while ((st = k_status(s->h, NULL, NULL)) == 0) {
-		if (_farpeekl(_dos_ds, 0x46c) - t0 > 60 * 18) {	/* 60 s */
+		if (_farpeekl(_dos_ds, 0x46c) - t0 > connect_wait * 18) {
 			s->err = ETIMEDOUT;
 			errno = ETIMEDOUT;
 			return -1;
@@ -941,16 +961,9 @@ port_of(const char *serv, const struct addrinfo *hints, int *port)
 static struct addrinfo *
 ai_new(int family, const void *addr, int port, const struct addrinfo *hints)
 {
-	struct addrinfo *ai = malloc(sizeof *ai);
-	struct sockaddr_storage *ss = malloc(sizeof *ss);
+	struct addrinfo *ai = xcalloc(1, sizeof *ai);
+	struct sockaddr_storage *ss = xcalloc(1, sizeof *ss);
 
-	if (ai == NULL || ss == NULL) {
-		free(ai);
-		free(ss);
-		return NULL;
-	}
-	memset(ai, 0, sizeof *ai);
-	memset(ss, 0, sizeof *ss);
 	ai->ai_family = family;
 	ai->ai_socktype = hints && hints->ai_socktype ? hints->ai_socktype :
 	    SOCK_STREAM;
@@ -1012,9 +1025,14 @@ getaddrinfo(const char *host, const char *serv, const struct addrinfo *hints,
 		if (n4 + n6 == 0)
 			return EAI_NONAME;
 	}
-	/* IPv6 first when this PC has a global IPv6 address, else IPv4 first. */
+	/*
+	 * IPv6 first when this PC has a global IPv6 address (2000::/3), else
+	 * IPv4 first: QEMU's user network gives fec0:: addresses that reach
+	 * the world only if the host has IPv6, and ULAs reach no further.
+	 */
 	for (pass = 0; pass < 2; pass++) {
-		int v6 = (pass == 0) == (have6 != 0);
+		int global6 = have6 && (my6[0] & 0xe0) == 0x20;
+		int v6 = (pass == 0) == (global6 != 0);
 
 		for (i = 0; i < (v6 ? n6 : n4); i++) {
 			struct addrinfo *ai = ai_new(v6 ? AF_INET6 : AF_INET,
@@ -1029,6 +1047,7 @@ getaddrinfo(const char *host, const char *serv, const struct addrinfo *hints,
 		}
 	}
 	*res = head;
+	addrs_left = n4 + n6;
 	return 0;
 }
 

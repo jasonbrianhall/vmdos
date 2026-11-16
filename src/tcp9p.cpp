@@ -37,6 +37,7 @@ struct Conn {
     bool need_ack;
     bool reset;                                // the server reset it (or refused it)
     bool api;                                  // opened by a DOS program (sock_api)
+    u32 api_seen;                              // its last call about it (ticks)
     u8 *tx, *rx;
 };
 Conn conns[NCONN];
@@ -176,8 +177,10 @@ void ask_hop(const Tcp9pCfg& c)
         u8* ip = o + 14;
         ip[0] = 0x60; ip[1] = ip[2] = ip[3] = 0;
         ip[4] = 0; ip[5] = 32; ip[6] = 58; ip[7] = 255;
-        bool ll = t[0] == 0xFE && (t[1] & 0xC0) == 0x80;
-        memcpy(ip + 8, ll || zero(k.c.my6, 16) ? k.c.my6ll : k.c.my6, 16);
+        // From the global address when there is one, even to a link-local
+        // router: it learns our MAC for the address its answers go to, and
+        // needn't ask for it by multicast (which a card may not take in).
+        memcpy(ip + 8, zero(k.c.my6, 16) ? k.c.my6ll : k.c.my6, 16);
         static const u8 snm[13] = { 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xFF };
         memcpy(ip + 24, snm, 13); memcpy(ip + 37, t + 13, 3);
         u8* m = ip + 40;
@@ -462,6 +465,16 @@ void tcp9p_tick()                              // net.cpp, the timer: neighbors,
 {
     if (!nactive) return;
     process();
+    // A DOS program's connection it no longer asks about (it ended without
+    // closing it: a crash, Ctrl-C): closed after a minute. A program that
+    // runs polls many times a second, even at a prompt.
+    for (int i = 0; i < NCONN; i++)
+        if (conns[i].api && conns[i].state != CLOSED && (u32)(ticks - conns[i].api_seen) > 60000) {
+            tlog("tcp: connection %d left behind by a DOS program: closed\n", i);
+            conns[i].api = false;
+            tcp9p_close(i);
+        }
+    if (!nactive) return;
     for (auto& k : conns) if (k.state == OPEN && k.need_ack) segment(k, F_ACK, k.snd_nxt, 0, 0);
 }
 
@@ -704,6 +717,7 @@ static void sock_call(struct regs* r, int fn)
         int i = tcp9p_start(c);
         if (i < 0) { AX(r) = 0xFFFF; return; }
         conns[i].api = true;
+        conns[i].api_seen = ticks;
         api_pump(conns[i]);
         AX(r) = (u16)i;
         return;
@@ -716,6 +730,7 @@ static void sock_call(struct regs* r, int fn)
     }
     if (h >= (unsigned)NCONN || !conns[h].api) { AX(r) = 0xFFFF; CX(r) = 0; return; }
     Conn& k = conns[h];
+    k.api_seen = ticks;
     switch (fn) {
     case 14:
         k.api = false;
