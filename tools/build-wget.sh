@@ -8,7 +8,7 @@
 #   a cross gcc i586-pc-msdosdjgpp-gcc on PATH (or DJGPP=dir with bin/), or
 #   Docker: the image djfdyuruiry/djgpp (DJGPP_IMAGE=... for another one),
 #           used when there's no cross gcc; DJGPP_DOCKER=1 to prefer it
-# and: git, a host gcc with -m32 (gcc-multilib), python3, upx
+# and: git, a host gcc with -m32 (gcc-multilib), python3; upx if there (smaller)
 #   WATTSRC=dir    an existing checkout of github.com/gvanem/Watt-32
 #   MBEDTLSSRC=dir an existing checkout of github.com/Mbed-TLS/mbedtls
 #   KEEP_TMP=1     keep the build directory
@@ -90,5 +90,10 @@ else
 fi
 mkdir -p "$port/bin"
 rm -f "$port/bin/WGET.EXE"
-upx -q --best -o "$port/bin/WGET.EXE" "$tmp/wget.exe" > /dev/null
+if command -v upx > /dev/null; then
+    upx -q --best -o "$port/bin/WGET.EXE" "$tmp/wget.exe" > /dev/null
+else
+    echo "build-wget: no upx: WGET.EXE left uncompressed" >&2
+    cp "$tmp/wget.exe" "$port/bin/WGET.EXE"
+fi
 ls -l "$port/bin/WGET.EXE"
