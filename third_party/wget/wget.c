@@ -174,13 +174,19 @@ bio_recv(void *ctx, unsigned char *p, size_t n)
 	return (int)r;
 }
 
+static double
+elapsed(void)			/* seconds since WGET started (DOS: 1/18 s steps) */
+{
+	return (double)clock() / CLOCKS_PER_SEC;
+}
+
 static void
 tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
 	const char *f = strrchr(file, '/');
 
 	(void)ctx;
-	fprintf(stderr, "[%d %s:%d] %s", level, f ? f + 1 : file, line, msg);
+	fprintf(stderr, "%6.2f [%d %s:%d] %s", elapsed(), level, f ? f + 1 : file, line, msg);
 }
 
 static void
@@ -204,6 +210,7 @@ tls_init(void)
 		 * stdio's buffering off, and DJGPP then reads byte by byte, a DOS
 		 * call each: 180 KB of CAs took long enough that a server waiting
 		 * for the handshake gave up. */
+		double t0 = elapsed(), t1;
 		FILE *f = fopen(ca_file, "rb");
 		unsigned char *pem = NULL;
 		size_t n = 0, room = 0, r;
@@ -226,8 +233,17 @@ tls_init(void)
 			die("can't read the certificate authorities in %s: %s "
 			    "(-k skips the check)", ca_file, f ? "empty" : strerror(errno));
 		pem[n] = '\0';
+		t1 = elapsed();
 		e = mbedtls_x509_crt_parse(&cas, pem, n + 1);
 		free(pem);
+		if (debug_level) {
+			int k = 0;
+			mbedtls_x509_crt *c;
+			for (c = &cas; c && c->raw.len; c = c->next)
+				k++;
+			fprintf(stderr, "%6.2f wget: %d certificate authorities: read %.2f s, parsed %.2f s\n",
+			    elapsed(), k, t1 - t0, elapsed() - t1);
+		}
 		if (e < 0) {
 			char m[100];
 			mbedtls_strerror(e, m, sizeof m);
@@ -275,6 +291,8 @@ connect_to(const char *host, const char *port, int use_tls)
 
 	if (use_tls)
 		tls_init();		/* the CAs and random numbers before connecting: the server won't wait */
+	if (debug_level)
+		fprintf(stderr, "%6.2f wget: connecting to %s port %s\n", elapsed(), host, port);
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
@@ -292,6 +310,8 @@ connect_to(const char *host, const char *port, int use_tls)
 	freeaddrinfo(ai);
 	if (fd < 0)
 		die("%s port %s: %s", host, port, strerror(errno));
+	if (debug_level)
+		fprintf(stderr, "%6.2f wget: connected\n", elapsed());
 	if (!use_tls)
 		return;
 	mbedtls_ssl_init(&ssl);
