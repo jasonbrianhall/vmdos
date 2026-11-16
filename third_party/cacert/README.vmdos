@@ -1,0 +1,5 @@
+CACERT.PEM: the certificate authorities WGET trusts for https:// (copied to
+C:\VMDOS\NET\CACERT.PEM). Mozilla's CA list as Ubuntu's ca-certificates
+package 20260816 builds it (/etc/ssl/certs/ca-certificates.crt), 120 roots;
+the certificates are Mozilla's list, MPL-2.0. To update, replace it with a
+newer ca-certificates bundle or curl's https://curl.se/ca/cacert.pem.

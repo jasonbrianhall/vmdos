@@ -1,0 +1,21 @@
+WGET.EXE: downloads over HTTP and HTTPS for DOS, on vmdos's own TCP.
+
+    WGET [-k] [-q] [--ca FILE] URL [FILE]
+
+wget.c is the program (vmdos's own; the same file builds on Linux to test
+it there). Under DOS its sockets are ssh's (third_party/openssh/dos-sock.c:
+socket(), connect(), getaddrinfo() on vmdos's TCP through INT 2Fh AX=564Eh,
+VMTCP.CFG's addresses and DNS servers, IPv4 and IPv6); dos/ has the little
+dos-sock.c needs from the rest of the ssh port. TLS 1.2 and 1.3 are
+mbedTLS's (github.com/Mbed-TLS/mbedtls 3.6, Apache-2.0), its default
+configuration less what DOS can't use (wget_mbedtls_config.h), entropy from
+RDRAND, the TSC's jitter and the clock. Certificates are checked against
+C:\VMDOS\NET\CACERT.PEM (third_party/cacert) and the host name; -k skips
+that. HTTP/1.1, chunked bodies, up to 8 redirects. Nothing of it is in
+vmdos's kernel.
+
+Build: tools/build-wget.sh (DJGPP, like tools/build-openssh.sh), which
+writes bin/WGET.EXE; the Makefile puts it in C:\VMDOS\NET when it's there.
+On Linux, to test: build mbedTLS's library/*.c with
+-DMBEDTLS_USER_CONFIG_FILE='"wget_mbedtls_config.h"' -I third_party/wget,
+then  gcc wget.c libmbedtls.a  with the same flags.
