@@ -871,6 +871,7 @@ rebuilds them.
 
 ### Remote DOS prompt (telnet)
 
+Off unless asked for: without `remote=` vmdos listens on no port.
 `remote=23` on the command line (`remote=on` is 23, any port works) has
 vmdos take telnet connections to DOS's IPv4 address on that port, after
 STARTNET or VMTCP has given DOS one (vmdos sees it go by; nothing stays

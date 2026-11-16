@@ -68,7 +68,7 @@ NETWORK: TCP/IP, IPv4 AND IPv6 (in C:\VMDOS\NET; STARTNET loads it all)
                           DOSBox server. vmdos keeps it running: then load
                           VMIPX and start the game. VMIPXBOX STOP ends it.
 
-  Remote prompt: boot with remote=23 (remotepw=WORD for a password), run
+  Remote prompt (off unless asked for): boot with remote=23 (remotepw=WORD for a password), run
   STARTNET, then "telnet <DOS's address>" from another computer shows this
   screen and types into it. Plain telnet: for your own network only.
 
