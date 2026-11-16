@@ -182,9 +182,12 @@ tls_init(void)
 		die("TLS: no random numbers (-%x)", -e);
 	if (!insecure) {
 		e = mbedtls_x509_crt_parse_file(&cas, ca_file);
-		if (e < 0)
-			die("can't read the certificate authorities in %s "
-			    "(-k skips the check)", ca_file);
+		if (e < 0) {
+			char m[100];
+			mbedtls_strerror(e, m, sizeof m);
+			die("can't read the certificate authorities in %s: %s "
+			    "(-k skips the check)", ca_file, m);
+		}
 		cas_loaded = 1;
 	}
 	tls_ready = 1;
@@ -263,14 +266,23 @@ connect_to(const char *host, const char *port, int use_tls)
 		if (e == MBEDTLS_ERR_SSL_WANT_READ || e == MBEDTLS_ERR_SSL_WANT_WRITE)
 			continue;
 		vf = mbedtls_ssl_get_verify_result(&ssl);
-		if (e == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && vf)
-			die("%s: %s (-k skips the check)", host, verify_text(vf));
+		if (e == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && vf) {
+			char info[512];
+			mbedtls_x509_crt_verify_info(info, sizeof info, "  ", vf);
+			fprintf(stderr, "wget: %s: %s (-k skips the check)\n%s", host,
+			    verify_text(vf), info);
+			if (vf & (MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE)) {
+				time_t now = time(NULL);
+				fprintf(stderr, "  this PC's clock says %s", asctime(gmtime(&now)));
+			}
+			exit(1);
+		}
 		if (e == MBEDTLS_ERR_SSL_CONN_EOF)
 			die("%s closed the connection during the TLS handshake", host);
 		{
 			char m[100];
 			mbedtls_strerror(e, m, sizeof m);
-			die("%s: TLS handshake failed: %s", host, m);
+			die("%s: TLS handshake failed: %s (-%04x)", host, m, -e);
 		}
 	}
 	if (!quiet)
