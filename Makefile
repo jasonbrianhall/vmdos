@@ -235,6 +235,10 @@ C_ONLY_DEPS  := $(C_ONLY_FILES) $(addprefix third_party/vim/RT/,$(VIM_RT)) $(FEL
 C_ONLY_MAP   := $(foreach f,$(VIM_RT),third_party/vim/RT/$(f)=VMDOS/$(f))
 C_ONLY_MAP   += third_party/felixbasic/bin/FELIXBAS.EXE=VMDOS/BASIC/FELIXBAS.EXE \
                 third_party/felixbasic/README.vmdos=VMDOS/BASIC/README.TXT third_party/felixbasic/LICENSE.md=VMDOS/BASIC/LICENSE.TXT
+# OpenSSH's ssh, sftp and scp (DJGPP, on Watt-32 over VMPKT) in C:\VMDOS\NET:
+# third_party/openssh/README.vmdos
+C_ONLY_DEPS  += $(addprefix third_party/openssh/bin/,SSH.EXE SFTP.EXE SCP.EXE)
+C_ONLY_MAP   += $(foreach f,SSH.EXE SFTP.EXE SCP.EXE,third_party/openssh/bin/$(f)=VMDOS/NET/$(f))
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \
