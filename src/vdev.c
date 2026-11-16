@@ -695,14 +695,19 @@ void vkbd_real_scancode(u8 sc)
 {
     u8 k = sc & 0x7F;
     int up = sc & 0x80;
-    if (sc == 0xE0) e0 = 1;
-    else {
-        if (k == 0x1D) ctrl = !up;
-        else if (k == 0x38) alt = !up;
-        else if (k == 0x2A && !e0) lshift = !up;               /* E0 2A: a fake shift around gray keys */
-        else if (k == 0x36 && !e0) rshift = !up;
-        e0 = 0;
-    }
+    /* An E0 prefix waits for its key: if vmdos keeps the key (Ctrl+Shift+PgUp
+       for the scrollback, the selection's arrows), the prefix goes too. Passed
+       on alone, DOS's BIOS took the next byte (often Shift's or Ctrl's
+       release) as an extended key: Shift or Ctrl stayed down for DOS. */
+    static int e0_held;
+    if (sc == 0xE0) { e0 = 1; e0_held = 1; return; }
+    int had_e0 = e0_held;
+    e0_held = 0;
+    if (k == 0x1D) ctrl = !up;
+    else if (k == 0x38) alt = !up;
+    else if (k == 0x2A && !e0) lshift = !up;                   /* E0 2A: a fake shift around gray keys */
+    else if (k == 0x36 && !e0) rshift = !up;
+    e0 = 0;
     if (hv_active && ctrl && alt && k == 0x4F) {               /* Ctrl+Alt+End: leave VMHV (hv.c) */
         if (!up) hv_hotkey();
         return;
@@ -795,11 +800,12 @@ void vkbd_real_scancode(u8 sc)
         if (!up) sound_next_output();
         return;
     }
-    if (!up && sc != 0xE0 && k != 0x1D && k != 0x38 && k != 0x2A && k != 0x36) {
+    if (!up && k != 0x1D && k != 0x38 && k != 0x2A && k != 0x36) {
         void video_scrollback_live(void);                 /* a key for DOS: back to the live screen */
         video_scrollback_live();
         clip_paste_stop();                                /* and a paste stops */
     }
+    if (had_e0) kq_put(0xE0);
     kq_put(sc);
 }
 
