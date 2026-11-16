@@ -28,3 +28,7 @@ bool tcp9p_active();
 void tcp9p_tick();
 void net_poll();                              // the card polled now (frames to enqueue / tcp9p_rx)
 void net_keep_rx(bool on);                    // the card keeps receiving (and the queue doesn't hold it up)
+
+// INT 2Fh AX=564Eh BL=13-18: connections and DNS for DOS programs (SSH.EXE)
+struct regs;
+void sock_api(struct regs* r, int fn);

@@ -4,6 +4,11 @@
 // DNS, the next hop's MAC, IPv4 or IPv6) and hands that over; nothing stays
 // resident in DOS.
 //
+// The same connections serve DOS programs directly (sock_api, INT 2Fh
+// AX=564Eh BL=13-18: SSH.EXE, SFTP.EXE, SCP.EXE): they give the addresses
+// and the next hop, vmdos finds its MAC (ARP / neighbor solicitation) and
+// runs the connection; and one UDP question and answer at a time, for DNS.
+//
 // One connection per host share. Polled: fs9p sends a request, then pumps
 // (tcp9p_pump) until the answers are in, with the card polled from here.
 // Segments come in order or are dropped (a duplicate ACK asks again);
@@ -30,6 +35,8 @@ struct Conn {
     u32 progress, rto;
     u16 peer_win, mss, dupacks;
     bool need_ack;
+    bool reset;                                // the server reset it (or refused it)
+    bool api;                                  // opened by a DOS program (sock_api)
     u8 *tx, *rx;
 };
 Conn conns[NCONN];
@@ -48,6 +55,30 @@ bool log_on()
 #define tlog(...) do { if (log_on()) kprintf(__VA_ARGS__); } while (0)
 
 inline bool zero(const u8* p, int n) { while (n--) if (*p++) return false; return true; }
+
+// MACs seen in ARP and neighbor advertisements (for next hops not yet known)
+struct Nb { u8 fam, ip[16], mac[6]; };
+Nb nbc[8];
+int nbc_next;
+
+void nb_learn(int fam, const u8* ip, const u8* mac)
+{
+    int n = fam == 4 ? 4 : 16, i;
+    if (zero(ip, n) || (mac[0] & 1)) return;
+    for (i = 0; i < 8; i++) if (nbc[i].fam == fam && !memcmp(nbc[i].ip, ip, n)) break;
+    if (i == 8) { i = nbc_next++ % 8; nbc[i].fam = (u8)fam; memset(nbc[i].ip, 0, 16); memcpy(nbc[i].ip, ip, n); }
+    memcpy(nbc[i].mac, mac, 6);
+}
+
+bool nb_find(int fam, const u8* ip, u8* mac)
+{
+    int n = fam == 4 ? 4 : 16;
+    for (auto& e : nbc) if (e.fam == fam && !memcmp(e.ip, ip, n)) { memcpy(mac, e.mac, 6); return true; }
+    return false;
+}
+
+// A UDP answer awaited (sock_api's DNS question)
+struct UdpWait { bool on, done; int fam; u8 src[16]; u16 sport, dport; u8* buf; u32 room, len; } uw;
 inline u32 g32(const u8* p) { return (u32)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 inline void p32(u8* p, u32 v) { p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16); p[2] = (u8)(v >> 8); p[3] = (u8)v; }
 inline int sdiff(u32 a, u32 b) { return (int)(a - b); }
@@ -123,10 +154,11 @@ void segment(Conn& k, u8 flags, u32 seq, const u8* data, unsigned len)
 }
 
 // Who has the next hop (IPv4: ARP; IPv6: a neighbor solicitation)?
-void ask_hop(Conn& k)
+void ask_hop(const Tcp9pCfg& c)
 {
     static u8 o[net::FRAME_MAX];
     const u8* me = net_cur_mac();
+    struct { const Tcp9pCfg& c; } k = { c };
     if (k.c.family == 4) {
         if (zero(k.c.hop4, 4)) return;
         memset(o, 0xFF, 6); memcpy(o + 6, me, 6);
@@ -167,6 +199,12 @@ void neighbors(const u8* f, unsigned len)
     u16 t = (u16)((f[12] << 8) | f[13]);
     static u8 o[net::FRAME_MAX];
     if (t == 0x0806 && len >= 42) {
+        nb_learn(4, f + 28, f + 22);
+        for (auto& k : conns)                  // not known yet: the SYN goes now
+            if (k.state == SYN_SENT && k.c.family == 4 && zero(k.c.hop_mac, 6) && !memcmp(f + 28, k.c.hop4, 4)) {
+                memcpy(k.c.hop_mac, f + 22, 6);
+                k.progress = ticks - k.rto;
+            }
         for (auto& k : conns)                  // the next hop moved?
             if (k.state != CLOSED && k.c.family == 4 && !memcmp(f + 28, k.c.hop4, 4) && memcmp(k.c.hop_mac, f + 22, 6)) {
                 memcpy(k.c.hop_mac, f + 22, 6);
@@ -187,10 +225,17 @@ void neighbors(const u8* f, unsigned len)
     if (t == 0x86DD && len >= 14 + 40 + 24 && f[20] == 58 && f[21] == 255) {
         const u8* target = f + 62;
         if (f[54] == 136) {                    // an advertisement: the next hop's MAC?
+            // its target link-layer address option (type 2) follows the target
+            const u8* mac = 0;
+            for (unsigned o = 78; o + 8 <= len && f[o + 1]; o += f[o + 1] * 8u)
+                if (f[o] == 2) { mac = f + o + 2; break; }
+            if (!mac) return;
+            nb_learn(6, target, mac);
             for (auto& k : conns)
-                if (k.state != CLOSED && k.c.family == 6 && len >= 14 + 40 + 32 && f[86] == 2 &&
-                    !memcmp(f + 22, k.c.hop6, 16))
-                    memcpy(k.c.hop_mac, f + 88, 6);
+                if (k.state != CLOSED && k.c.family == 6 && !memcmp(target, k.c.hop6, 16)) {
+                    if (k.state == SYN_SENT && zero(k.c.hop_mac, 6)) k.progress = ticks - k.rto;
+                    memcpy(k.c.hop_mac, mac, 6);
+                }
             return;
         }
         if (f[54] != 135 || zero(f + 22, 16)) return;
@@ -259,6 +304,7 @@ void segment_in(Conn& k, const u8* t, unsigned tl)
         if (k.state == SYN_SENT && !((fl & F_ACK) && ack == k.iss + 1)) return;
         tlog("tcp: the server reset the connection\n");
         k.state = DEAD;
+        k.reset = true;
         return;
     }
     if (k.state == SYN_SENT) {
@@ -335,8 +381,14 @@ void process()
 void output(Conn& k)
 {
     if (k.state == SYN_SENT) {
+        if (zero(k.c.hop_mac, 6)) {            // the next hop's MAC first
+            const u8* hop = k.c.family == 4 ? k.c.hop4 : k.c.hop6;
+            if (nb_find(k.c.family, hop, k.c.hop_mac)) { k.progress = ticks - k.rto; return; }
+            if ((u32)(ticks - k.progress) >= 300) { ask_hop(k.c); k.progress = ticks; }
+            return;
+        }
         if ((u32)(ticks - k.progress) >= k.rto) {
-            ask_hop(k);
+            ask_hop(k.c);
             segment(k, F_SYN, k.iss, 0, 0);
             k.progress = ticks;
             k.rto = k.rto * 2 > 4000 ? 4000 : k.rto * 2;
@@ -349,7 +401,7 @@ void output(Conn& k)
         k.snd_nxt = k.snd_una;
         k.progress = ticks;
         k.rto = k.rto * 2 > 4000 ? 4000 : k.rto * 2;
-        if (k.rto >= 2000) ask_hop(k);
+        if (k.rto >= 2000) ask_hop(k.c);
     }
     u32 end = k.tx_base + k.tx_len;
     for (int burst = 0; burst < 48 && sdiff(end, k.snd_nxt) > 0; burst++) {
@@ -373,6 +425,28 @@ bool tcp9p_rx(const u8* f, unsigned len)
 {
     const u8* t;
     unsigned tl;
+    if (uw.on && !uw.done && len >= 14 + 28) {                 // sock_api's UDP answer?
+        u16 ty = (u16)((f[12] << 8) | f[13]);
+        const u8 *ip = f + 14, *u = 0, *src = 0;
+        unsigned ul = 0;
+        if (ty == 0x0800 && uw.fam == 4 && (ip[0] >> 4) == 4 && ip[9] == 17) {
+            unsigned ihl = (ip[0] & 15) * 4u;
+            src = ip + 12; u = ip + ihl; ul = len - 14 - ihl;
+        } else if (ty == 0x86DD && uw.fam == 6 && ip[6] == 17 && len >= 14 + 48) {
+            src = ip + 8; u = ip + 40; ul = len - 54;
+        }
+        if (u && ul >= 8 && !memcmp(src, uw.src, uw.fam == 4 ? 4 : 16) &&
+            (u16)((u[0] << 8) | u[1]) == uw.sport && (u16)((u[2] << 8) | u[3]) == uw.dport) {
+            unsigned n = (unsigned)((u[4] << 8) | u[5]);
+            n = n < 8 ? 0 : n - 8;
+            if (n > ul - 8) n = ul - 8;
+            if (n > uw.room) n = uw.room;
+            memcpy(uw.buf, u + 8, n);
+            uw.len = n;
+            uw.done = true;
+            return true;
+        }
+    }
     bool mine = ours(f, len, &t, &tl) >= 0;
     u16 ty = (u16)((f[12] << 8) | f[13]);
     if (!mine && ty != 0x0806 && !(ty == 0x86DD && len > 54 && f[20] == 58)) return false;
@@ -391,8 +465,8 @@ void tcp9p_tick()                              // net.cpp, the timer: neighbors,
     for (auto& k : conns) if (k.state == OPEN && k.need_ack) segment(k, F_ACK, k.snd_nxt, 0, 0);
 }
 
-// A connection to cfg: its number, or -1 no memory, -2 no answer, -3 refused
-int tcp9p_open(const Tcp9pCfg& cfg)
+// A connection to cfg started (SYN_SENT): its number, or -1 no memory
+static int tcp9p_start(const Tcp9pCfg& cfg)
 {
     if (!rxq) rxq = (u8*)phys_try_alloc(RXQ * net::FRAME_MAX);
     if (!rxq) return -1;
@@ -412,6 +486,15 @@ int tcp9p_open(const Tcp9pCfg& cfg)
     k.progress = ticks - k.rto;                // the SYN now
     nactive++;
     net_keep_rx(true);
+    return i;
+}
+
+// A connection to cfg: its number, or -1 no memory, -2 no answer, -3 refused
+int tcp9p_open(const Tcp9pCfg& cfg)
+{
+    int i = tcp9p_start(cfg);
+    if (i < 0) return i;
+    Conn& k = conns[i];
     u32 start = ticks;
     while (k.state == SYN_SENT && (u32)(ticks - start) < 8000) tcp9p_pump(i);
     if (k.state == OPEN) return i;
@@ -464,4 +547,214 @@ void tcp9p_consume(int i, u32 n)
     memmove(k.rx, k.rx + n, k.rx_len - n);
     k.rx_len -= n;
     if (before < 8192 && RXBUF - k.rx_len >= 8192 && k.state == OPEN) segment(k, F_ACK, k.snd_nxt, 0, 0);   // the window opens again
+}
+
+// ---- for DOS programs: INT 2Fh AX=564Eh BL=13-18 (sock_api) ----
+
+namespace {
+
+// One UDP question to c.server:c.port from c.local_port, and its answer
+// (DNS): the answer's length, -1 none in time, -2 the next hop unknown.
+int udp_ask(Tcp9pCfg c, const u8* q, unsigned qn, u8* ans, unsigned room, u32 ms)
+{
+    static u8 f[net::FRAME_MAX];
+    if (!rxq) rxq = (u8*)phys_try_alloc(RXQ * net::FRAME_MAX);
+    if (!rxq || qn > 1400) return -1;
+    nactive++;                                 // frames to tcp9p_rx meanwhile
+    net_keep_rx(true);
+    int fam = c.family, ret = -1;
+    const u8* hop = fam == 4 ? c.hop4 : c.hop6;
+    u32 start = ticks, asked = 0;
+    bool first = true;
+    while (zero(c.hop_mac, 6) && !nb_find(fam, hop, c.hop_mac) && (u32)(ticks - start) < 1500) {
+        if (first || (u32)(ticks - asked) >= 300) { ask_hop(c); asked = ticks; first = false; }
+        net_poll(); process(); tick_poll();
+    }
+    if (zero(c.hop_mac, 6)) { tlog("udp: the next hop didn't answer\n"); ret = -2; goto out; }
+    tlog("udp: asking (%u bytes, %u ms)\n", qn, ms);
+    {
+        uw = UdpWait();
+        uw.fam = fam;
+        memcpy(uw.src, c.server, 16);
+        uw.sport = c.port; uw.dport = c.local_port;
+        uw.buf = ans; uw.room = room;
+        uw.on = true;
+        memcpy(f, c.hop_mac, 6);
+        memcpy(f + 6, net_cur_mac(), 6);
+        u8 *ip = f + 14, *u;
+        u32 ps;
+        unsigned ul = 8 + qn;
+        if (fam == 4) {
+            f[12] = 0x08; f[13] = 0x00;
+            unsigned tot = 20 + ul;
+            ip[0] = 0x45; ip[1] = 0; ip[2] = (u8)(tot >> 8); ip[3] = (u8)tot;
+            ip[4] = (u8)(ticks >> 8); ip[5] = (u8)ticks; ip[6] = 0x40; ip[7] = 0;
+            ip[8] = 64; ip[9] = 17; ip[10] = ip[11] = 0;
+            memcpy(ip + 12, c.my4, 4); memcpy(ip + 16, c.server, 4);
+            u16 s = ~csum_add(0, ip, 20);
+            ip[10] = (u8)(s >> 8); ip[11] = (u8)s;
+            u = ip + 20;
+            ps = csum_add(0, ip + 12, 8) + 17 + ul;
+        } else {
+            f[12] = 0x86; f[13] = 0xDD;
+            ip[0] = 0x60; ip[1] = ip[2] = ip[3] = 0;
+            ip[4] = (u8)(ul >> 8); ip[5] = (u8)ul; ip[6] = 17; ip[7] = 64;
+            bool ll = c.server[0] == 0xFE && (c.server[1] & 0xC0) == 0x80;
+            memcpy(ip + 8, ll || zero(c.my6, 16) ? c.my6ll : c.my6, 16);
+            memcpy(ip + 24, c.server, 16);
+            u = ip + 40;
+            ps = csum_add(0, ip + 8, 32) + 17 + ul;
+        }
+        u[0] = (u8)(c.local_port >> 8); u[1] = (u8)c.local_port;
+        u[2] = (u8)(c.port >> 8); u[3] = (u8)c.port;
+        u[4] = (u8)(ul >> 8); u[5] = (u8)ul; u[6] = u[7] = 0;
+        memcpy(u + 8, q, qn);
+        u16 s = ~csum_add(ps, u, ul);
+        if (!s) s = 0xFFFF;
+        u[6] = (u8)(s >> 8); u[7] = (u8)s;
+        unsigned flen = (unsigned)(u - f) + ul;
+        start = ticks;
+        u32 sent = 0;
+        for (int tries = 0; !uw.done && (u32)(ticks - start) < ms; ) {
+            if (!tries || ((u32)(ticks - sent) >= ms / 2 && tries < 2)) {
+                send_frame(f, flen);
+                sent = ticks; tries++;
+            }
+            net_poll(); process(); tick_poll();
+        }
+        if (uw.done) ret = (int)uw.len;
+        uw.on = false;
+        tlog("udp: %s\n", uw.done ? "answered" : "no answer");
+    }
+out:
+    if (!--nactive) net_keep_rx(false);
+    return ret;
+}
+
+int api_state(const Conn& k)                   // 0 connecting, 1 open, 2 closed (FIN), 3 reset/refused, 4 none
+{
+    if (!k.api || k.state == CLOSED) return 4;
+    if (k.state == SYN_SENT) return 0;
+    if (k.state == OPEN) return 1;
+    return k.reset ? 3 : 2;
+}
+
+void api_pump(Conn& k)
+{
+    net_poll();
+    process();
+    if (k.state == SYN_SENT || k.state == OPEN) output(k);
+    tick_poll();
+}
+
+u16 local_port_pick()
+{
+    static u16 next;
+    if (!next) next = (u16)(49152 + ((u32)tsc_read() % 8192));
+    if (++next < 49152) next = 49152;
+    return next;
+}
+
+} // namespace
+
+// INT 2Fh AX=564Eh, from net_api:
+//  13  TCP connect: ES:DI -> Tcp9pCfg (local_port 0: vmdos picks; hop_mac
+//      zero: vmdos asks hop4/hop6 for it): AX = handle, FFFFh none free.
+//      It runs in the background: BL=17 tells when it's open.
+//  14  close handle DX (FFFFh: every one a DOS program opened)
+//  15  send DS:SI, CX bytes on DX: AX = bytes taken (0: no room now),
+//      FFFFh not open
+//  16  receive into ES:DI, CX room, from DX: CX = bytes, AX = state
+//  17  status of DX: AX = state (0 connecting, 1 open, 2 closed by the
+//      server, 3 reset or refused, 4 no such), CX = bytes waiting (at most
+//      FFFFh), DX = bytes not yet acknowledged (at most FFFFh)
+//  18  one UDP question and answer (DNS): ES:DI -> SockUdp: AX = 0 and
+//      CX = the answer's length (in data), 1 no answer in time, 2 the next
+//      hop didn't answer
+struct __attribute__((packed)) SockUdp {
+    Tcp9pCfg c;
+    u16 len, timeout_ms;
+    u8 data[1400];
+};
+
+static void sock_call(struct regs* r, int fn);
+
+void sock_api(struct regs* r, int fn)
+{
+    tick_poll_begin();                         // time goes on while we wait (interrupts are off here)
+    sock_call(r, fn);
+    tick_poll_end();
+}
+
+static void sock_call(struct regs* r, int fn)
+{
+    if (fn == 18) {
+        SockUdp* q = (SockUdp*)gptr(LIN(r->v86_es, DI(r)));
+        if (!q->c.local_port) q->c.local_port = local_port_pick();
+        u32 ms = q->timeout_ms ? q->timeout_ms : 2000;
+        int n = udp_ask(q->c, q->data, q->len > 1400 ? 1400 : q->len, q->data, 1400, ms);
+        if (n >= 0) { AX(r) = 0; CX(r) = (u16)n; }
+        else { AX(r) = n == -2 ? 2 : 1; CX(r) = 0; }
+        return;
+    }
+    if (fn == 13) {
+        Tcp9pCfg c;
+        memcpy(&c, gptr(LIN(r->v86_es, DI(r))), sizeof c);
+        if (!c.local_port) c.local_port = local_port_pick();
+        int i = tcp9p_start(c);
+        if (i < 0) { AX(r) = 0xFFFF; return; }
+        conns[i].api = true;
+        api_pump(conns[i]);
+        AX(r) = (u16)i;
+        return;
+    }
+    unsigned h = DX(r);
+    if (fn == 14 && h == 0xFFFF) {
+        for (int i = 0; i < NCONN; i++) if (conns[i].api) { conns[i].api = false; tcp9p_close(i); }
+        AX(r) = 0;
+        return;
+    }
+    if (h >= (unsigned)NCONN || !conns[h].api) { AX(r) = 0xFFFF; CX(r) = 0; return; }
+    Conn& k = conns[h];
+    switch (fn) {
+    case 14:
+        k.api = false;
+        tcp9p_close((int)h);
+        AX(r) = 0;
+        return;
+    case 15: {
+        api_pump(k);
+        if (k.state != OPEN) { AX(r) = 0xFFFF; return; }
+        u32 n = CX(r), acked = k.snd_una - k.tx_base;
+        if (k.tx_len + n > TXBUF && acked) {   // make room: drop what's acknowledged
+            memmove(k.tx, k.tx + acked, k.tx_len - acked);
+            k.tx_base += acked; k.tx_len -= acked;
+        }
+        if (k.tx_len + n > TXBUF) n = TXBUF - k.tx_len;
+        if (n) {
+            memcpy(k.tx + k.tx_len, gptr(LIN(r->v86_ds, SI(r))), n);
+            k.tx_len += n;
+            output(k);
+        }
+        AX(r) = (u16)n;
+        return; }
+    case 16: {
+        api_pump(k);
+        u32 n = CX(r) < k.rx_len ? CX(r) : k.rx_len;
+        if (n) {
+            memcpy(gptr(LIN(r->v86_es, DI(r))), k.rx, n);
+            tcp9p_consume((int)h, n);
+        }
+        CX(r) = (u16)n;
+        AX(r) = (u16)api_state(k);
+        return; }
+    case 17: {
+        api_pump(k);
+        AX(r) = (u16)api_state(k);
+        CX(r) = (u16)(k.rx_len > 0xFFFF ? 0xFFFF : k.rx_len);
+        u32 unacked = k.state == OPEN ? k.tx_base + k.tx_len - k.snd_una : 0;
+        DX(r) = (u16)(unacked > 0xFFFF ? 0xFFFF : unacked);
+        return; }
+    }
+    AX(r) = 0xFFFF;
 }
