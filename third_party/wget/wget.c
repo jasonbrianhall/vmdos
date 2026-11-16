@@ -200,7 +200,34 @@ tls_init(void)
 	    (const unsigned char *)pers, sizeof pers - 1)) != 0)
 		die("TLS: no random numbers (-%x)", -e);
 	if (!insecure) {
-		e = mbedtls_x509_crt_parse_file(&cas, ca_file);
+		/* Read here, in big blocks: mbedtls_x509_crt_parse_file() turns
+		 * stdio's buffering off, and DJGPP then reads byte by byte, a DOS
+		 * call each: 180 KB of CAs took long enough that a server waiting
+		 * for the handshake gave up. */
+		FILE *f = fopen(ca_file, "rb");
+		unsigned char *pem = NULL;
+		size_t n = 0, room = 0, r;
+
+		if (f) {
+			for (;;) {
+				if (n + 65536 + 1 > room) {
+					unsigned char *p = realloc(pem, room = n + 65536 * 4 + 1);
+					if (!p)
+						die("out of memory reading %s", ca_file);
+					pem = p;
+				}
+				if ((r = fread(pem + n, 1, room - n - 1, f)) == 0)
+					break;
+				n += r;
+			}
+			fclose(f);
+		}
+		if (!f || !n)
+			die("can't read the certificate authorities in %s: %s "
+			    "(-k skips the check)", ca_file, f ? "empty" : strerror(errno));
+		pem[n] = '\0';
+		e = mbedtls_x509_crt_parse(&cas, pem, n + 1);
+		free(pem);
 		if (e < 0) {
 			char m[100];
 			mbedtls_strerror(e, m, sizeof m);
@@ -246,6 +273,9 @@ connect_to(const char *host, const char *port, int use_tls)
 	struct addrinfo hints, *ai, *a;
 	int e;
 
+	if (use_tls)
+		tls_init();		/* the CAs and random numbers before connecting: the server won't wait */
+
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -264,7 +294,6 @@ connect_to(const char *host, const char *port, int use_tls)
 		die("%s port %s: %s", host, port, strerror(errno));
 	if (!use_tls)
 		return;
-	tls_init();
 	mbedtls_ssl_init(&ssl);
 	mbedtls_ssl_config_init(&conf);
 	tls = 1;
