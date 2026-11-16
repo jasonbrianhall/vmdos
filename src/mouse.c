@@ -185,7 +185,7 @@ static int granular_x(void) { return (video_mode <= 1 || video_mode == 4 || vide
 static void reset_ranges(void)
 {
     xmin = ymin = 0;
-    xmax = 639;
+    xmax = video_mouse_width() - 1;
     ymax = video_gfx_height() - 1;
     mx = (xmax + 1) / 2; my = (ymax + 1) / 2;
 }

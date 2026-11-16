@@ -98,7 +98,7 @@ vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
 more detail.
 
 C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
-vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, SHSUCDX,
+vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, VMRES, SHSUCDX,
 CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
 DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
 (Vim 7.4, also as VI; on C: only), BASIC (Felix BASIC, a QBasic-style BASIC with
@@ -827,7 +827,13 @@ are VMTCP.CFG's (STARTNET's DHCP and SLAAC, or VMTCP). ssh is its own
 terminal (TERM=linux: colors, full-screen programs, UTF-8 line drawing in
 code page 437, F-keys, Alt), so no ANSI driver is needed. sftp and scp
 carry ssh inside them (DOS runs one program at a time). ~/.ssh is
-C:\HOME\.ssh (HOME= to change; DOSLFN for the long name).
+C:\HOME\.ssh (HOME= to change; DOSLFN for the long name). ssh takes the
+remote terminal's size from the DOS screen: `VMRES 132x50` (or 80x28,
+80x43, 80x50, 80x60, 132x25, 132x43, 132x60; `VMRES` shows it, `VMRES 25`
+goes back) first gives a bigger one. VMRES uses plain INT 10h (the BIOS's
+8x14/8x8 fonts, AX=1111h/1112h, and the VESA text modes 108h-10Ch), which
+vmdos's VGA BIOS draws and a real card's (`video=vbe`) usually has; a program
+that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
 

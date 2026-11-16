@@ -209,6 +209,14 @@ static void default_palette(int kind)
 /* ---------------- modes ---------------- */
 static int text_cols = 80, text_rows = 25;
 static u32 text_base = 0xB8000;
+/* Text modes' character height (8, 14 or 16 scan lines: the 8x14 font is
+   the 8x16 one without its top and bottom lines, as in the BIOS) and the
+   screen's scan lines: 80x28, 80x43 and 80x50 are a smaller font on the
+   same screen (INT 10h AX=1111h/1112h). vga_lines is INT 10h AH=12h
+   BL=30h's choice (200, 350, 400) for the next text mode set. text_vbe:
+   the VESA text mode (108h-10Ch: 80x60, 132x25/43/50/60) when one is set. */
+static int text_ch = 16, text_scan = 400, vga_lines = 400;
+static u16 text_vbe;
 
 static u8 *planes;                 /* 4 x 64 KiB: unchained 256-color and 16-color modes */
 static int is_text(int m) { return m <= 3 || m == 7; }
@@ -280,7 +288,13 @@ static int native_height(void);
 int video_gfx_height(void)
 {
     if (vga_native) return native_height();
-    return vbe_on ? (int)vbe_h : is_text(video_mode) ? 200 : gfx_h();
+    return vbe_on ? (int)vbe_h : is_text(video_mode) ? (text_rows < 25 ? 25 : text_rows) * 8 : gfx_h();
+}
+/* The INT 33h pointer's width: 640, or 8 per column in the wide text modes (132). */
+int video_mouse_width(void)
+{
+    if (vga_native || vbe_on || !is_text(video_mode) || text_cols <= 80) return 640;
+    return text_cols * 8;
 }
 
 /* CGA color select (port 3D9h, INT 10h AH=0Bh): background (or the
@@ -326,6 +340,8 @@ static void video_set_mode_(int mode, int clear)
     video_mode = mode;
     text_cols = (mode == 0 || mode == 1 || mode == 4 || mode == 5 || mode == 0x0D || mode == 0x13) ? 40 : 80;
     text_rows = 25;
+    text_ch = 16; text_scan = 400; text_vbe = 0;
+    if (mode <= 3) { text_scan = vga_lines; text_ch = vga_lines == 200 ? 8 : vga_lines == 350 ? 14 : 16; }
     text_base = mode == 7 ? 0xB0000 : 0xB8000;
     wr8(BDA + 0x49, (u8)mode);
     wr16(BDA + 0x4A, (u16)text_cols);
@@ -340,7 +356,7 @@ static void video_set_mode_(int mode, int clear)
     wr8(BDA + 0x65, mode == 0x13 ? 0x0E : 0x29);
     wr8(BDA + 0x66, 0x30);
     wr8(BDA + 0x84, (u8)(text_rows - 1));
-    wr16(BDA + 0x85, mode == 0x10 ? 14 : mode == 0x12 || is_text(mode) ? 16 : 8);
+    wr16(BDA + 0x85, mode == 0x10 ? 14 : is_text(mode) ? text_ch : mode == 0x12 ? 16 : 8);
     /* INT 43h: the graphics font for this mode's character height, as a VGA
        BIOS sets it (F000:D000 8x14, A000 8x16, B000 8x8). Programs draw text
        themselves from it with the height in 40:85h (SimCity, mode 10h). */
@@ -389,6 +405,11 @@ static void video_set_mode_(int mode, int clear)
     ega_check();
     if (hv_active) video_b000_map();                         /* mode 7 has its text there */
     crtc[0x0A] = 0x0D; crtc[0x0B] = 0x0E;
+    if (is_text(mode) && text_ch != 16) {          /* 200 or 350 lines (AH=12h BL=30h) */
+        crtc[0x09] = (u8)((crtc[0x09] & 0xE0) | (text_ch - 1));
+        crtc[0x12] = (u8)(text_scan - 1);
+        crtc[0x0A] = (u8)(text_ch - 3); crtc[0x0B] = (u8)(text_ch - 2);
+    }
     if (clear) {
         if (is_text(mode)) for (u32 i = 0; i < 0x4000; i++) wr16(text_base + i * 2, 0x0720);
         else if (is_cga(mode)) memset(gptr(0xB8000), 0, 0x8000);
@@ -414,6 +435,73 @@ static void video_set_mode_(int mode, int clear)
     last_layout_mode = -1;
     if (!is_text(mode) && !is_cga(mode) && !is_ega(mode) && mode != 0x13) kprintf("video mode %02x: not drawn yet\n", mode);
     else dbg(1, "video mode %02x\n", mode);
+}
+
+/* A text mode's font height ch (8, 14, 16) on its scan lines: as many rows
+   as fit (INT 10h AX=1111h, 1112h, 1114h: 80x28, 80x43, 80x50), and the BIOS
+   data, CRTC and cursor to match, as a VGA BIOS sets them. */
+static void text_geometry(int ch)
+{
+    text_ch = ch;
+    text_rows = text_scan / ch;
+    if (text_rows > 60) text_rows = 60;            /* shadow_text, refresh_text's rows */
+    wr16(BDA + 0x4A, (u16)text_cols);
+    wr8(BDA + 0x84, (u8)(text_rows - 1));
+    wr16(BDA + 0x85, (u16)ch);
+    wr16(BDA + 0x4C, (u16)((text_rows * text_cols * 2 + 0xFF) & ~0xFF));
+    wr16(BDA + 0x60, 0x0607);
+    crtc[0x01] = (u8)(text_cols - 1);
+    crtc[0x13] = (u8)(text_cols / 2);
+    crtc[0x09] = (u8)((crtc[0x09] & 0xE0) | (ch - 1));
+    crtc[0x12] = (u8)(text_rows * ch - 1);
+    crtc[0x0A] = (u8)(ch > 8 ? ch - 3 : ch - 2); crtc[0x0B] = (u8)(crtc[0x0A] + 1);
+    full_redraw = 1;
+}
+
+static int console_on;                             /* (the drawing section's) */
+static void text_font(int ch)
+{
+    if (!is_text(video_mode) || video_mode == 7 || vbe_on || console_on || vga_native) return;
+    text_geometry(ch);
+    u16 pos = rd16(BDA + 0x50 + rd8(BDA + 0x62) * 2);  /* the cursor stays on the screen */
+    if ((pos >> 8) >= text_rows) wr16(BDA + 0x50 + rd8(BDA + 0x62) * 2, (u16)((text_rows - 1) << 8 | (pos & 0xFF)));
+    dbg(1, "video: text %dx%d, 8x%d font\n", text_cols, text_rows, ch);
+}
+
+/* The VESA text modes: 108h 80x60, 109h 132x25, 10Ah 132x43, 10Bh 132x50,
+   10Ch 132x60. Mode 3 with more columns and rows: the same B800h memory
+   (132x60 is 15.5 KB of it), drawn as any text mode. Not in 4F00h's list
+   (games take it for graphics), but 4F01h and 4F02h take them. */
+static const struct { u16 no; u8 cols, rows, ch; u16 scan; } vtext[] = {
+    { 0x108, 80, 60, 8, 480 }, { 0x109, 132, 25, 16, 400 }, { 0x10A, 132, 43, 8, 350 },
+    { 0x10B, 132, 50, 8, 400 }, { 0x10C, 132, 60, 8, 480 },
+};
+static int vtext_find(u16 no)
+{
+    for (unsigned i = 0; i < sizeof vtext / sizeof vtext[0]; i++) if (vtext[i].no == (no & 0x1FF)) return (int)i;
+    return -1;
+}
+static void vtext_set(int i, int clear)
+{
+    video_set_mode(3, clear);
+    text_cols = vtext[i].cols;
+    text_scan = vtext[i].scan;
+    text_geometry(vtext[i].ch);
+    text_vbe = vtext[i].no;
+    kprintf("video: VESA text mode %x, %ux%u\n", vtext[i].no, vtext[i].cols, vtext[i].rows);
+}
+static void vtext_info(int i, u32 a)
+{
+    for (int k = 0; k < 256; k++) wr8(a + k, 0);
+    wr16(a + 0x00, 0x000F);                        /* supported, extra info, BIOS output, color; text */
+    wr8(a + 0x02, 0x07); wr16(a + 0x04, 32); wr16(a + 0x06, 32);   /* window A: 32 KB at B800h */
+    wr16(a + 0x08, 0xB800);
+    wr16(a + 0x10, (u16)(vtext[i].cols * 2));
+    wr16(a + 0x12, vtext[i].cols); wr16(a + 0x14, vtext[i].rows);
+    wr8(a + 0x16, 8); wr8(a + 0x17, vtext[i].ch);
+    wr8(a + 0x18, 4); wr8(a + 0x19, 4);            /* 4 planes, 4 bits: as VGA text reports */
+    wr8(a + 0x1A, 1); wr8(a + 0x1B, 0);            /* banks, memory model 0: text */
+    wr8(a + 0x1D, 0); wr8(a + 0x1E, 1);
 }
 
 /* ---------------- drawing ---------------- */
@@ -748,7 +836,7 @@ static void layout(void)
     if (smooth_opt < 0) smooth_opt = (strstr(cmdline, "scale=smooth") || xbrz_opt) && !no_scale && !unscaled;
     int text = is_text(video_mode) && !vd_on;
     u32 w = vd_on ? vd_w : vbe_on ? vbe_w : text ? text_pixels_w() : (u32)gfx_w();
-    u32 h = vd_on ? vd_h : vbe_on ? vbe_h : text ? (u32)text_rows * 16 : (u32)gfx_h();
+    u32 h = vd_on ? vd_h : vbe_on ? vbe_h : text ? (u32)(text_rows * text_ch) : (u32)gfx_h();
     int lmode = vd_on ? 0x1000 : video_mode;      /* the Voodoo 3's picture: a mode of its own */
     if (last_layout_mode == lmode && (int)w == last_w && (int)h == last_h) return;
     last_layout_mode = lmode;
@@ -789,7 +877,7 @@ static void layout(void)
 
 static int sh_mouse = -1, sh_blink = -1;
 
-/* Text modes are drawn like the graphics ones: each text row (16 scanlines)
+/* Text modes are drawn like the graphics ones: each text row (text_ch scanlines)
    that changed is rendered into a buffer in RAM at its native width (640
    pixels for 80 or 40 columns) and scaled into the picture's box, so it
    fills the screen as games do; nothing is read back from the framebuffer. */
@@ -808,8 +896,8 @@ static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_a
         if (atc[0x10] & 8) { bg &= 7; if ((a & 0x80) && !blink_phase) fg = bg; }
         u32 pf = pal[atc[fg] & 0x3F], pb = pal[atc[bg] & 0x3F];
         int cur_on = i == cursor_off && blink_phase && !(crtc[0x0A] & 0x20);
-        const u8 *g = font8x16 + ch * 16;
-        for (int gy = 0; gy < 16; gy++) {
+        const u8 *g = text_ch == 8 ? font8x8 + ch * 8 : font8x16 + ch * 16 + (text_ch == 14);
+        for (int gy = 0; gy < text_ch; gy++) {
             u8 bits = g[gy];
             if (cur_on && gy >= cs && gy <= ce) bits = 0xFF;
             u32 *p = band[gy] + c * cw;
@@ -821,16 +909,16 @@ static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_a
         }
     }
     if (smooth) {
-        for (int gy = 0; gy < 16; gy++) smooth_row((u32)(r * 16 + gy), band[gy]);
+        for (int gy = 0; gy < text_ch; gy++) smooth_row((u32)(r * text_ch + gy), band[gy]);
         return;
     }
-    u32 th = (u32)text_rows * 16;
-    u32 y0 = ((u32)r * 16 * g_h + th - 1) / th, y1 = ((u32)(r + 1) * 16 * g_h + th - 1) / th;
+    u32 ch = (u32)text_ch, th = (u32)text_rows * ch;
+    u32 y0 = ((u32)r * ch * g_h + th - 1) / th, y1 = ((u32)(r + 1) * ch * g_h + th - 1) / th;
     int last = -1;
     for (u32 y = y0; y < y1 && y < g_h; y++) {
-        int gy = (int)(y * th / g_h) - r * 16;
+        int gy = (int)(y * th / g_h) - r * text_ch;
         if (gy < 0) gy = 0;
-        if (gy > 15) gy = 15;
+        if (gy > text_ch - 1) gy = text_ch - 1;
         if (gy != last) { for (u32 x = 0; x < g_w; x++) line[x] = band[gy][txmap[x]]; last = gy; }
         put_row(line, g_w, g_x, g_y + y);
     }
@@ -2054,6 +2142,8 @@ static void vbe_call(struct regs *r)
         }
         AX(r) = 0x004F; return; }
     case 0x01: {
+        int t = vtext_find(CX(r));
+        if (t >= 0) { vtext_info(t, es_di); AX(r) = 0x004F; return; }
         int m = vbe_find(CX(r));
         if (m < 0) { AX(r) = 0x014F; return; }
         vbe_mode_info(m, es_di);
@@ -2061,6 +2151,8 @@ static void vbe_call(struct regs *r)
     case 0x02: {
         u16 bx = BX(r);
         if ((bx & 0x1FF) < 0x100) { video_set_mode(bx & 0x7F, !(bx & 0x8000)); AX(r) = 0x004F; return; }
+        int vt = vtext_find(bx);
+        if (vt >= 0) { vtext_set(vt, !(bx & 0x8000)); AX(r) = 0x004F; return; }
         int m = vbe_find(bx);
         if (m < 0) { AX(r) = 0x014F; return; }
         if (vmodes[m].bpp == 4) {               /* planar: the VGA's own timings, a CRTCInfoBlock or not */
@@ -2076,7 +2168,7 @@ static void vbe_call(struct regs *r)
         vbe_set(m, !(bx & 0x8000));
         if (bx & 0x0800) vbe_timing_set(&t);
         AX(r) = 0x004F; return; }
-    case 0x03: BX(r) = vbe_on ? vbe_cur : planar_vbe ? planar_vbe : (u16)video_mode; AX(r) = 0x004F; return;
+    case 0x03: BX(r) = vbe_on ? vbe_cur : planar_vbe ? planar_vbe : text_vbe ? text_vbe : (u16)video_mode; AX(r) = 0x004F; return;
     case 0x05: video_vbe_window(r); return;
     case 0x06: {
         if (planar_vbe && planar_scanline(r)) return;
@@ -2637,7 +2729,8 @@ static void video_console_attr_(const char *title, const char *msg, u16 attr)
         return;
     }
     console_on = 1;
-    if (!is_text(video_mode)) { video_mode = 3; text_cols = 80; }
+    if (!is_text(video_mode)) video_mode = 3;
+    text_cols = 80; text_rows = 25; text_ch = 16;   /* console_cells' size, whatever text mode DOS had */
     dac8 = 0; dac_mask = 0xFF;
     default_palette(0);
     last_layout_mode = -1;
@@ -2648,12 +2741,12 @@ void video_console(const char *msg) { video_console_attr("vmdos stopped", msg, 0
 
 /* Around a console the guest gets back (Ctrl+Shift+F10, the log): its
    mode, text width and palette, then a full redraw. */
-static struct { int on, mode, cols, dac8; u8 mask; u8 dac[256][3]; } saved;
+static struct { int on, mode, cols, rows, ch, dac8; u8 mask; u8 dac[256][3]; } saved;
 static void video_console_save_(void);
 void video_console_save(void) { rlock_take(&video_lock); video_console_save_(); rlock_drop(&video_lock); }
 static void video_console_save_(void)
 {
-    saved.on = 1; saved.mode = video_mode; saved.cols = text_cols;
+    saved.on = 1; saved.mode = video_mode; saved.cols = text_cols; saved.rows = text_rows; saved.ch = text_ch;
     saved.dac8 = dac8; saved.mask = dac_mask;                  /* the 8-bit DAC too: the console's is 6-bit */
     memcpy(saved.dac, vga_dac, sizeof vga_dac);
 }
@@ -2664,7 +2757,7 @@ static void video_console_restore_(void)
     if (!saved.on) return;
     saved.on = 0;
     console_on = 0;
-    video_mode = saved.mode; text_cols = saved.cols;
+    video_mode = saved.mode; text_cols = saved.cols; text_rows = saved.rows; text_ch = saved.ch;
     dac8 = saved.dac8; dac_mask = saved.mask;
     memcpy(vga_dac, saved.dac, sizeof vga_dac);
     palette_dirty = 1;
@@ -3224,9 +3317,9 @@ static int video_int10_(struct regs *r)
     case 0x01:
         wr16(BDA + 0x60, CX(r));
         crtc[0x0A] = CH(r) & 0x3F; crtc[0x0B] = CL(r) & 0x1F;
-        if ((CH(r) & 0x1F) < 8 && (CL(r) & 0x1F) < 8 && !(CH(r) & 0x20)) {   /* CGA-style shape: scale to 16 lines */
-            crtc[0x0A] = (CH(r) & 0x1F) * 2; crtc[0x0B] = (CL(r) & 0x1F) * 2 + 1;
-            if ((CL(r) & 0x1F) == 7) crtc[0x0B] = 15;
+        if (text_ch > 8 && (CH(r) & 0x1F) < 8 && (CL(r) & 0x1F) < 8 && !(CH(r) & 0x20)) {   /* CGA-style shape: scale to the font */
+            crtc[0x0A] = (u8)((CH(r) & 0x1F) * text_ch / 8); crtc[0x0B] = (u8)((CL(r) & 0x1F) * text_ch / 8 + text_ch / 8 - 1);
+            if ((CL(r) & 0x1F) == 7) crtc[0x0B] = (u8)(text_ch - 1);
         }
         break;
     case 0x02: set_cursor(page, DH(r), DL(r)); break;
@@ -3311,11 +3404,17 @@ static int video_int10_(struct regs *r)
             else { r->v86_es = 0xF000; BP(r) = offs[which]; }
             CX(r) = rd16(BDA + 0x85);
             DL(r) = rd8(BDA + 0x84);
-        } else dbg(1, "INT 10h AX=%04x (font) ignored\n", AX(r));
+        } else if ((AL(r) & 0xEF) == 0x01) text_font(14);   /* 1101h/1111h: ROM 8x14 */
+        else if ((AL(r) & 0xEF) == 0x02) text_font(8);      /* 1102h/1112h: ROM 8x8 */
+        else if ((AL(r) & 0xEF) == 0x04) text_font(16);     /* 1104h/1114h: ROM 8x16 */
+        else dbg(1, "INT 10h AX=%04x (font) ignored\n", AX(r));
         break;
     case 0x12:
         if (BL(r) == 0x10) { BH(r) = 0; BL(r) = 3; CX(r) = 0x0009; }
-        else AL(r) = 0x12;
+        else if (BL(r) == 0x30 && AL(r) <= 2) {        /* text scan lines for the next mode set: 200, 350, 400 */
+            vga_lines = AL(r) == 0 ? 200 : AL(r) == 1 ? 350 : 400;
+            AL(r) = 0x12;
+        } else AL(r) = 0x12;
         break;
     case 0x13: {
         u32 s = LIN(r->v86_es, BP(r));
