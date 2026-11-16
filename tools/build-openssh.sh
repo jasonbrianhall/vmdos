@@ -46,11 +46,12 @@ if [ -n "$SSHSRC" ]; then
 else
     git -c advice.detachedHead=false clone -q --depth 1 --branch $ssh_tag https://github.com/openssh/openssh-portable "$tmp/openssh"
 fi
-(cd "$tmp/openssh" && autoreconf > /dev/null 2>&1)
+# DOS's changes: the user name prompt, ssh run inside sftp and scp (README.vmdos)
+(cd "$tmp/openssh" && patch -s -p1 < "$port/openssh-dos.patch" && autoreconf > /dev/null 2>&1)
 mkdir "$tmp/build"
 cd "$tmp/build"
 ac_cv_have_struct_timespec=yes ac_cv_func_ppoll=yes ac_cv_func_poll=yes \
-ac_cv_func_getentropy=yes \
+ac_cv_func_getentropy=yes ac_cv_func_closefrom=yes \
 "$tmp/openssh/configure" --host=i586-pc-msdosdjgpp \
     --without-openssl --without-zlib --without-pam --without-selinux \
     --without-security-key-builtin --disable-security-key --disable-pkcs11 \
@@ -67,13 +68,37 @@ for f in dos-compat dos-term; do
     $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
         -DHAVE_CONFIG_H -c "$port/$f.c" -o $f.o
 done
-i586-pc-msdosdjgpp-ar rcs libdoscompat.a dos-compat.o dos-term.o
-make -j"$(nproc)" ssh.exe CC="$CC" sysconfdir=c:/vmdos/ssh \
-    LIBS="-L. -ldoscompat -lopenbsd-compat -lwatt" > make.log 2>&1 ||
-    { grep -E -A3 "error:|undefined reference" make.log | head -40; exit 1; }
+$CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+    -DHAVE_CONFIG_H -c "$port/dos-co.c" -o dos-co.o
+i586-pc-msdosdjgpp-ar rcs libdoscompat.a dos-compat.o dos-term.o dos-co.o
+LIBS="-L. -ldoscompat -lopenbsd-compat -lwatt"
+make -j"$(nproc)" ssh.exe sftp.o sftp-usergroup.o progressmeter.o sftp-common.o \
+    sftp-client.o sftp-glob.o ssherr-nolibcrypto.o scp.o CC="$CC" sysconfdir=c:/vmdos/ssh LIBS="$LIBS" \
+    > make.log 2>&1 || { grep -E -A3 "error:|undefined reference" make.log | head -40; exit 1; }
+# SFTP.EXE and SCP.EXE carry ssh inside (dos-co.c, dos-spawn.c): ssh.c's
+# main and clientloop.c's cleanup_exit get other names, and so does scp's
+# cleanup_exit (dos-spawn.c's picks between them).
+i586-pc-msdosdjgpp-objcopy --redefine-sym _main=_ssh_main ssh.o ssh-in.o
+i586-pc-msdosdjgpp-objcopy --redefine-sym _cleanup_exit=_ssh_cleanup_exit \
+    clientloop.o clientloop-in.o
+$CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+    -DHAVE_CONFIG_H -c "$port/dos-spawn.c" -o dos-spawn.o
+SSH_IN="dos-spawn.o ssh-in.o readconf.o clientloop-in.o sshtty.o sshconnect.o
+    sshconnect2.o mux.o ssh-pkcs11.o ssh-sk-client.o"
+for p in sftp scp; do
+    i586-pc-msdosdjgpp-objcopy --redefine-sym _cleanup_exit=_prog_cleanup_exit $p.o $p-prog.o
+done
+LINK="-L. -Lopenbsd-compat -L$W/lib -lssh -lopenbsd-compat $LIBS"
+i586-pc-msdosdjgpp-gcc -o sftp.exe sftp-prog.o sftp-usergroup.o progressmeter.o \
+    sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o $SSH_IN $LINK
+i586-pc-msdosdjgpp-gcc -o scp.exe scp-prog.o progressmeter.o \
+    sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o $SSH_IN $LINK
 [ -n "$SSH_KEEP" ] && cp ssh.exe "$SSH_KEEP"
-i586-pc-msdosdjgpp-strip ssh.exe
 mkdir -p "$port/bin"
-rm -f "$port/bin/SSH.EXE"
-upx -q --best -o "$port/bin/SSH.EXE" ssh.exe > /dev/null
-ls -l "$port/bin/SSH.EXE"
+for p in ssh sftp scp; do
+    i586-pc-msdosdjgpp-strip $p.exe
+    P=$(echo $p | tr a-z A-Z)
+    rm -f "$port/bin/$P.EXE"
+    upx -q --best -o "$port/bin/$P.EXE" $p.exe > /dev/null
+    ls -l "$port/bin/$P.EXE"
+done

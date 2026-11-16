@@ -36,6 +36,10 @@
 #include <sys/ioctl.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include "xmalloc.h"
+#include "log.h"
+
+static unsigned char sock_nb[256];	/* sockets set non-blocking (dos_fcntl) */
 
 
 static inline unsigned long long rdtsc(void)
@@ -255,6 +259,15 @@ dos_poll(struct pollfd *fds, int nfds, int timeout_ms)
 			fds[i].revents = 0;
 			if (fd < 0)
 				continue;
+			if (dos_is_pipe(fd)) {
+				if ((ev & (POLLIN | POLLRDNORM)) &&
+				    dos_pipe_ready(fd, 0))
+					fds[i].revents |= ev & (POLLIN | POLLRDNORM);
+				if ((ev & (POLLOUT | POLLWRNORM)) &&
+				    dos_pipe_ready(fd, 1))
+					fds[i].revents |= ev & (POLLOUT | POLLWRNORM);
+				continue;
+			}
 			if (is_socket(fd)) {
 				if (nsk < 64) {
 					sk[nsk] = fds[i];
@@ -286,7 +299,12 @@ dos_poll(struct pollfd *fds, int nfds, int timeout_ms)
 		if (timeout_ms > 0 &&
 		    (_farpeekl(_dos_ds, 0x46c) - start) * 55 >= (unsigned)timeout_ms)
 			return 0;
-		__dpmi_yield();
+		if (co_ssh_state == CO_RUNNING)
+			co_yield();	/* the other side of sftp/scp */
+		else {
+			dos_alarm_check();
+			__dpmi_yield();
+		}
 	}
 }
 
@@ -399,6 +417,7 @@ dos_tcsetattr(int fd, int act, const struct termios *t)
 #define M_MAXNS 4
 static char m_ip[64], m_mask[64], m_gw[64], m_vec[16], m_host[64];
 static char m_ns[M_MAXNS][64];
+
 static int m_nns;
 
 static long
@@ -420,6 +439,12 @@ mtcp_config(int pass, const struct config_table *cfg)
 		tcp_inject_config(cfg, "NAMESERVER", m_ns[i]);
 	if (*m_host)
 		tcp_inject_config(cfg, "HOSTNAME", m_host);
+	if (getenv("WATTDBG") != NULL) {	/* Watt-32's packet trace */
+		tcp_inject_config(cfg, "DEBUG.FILE", "C:/WATTDBG.TXT");
+		tcp_inject_config(cfg, "DEBUG.MODE", "ALL");
+		tcp_inject_config(cfg, "DEBUG.PROTO", "ALL");
+		tcp_inject_config(cfg, "DEBUG.LINEBUF", "1");
+	}
 	return 1;
 }
 
@@ -473,6 +498,7 @@ read_mtcp_config(void)
 			copy_word(m_host, sizeof m_host, v);
 		else if (strcasecmp(key, "NAMESERVER") == 0 && m_nns < M_MAXNS)
 			copy_word(m_ns[m_nns++], sizeof m_ns[0], v);
+
 	}
 	fclose(f);
 	/* Never DHCP or BOOTP of its own: the address DOS already has. */
@@ -483,12 +509,17 @@ read_mtcp_config(void)
 	}
 	_watt_no_config = 1;
 	_watt_user_config(mtcp_config);
+	if (getenv("WATTDBG") != NULL)
+		dbug_init();
 }
 
 __attribute__((constructor)) static void
 dos_init(void)
 {
 	/* Bytes to and from the remote side as they are. */
+	/* Files as they are: no CR/LF translation, no stop at Ctrl-Z
+	   (sftp and scp copy files byte for byte). */
+	_fmode = O_BINARY;
 	setmode(STDOUT_FILENO, O_BINARY);
 	/* ~/.ssh (known_hosts, keys): C:\HOME unless HOME says otherwise. */
 	if (getenv("HOME") == NULL) {
@@ -507,7 +538,6 @@ dos_init(void)
  * DJGPP's fcntl. dos-compat.h renames fcntl to dos_fcntl.
  */
 #undef fcntl
-static unsigned char sock_nb[256];
 
 int
 dos_fcntl(int fd, int cmd, ...)
@@ -518,6 +548,18 @@ dos_fcntl(int fd, int cmd, ...)
 	va_start(ap, cmd);
 	arg = va_arg(ap, long);
 	va_end(ap);
+	if (dos_is_pipe(fd)) {
+		switch (cmd) {
+		case F_GETFL:
+			return (dos_pipe_wr(fd) ? O_WRONLY : O_RDONLY) |
+			    (dos_pipe_setnb(fd, -1) ? O_NONBLOCK : 0);
+		case F_SETFL:
+			dos_pipe_setnb(fd, (arg & O_NONBLOCK) != 0);
+			return 0;
+		default:
+			return 0;
+		}
+	}
 	if (fd >= 0 && fd < 256 && __FSEXT_get_function(fd) != NULL) {
 		int on;
 
@@ -556,7 +598,7 @@ dos_strerror(int e)
 		{ ESOCKTNOSUPPORT, "Socket type not supported" },
 		{ EOPNOTSUPP, "Operation not supported" },
 		{ EPFNOSUPPORT, "Protocol family not supported" },
-		{ EAFNOSUPPORT, "Address family not supported by protocol" },
+		{ EAFNOSUPPORT, "IPv6 isn't supported yet (Watt-32's IPv6 TCP doesn't work)" },
 		{ EADDRINUSE, "Address already in use" },
 		{ EADDRNOTAVAIL, "Cannot assign requested address" },
 		{ ENETDOWN, "Network is down" },
@@ -592,4 +634,212 @@ time_t
 (time)(time_t *tp)
 {
 	return dos_time(tp);
+}
+
+/*
+ * The remote user name when none was given (user@, -l, User): DOS has no
+ * login name to use, so USER (or LOGNAME) if set, else ask, as PuTTY does.
+ */
+char *
+dos_ask_user(const char *def)
+{
+	const char *u = getenv("USER");
+	char buf[256];
+
+	(void)def;
+	if (u == NULL || *u == '\0')
+		u = getenv("LOGNAME");
+	if (u != NULL && *u != '\0')
+		return xstrdup(u);
+	if (readpassphrase("login as: ", buf, sizeof buf, RPP_ECHO_ON) == NULL ||
+	    buf[0] == '\0')
+		fatal("No user name given (user@host, -l, or SET USER=)");
+	return xstrdup(buf);
+}
+
+/*
+ * IPv6: Watt-32's IPv6 TCP doesn't work (its state machine never parses
+ * IPv6 segments, and more), so say so plainly rather than time out.
+ */
+#undef connect
+int W32_CALL connect(int, const struct sockaddr *, socklen_t);
+
+int W32_CALL
+dos_connect(int s, const struct sockaddr *sa, socklen_t len)
+{
+	if (sa != NULL && sa->sa_family == AF_INET6) {
+		errno = EAFNOSUPPORT;
+		return -1;
+	}
+	return connect(s, sa, len);
+}
+
+/* Pipes and sockets aren't terminals (DOS calls both character devices). */
+#undef isatty
+int
+dos_isatty(int fd)
+{
+	if (dos_is_pipe(fd) || is_socket(fd))
+		return 0;
+	return isatty(fd);
+}
+
+/* Nothing to close: DOS programs don't hand handles on (and ssh inside
+   sftp/scp mustn't close their files and pipes). */
+void
+closefrom(int lowfd)
+{
+	(void)lowfd;
+}
+
+/* readv/writev through dos_read/dos_write (pipes, sockets, the console). */
+#undef readv
+#undef writev
+ssize_t
+dos_writev(int fd, const struct iovec *iov, int n)
+{
+	ssize_t total = 0, r;
+	int i;
+
+	for (i = 0; i < n; i++) {
+		if (iov[i].iov_len == 0)
+			continue;
+		r = dos_write(fd, iov[i].iov_base, iov[i].iov_len);
+		if (r < 0)
+			return total > 0 ? total : -1;
+		total += r;
+		if ((size_t)r < iov[i].iov_len)
+			break;
+	}
+	return total;
+}
+
+ssize_t
+dos_readv(int fd, const struct iovec *iov, int n)
+{
+	ssize_t total = 0, r;
+	int i;
+
+	for (i = 0; i < n; i++) {
+		if (iov[i].iov_len == 0)
+			continue;
+		r = dos_read(fd, iov[i].iov_base, iov[i].iov_len);
+		if (r < 0)
+			return total > 0 ? total : -1;
+		total += r;
+		if ((size_t)r < iov[i].iov_len)
+			break;
+	}
+	return total;
+}
+
+/* stat() and friends with POSIX file type bits (dos-compat.h). */
+#undef stat
+#undef lstat
+#undef fstat
+#define DJ_IFMT  0xf000		/* DJGPP's values */
+#define DJ_IFREG 0x0000
+#define DJ_IFBLK 0x1000
+#define DJ_IFCHR 0x2000
+#define DJ_IFDIR 0x3000
+#define DJ_IFIFO 0x4000
+#define DJ_IFLNK 0x8000
+
+static void
+posix_mode(struct stat *st)
+{
+	unsigned m = st->st_mode, t;
+
+	switch (m & DJ_IFMT) {
+	case DJ_IFDIR: t = S_IFDIR; break;
+	case DJ_IFCHR: t = S_IFCHR; break;
+	case DJ_IFBLK: t = S_IFBLK; break;
+	case DJ_IFIFO: t = S_IFIFO; break;
+	case DJ_IFLNK: t = S_IFLNK; break;
+	default:       t = S_IFREG; break;
+	}
+	st->st_mode = t | (m & 07777);
+}
+
+int
+dos_stat(const char *p, struct stat *st)
+{
+	int r = stat(p, st);
+
+	if (r == 0)
+		posix_mode(st);
+	return r;
+}
+
+int
+dos_lstat(const char *p, struct stat *st)
+{
+	int r = lstat(p, st);
+
+	if (r == 0)
+		posix_mode(st);
+	return r;
+}
+
+int
+dos_fstat(int fd, struct stat *st)
+{
+	int r;
+
+	if (dos_is_pipe(fd)) {
+		memset(st, 0, sizeof *st);
+		st->st_mode = S_IFIFO | 0600;
+		return 0;
+	}
+	if ((r = fstat(fd, st)) == 0)
+		posix_mode(st);
+	return r;
+}
+
+/*
+ * gmtime() (and localtime(): the DOS clock is taken as UTC, as in
+ * dos_gettimeofday) by plain arithmetic: DJGPP's tz code got dates wrong.
+ */
+struct tm *
+dos_gmtime_r(const time_t *tp, struct tm *tm)
+{
+	long long t = *tp, days = t / 86400, rem = t % 86400, z, era;
+	unsigned doe, yoe, doy, mp;
+
+	if (rem < 0) {
+		rem += 86400;
+		days--;
+	}
+	memset(tm, 0, sizeof *tm);
+	tm->tm_hour = rem / 3600;
+	tm->tm_min = (rem % 3600) / 60;
+	tm->tm_sec = rem % 60;
+	tm->tm_wday = (int)(((days % 7) + 11) % 7);	/* 1970-01-01: Thursday */
+	z = days + 719468;
+	era = (z >= 0 ? z : z - 146096) / 146097;
+	doe = (unsigned)(z - era * 146097);
+	yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	mp = (5 * doy + 2) / 153;
+	tm->tm_mday = doy - (153 * mp + 2) / 5 + 1;
+	tm->tm_mon = mp < 10 ? mp + 2 : mp - 10;
+	tm->tm_year = (int)(yoe + era * 400 + (tm->tm_mon <= 1)) - 1900;
+	{
+		static const int cum[12] = { 0, 31, 59, 90, 120, 151, 181,
+		    212, 243, 273, 304, 334 };
+		int y = tm->tm_year + 1900, leap = (y % 4 == 0 &&
+		    (y % 100 != 0 || y % 400 == 0));
+
+		tm->tm_yday = cum[tm->tm_mon] + tm->tm_mday - 1 +
+		    (leap && tm->tm_mon > 1);
+	}
+	return tm;
+}
+
+struct tm *
+dos_gmtime(const time_t *tp)
+{
+	static struct tm tm;
+
+	return dos_gmtime_r(tp, &tm);
 }

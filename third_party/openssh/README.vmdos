@@ -1,13 +1,16 @@
-OpenSSH's ssh client for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), in
-C:\VMDOS\NET on C: only (the boot floppy has no room).
+OpenSSH's ssh, sftp and scp for DOS (DJGPP, 32-bit, need DPMI: vmdos's
+own), in C:\VMDOS\NET on C: only (the boot floppy has no room).
 
     STARTNET                         (once: VMPKT and the TCP/IP settings)
     SSH user@host
+    SSH host                         (asks "login as:"; SET USER=name skips it)
     SSH -p 2222 user@192.168.1.10
     SSH -i C:\HOME\.ssh\id_ed25519 user@host uptime
+    SFTP user@host                   (get, put, ls, cd, lcd, ... ; bye)
+    SCP C:\NOTES.TXT user@host:      SCP user@host:file.tgz C:\DL
 
   bin/SSH.EXE        github.com/openssh/openssh-portable tag V_10_6_P2, the
-                     client only, built --without-openssl (OpenSSH's own
+                     clients only (SFTP.EXE and SCP.EXE: below), built --without-openssl (OpenSSH's own
                      crypto: Ed25519 and ML-KEM/sntrup/Curve25519 key exchange,
                      ChaCha20-Poly1305 and AES-CTR ciphers; no RSA or ECDSA
                      keys or host keys: those need OpenSSL), on Watt-32 (github.com/gvanem/Watt-32,
@@ -19,6 +22,10 @@ C:\VMDOS\NET on C: only (the boot floppy has no room).
                      gettimeofday()/time(), strerror() for network errors,
                      Ctrl-C as a character in raw mode, the TCP/IP settings
   dos-term.c         the terminal (below)
+  dos-co.c, dos-spawn.c   ssh inside sftp and scp (below)
+  openssh-dos.patch  the changes to OpenSSH itself: the user name prompt;
+                     sftp and scp start the built-in ssh instead of fork();
+                     C:FILE and C:\DIR\FILE are local paths to scp
   djstrerr.py        for the build: DJGPP's errno numbers, so Watt-32's errno
                      list can be made on the host (it is normally made by running
                      a DOS program)
@@ -55,6 +62,16 @@ Alt+key as Esc+key, Backspace as DEL; with TERM=xterm (SET TERM=xterm) the
 xterm sequences instead. Tested: bash, top, vi, colored ls. Ctrl-C goes to
 the remote side; ~. ends a stuck session as usual.
 
+sftp and scp. They normally start ssh as another process and talk to it
+through pipes; DOS runs one program at a time. So SFTP.EXE and SCP.EXE
+carry ssh inside: it runs as a coroutine on its own stack, joined to sftp
+or scp by pipes in memory, each side running while the other waits.
+Everything else is as usual: the same options and config, passwords and
+host keys asked as ssh asks them, the progress meter. Paths: scp takes
+C:\DIR\FILE; in sftp, backslashes escape, so write C:/DIR/FILE. Files are
+copied as they are (binary). Not there: scp -3 (remote to remote through
+here: two ssh at once), sftp -S/-D (other programs), local-to-local scp.
+
 Not there: ssh-agent and agent forwarding to a DOS agent, ControlMaster,
 ProxyCommand and anything else that starts a program (DOS can't run one
 beside ssh), X11 forwarding, PKCS#11/FIDO keys. Port forwarding is untested.
@@ -62,7 +79,19 @@ beside ssh), X11 forwarding, PKCS#11/FIDO keys. Port forwarding is untested.
 tools/build-openssh.sh rebuilds bin/SSH.EXE (DJGPP cross gcc; it fetches
 OpenSSH and Watt-32 at the pinned versions).
 
-Two things found on the way, worked around here: DJGPP's select() and
+IPv6: not yet. Watt-32's IPv6 TCP doesn't work (its state machine never
+parses IPv6 segments; no neighbor discovery or routing; wrong checksums),
+so -6 says so. The plan is vmdos's own TCP (src/tcp9p.cpp, IPv4 and IPv6)
+in place of Watt-32.
+
+SET WATTDBG=1 writes Watt-32's packet trace to C:\WATTDBG.TXT.
+
+Things found on the way, worked around here: DJGPP's select() and
 gettimeofday() go through mktime(), which sometimes loops for ever in
 timesub() (ssh hung after login); and INT 10h AX=1003h (blink/intensity)
-froze the guest under vmdos now and then, so ssh leaves the blink bit alone.
+froze the guest under vmdos now and then, so ssh leaves the blink bit alone;
+DJGPP's localtime() got dates wrong (sftp's ls), so gmtime/localtime are
+plain arithmetic here (the DOS clock is taken as UTC); DJGPP's file type
+bits aren't POSIX's (S_IFREG is 0), so stat() results are converted; and
+_exit() runs the exit handlers, or Watt-32 stays hooked into the packet
+driver after the program is gone (DOS then crashes on the next frame).

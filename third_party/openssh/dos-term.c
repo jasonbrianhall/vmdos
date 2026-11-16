@@ -36,6 +36,8 @@
 #undef read
 #undef write
 #undef ioctl
+#undef isatty
+#undef close
 
 #define MAXP 16
 
@@ -292,6 +294,8 @@ term_init(void)
 	atexit(term_restore);
 }
 
+/* At exit: the main screen back if on the alternate, the cursor shown.
+   (Others may have written since: the cursor stays where it is.) */
 static void
 term_restore(void)
 {
@@ -299,11 +303,10 @@ term_restore(void)
 		dosmemput(alt_save, rows * cols * 2, ScreenPrimary);
 		free(alt_save);
 		alt_save = NULL;
-		cx = alt_x;
-		cy = alt_y;
+		ScreenSetCursor(alt_y, alt_x);
 	}
-	set_cursor_shape(1);
-	ScreenSetCursor(cy, cx);
+	if (!cur_visible)
+		set_cursor_shape(1);
 }
 
 static void
@@ -853,6 +856,8 @@ dos_write(int fd, const void *buf, size_t len)
 	size_t i;
 	int y, x;
 
+	if (dos_is_pipe(fd))
+		return dos_pipe_write(fd, buf, len);
 	if (len == 0 || !CON_OUT(fd))
 		return write(fd, buf, len);
 	term_init();
@@ -1029,6 +1034,8 @@ ssize_t
 dos_read(int fd, void *buf, size_t len)
 {
 	int n;
+	if (dos_is_pipe(fd))
+		return dos_pipe_read(fd, buf, len);
 	if (!raw_in || len == 0 || !CON_IN(fd))
 		return read(fd, buf, len);
 	term_init();
