@@ -689,6 +689,7 @@ void vkbd_release_mods(int m)
 }
 
 void vkbd_inject(u8 sc) { kq_put(sc); }       /* hv.c: keys typed for the guest */
+int vkbd_free(void) { return (int)((kq_head + sizeof kq - kq_tail - 1) % sizeof kq); }   /* room in the key queue */
 
 void vkbd_real_scancode(u8 sc)
 {

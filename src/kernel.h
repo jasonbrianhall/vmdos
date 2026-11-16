@@ -504,7 +504,14 @@ u32 clip_size(void);
 int clip_paste(void);                         /* Ctrl+Shift+V: 1 if there was text */
 void clip_paste_stop(void);
 void clip_tick(void);
-extern volatile int clip_grab_req;                     /* wheel clicks up (+) / down (-): the scrollback */                  /* INT 33h pointer width: 640, more in 132-column text */
+extern volatile int clip_grab_req;
+u32 cp437_uni(u8 c);
+u8 uni_cp437(u32 u);
+int us_key(u8 c);
+int video_text_snapshot(u16 *out, int max, int *cols, int *rows, int *crow, int *ccol);
+void vkbd_inject(u8 sc);
+int vkbd_free(void);
+void remote_tick(void);                     /* wheel clicks up (+) / down (-): the scrollback */                  /* INT 33h pointer width: 640, more in 132-column text */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;
 

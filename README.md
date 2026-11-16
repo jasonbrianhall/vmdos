@@ -869,6 +869,23 @@ that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
 
+### Remote DOS prompt (telnet)
+
+`remote=23` on the command line (`remote=on` is 23, any port works) has
+vmdos take telnet connections to DOS's IPv4 address on that port, after
+STARTNET or VMTCP has given DOS one (vmdos sees it go by; nothing stays
+resident in DOS, and vmdos answers ARP for it meanwhile). The session shows
+the DOS text screen, ANSI colors and code page 437 as UTF-8, only what
+changes, and keys typed there go to DOS as scan codes: arrows, Home/End,
+PgUp/PgDn, Ins/Del, F1-F12, Ctrl+letters, so a program with its own
+keyboard handler gets them too (paced by the BIOS buffer, so a paste into
+the terminal isn't lost). Graphics modes show a note until text comes back.
+One session at a time; another gets "busy". `remotepw=WORD` asks for a
+password first (three tries). Telnet isn't encrypted: keep it on your own
+network, or reach it through an SSH tunnel. Under QEMU's user networking:
+`-nic user,hostfwd=tcp::2323-:23`, then `telnet localhost 2323`.
+IPv4 only.
+
 ### Memory statistics for the host (virtio-balloon)
 
 With a virtio-balloon device (QEMU `-device virtio-balloon-pci,id=bal`), vmdos reports

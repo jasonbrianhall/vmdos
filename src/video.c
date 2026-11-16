@@ -1086,6 +1086,23 @@ int video_scrollback_key(int delta)
     return 1;
 }
 int video_text_page(void) { return text_rows > 2 ? text_rows - 1 : 1; }
+
+/* The DOS text screen as it is (remote.cpp): cells into out (cols x rows,
+   at most max), the cursor's row and column (-1: hidden). 0: not a text
+   mode vmdos draws. */
+int video_text_snapshot(u16 *out, int max, int *cols, int *rows, int *crow, int *ccol)
+{
+    if (vga_native || !is_text(video_mode) || vbe_on) return 0;
+    int C = text_cols, R = text_rows;
+    if (C * R > max) return 0;
+    u16 start = crtc[0x0C] << 8 | crtc[0x0D];
+    memcpy(out, gptr(text_base + start * 2), (u32)C * R * 2);
+    int cur = (int)(u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
+    *cols = C; *rows = R;
+    if ((crtc[0x0A] & 0x20) || cur < 0 || cur >= C * R) *crow = *ccol = -1;
+    else { *crow = cur / C; *ccol = cur % C; }
+    return 1;
+}
 /* Any other key: the live screen again. */
 void video_scrollback_live(void) { if (sb_view) sb_live_req = 1; }
 
