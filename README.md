@@ -814,6 +814,23 @@ the kernel command line logs each step. (IPv6 addresses aren't renewed.)
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
+### SSH, SFTP and SCP
+
+C:\VMDOS\NET has OpenSSH's ssh, sftp and scp (10.6p2, its own crypto:
+Ed25519 keys, ChaCha20-Poly1305/AES-CTR; on C: only): after STARTNET,
+`SSH user@host` (`SSH host` asks `login as:`), `SFTP user@host`,
+`SCP C:\FILE.TXT user@host:`. They use vmdos's own TCP (the one VMDOSNET
+uses, `src/tcp9p.cpp`), IPv4 and IPv6, through INT 2Fh AX=564Eh BL=13-18
+(connections, and DNS questions); no packet driver or DOS TCP/IP stack is
+involved, and nothing runs DHCP: the addresses, gateways and DNS servers
+are VMTCP.CFG's (STARTNET's DHCP and SLAAC, or VMTCP). ssh is its own
+terminal (TERM=linux: colors, full-screen programs, UTF-8 line drawing in
+code page 437, F-keys, Alt), so no ANSI driver is needed. sftp and scp
+carry ssh inside them (DOS runs one program at a time). ~/.ssh is
+C:\HOME\.ssh (HOME= to change; DOSLFN for the long name).
+`third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
+rebuilds them.
+
 ### Memory statistics for the host (virtio-balloon)
 
 With a virtio-balloon device (QEMU `-device virtio-balloon-pci,id=bal`), vmdos reports
@@ -1013,7 +1030,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `src/mouse.c` | PS/2 + USB mouse, INT 33h |
 | `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
-| `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP) |
+| `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP); tcp9p's connections and DNS for DOS programs too (INT 2Fh AX=564Eh BL=13-18: SSH) |
 | `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
 | `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, DEC 21140 Tulip, Hyper-V netvsc, USB (CDC-ECM) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / NVMe / Hyper-V / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, NVMe, Hyper-V storvsc, USB), FAT reader |
@@ -1034,6 +1051,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
 | `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
 | `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
+| `third_party/openssh/` | OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's TCP) with their DOS glue, sockets, terminal and OpenSSH patch (prebuilt; licenses, notes in its README.vmdos; `tools/build-openssh.sh`) |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT; CWSDPMI built in for VMHV) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
