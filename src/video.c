@@ -490,6 +490,40 @@ static void vtext_set(int i, int clear)
     text_vbe = vtext[i].no;
     kprintf("video: VESA text mode %x, %ux%u\n", vtext[i].no, vtext[i].cols, vtext[i].rows);
 }
+/* A text screen of cols x rows as VMRES sets it (80x25, 80x28, 80x43,
+   80x50, or a VESA text mode): 0, or -1 for a size there isn't. */
+static int text_size_(int cols, int rows)
+{
+    for (unsigned i = 0; i < sizeof vtext / sizeof vtext[0]; i++)
+        if (vtext[i].cols == cols && vtext[i].rows == rows) { vtext_set((int)i, 1); return 0; }
+    if (cols != 80) return -1;
+    int ch = rows == 25 ? 16 : rows == 28 ? 14 : rows == 43 || rows == 50 ? 8 : 0;
+    if (!ch) return -1;
+    vga_lines = rows == 43 ? 350 : 400;
+    video_set_mode(3, 1);
+    if (ch != 16) text_font(ch);
+    return 0;
+}
+
+/* text=COLSxROWS on the command line (vmdos.cfg, the boot menu): the DOS
+   prompt starts at that size, as VMRES would set it. */
+void video_boot_text(void)
+{
+    const char *t = strstr(cmdline, "text=");
+    if (!t || (t != cmdline && t[-1] != ' ') || vga_native) return;
+    t += 5;
+    int cols = 0, rows = 0;
+    while (*t >= '0' && *t <= '9') cols = cols * 10 + (*t++ - '0');
+    if (*t == 'x' || *t == 'X') { t++; while (*t >= '0' && *t <= '9') rows = rows * 10 + (*t++ - '0'); }
+    if (!rows && cols != 80 && cols != 132) { rows = cols; cols = 80; }   /* text=50: 80x50 */
+    if (!rows) rows = 25;
+    rlock_take(&video_lock);
+    int bad = text_size_(cols, rows);
+    rlock_drop(&video_lock);
+    if (bad) kprintf("text=%dx%d: no such text size (80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60)\n", cols, rows);
+    else kprintf("video: text %dx%d from text=\n", cols, rows);
+}
+
 static void vtext_info(int i, u32 a)
 {
     for (int k = 0; k < 256; k++) wr8(a + k, 0);
@@ -954,6 +988,349 @@ static void refresh_text(const u16 *cells, int cursor_off)
     sh_cursor = cursor_off;
     sh_mouse = mcell;
     sh_blink = blink_phase;
+}
+
+/* ---------------- scrollback (Ctrl+Shift+PgUp) ----------------
+   The text rows that leave the top of the DOS screen are kept (SB_LINES of
+   them) and Ctrl+Shift+PgUp/PgDn/Up/Down/Home/End page back through them,
+   as a terminal's scrollback; any other key goes back to the live screen
+   (and to DOS). Two ways in: the BIOS's own scrolls (INT 10h AH=06h and
+   teletype output, DOS's CON: DIR, TYPE), row for row however fast, and
+   for programs that write the screen themselves (ssh, mTCP) each redraw
+   compared with the last one: the screen moved up k rows with the cursor
+   at the bottom, so the k rows that were at the top are kept. More than a
+   screen between two redraws is lost that way; DOS's own output isn't.
+   scrollback=off on the command line: none. */
+#define SB_LINES 2000
+#define SB_W 132
+static u16 *sb_buf;                                /* SB_LINES rows of SB_W cells, a ring */
+static u8 sb_wid[SB_LINES];                        /* each row's columns */
+static u32 sb_head, sb_count;                      /* the next row written, rows kept */
+static u32 sb_total;                               /* rows ever kept: row numbers for a selection */
+static u32 sb_view;                                /* rows scrolled back; 0: the live screen */
+static u16 sb_snap[132 * 60];                      /* the screen at the last redraw */
+static int sb_snap_c, sb_snap_r, sb_off = -1;
+static volatile int sb_delta, sb_live_req;
+static u16 sb_cells[132 * 60];                     /* what's shown while scrolled back */
+
+static void sb_push(const u16 *cells, int cols)
+{
+    if (sb_off < 0) sb_off = strstr(cmdline, "scrollback=off") != 0;
+    if (sb_off) return;
+    if (!sb_buf) {
+        sb_buf = phys_try_alloc(SB_LINES * SB_W * 2);
+        if (!sb_buf) { sb_off = 1; kprintf("video: no memory for the scrollback\n"); return; }
+    }
+    if (cols > SB_W) cols = SB_W;
+    memcpy(sb_buf + sb_head * SB_W, cells, (u32)cols * 2);
+    sb_wid[sb_head] = (u8)cols;
+    sb_head = (sb_head + 1) % SB_LINES;
+    sb_total++;
+    if (sb_count < SB_LINES) sb_count++;
+    if (sb_view && sb_view < sb_count) sb_view++;  /* scrolled back: the same rows stay in view */
+}
+
+/* The BIOS scrolled the shown page's whole screen up n rows (scroll()): the
+   top n rows go into the scrollback now, and the last redraw's picture
+   moves up with them so sb_watch doesn't take them a second time. */
+static void sb_bios_scroll(u32 base, int n)
+{
+    int C = text_cols, R = text_rows;
+    for (int i = 0; i < n; i++) sb_push((const u16 *)gptr(base + (u32)i * C * 2), C);
+    if (sb_snap_c != C || sb_snap_r != R) return;
+    memmove(sb_snap, sb_snap + n * C, (u32)(R - n) * C * 2);
+    for (int i = (R - n) * C; i < R * C; i++) sb_snap[i] = 0x0720;
+}
+
+static int sb_blank(const u16 *row, int C)
+{
+    for (int c = 0; c < C; c++) if ((row[c] & 0xFF) != ' ' && (row[c] & 0xFF) != 0) return 0;
+    return 1;
+}
+
+/* A redraw of the text screen: did it move up since the last one? */
+static void sb_watch(const u16 *cells, int cursor_off)
+{
+    int C = text_cols, R = text_rows, n = C * R;
+    if (sb_snap_c != C || sb_snap_r != R) {
+        sb_snap_c = C; sb_snap_r = R;
+        memcpy(sb_snap, cells, (u32)n * 2);
+        return;
+    }
+    if (!memcmp(sb_snap, cells, (u32)n * 2)) return;
+    int crow = cursor_off >= 0 && cursor_off < n ? cursor_off / C : -1;
+    if (crow >= R - 2) {                           /* output at the bottom: a scroll, maybe */
+        int best = 0, bestm = 0, m0 = 0;
+        for (int k = 0; k < R; k++) {
+            int m = 0;
+            for (int i = 0; i + k < R; i++) {
+                const u16 *o = sb_snap + (i + k) * C;
+                if (!memcmp(o, cells + i * C, (u32)C * 2) && !sb_blank(o, C)) m++;
+            }
+            if (k == 0) m0 = m;
+            else if (m > bestm) { bestm = m; best = k; }
+        }
+        /* most of what's left matched, moved up, better than in place */
+        if (best && bestm > m0 && bestm * 2 >= R - best && bestm >= 2)
+            for (int i = 0; i < best; i++) sb_push(sb_snap + i * C, C);
+    }
+    memcpy(sb_snap, cells, (u32)n * 2);
+}
+
+/* Ctrl+Shift+PgUp etc. (vdev.c): rows back (+) or forward (-); 1 if the
+   scrollback took the key (a text screen vmdos draws). */
+int video_scrollback_key(int delta)
+{
+    if (!fb || vga_native || console_on || !is_text(video_mode) || sb_off > 0) return 0;
+    sb_delta += delta;
+    return 1;
+}
+int video_text_page(void) { return text_rows > 2 ? text_rows - 1 : 1; }
+
+/* The DOS text screen as it is (remote.cpp): cells into out (cols x rows,
+   at most max), the cursor's row and column (-1: hidden). 0: not a text
+   mode vmdos draws. */
+int video_text_snapshot(u16 *out, int max, int *cols, int *rows, int *crow, int *ccol)
+{
+    if (vga_native || !is_text(video_mode) || vbe_on) return 0;
+    int C = text_cols, R = text_rows;
+    if (C * R > max) return 0;
+    u16 start = crtc[0x0C] << 8 | crtc[0x0D];
+    memcpy(out, gptr(text_base + start * 2), (u32)C * R * 2);
+    int cur = (int)(u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
+    *cols = C; *rows = R;
+    if ((crtc[0x0A] & 0x20) || cur < 0 || cur >= C * R) *crow = *ccol = -1;
+    else { *crow = cur / C; *ccol = cur % C; }
+    return 1;
+}
+/* Any other key: the live screen again. */
+void video_scrollback_live(void) { if (sb_view) sb_live_req = 1; }
+
+static void video_osd_(const char *msg);
+#define osd_say video_osd_
+
+/* ---------------- copy: selecting text ----------------
+   Ctrl+Shift+C: a cursor on the screen (where DOS's is); arrows move it,
+   Shift+arrows (or Space, then arrows) select from where it was, PgUp/PgDn
+   and Home/End (Ctrl: the top / bottom) move further, into the scrollback
+   too; Enter (or Ctrl+Shift+C again) copies it, Esc leaves. Or the mouse:
+   Ctrl+Shift and drag (or just drag, while selecting) selects, and letting
+   go copies. Rows are numbered from the scrollback's first (sb_total), so
+   a selection stays on its text while more scrolls in. The selection runs
+   as text does, row to row; each row's trailing blanks aren't copied. */
+static int mk_on, mk_sel, mk_mouse;               /* selecting; anchor set; by the mouse (copy on release) */
+static u32 mk_al, mk_cl;                          /* anchor's and cursor's rows */
+static int mk_ac, mk_cc;
+static volatile u16 mk_q[64];                     /* keys from vdev.c: k | 100h up | 200h shift | 400h ctrl */
+static volatile u32 mk_qh, mk_qt;
+static volatile int mk_start_req;
+static volatile int mm_abs, mm_x, mm_y, mm_dx, mm_dy, mm_b, mm_press, mm_release, mm_moved;
+
+static u16 vcell(const u16 *cells, u32 row, int c)   /* a cell of row (sb_total-based), screen or scrollback */
+{
+    int C = text_cols;
+    if (c < 0 || c >= C) return 0x0720;
+    if (row >= sb_total) {
+        u32 r = row - sb_total;
+        return r < (u32)text_rows ? cells[r * C + c] : 0x0720;
+    }
+    if (sb_total - row > sb_count) return 0x0720;       /* gone from the scrollback */
+    u32 slot = (sb_head + SB_LINES - (sb_total - row)) % SB_LINES;
+    return c < sb_wid[slot] ? sb_buf[slot * SB_W + c] : 0x0720;
+}
+
+static void mk_copy(const u16 *cells)
+{
+    static u8 t[65536];
+    u32 l0 = mk_al, l1 = mk_cl; int c0 = mk_ac, c1 = mk_cc;
+    if (l0 > l1 || (l0 == l1 && c0 > c1)) { u32 tl = l0; l0 = l1; l1 = tl; int tc = c0; c0 = c1; c1 = tc; }
+    u32 n = 0;
+    for (u32 l = l0; l <= l1 && n < sizeof t - 1; l++) {
+        int a = l == l0 ? c0 : 0, b = l == l1 ? c1 : text_cols - 1;
+        u32 start = n;
+        for (int c = a; c <= b && n < sizeof t - 1; c++) { u8 ch = (u8)vcell(cells, l, c); t[n++] = ch ? ch : ' '; }
+        while (n > start && t[n - 1] == ' ') n--;
+        if (l != l1) t[n++] = '\n';
+    }
+    clip_set(t, n);
+    char msg[48];
+    snprintf(msg, sizeof msg, "copied: %u characters", n);
+    osd_say(msg);
+}
+
+static void mk_clamp_view(void)                   /* the cursor's row in view */
+{
+    u32 top = sb_total - sb_view, R = (u32)text_rows;
+    if (mk_cl < top) sb_view = sb_total - mk_cl;
+    else if (mk_cl >= top + R) sb_view = mk_cl + 1 >= sb_total + R ? 0 : sb_total + R - 1 - mk_cl;
+    if (sb_view > sb_count) sb_view = sb_count;
+}
+
+static void mk_move(int dl, int dc)
+{
+    long l = (long)mk_cl + dl, oldest = (long)(sb_total - sb_count), last = (long)(sb_total + text_rows - 1);
+    if (l < oldest) l = oldest;
+    if (l > last) l = last;
+    int c = mk_cc + dc;
+    if (c < 0) c = 0;
+    if (c >= text_cols) c = text_cols - 1;
+    mk_cl = (u32)l; mk_cc = c;
+    mk_clamp_view();
+}
+
+/* The mouse's cell on the text screen, from the tablet's place or the motion. */
+static int mm_cell(int *row, int *col)
+{
+    if (mm_abs) {
+        if (!g_w || !g_h) return 0;
+        long px = (long)mm_x * fb_w / 32768 - g_x, py = (long)mm_y * fb_h / 32768 - g_y;
+        long c = px * text_cols / (long)g_w, r = py * text_rows / (long)g_h;
+        *col = c < 0 ? 0 : c >= text_cols ? text_cols - 1 : (int)c;
+        *row = r < 0 ? 0 : r >= text_rows ? text_rows - 1 : (int)r;
+        return 1;
+    }
+    return 0;
+}
+
+static void mk_begin(void)                        /* selecting, from where DOS's cursor is */
+{
+    mk_on = 1; mk_sel = 0; mk_mouse = 0;
+    u16 pos = rd16(BDA + 0x50 + rd8(BDA + 0x62) * 2);
+    mk_cl = sb_total - sb_view + (u32)((pos >> 8) < text_rows ? (pos >> 8) : text_rows - 1);
+    mk_cc = (pos & 0xFF) < text_cols ? (pos & 0xFF) : 0;
+    mk_al = mk_cl; mk_ac = mk_cc;
+}
+
+static void mk_process(const u16 *cells)
+{
+    if (mk_start_req) {
+        mk_start_req = 0;
+        if (mk_on) { if (mk_sel) mk_copy(cells); mk_on = 0; sb_view = 0; }
+        else { mk_begin(); osd_say("select: Shift+arrows, Enter copies, Esc"); }
+    }
+    while (mk_qh != mk_qt) {
+        u16 e = mk_q[mk_qh % 64];
+        mk_qh++;
+        if (!mk_on || (e & 0x100)) continue;
+        int k = e & 0xFF, shift = e & 0x200, ctrl = e & 0x400;
+        if (k == 0x01) { mk_on = 0; sb_view = 0; continue; }                 /* Esc */
+        if (k == 0x1C) { if (mk_sel) mk_copy(cells); mk_on = 0; sb_view = 0; continue; }   /* Enter */
+        if (k == 0x39) { mk_sel = !mk_sel; mk_al = mk_cl; mk_ac = mk_cc; continue; }   /* Space: start / drop */
+        int moves = k == 0x48 || k == 0x50 || k == 0x4B || k == 0x4D || k == 0x49 || k == 0x51 || k == 0x47 || k == 0x4F;
+        if (!moves) continue;
+        if (shift && !mk_sel) { mk_sel = 1; mk_al = mk_cl; mk_ac = mk_cc; }
+        int pg = text_rows - 1;
+        if (k == 0x48) mk_move(-1, 0);
+        else if (k == 0x50) mk_move(1, 0);
+        else if (k == 0x4B) mk_move(0, -1);
+        else if (k == 0x4D) mk_move(0, 1);
+        else if (k == 0x49) mk_move(-pg, 0);
+        else if (k == 0x51) mk_move(pg, 0);
+        else if (k == 0x47) mk_move(ctrl ? -1000000 : 0, -1000);
+        else mk_move(ctrl ? 1000000 : 0, 1000);
+        if (!shift && !mk_sel) { mk_al = mk_cl; mk_ac = mk_cc; }
+    }
+    /* the mouse */
+    int row, col;
+    if (mm_cell(&row, &col)) {                        /* a tablet: its place */
+        u32 l = sb_total - sb_view + (u32)row;
+        if (mm_press) {
+            mm_press = 0;
+            mk_on = 1; mk_mouse = 1; mk_sel = 1;
+            mk_al = mk_cl = l; mk_ac = mk_cc = col;
+        } else if (mk_on && mk_mouse && (mm_b & 1)) { mk_cl = l; mk_cc = col; }
+    } else if (mm_press || mm_moved) {                /* motion only: it moves the selection's cursor, 8 counts a column, 16 a row */
+        static int fx, fy;
+        if (mm_press && !mk_on) { mk_begin(); fx = fy = 0; }
+        if (mk_on) {
+            fx += mm_dx; fy += mm_dy;
+            int dc = fx / 8, dl = fy / 16;
+            fx -= dc * 8; fy -= dl * 16;
+            if (dc || dl) {
+                mk_move(dl, dc);
+                if (!mk_sel) { mk_al = mk_cl; mk_ac = mk_cc; }
+            }
+            if (mm_press) { mk_mouse = 1; mk_sel = 1; mk_al = mk_cl; mk_ac = mk_cc; }
+        }
+        mm_press = 0;
+    }
+    mm_dx = mm_dy = 0;
+    mm_moved = 0;
+    if (mm_release) {
+        mm_release = 0;
+        if (mk_on && mk_mouse) {
+            if (mk_al != mk_cl || mk_ac != mk_cc) mk_copy(cells);
+            mk_on = 0; mk_mouse = 0; sb_view = 0;
+        }
+    }
+}
+
+/* vdev.c: Ctrl+Shift+C (start, or copy); while selecting, its keys. */
+void video_select_start(void) { mk_start_req = 1; }
+int video_selecting(void) { return mk_on || mk_start_req; }
+void video_select_key(int k, int up, int shift, int ctrl)
+{
+    if (mk_qt - mk_qh >= 64) return;
+    mk_q[mk_qt % 64] = (u16)(k | (up ? 0x100 : 0) | (shift ? 0x200 : 0) | (ctrl ? 0x400 : 0));
+    mk_qt++;
+}
+/* mouse.c: the mouse, while Ctrl+Shift are down or a selection is on;
+   1 if it's the selection's (DOS doesn't get it). abs: x, y 0..32767. */
+int video_select_mouse(int abs, int x, int y, int b, int mods)
+{
+    if (!fb || vga_native || console_on || !is_text(video_mode)) return 0;
+    int held = (mods & 1) && (mods & 6);
+    int left = b & 1, was = mm_b & 1;
+    if (!mk_on && !mk_start_req && !(held && left) && !(mk_mouse && was)) { mm_b = b; return 0; }
+    mm_abs = abs;
+    if (abs) { mm_x = x; mm_y = y; } else { mm_dx += x; mm_dy += y; }
+    mm_moved = 1;
+    if (left && !was) mm_press = 1;
+    if (!left && was) mm_release = 1;
+    mm_b = b;
+    return 1;
+}
+
+/* What the text screen shows: the live cells, or rows back in the
+   scrollback; a selection highlighted; a note in the top row's corner. */
+static const u16 *sb_compose(const u16 *cells, int *cursor_off)
+{
+    int d = sb_delta;
+    sb_delta -= d;
+    if (sb_live_req) { sb_live_req = 0; if (!mk_on) sb_view = 0; d = 0; }
+    long v = (long)sb_view + d;
+    sb_view = v < 0 ? 0 : v > (long)sb_count ? sb_count : (u32)v;
+    mk_process(cells);
+    if (!sb_view && !mk_on) return cells;
+    int C = text_cols, R = text_rows;
+    u32 top = sb_total - sb_view;
+    for (int i = 0; i < R; i++)
+        for (int c = 0; c < C; c++) sb_cells[i * C + c] = vcell(cells, top + (u32)i, c);
+    if (mk_on) {
+        u32 l0 = mk_al, l1 = mk_cl; int c0 = mk_ac, c1 = mk_cc;
+        if (l0 > l1 || (l0 == l1 && c0 > c1)) { u32 tl = l0; l0 = l1; l1 = tl; int tc = c0; c0 = c1; c1 = tc; }
+        for (int i = 0; i < R; i++) {
+            u32 l = top + (u32)i;
+            for (int c = 0; c < C; c++) {
+                u16 *p = &sb_cells[i * C + c];
+                int in = mk_sel && (l > l0 || (l == l0 && c >= c0)) && (l < l1 || (l == l1 && c <= c1));
+                int cur = l == mk_cl && c == mk_cc;
+                if (in || cur) {
+                    u8 a = (u8)(*p >> 8), na = cur ? 0x4F : (u8)((a & 0x0F) << 4 | (a & 0x70) >> 4);
+                    if (na == a) na = 0x70;
+                    *p = (u16)(na << 8 | (*p & 0xFF));
+                }
+            }
+        }
+    }
+    if (sb_view) {
+        char note[48];
+        snprintf(note, sizeof note, " scrollback -%u/%u ", sb_view, sb_count);
+        int len = (int)strlen(note);
+        for (int i = 0; i < len && i < C; i++) sb_cells[C - len + i] = (u16)(0x7000 | (u8)note[i]);
+    }
+    *cursor_off = -1;
+    return sb_cells;
 }
 
 /* The mouse pointer in graphics modes: an arrow, 1 = outline, 2 = fill. */
@@ -2694,7 +3071,10 @@ static void video_refresh_(void)
     else if (is_text(video_mode)) {
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
-        refresh_text((const u16 *)gptr(text_base + start * 2), cur);
+        const u16 *cells = (const u16 *)gptr(text_base + start * 2);
+        int cur_off = cur;
+        sb_watch(cells, cur_off);
+        refresh_text(sb_compose(cells, &cur_off), cur_off);
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
@@ -3159,6 +3539,8 @@ static void scroll(int up, int lines, u8 attr, int r0, int c0, int r1, int c1, i
         return;
     }
     if (!is_text(video_mode)) return;
+    if (up && lines < h && r0 == 0 && c0 == 0 && r1 == text_rows - 1 && c1 == text_cols - 1 && page == rd8(BDA + 0x62) && !console_on)
+        sb_bios_scroll(cell_addr(page, 0, 0), lines);   /* the top rows leave the screen: keep them */
     for (int i = 0; i < h; i++) {
         int dr = up ? r0 + i : r1 - i;
         int sr = up ? dr + lines : dr - lines;
