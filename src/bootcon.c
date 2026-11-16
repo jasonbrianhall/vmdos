@@ -33,12 +33,68 @@ static u32 text_phys;                         /* its physical address (B8000h) *
 
 static u32 rgb(u8 r, u8 g, u8 b) { return (u32)r << rpos | (u32)g << gpos | (u32)b << bpos; }
 
+/* The logo (icon.png, tools/mklogo.py): top right, under the title bar,
+   framebuffer only. Lines on its rows wrap before it. Like Linux's
+   penguin it goes at the first jump (the log would move under it), or
+   after LOGO_MS, whichever is first; the screen is the log's again. */
+#include "logo.h"
+#define LOGO_MS 5000
+static int logo_on, logo_c0, logo_r1;         /* its first column, last row */
+static u32 logo_x, logo_y, logo_end;
+
+static int under_logo(int r, int c) { return logo_on && r >= 1 && r <= logo_r1 && c >= logo_c0; }
+static int row_cols(int r) { return logo_on && r >= 1 && r <= logo_r1 ? logo_c0 : cols; }
+
+static void draw_logo(void)
+{
+    if (!logo_on || hidden) return;
+    u32 pal[16];
+    for (int i = 0; i < 16; i++) pal[i] = rgb(logo_pal[i][0], logo_pal[i][1], logo_pal[i][2]);
+    u32 x = 0, y = 0;
+    for (u32 i = 0; i < sizeof logo_rle && y < LOGO_H; i++) {
+        u32 c = pal[logo_rle[i] >> 4];
+        for (int n = (logo_rle[i] & 15) + 1; n > 0; n--) {
+            for (u32 dy = 0; dy < scale; dy++) {
+                volatile u32 *p = (volatile u32 *)(fb + (logo_y + y * scale + dy) * pitch) + logo_x + x * scale;
+                for (u32 dx = 0; dx < scale; dx++) p[dx] = c;
+            }
+            if (++x == LOGO_W) { x = 0; if (++y == LOGO_H) break; }
+        }
+    }
+}
+
+static void logo_place(void)
+{
+    u32 cw = 8 * scale, ch = 16 * scale;
+    logo_x = width - (LOGO_W + 8) * scale;
+    logo_y = ch + 4 * scale;
+    logo_c0 = (int)(logo_x / cw);
+    logo_r1 = (int)((logo_y + LOGO_H * scale - 1) / ch);
+    logo_on = logo_c0 >= 40 && logo_r1 < rows - 4;    /* room left for the log */
+    logo_end = ticks + LOGO_MS;                       /* the timer's: it starts soon after */
+}
+
+static void draw_row(int r);
+
+static void logo_off(int redraw)              /* with busy held; redraw: its rows' text */
+{
+    if (!logo_on) return;
+    logo_on = 0;
+    if (hidden) return;
+    for (u32 y = logo_y; y < logo_y + LOGO_H * scale; y++) {
+        volatile u32 *q = (volatile u32 *)(fb + y * pitch) + logo_x;
+        for (u32 x = 0; x < LOGO_W * scale; x++) q[x] = 0;
+    }
+    if (redraw) for (int r = 1; r <= logo_r1; r++) draw_row(r);
+}
+
 static void glyph(int r, int c, u8 ch, u32 fg, u32 bg)
 {
     if (textmode) {                               /* fg, bg: the attribute's halves */
         ((volatile u16 *)fb)[r * (int)(pitch / 2) + c] = (u16)((bg << 4 | fg) << 8 | ch);
         return;
     }
+    if (under_logo(r, c)) return;
     const u8 *f = vga_font16 + ch * 16;
     u32 x0 = (u32)c * 8 * scale, y0 = (u32)r * 16 * scale;
     for (u32 y = 0; y < 16 * scale; y++) {
@@ -98,6 +154,8 @@ int bootcon_start(u64 addr, u32 p, u32 w, u32 h, u32 bpp, u8 rp, u8 gp, u8 bp)
     row = 1; col = 0;
     bootcon_on = 1;
     title();
+    logo_place();
+    draw_logo();
     return 1;
 }
 
@@ -127,7 +185,7 @@ void bootcon_hold(int on)
     if (!bootcon_on || dos_on_other) return;
     while (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) ;
     hidden = on;
-    if (!on) for (int r = 0; r < rows; r++) draw_row(r);
+    if (!on) { for (int r = 0; r < rows; r++) draw_row(r); draw_logo(); }
     __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
 
@@ -177,7 +235,7 @@ static void osd_erase(void)
 {
     if (!osd_up) return;
     osd_up = 0;
-    if (!hidden) { for (int r = 0; r < rows; r++) draw_row(r); return; }
+    if (!hidden) { for (int r = 0; r < rows; r++) draw_row(r); draw_logo(); return; }
     for (u32 y = osd_y; y < osd_y + osd_h; y++) {
         volatile u32 *q = (volatile u32 *)(fb + y * pitch) + osd_x;
         for (u32 x = 0; x < osd_w; x++) q[x] = 0;
@@ -215,10 +273,11 @@ static void apply_show(void)                  /* with busy held: what the hotkey
             osd_up = 0;
             hidden = !w;
             if (hidden) clear_fb();
-            else for (int r = 0; r < rows; r++) draw_row(r);
+            else { for (int r = 0; r < rows; r++) draw_row(r); draw_logo(); }
             if (had) osd_draw();
         }
     }
+    if (logo_on && (int32_t)(ticks - logo_end) >= 0) logo_off(1);
     if (osd_new) { osd_new = 0; osd_draw(); }
     if (osd_up && (int32_t)(ticks - osd_end) >= 0) osd_erase();
 }
@@ -243,7 +302,7 @@ void bootcon_osd(const char *msg)
 
 void bootcon_tick(void)                       /* the timer: a message's 2 s are up */
 {
-    if (osd_up || osd_new || want_shown >= 0) apply_now();
+    if (osd_up || osd_new || want_shown >= 0 || logo_on) apply_now();
 }
 
 /* Ctrl+Shift+F10 with the log screen: shown (1) or black (0). Done now, or
@@ -260,6 +319,7 @@ static void newline(void)
 {
     col = 0;
     if (++row < rows) return;
+    logo_off(0);                                      /* the log moves up: the logo goes (all rows redrawn below) */
     int keep = (rows - 1) / 2;                        /* jump: the last half stays */
     for (int r = 1; r < rows; r++) {
         if (r <= keep) memcpy(text[r], text[rows - keep + r - 1], MAX_COLS);
@@ -275,7 +335,7 @@ void bootcon_putc(char c)
     if (c == '\n') newline();
     else if (c == '\r') col = 0;                      /* rewrite the line (a countdown) */
     else if (c >= 32 && c < 127) {
-        if (col >= cols) newline();
+        if (col >= row_cols(row)) newline();
         text[row][col] = c;
         if (!hidden) glyph(row, col, (u8)c, fg_of(row), bg_of(row));
         col++;
