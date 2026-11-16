@@ -814,6 +814,20 @@ the kernel command line logs each step. (IPv6 addresses aren't renewed.)
 The programs are prebuilt in net/bin;
 `make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
 
+### SSH
+
+C:\VMDOS\NET\SSH.EXE is OpenSSH's ssh client (10.6p2, its own crypto: Ed25519
+keys, ChaCha20-Poly1305/AES-CTR; on C: only), on the same TCP/IP settings as
+the tools above: after STARTNET, `SSH user@host` (`-p`, `-i`, `-v`, commands
+after the host, as anywhere). It doesn't run DHCP of its own: it takes
+VMTCP.CFG's address, gateway and DNS servers (no address there: it says to
+run STARTNET) and uses VMPKT through Watt-32, a TCP/IP library for DOS
+programs. It is its own terminal (TERM=linux: colors, full-screen programs,
+UTF-8 line drawing in code page 437, F-keys, Alt), so no ANSI driver is
+needed. ~/.ssh is C:\HOME\.ssh (HOME= to change; DOSLFN for the long name).
+`third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
+rebuilds it.
+
 ### Memory statistics for the host (virtio-balloon)
 
 With a virtio-balloon device (QEMU `-device virtio-balloon-pci,id=bal`), vmdos reports
@@ -1034,6 +1048,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
 | `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
 | `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
+| `third_party/openssh/` | OpenSSH's ssh client (DJGPP, on Watt-32 over VMPKT) with its DOS glue and terminal (prebuilt; licenses, notes in its README.vmdos; `tools/build-openssh.sh`) |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT; CWSDPMI built in for VMHV) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |

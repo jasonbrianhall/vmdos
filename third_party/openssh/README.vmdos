@@ -1,0 +1,68 @@
+OpenSSH's ssh client for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), in
+C:\VMDOS\NET on C: only (the boot floppy has no room).
+
+    STARTNET                         (once: VMPKT and the TCP/IP settings)
+    SSH user@host
+    SSH -p 2222 user@192.168.1.10
+    SSH -i C:\HOME\.ssh\id_ed25519 user@host uptime
+
+  bin/SSH.EXE        github.com/openssh/openssh-portable tag V_10_6_P2, the
+                     client only, built --without-openssl (OpenSSH's own
+                     crypto: Ed25519 and ML-KEM/sntrup/Curve25519 key exchange,
+                     ChaCha20-Poly1305 and AES-CTR ciphers; no RSA or ECDSA
+                     keys or host keys: those need OpenSSL), on Watt-32 (github.com/gvanem/Watt-32,
+                     unmodified) for TCP/IP over the packet driver; DJGPP gcc 12,
+                     UPX --best
+  dos-compat.h       forced into every OpenSSH file: what DJGPP lacks or gets
+                     in the way (signals, mmap, IXANY, ...), and the renames below
+  dos-compat.c       getentropy(), poll()/ppoll(), fcntl() on sockets,
+                     gettimeofday()/time(), strerror() for network errors,
+                     Ctrl-C as a character in raw mode, the TCP/IP settings
+  dos-term.c         the terminal (below)
+  djstrerr.py        for the build: DJGPP's errno numbers, so Watt-32's errno
+                     list can be made on the host (it is normally made by running
+                     a DOS program)
+  LICENCE.openssh    OpenSSH's licence (BSD-style)
+  LICENSE.watt32     Watt-32's: free to use in programs given away or sold
+
+Networking. ssh doesn't run DHCP or anything of its own: it takes the
+address, netmask, gateway and DNS servers from vmdos's TCP/IP settings
+(%MTCPCFG%, C:\VMDOS\NET\VMTCP.CFG, which DHCP or VMTCP IPADDR... fills in)
+and gives them to Watt-32 as static settings, so it uses the same address
+as DOS's other TCP/IP programs (vmdos keeps the DHCP lease renewed). With no
+address there it says to run STARTNET. Watt-32 talks to VMPKT (the packet
+driver, INT 60h) like any DOS TCP/IP program. A WATTCP.CFG (SET WATTCP.CFG=dir)
+is used instead if you set one.
+
+Files. HOME is C:\HOME unless set; ~/.ssh is C:\HOME\.ssh (a long name:
+DOSLFN, which AUTOEXEC.BAT loads, has to be there): known_hosts, id_ed25519,
+config. ssh-keygen isn't built: make the key elsewhere and copy it there.
+The system-wide ssh_config is C:\VMDOS\SSH\SSH_CONFIG if you make one.
+C:\HOME\.ssh\SSHSEED.BIN keeps random state between runs.
+
+Randomness. DOS has no /dev/urandom: getentropy() takes RDSEED/RDRAND (any
+CPU of the last ten years), the seed file, the clocks, and TSC-against-8254
+timing jitter (lots of it when the CPU has no RDRAND), all through SHA-512.
+
+The terminal. DOS has no terminal emulator (ANSI.SYS at best), so ssh has
+one: TERM=linux is sent unless TERM is set in DOS, and the screen behaves as
+the Linux console (which is the PC text screen anyway): colors (256 and RGB
+colors to the nearest of 16; 8 background colors), cursor movement, erase,
+insert/delete of characters and lines, scroll regions, line drawing, the
+alternate screen (xterm's), UTF-8 shown in code page 437, the screen's real
+size (25 or 50 lines, ...). Keys: arrows, Home/End/Ins/Del/PgUp/PgDn, F1-F12,
+Alt+key as Esc+key, Backspace as DEL; with TERM=xterm (SET TERM=xterm) the
+xterm sequences instead. Tested: bash, top, vi, colored ls. Ctrl-C goes to
+the remote side; ~. ends a stuck session as usual.
+
+Not there: ssh-agent and agent forwarding to a DOS agent, ControlMaster,
+ProxyCommand and anything else that starts a program (DOS can't run one
+beside ssh), X11 forwarding, PKCS#11/FIDO keys. Port forwarding is untested.
+
+tools/build-openssh.sh rebuilds bin/SSH.EXE (DJGPP cross gcc; it fetches
+OpenSSH and Watt-32 at the pinned versions).
+
+Two things found on the way, worked around here: DJGPP's select() and
+gettimeofday() go through mktime(), which sometimes loops for ever in
+timesub() (ssh hung after login); and INT 10h AX=1003h (blink/intensity)
+froze the guest under vmdos now and then, so ssh leaves the blink bit alone.
