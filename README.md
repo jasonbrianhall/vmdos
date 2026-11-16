@@ -869,6 +869,17 @@ that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
 
+### Downloads: WGET
+
+`WGET https://example.com/file.zip` (after STARTNET) saves FILE.ZIP in the
+current directory (`WGET URL NAME` names it; `-k` skips the certificate
+check, `-q` the progress). HTTP and HTTPS (TLS 1.2 and 1.3, mbedTLS),
+redirects, chunked answers; certificates are checked against
+C:\VMDOS\NET\CACERT.PEM (Mozilla's list) and the host name. It runs on
+vmdos's own TCP as ssh does (its socket layer), with nothing in the kernel
+and no packet driver. `tools/build-wget.sh` builds it (DJGPP);
+`third_party/wget/README.vmdos` has the rest.
+
 ### Remote DOS prompt (telnet)
 
 Off unless asked for: without `remote=` vmdos listens on no port.
