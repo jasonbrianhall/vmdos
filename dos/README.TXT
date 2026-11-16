@@ -15,6 +15,14 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F10   vmdos log over the game, on / off (the game keeps
                      running; Ctrl+Shift+arrows/PgUp/PgDn scroll it,
                      Ctrl+Shift+S saves it to C:\VMDOS\VMDOS.LOG)
+  Ctrl+Shift+PgUp  Scrollback: page back through what scrolled off the DOS
+                     screen (PgDn, Up/Down, Home/End too; the mouse
+                     wheel scrolls it as well); any other key goes back
+  Ctrl+Shift+C     Select text to copy: arrows move, Shift+arrows select
+                     (PgUp goes into the scrollback), Enter copies, Esc
+                     leaves. Or Ctrl+Shift and drag the mouse.
+  Ctrl+Shift+V     Type the clipboard into DOS (the host's too, under
+                     QEMU or virt-manager with the SPICE agent channel)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
   Ctrl+Alt+Del     Restart
@@ -60,6 +68,10 @@ NETWORK: TCP/IP, IPv4 AND IPv6 (in C:\VMDOS\NET; STARTNET loads it all)
                           DOSBox server. vmdos keeps it running: then load
                           VMIPX and start the game. VMIPXBOX STOP ends it.
 
+  Remote prompt (off unless asked for): boot with remote=23 (remotepw=WORD for a password), run
+  STARTNET, then "telnet <DOS's address>" from another computer shows this
+  screen and types into it. Plain telnet: for your own network only.
+
 SCREEN RESOLUTION AND SCALING
 
   vmdos can't switch the PC's real screen mode while DOS runs: the
@@ -93,6 +105,8 @@ BOOT OPTIONS
     vga=max        UEFI: the largest mode (usually the panel's own size)
                    On a legacy BIOS boot, pick the size in the boot menu
                    instead ("screen resolution"), which UEFI has too.
+    text=132x50    The DOS prompt's size from boot (VMRES's sizes; text=50
+                   is 80x50)
   Speed
     speed=N        Run at N% of full speed from boot
   Sound

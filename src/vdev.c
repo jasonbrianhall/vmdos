@@ -689,6 +689,7 @@ void vkbd_release_mods(int m)
 }
 
 void vkbd_inject(u8 sc) { kq_put(sc); }       /* hv.c: keys typed for the guest */
+int vkbd_free(void) { return (int)((kq_head + sizeof kq - kq_tail - 1) % sizeof kq); }   /* room in the key queue */
 
 void vkbd_real_scancode(u8 sc)
 {
@@ -745,6 +746,30 @@ void vkbd_real_scancode(u8 sc)
         }
         return;
     }
+    {
+        int video_selecting(void), video_scrollback_key(int delta);
+        void video_select_start(void), video_select_key(int k, int up, int shift, int ctrl);
+        int modkey = k == 0x1D || k == 0x38 || k == 0x2A || k == 0x36 || sc == 0xE0;
+        if (hot && k == 0x2E && !video_log_on() && (video_selecting() || video_scrollback_key(0))) {
+            if (!up) video_select_start();                    /* Ctrl+Shift+C: select (again: copy) */
+            return;
+        }
+        if (hot && k == 0x2F && !video_log_on()) {            /* Ctrl+Shift+V: type the clipboard */
+            if (!up && clip_paste()) return;
+            if (up && clip_size()) return;
+        }
+        if (video_selecting() && !modkey) {                   /* selecting: the keys are the selection's */
+            video_select_key(k, up, lshift || rshift, ctrl);
+            return;
+        }
+    }
+    if (hot && !video_log_on() && (k == 0x48 || k == 0x50 || k == 0x49 || k == 0x51 || k == 0x47 || k == 0x4F)) {
+        int video_scrollback_key(int delta), video_text_page(void);   /* Ctrl+Shift+PgUp etc.: the DOS screen's scrollback (video.c) */
+        if (video_scrollback_key(0)) {
+            if (!up) video_scrollback_key(k == 0x48 ? 1 : k == 0x50 ? -1 : k == 0x49 ? video_text_page() : k == 0x51 ? -video_text_page() : k == 0x47 ? 100000 : -100000);
+            return;
+        }
+    }
     if (hot && k >= 0x3D && k <= 0x3F) {                     /* Ctrl+Shift+F3/F4: volume down/up, F5: mute */
         void sound_volume_key(int k);
         if (!up) sound_volume_key(k == 0x3D ? -1 : k == 0x3E ? 1 : 0);
@@ -769,6 +794,11 @@ void vkbd_real_scancode(u8 sc)
         void sound_next_output(void);
         if (!up) sound_next_output();
         return;
+    }
+    if (!up && sc != 0xE0 && k != 0x1D && k != 0x38 && k != 0x2A && k != 0x36) {
+        void video_scrollback_live(void);                 /* a key for DOS: back to the live screen */
+        video_scrollback_live();
+        clip_paste_stop();                                /* and a paste stops */
     }
     kq_put(sc);
 }

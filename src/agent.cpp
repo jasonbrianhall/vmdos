@@ -7,6 +7,13 @@
 // guest-network-get-interfaces (DOS's address as net.cpp sees it go by).
 // Anything else: CommandNotFound. "agent=off" skips it.
 //
+// The clipboard (clip.c) on the SPICE agent's port, com.redhat.spice.0
+// (virt-manager's SPICE channel, or QEMU's own: -chardev
+// qemu-vdagent,id=vda,clipboard=on -device virtserialport,chardev=vda,
+// name=com.redhat.spice.0): spice-vdagent's protocol, just its clipboard
+// (CLIPBOARD_BY_DEMAND, UTF-8 text). The host's copy is fetched when it
+// grabs the clipboard, for Ctrl+Shift+V; a copy in vmdos grabs it back.
+//
 // virtio-serial (virtio-console with MULTIPORT), legacy or virtio 1.0, the
 // transport in virtio.cpp: queues 2/3 carry control messages, port p's data
 // is on queues 0/1 (p = 0) or 2p+2/2p+3. The device names its ports
@@ -26,6 +33,7 @@ const uint32_t F_MULTIPORT = 1u << 1;
 enum { DEVICE_READY = 0, PORT_ADD = 1, PORT_REMOVE = 2, PORT_READY = 3, CONSOLE_PORT = 4, RESIZE = 5,
        PORT_OPEN = 6, PORT_NAME = 7 };
 const char AGENT_NAME[] = "org.qemu.guest_agent.0";
+const char SPICE_NAME[] = "com.redhat.spice.0";
 const int MAXPORTS = 8;                         // ports 0-7 (libvirt puts the agent at 1 or 2)
 const int NQ = 2 * MAXPORTS + 2;
 const int NBUF = 4, BUFSZ = 1024;               // receive buffers per queue we read
@@ -41,7 +49,8 @@ struct Ring {
 VirtioDev v;
 Ring rings[NQ];
 int nports, agent = -1, qnum_rx, qnum_tx;
-bool on, host_open;
+int spice = -1, sq_rx, sq_tx;
+bool on, host_open, spice_open;
 
 int rxq(int p) { return p ? 2 * p + 2 : 0; }
 
@@ -293,6 +302,133 @@ void feed(const uint8_t* b, int n)
     }
 }
 
+// ---------------- the SPICE agent: the clipboard ----------------
+enum { VD_MSG_CLIPBOARD = 4, VD_MSG_ANNOUNCE = 6, VD_MSG_GRAB = 7, VD_MSG_REQUEST = 8, VD_MSG_RELEASE = 9 };
+enum { CAP_CLIPBOARD_BY_DEMAND = 5, CAP_CLIPBOARD_SELECTION = 6, CAP_LINEEND_LF = 8 };
+const uint32_t VD_UTF8 = 1;
+const int VD_CHUNK = 2048;                      // the most data in one chunk
+const uint32_t VD_HDR = 20;                     // protocol, type, opaque (8), size
+
+// Sent as a byte stream: chunks (port, size) each carrying part of a message.
+uint8_t* vout;                                  // what's still to go to the host
+uint32_t vout_n;
+const uint32_t VOUT_MAX = 72 * 1024;
+bool host_selection;                            // both sides said CLIPBOARD_SELECTION: a 4-byte prefix
+
+void vd_put(const void* p, uint32_t n)
+{
+    if (!vout) vout = (uint8_t*)phys_alloc(VOUT_MAX);
+    if (vout_n + n > VOUT_MAX) return;
+    memcpy(vout + vout_n, p, n);
+    vout_n += n;
+}
+
+// A message: the header and the data, cut into chunks.
+void vd_msg(uint32_t type, const uint8_t* pre, uint32_t pren, const uint8_t* data, uint32_t n)
+{
+    uint8_t h[VD_HDR] = {};
+    uint32_t total = pren + n;
+    *(uint32_t*)h = 1;                          // VD_AGENT_PROTOCOL
+    *(uint32_t*)(h + 4) = type;
+    *(uint32_t*)(h + 16) = total;
+    uint32_t all = VD_HDR + total, done = 0;
+    if (vout_n + all + (all / VD_CHUNK + 1) * 8 > VOUT_MAX) { kprintf("clip: too much to send at once\n"); return; }
+    while (done < all) {
+        uint32_t c = all - done < (uint32_t)VD_CHUNK ? all - done : VD_CHUNK;
+        uint32_t ch[2] = { 1, c };              // VDP_CLIENT_PORT
+        vd_put(ch, 8);
+        for (uint32_t i = 0; i < c; i++, done++) {   // byte i of header, prefix, data
+            uint32_t k = done;
+            uint8_t b = k < VD_HDR ? h[k] : k < VD_HDR + pren ? pre[k - VD_HDR] : data[k - VD_HDR - pren];
+            vd_put(&b, 1);
+        }
+    }
+}
+
+void vd_clip_msg(uint32_t type, const uint8_t* data, uint32_t n)
+{
+    uint8_t sel[4] = {};                        // selection 0: the clipboard
+    vd_msg(type, sel, host_selection ? 4 : 0, data, n);
+}
+
+void vd_announce(bool request)
+{
+    uint32_t a[2] = { request ? 1u : 0u, 1u << CAP_CLIPBOARD_BY_DEMAND | 1u << CAP_LINEEND_LF };
+    vd_msg(VD_MSG_ANNOUNCE, nullptr, 0, (const uint8_t*)a, sizeof a);
+}
+
+void vd_pump()
+{
+    if (spice < 0 || !vout_n) return;
+    reclaim(sq_tx);
+    uint32_t off = 0;
+    while (off < vout_n) {
+        uint32_t c = vout_n - off < (uint32_t)TXSZ ? vout_n - off : TXSZ;
+        if (!send(sq_tx, vout + off, (int)c)) break;   // the host still has every slot
+        off += c;
+    }
+    memmove(vout, vout + off, vout_n - off);
+    vout_n -= off;
+}
+
+void vd_message(uint32_t type, const uint8_t* d, uint32_t n)
+{
+    dbg(2, "clip: SPICE agent message %u, %u bytes\n", type, n);
+    if (type == VD_MSG_ANNOUNCE) {
+        if (n < 8) return;
+        uint32_t req = *(const uint32_t*)d, caps = *(const uint32_t*)(d + 4);
+        host_selection = false;                 // (we don't offer it: no prefix either way)
+        dbg(1, "clip: the host's SPICE agent caps %x%s\n", caps, req ? ", asks ours" : "");
+        if (req) vd_announce(false);
+        return;
+    }
+    if (type != VD_MSG_GRAB && type != VD_MSG_CLIPBOARD && type != VD_MSG_REQUEST && type != VD_MSG_RELEASE) return;
+    if (host_selection) { if (n < 4 || d[0] != 0) return; d += 4; n -= 4; }
+    if (type == VD_MSG_GRAB) {                  // the host copied: fetch its text, if it has some
+        for (uint32_t i = 0; i + 4 <= n; i += 4)
+            if (*(const uint32_t*)(d + i) == VD_UTF8) { vd_clip_msg(VD_MSG_REQUEST, (const uint8_t*)&VD_UTF8, 4); return; }
+    } else if (type == VD_MSG_CLIPBOARD) {
+        if (n >= 4 && *(const uint32_t*)d == VD_UTF8) clip_from_host(d + 4, n - 4);
+    } else if (type == VD_MSG_REQUEST) {        // the host pastes what vmdos copied
+        static uint8_t* t;
+        if (!t) t = (uint8_t*)phys_alloc(65536 * 3 + 4);
+        *(uint32_t*)t = VD_UTF8;
+        uint32_t len = clip_to_utf8(t + 4, 65536 * 3);
+        uint32_t room = VOUT_MAX / 2;           // what fits in the send buffer with its chunk headers
+        if (len + 4 > room) len = room - 4;
+        vd_clip_msg(VD_MSG_CLIPBOARD, t, len + 4);
+    }
+}
+
+// The byte stream: chunk headers, and the messages they carry.
+uint32_t vin_hdr_n, vin_chunk_left;
+uint8_t vin_hdr[8];
+uint8_t* vmsg;
+uint32_t vmsg_n, vmsg_want;
+const uint32_t VMSG_MAX = 192 * 1024 + VD_HDR + 8;
+
+void vd_feed(const uint8_t* b, int n)
+{
+    if (!vmsg) vmsg = (uint8_t*)phys_alloc(VMSG_MAX);
+    for (int i = 0; i < n; ) {
+        if (!vin_chunk_left) {                  // a chunk header
+            vin_hdr[vin_hdr_n++] = b[i++];
+            if (vin_hdr_n == 8) { vin_chunk_left = *(uint32_t*)(vin_hdr + 4); vin_hdr_n = 0; }
+            continue;
+        }
+        uint8_t c = b[i++];
+        vin_chunk_left--;
+        if (vmsg_n < VMSG_MAX) vmsg[vmsg_n] = c;
+        vmsg_n++;
+        if (vmsg_n == VD_HDR) vmsg_want = VD_HDR + *(uint32_t*)(vmsg + 16);
+        if (vmsg_n >= VD_HDR && vmsg_n == vmsg_want) {
+            if (vmsg_want <= VMSG_MAX) vd_message(*(uint32_t*)(vmsg + 4), vmsg + VD_HDR, vmsg_want - VD_HDR);
+            else kprintf("clip: a SPICE agent message too big (%u bytes) skipped\n", vmsg_want);
+            vmsg_n = 0; vmsg_want = 0;
+        }
+    }
+}
+
 // ---------------- the device ----------------
 void control_msg(const uint8_t* m, int len)
 {
@@ -314,9 +450,25 @@ void control_msg(const uint8_t* m, int len)
             control(id, PORT_OPEN, 1);
             kprintf("agent: QEMU guest agent on virtio-serial port %u\n", id);
         }
+        int ks = (int)sizeof SPICE_NAME - 1;
+        bool sm = (n == ks || (n > ks && !m[8 + ks])) && !memcmp(m + 8, SPICE_NAME, ks);
+        if (sm && spice < 0 && id < (uint32_t)nports && !strstr(cmdline, "clipboard=off")) {
+            spice = (int)id;
+            sq_rx = rxq(spice);
+            sq_tx = sq_rx + 1;
+            post_rx(sq_rx);
+            control(id, PORT_OPEN, 1);
+            kprintf("agent: SPICE agent (the clipboard) on virtio-serial port %u\n", id);
+        }
         break; }
     case PORT_OPEN:
         if ((int)id == agent) { host_open = val; depth = 0; }
+        if ((int)id == spice) {
+            spice_open = val;
+            vin_hdr_n = vin_chunk_left = vmsg_n = vmsg_want = 0;
+            vout_n = 0;
+            if (val) vd_announce(true);
+        }
         break;
     default:
         break;
@@ -364,6 +516,15 @@ extern "C" void agent_tick(void)
     while (c.q.has_used()) {
         VirtqUsed u = c.q.take();
         if (u.id < NBUF) { control_msg(c.buf + u.id * BUFSZ, (int)u.len); repost(2, (uint16_t)u.id); }
+    }
+    if (spice >= 0) {
+        Ring& s = rings[sq_rx];
+        while (s.q.has_used()) {
+            VirtqUsed u = s.q.take();
+            if (u.id < NBUF) { vd_feed(s.buf + u.id * BUFSZ, (int)u.len); repost(sq_rx, (uint16_t)u.id); }
+        }
+        if (clip_grab_req && spice_open) { clip_grab_req = 0; vd_clip_msg(VD_MSG_GRAB, (const uint8_t*)&VD_UTF8, 4); dbg(2, "clip: grab sent to the host\n"); }
+        vd_pump();
     }
     if (agent < 0) return;
     reclaim(qnum_tx);

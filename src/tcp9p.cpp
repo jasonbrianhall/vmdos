@@ -18,14 +18,21 @@
 // can run with the same address at the same time; ARP and IPv6 neighbor
 // solicitations for our addresses are answered here, since nothing in DOS
 // may be listening.
+//
+// One port can also be listened on (tcp9p_listen: the remote prompt,
+// remote.cpp), IPv4: a SYN to DOS's address there opens a connection
+// (SYN_RCVD, then OPEN once our SYN-ACK is acknowledged) that
+// tcp9p_accept hands over; ARP for DOS's address is answered meanwhile.
 #include "net.hpp"
 #include "tcp9p.hpp"
+
+extern "C" int net_guest_addr(uint8_t* mac, uint8_t* ip, int* prefix);
 
 namespace {
 
 const int NCONN = 4, RXQ = 64;
 const u32 TXBUF = 512 * 1024, RXBUF = 320 * 1024;
-enum { CLOSED, SYN_SENT, OPEN, DEAD };
+enum { CLOSED, SYN_SENT, OPEN, DEAD, SYN_RCVD };
 enum { F_FIN = 1, F_SYN = 2, F_RST = 4, F_PSH = 8, F_ACK = 16 };
 
 struct Conn {
@@ -39,6 +46,8 @@ struct Conn {
     bool api;                                  // opened by a DOS program (sock_api)
     u32 api_seen;                              // its last call about it (ticks)
     bool peer_mac;                             // hop_mac from the server's segments (IPv6)
+    bool passive, accept_pending;              // opened by a SYN to the listened port; not handed over yet
+    u32 born;                                  // SYN_RCVD since (ticks)
     u8 *tx, *rx;
 };
 Conn conns[NCONN];
@@ -48,6 +57,14 @@ u16 rxq_len[RXQ];
 int rxq_head, rxq_n;
 u32 dropped;
 int logging = -1;
+u16 listen_port;                               // tcp9p_listen's, 0: none
+
+bool dos_addr(u8* ip4)                         // DOS's IPv4 address, as net.cpp saw it go by
+{
+    u8 mac[6];
+    int prefix;
+    return net_guest_addr(mac, ip4, &prefix) && (ip4[0] | ip4[1] | ip4[2] | ip4[3]);
+}
 
 bool log_on()
 {
@@ -223,6 +240,8 @@ void neighbors(const u8* f, unsigned len)
         if (f[20] != 0 || f[21] != 1) return;
         const u8* my = 0;
         for (auto& k : conns) if (k.state != CLOSED && k.c.family == 4 && !memcmp(f + 38, k.c.my4, 4)) my = k.c.my4;
+        static u8 dos4[4];
+        if (!my && listen_port && dos_addr(dos4) && !memcmp(f + 38, dos4, 4)) my = dos4;   // listening: DOS's address
         if (!my) return;
         memcpy(o, f + 6, 6); memcpy(o + 6, me, 6);
         memcpy(o + 12, f + 12, 8);
@@ -321,6 +340,16 @@ void segment_in(Conn& k, const u8* t, unsigned tl)
         k.reset = true;
         return;
     }
+    if (k.state == SYN_RCVD) {
+        if (fl & F_SYN) { segment(k, F_SYN | F_ACK, k.iss, 0, 0); return; }   // its SYN again: our SYN-ACK was lost
+        if (!(fl & F_ACK) || ack != k.iss + 1) return;
+        k.state = OPEN;
+        k.accept_pending = true;
+        k.progress = ticks;
+        k.rto = 300;
+        tlog("tcp: connection accepted on port %u, mss %u\n", k.c.local_port, k.mss);
+        // and on: data may come with the ACK
+    }
     if (k.state == SYN_SENT) {
         if ((fl & (F_SYN | F_ACK)) != (F_SYN | F_ACK) || ack != k.iss + 1) return;
         k.rcv_nxt = seq + 1;
@@ -380,6 +409,62 @@ void segment_in(Conn& k, const u8* t, unsigned tl)
     }
 }
 
+// A SYN (no ACK) to the listened port, IPv4: the TCP header in *tcp.
+bool listen_syn(const u8* f, unsigned len, const u8** tcp, unsigned* tlen)
+{
+    if (!listen_port || len < 14 + 40 || f[12] != 0x08 || f[13] != 0x00) return false;
+    const u8* ip = f + 14;
+    if ((ip[0] >> 4) != 4 || ip[9] != 6 || (ip[6] & 0x3F) || ip[7]) return false;
+    unsigned ihl = (ip[0] & 15) * 4u, tot = (unsigned)((ip[2] << 8) | ip[3]);
+    if (tot > len - 14 || tot < ihl + 20) return false;
+    const u8* t = ip + ihl;
+    if ((u16)((t[2] << 8) | t[3]) != listen_port || (t[13] & (F_SYN | F_ACK | F_RST)) != F_SYN) return false;
+    *tcp = t; *tlen = tot - ihl;
+    return true;
+}
+
+int conn_alloc();
+
+// A connection from the SYN in frame f: SYN_RCVD, our SYN-ACK sent.
+void passive_open(const u8* f, const u8* t, unsigned tl)
+{
+    const u8* ip = f + 14;
+    for (auto& k : conns)                      // its SYN again, before our SYN-ACK got there
+        if (k.state == SYN_RCVD && !memcmp(k.c.server, ip + 12, 4) && k.c.port == (u16)((t[0] << 8) | t[1])) {
+            segment(k, F_SYN | F_ACK, k.iss, 0, 0);
+            return;
+        }
+    int i = conn_alloc();
+    if (i < 0) { tlog("tcp: a connection to port %u refused: none free\n", listen_port); return; }
+    Conn& k = conns[i];
+    memset(&k.c, 0, sizeof k.c);
+    k.c.family = 4;
+    memcpy(k.c.hop_mac, f + 6, 6);             // back the way it came (the router, or the host itself)
+    memcpy(k.c.server, ip + 12, 4);
+    memcpy(k.c.my4, ip + 16, 4);
+    k.c.port = (u16)((t[0] << 8) | t[1]);
+    k.c.local_port = listen_port;
+    k.passive = true;
+    k.rcv_nxt = g32(t + 4) + 1;
+    k.snd_una = k.iss + 1; k.snd_nxt = k.iss + 1; k.tx_base = k.iss + 1;
+    k.mss = 536;
+    unsigned doff = (t[12] >> 4) * 4u;
+    for (unsigned o = 20; o + 1 < doff && o + 1 < tl; ) {   // its MSS
+        if (t[o] == 0) break;
+        if (t[o] == 1) { o++; continue; }
+        if (t[o + 1] < 2) break;
+        if (t[o] == 2 && t[o + 1] == 4) k.mss = (u16)((t[o + 2] << 8) | t[o + 3]);
+        o += t[o + 1];
+    }
+    if (k.mss > 1460) k.mss = 1460;
+    k.peer_win = (u16)((t[14] << 8) | t[15]);
+    k.state = SYN_RCVD;
+    k.born = k.progress = ticks;
+    k.rto = 500;
+    segment(k, F_SYN | F_ACK, k.iss, 0, 0);
+    tlog("tcp: SYN from %u.%u.%u.%u:%u to port %u\n", ip[12], ip[13], ip[14], ip[15], k.c.port, listen_port);
+}
+
 void process()
 {
     while (rxq_n) {
@@ -403,6 +488,7 @@ void process()
             if (k.c.family == 6) k.peer_mac = true;
             segment_in(k, t, tl);
         }
+        else if (listen_syn(f, len, &t, &tl)) passive_open(f, t, tl);
         else neighbors(f, len);
         rxq_head = (rxq_head + 1) % RXQ;
         rxq_n--;
@@ -412,6 +498,15 @@ void process()
 // Send what the window allows; again what wasn't acknowledged in time.
 void output(Conn& k)
 {
+    if (k.state == SYN_RCVD) {
+        if ((u32)(ticks - k.born) > 15000) { tlog("tcp: no ACK for our SYN-ACK: dropped\n"); k.state = DEAD; return; }
+        if ((u32)(ticks - k.progress) >= k.rto) {
+            segment(k, F_SYN | F_ACK, k.iss, 0, 0);
+            k.progress = ticks;
+            k.rto = k.rto * 2 > 4000 ? 4000 : k.rto * 2;
+        }
+        return;
+    }
     if (k.state == SYN_SENT) {
         if (zero(k.c.hop_mac, 6)) {            // the next hop's MAC first
             const u8* hop = k.c.family == 4 ? k.c.hop4 : k.c.hop6;
@@ -484,7 +579,7 @@ bool tcp9p_rx(const u8* f, unsigned len)
             return true;
         }
     }
-    bool mine = ours(f, len, &t, &tl) >= 0;
+    bool mine = ours(f, len, &t, &tl) >= 0 || listen_syn(f, len, &t, &tl);
     u16 ty = (u16)((f[12] << 8) | f[13]);
     if (!mine && ty != 0x0806 && !(ty == 0x86DD && len > 54 && f[20] == 58)) return false;
     if (rxq_n == RXQ) { dropped++; return mine; }
@@ -510,10 +605,17 @@ void tcp9p_tick()                              // net.cpp, the timer: neighbors,
         }
     if (!nactive) return;
     for (auto& k : conns) if (k.state == OPEN && k.need_ack) segment(k, F_ACK, k.snd_nxt, 0, 0);
+    for (auto& k : conns) if (k.state == SYN_RCVD) output(k);
+    for (int i = 0; i < NCONN; i++)            // a passive one that never opened: freed
+        if (conns[i].passive && conns[i].state == DEAD && !conns[i].accept_pending && conns[i].born && (u32)(ticks - conns[i].born) > 15000 && !conns[i].api) {
+            conns[i].born = 0;
+            tcp9p_close(i);
+        }
 }
 
-// A connection to cfg started (SYN_SENT): its number, or -1 no memory
-static int tcp9p_start(const Tcp9pCfg& cfg)
+namespace {
+// A free connection, its buffers and ISS ready (state still CLOSED, counted active): its number, or -1.
+int conn_alloc()
 {
     if (!rxq) rxq = (u8*)phys_try_alloc(RXQ * net::FRAME_MAX);
     if (!rxq) return -1;
@@ -526,15 +628,69 @@ static int tcp9p_start(const Tcp9pCfg& cfg)
     k.tx = tx ? tx : (u8*)phys_try_alloc(TXBUF);
     k.rx = rx ? rx : (u8*)phys_try_alloc(RXBUF);
     if (!k.tx || !k.rx) return -1;
-    k.c = cfg;
     k.iss = (u32)tsc_read() ^ (u32)(tsc_read() >> 17) ^ ticks * 2654435761u;
-    k.state = SYN_SENT;
-    k.rto = 500;
-    k.progress = ticks - k.rto;                // the SYN now
+    k.state = DEAD;                            // taken; the caller sets the real state
     nactive++;
     net_keep_rx(true);
     return i;
 }
+}
+
+// A connection to cfg started (SYN_SENT): its number, or -1 no memory
+static int tcp9p_start(const Tcp9pCfg& cfg)
+{
+    int i = conn_alloc();
+    if (i < 0) return -1;
+    Conn& k = conns[i];
+    k.c = cfg;
+    k.state = SYN_SENT;
+    k.rto = 500;
+    k.progress = ticks - k.rto;                // the SYN now
+    return i;
+}
+
+// Listen on port (IPv4, DOS's address): new connections come from tcp9p_accept.
+void tcp9p_listen(u16 port)
+{
+    if (!rxq) rxq = (u8*)phys_try_alloc(RXQ * net::FRAME_MAX);
+    if (!rxq || listen_port) return;
+    listen_port = port;
+    nactive++;                                 // frames to tcp9p_rx from now on
+    net_keep_rx(true);
+}
+
+// A connection opened by a SYN to the listened port, once: its number, or -1.
+int tcp9p_accept()
+{
+    for (int i = 0; i < NCONN; i++)
+        if (conns[i].accept_pending) { conns[i].accept_pending = false; return i; }
+    return -1;
+}
+
+// What tcp9p_pump does without polling the card (the timer's net_tick has):
+// take what came, send what can go. False: the connection is gone.
+bool tcp9p_service(int i)
+{
+    process();
+    output(conns[i]);
+    return conns[i].state == OPEN;
+}
+
+// Bytes queued but not yet acknowledged.
+u32 tcp9p_unacked(int i) { const Conn& k = conns[i]; return k.state == OPEN ? k.tx_base + k.tx_len - k.snd_una : 0; }
+
+// Close with a FIN (what was sent is through): the peer sees the end, not a reset.
+void tcp9p_close_fin(int i)
+{
+    if (i < 0 || i >= NCONN || conns[i].state == CLOSED) return;
+    Conn& k = conns[i];
+    if (k.state == OPEN) segment(k, F_FIN | F_ACK, k.snd_nxt, 0, 0);
+    k.state = CLOSED;
+    if (!--nactive) net_keep_rx(false);
+}
+
+// Its peer's IPv4 address (a passive connection's caller).
+void tcp9p_peer(int i, u8* ip4) { memcpy(ip4, conns[i].c.server, 4); }
 
 // A connection to cfg: its number, or -1 no memory, -2 no answer, -3 refused
 int tcp9p_open(const Tcp9pCfg& cfg)
