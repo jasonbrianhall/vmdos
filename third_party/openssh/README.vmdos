@@ -1,0 +1,99 @@
+OpenSSH's ssh, sftp and scp for DOS (DJGPP, 32-bit, need DPMI: vmdos's
+own), in C:\VMDOS\NET on C: only (the boot floppy has no room).
+
+    STARTNET                         (once: the TCP/IP settings, by DHCP)
+    SSH user@host
+    SSH host                         (asks "login as:"; SET USER=name skips it)
+    SSH -p 2222 user@192.168.1.10    SSH -6 user@host   SSH user@2001:db8::10
+    SSH -i C:\HOME\.ssh\id_ed25519 user@host uptime
+    SFTP user@host                   (get, put, ls, cd, lcd, ... ; bye)
+    SCP C:\NOTES.TXT user@host:      SCP user@host:file.tgz C:\DL
+
+  bin/SSH.EXE        github.com/openssh/openssh-portable tag V_10_6_P2, the
+                     clients only (SFTP.EXE and SCP.EXE: below), built --without-openssl
+                     (OpenSSH's own crypto: Ed25519 and ML-KEM/sntrup/Curve25519
+                     key exchange, ChaCha20-Poly1305 and AES-CTR ciphers; no RSA
+                     or ECDSA keys or host keys: those need OpenSSL), on vmdos's
+                     own TCP (below); DJGPP gcc 12, UPX --best
+  dos-compat.h       forced into every OpenSSH file: what DJGPP lacks or gets
+                     in the way (signals, mmap, IXANY, ...), and the renames below
+  dos-compat.c       getentropy(), poll()/ppoll(), fcntl(), gettimeofday()/time(),
+                     gmtime(), stat(), strerror() for network errors, Ctrl-C
+                     as a character in raw mode, the login prompt
+  dos-sock.c         sockets and DNS on vmdos's TCP (below)
+  dos-term.c         the terminal (below)
+  dos-co.c, dos-spawn.c   ssh inside sftp and scp (below)
+  dos-res.c          "no" from the resolver library (SSHFP records)
+  openssh-dos.patch  the changes to OpenSSH itself: the user name prompt;
+                     sftp and scp start the built-in ssh instead of fork();
+                     C:FILE and C:\DIR\FILE are local paths to scp
+  djstrerr.py        for the build: DJGPP's errno numbers, for the network
+                     errno list made with Watt-32's headers
+  LICENCE.openssh    OpenSSH's licence (BSD-style)
+
+Networking. vmdos runs the TCP connections itself, on the PC's network
+card (src/tcp9p.cpp, as for VMDOSNET's 9P drives), IPv4 and IPv6; the
+programs ask it through INT 2Fh AX=564Eh BL=13-18 (connect, send,
+receive, status, close, and one UDP question and answer for DNS). No
+packet driver or DOS TCP/IP stack is involved, and nothing runs DHCP: the
+addresses, netmask, gateways and DNS servers are vmdos's TCP/IP settings
+(%MTCPCFG%, C:\VMDOS\NET\VMTCP.CFG: IPADDR, NETMASK, GATEWAY, NAMESERVER,
+IPV6ADDR, IPV6GATEWAY, IPV6NAMESERVER), as STARTNET's DHCP (and SLAAC) or
+VMTCP set them. With no address there the programs say to run STARTNET.
+vmdos finds the next hop's MAC (ARP, neighbor solicitation) and answers for
+the addresses while a connection is open. Names are looked up with
+AAAA and A questions to the DNS servers in turn; with a global IPv6
+address, IPv6 addresses are tried first. Not there: listening sockets (no
+port forwarding, -L/-R/-D), reverse DNS, UDP. Kernel option tcplog logs
+the connections and DNS questions (DMESG).
+
+Files. HOME is C:\HOME unless set; ~/.ssh is C:\HOME\.ssh (a long name:
+DOSLFN, which AUTOEXEC.BAT loads, has to be there): known_hosts, id_ed25519,
+config. ssh-keygen isn't built: make the key elsewhere and copy it there.
+The system-wide ssh_config is C:\VMDOS\SSH\SSH_CONFIG if you make one.
+C:\HOME\.ssh\SSHSEED.BIN keeps random state between runs.
+
+Randomness. DOS has no /dev/urandom: getentropy() takes RDSEED/RDRAND (any
+CPU of the last ten years), the seed file, the clocks, and TSC-against-8254
+timing jitter (lots of it when the CPU has no RDRAND), all through SHA-512.
+
+The terminal. DOS has no terminal emulator (ANSI.SYS at best), so ssh has
+one: TERM=linux is sent unless TERM is set in DOS, and the screen behaves as
+the Linux console (which is the PC text screen anyway): colors (256 and RGB
+colors to the nearest of 16; 8 background colors), cursor movement, erase,
+insert/delete of characters and lines, scroll regions, line drawing, the
+alternate screen (xterm's), UTF-8 shown in code page 437, the screen's real
+size (25 or 50 lines, ...). Keys: arrows, Home/End/Ins/Del/PgUp/PgDn, F1-F12,
+Alt+key as Esc+key, Backspace as DEL; with TERM=xterm (SET TERM=xterm) the
+xterm sequences instead. Tested: bash, top, vi, colored ls. Ctrl-C goes to
+the remote side; ~. ends a stuck session as usual.
+
+sftp and scp. They normally start ssh as another process and talk to it
+through pipes; DOS runs one program at a time. So SFTP.EXE and SCP.EXE
+carry ssh inside: it runs as a coroutine on its own stack, joined to sftp
+or scp by pipes in memory, each side running while the other waits.
+Everything else is as usual: the same options and config, passwords and
+host keys asked as ssh asks them, the progress meter. Paths: scp takes
+C:\DIR\FILE; in sftp, backslashes escape, so write C:/DIR/FILE. Files are
+copied as they are (binary). Not there: scp -3 (remote to remote through
+here: two ssh at once), sftp -S/-D (other programs), local-to-local scp.
+
+Not there: ssh-agent and agent forwarding to a DOS agent, ControlMaster,
+ProxyCommand and anything else that starts a program (DOS can't run one
+beside ssh), X11 forwarding, PKCS#11/FIDO keys, port forwarding (no listening sockets).
+
+tools/build-openssh.sh rebuilds bin/SSH.EXE, SFTP.EXE and SCP.EXE (DJGPP
+cross gcc; it fetches OpenSSH and Watt-32 at the pinned versions: Watt-32
+gives the build its socket headers, and OpenSSH's configure something to
+find; none of its code is in the programs).
+
+Prompts (login as, password, yes/no, sftp>) are edited by the terminal
+too: Backspace, Ctrl-U, Enter (DJGPP's own line editing showed ^H and ^M).
+
+Things found on the way, worked around here: DJGPP's select() and
+gettimeofday() go through mktime(), which sometimes loops for ever in
+timesub() (ssh hung after login); and INT 10h AX=1003h (blink/intensity)
+froze the guest under vmdos now and then, so ssh leaves the blink bit alone;
+DJGPP's localtime() got dates wrong (sftp's ls), so gmtime/localtime are
+plain arithmetic here (the DOS clock is taken as UTC); DJGPP's file type
+bits aren't POSIX's (S_IFREG is 0), so stat() results are converted.

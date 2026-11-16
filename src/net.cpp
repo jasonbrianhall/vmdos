@@ -51,6 +51,7 @@
 //  10  the IPX node DOS should use into ES:DI (IPXNET's in CONNECT, else the MAC)
 //  11  DHCP renewal (dhcpc.cpp): DOS's lease from ES:DI, kept renewed; or stop
 //  12  DHCP renewal status into ES:DI
+//  13-18  TCP connections and DNS for DOS programs (tcp9p.cpp, sock_api)
 #include "net.hpp"
 #include "tcp9p.hpp"
 
@@ -524,6 +525,9 @@ extern "C" void net_api(struct regs* r)
         return;
     case 11: case 12:
         dhcpc_api(r, fn);
+        return;
+    case 13: case 14: case 15: case 16: case 17: case 18:
+        sock_api(r, fn);
         return;
     case 7: {
         if (CL(r) == 0xFF) { auto_pick = true; AX(r) = 0; kprintf("net: auto\n"); return; }
