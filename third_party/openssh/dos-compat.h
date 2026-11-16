@@ -116,9 +116,6 @@ int dos_ppoll(struct pollfd *, unsigned int, const struct timespec *,
 #define POLLWRNORM POLLOUT
 #endif
 
-/* See dos-compat.c: IPv6 next hops before Watt-32's connect(). */
-#define connect dos_connect
-
 /*
  * See dos-co.c: ssh runs inside sftp and scp as a coroutine, joined by
  * in-memory pipes; these follow it (and are plain calls in SSH.EXE).
@@ -127,6 +124,7 @@ int dos_ppoll(struct pollfd *, unsigned int, const struct timespec *,
 #include <sys/wait.h>
 #include <dirent.h>
 #include "dos-co.h"
+#include "dos-sock.h"
 #define d_ino d_namlen	/* DJGPP's dirent has no inode: sftp only tests != 0 */
 int dos_isatty(int);
 void closefrom(int);

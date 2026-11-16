@@ -24,6 +24,7 @@
 #include <sys/farptr.h>
 
 #include "dos-co.h"
+#include "dos-sock.h"
 
 #undef read
 #undef write
@@ -347,6 +348,8 @@ dos_close(int fd)
 {
 	struct pfd *f = pfd_get(fd);
 
+	if (dos_is_sock(fd))
+		return dos_sock_close(fd);
 	if (f == NULL)
 		return close(fd);
 	pfd_close(f);

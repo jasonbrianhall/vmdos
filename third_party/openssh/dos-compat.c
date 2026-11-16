@@ -1,5 +1,5 @@
 /*
- * dos-compat.c: what OpenSSH's ssh needs that DJGPP + Watt-32 lack, for
+ * dos-compat.c: what OpenSSH's ssh needs that DJGPP lacks, for
  * vmdos (https://github.com/jasonbrianhall/vmdos).
  *
  *  - getentropy(): DOS has no /dev/urandom. Gathered from RDSEED/RDRAND
@@ -26,7 +26,6 @@
 #include <go32.h>
 #include <sys/farptr.h>
 #include <dpmi.h>
-#include <tcp.h>
 #include <io.h>
 #include <sys/exceptn.h>
 #include <termios.h>
@@ -38,8 +37,8 @@
 #include <sys/stat.h>
 #include "xmalloc.h"
 #include "log.h"
+#include "dos-sock.h"
 
-static unsigned char sock_nb[256];	/* sockets set non-blocking (dos_fcntl) */
 
 
 static inline unsigned long long rdtsc(void)
@@ -225,34 +224,23 @@ getentropy(void *s, size_t len)
 }
 
 /*
- * poll() and ppoll() for sockets, the console and files together.
- * Watt-32's own poll() only knows its sockets, and DJGPP's select() can't
- * be used: it reads the clock through gettimeofday() and mktime(), which
- * can spin for ever in libc's timesub() (see dos_gettimeofday below). So:
- * sockets through Watt-32's poll() (it runs tcp_tick), the console through
- * dos-term.c, and files are always ready. dos-compat.h renames poll to
- * dos_poll.
+ * poll() and ppoll() for sockets, pipes, the console and files together.
+ * DJGPP's select() can't be used: it reads the clock through
+ * gettimeofday() and mktime(), which can spin for ever in libc's timesub()
+ * (see dos_gettimeofday below). Sockets ask vmdos (dos-sock.c), pipes are
+ * in memory (dos-co.c), the console is dos-term.c's, files are always
+ * ready. dos-compat.h renames poll to dos_poll.
  */
 #undef poll
-int poll(struct pollfd *, int, int);	/* Watt-32's */
-
-static int
-is_socket(int fd)
-{
-	return fd >= 0 && __FSEXT_get_function(fd) != NULL;
-}
 
 int
 dos_poll(struct pollfd *fds, int nfds, int timeout_ms)
 {
-	struct pollfd sk[64];
-	int map[64];
 	unsigned long start = _farpeekl(_dos_ds, 0x46c);
-	int i, n, nsk, k;
+	int i, n, k;
 
 	for (;;) {
 		n = 0;
-		nsk = 0;
 		for (i = 0; i < nfds; i++) {
 			int fd = fds[i].fd, ev = fds[i].events;
 
@@ -268,12 +256,11 @@ dos_poll(struct pollfd *fds, int nfds, int timeout_ms)
 					fds[i].revents |= ev & (POLLOUT | POLLWRNORM);
 				continue;
 			}
-			if (is_socket(fd)) {
-				if (nsk < 64) {
-					sk[nsk] = fds[i];
-					sk[nsk].events &= POLLIN | POLLOUT | POLLPRI;
-					map[nsk++] = i;
-				}
+			if (dos_is_sock(fd)) {
+				int rv = dos_sock_poll(fd, ev & (POLLIN | POLLOUT));
+
+				fds[i].revents = (rv & (POLLHUP | POLLERR |
+				    POLLNVAL)) | (rv & ev);
 				continue;
 			}
 			if (ev & (POLLOUT | POLLWRNORM))
@@ -286,11 +273,6 @@ dos_poll(struct pollfd *fds, int nfds, int timeout_ms)
 					fds[i].revents |= ev & (POLLIN | POLLRDNORM);
 			}
 		}
-		if (nsk > 0 && poll(sk, nsk, 0) > 0) {
-			for (k = 0; k < nsk; k++)
-				fds[map[k]].revents |= sk[k].revents;
-		} else if (nsk == 0)
-			tcp_tick(NULL);
 		for (i = 0; i < nfds; i++)
 			if (fds[i].revents)
 				n++;
@@ -401,117 +383,14 @@ dos_tcsetattr(int fd, int act, const struct termios *t)
 {
 	int r = tcsetattr(fd, act, t);
 
-	if (r == 0 && isatty(fd) && __FSEXT_get_function(fd) == NULL) {
+	if (r == 0 && isatty(fd)) {
 		__djgpp_set_ctrl_c((t->c_lflag & ISIG) ? 1 : 0);
 		dos_term_mode(t);
 	}
 	return r;
 }
 
-/*
- * Watt-32's settings from vmdos's TCP/IP settings (mTCP's config file,
- * %MTCPCFG%, which DHCP or VMTCP fills in), unless there is a WATTCP.CFG:
- * the same address, netmask, gateway and DNS servers, set statically, so
- * ssh never asks DHCP itself (vmdos keeps the lease renewed).
- */
-#define M_MAXNS 4
-static char m_ip[64], m_mask[64], m_gw[64], m_vec[16], m_host[64];
-static char m_ns[M_MAXNS][64];
-
-static int m_nns;
-
-static long
-mtcp_config(int pass, const struct config_table *cfg)
-{
-	int i;
-
-	if (pass == 1) {
-		if (*m_vec)
-			tcp_inject_config(cfg, "PKT.VECTOR", m_vec);
-		return 1;
-	}
-	tcp_inject_config(cfg, "MY_IP", m_ip);
-	if (*m_mask)
-		tcp_inject_config(cfg, "NETMASK", m_mask);
-	if (*m_gw)
-		tcp_inject_config(cfg, "GATEWAY", m_gw);
-	for (i = 0; i < m_nns; i++)
-		tcp_inject_config(cfg, "NAMESERVER", m_ns[i]);
-	if (*m_host)
-		tcp_inject_config(cfg, "HOSTNAME", m_host);
-	if (getenv("WATTDBG") != NULL) {	/* Watt-32's packet trace */
-		tcp_inject_config(cfg, "DEBUG.FILE", "C:/WATTDBG.TXT");
-		tcp_inject_config(cfg, "DEBUG.MODE", "ALL");
-		tcp_inject_config(cfg, "DEBUG.PROTO", "ALL");
-		tcp_inject_config(cfg, "DEBUG.LINEBUF", "1");
-	}
-	return 1;
-}
-
-static void
-copy_word(char *dst, size_t len, const char *src)
-{
-	size_t i = 0;
-
-	while (*src == ' ' || *src == '\t')
-		src++;
-	while (src[i] && src[i] != ' ' && src[i] != '\t' &&
-	    src[i] != '\r' && src[i] != '\n' && i + 1 < len) {
-		dst[i] = src[i];
-		i++;
-	}
-	dst[i] = '\0';
-}
-
-static void
-read_mtcp_config(void)
-{
-	const char *path = getenv("MTCPCFG");
-	char line[256];
-	FILE *f;
-
-	if (getenv("WATTCP.CFG") != NULL || getenv("WATTCP_CFG") != NULL)
-		return;		/* the user's own WATTCP.CFG */
-	if (path == NULL)
-		path = "C:\\VMDOS\\NET\\VMTCP.CFG";
-	if ((f = fopen(path, "r")) == NULL) {
-		fprintf(stderr, "ssh: can't read the TCP/IP settings (%s): "
-		    "run STARTNET first\n", path);
-		exit(255);
-	}
-	while (fgets(line, sizeof line, f) != NULL) {
-		char key[32], *v = line;
-
-		copy_word(key, sizeof key, line);
-		while (*v == ' ' || *v == '\t')
-			v++;
-		v += strlen(key);
-		if (strcasecmp(key, "IPADDR") == 0)
-			copy_word(m_ip, sizeof m_ip, v);
-		else if (strcasecmp(key, "NETMASK") == 0)
-			copy_word(m_mask, sizeof m_mask, v);
-		else if (strcasecmp(key, "GATEWAY") == 0)
-			copy_word(m_gw, sizeof m_gw, v);
-		else if (strcasecmp(key, "PACKETINT") == 0)
-			copy_word(m_vec, sizeof m_vec, v);
-		else if (strcasecmp(key, "HOSTNAME") == 0)
-			copy_word(m_host, sizeof m_host, v);
-		else if (strcasecmp(key, "NAMESERVER") == 0 && m_nns < M_MAXNS)
-			copy_word(m_ns[m_nns++], sizeof m_ns[0], v);
-
-	}
-	fclose(f);
-	/* Never DHCP or BOOTP of its own: the address DOS already has. */
-	if (*m_ip == '\0' || strcmp(m_ip, "0.0.0.0") == 0) {
-		fprintf(stderr, "ssh: no IP address in %s: run STARTNET "
-		    "(DHCP) or set one with VMTCP IPADDR\n", path);
-		exit(255);
-	}
-	_watt_no_config = 1;
-	_watt_user_config(mtcp_config);
-	if (getenv("WATTDBG") != NULL)
-		dbug_init();
-}
+void dos_term_hook_stdin(void);
 
 __attribute__((constructor)) static void
 dos_init(void)
@@ -520,6 +399,7 @@ dos_init(void)
 	/* Files as they are: no CR/LF translation, no stop at Ctrl-Z
 	   (sftp and scp copy files byte for byte). */
 	_fmode = O_BINARY;
+	dos_term_hook_stdin();	/* line editing for libc's console reads */
 	setmode(STDOUT_FILENO, O_BINARY);
 	/* ~/.ssh (known_hosts, keys): C:\HOME unless HOME says otherwise. */
 	if (getenv("HOME") == NULL) {
@@ -529,13 +409,12 @@ dos_init(void)
 	/* Without TERM the remote side gets none: dos-term.c is a Linux console. */
 	if (getenv("TERM") == NULL)
 		setenv("TERM", "linux", 1);
-	read_mtcp_config();
 }
 
 /*
- * fcntl() on Watt-32's sockets: F_GETFL/F_SETFL as ssh uses them
- * (O_NONBLOCK) go to Watt-32 through FIONBIO; files and the console to
- * DJGPP's fcntl. dos-compat.h renames fcntl to dos_fcntl.
+ * fcntl() on sockets and pipes: F_GETFL/F_SETFL as ssh uses them
+ * (O_NONBLOCK); files and the console to DJGPP's fcntl. dos-compat.h
+ * renames fcntl to dos_fcntl.
  */
 #undef fcntl
 
@@ -560,27 +439,22 @@ dos_fcntl(int fd, int cmd, ...)
 			return 0;
 		}
 	}
-	if (fd >= 0 && fd < 256 && __FSEXT_get_function(fd) != NULL) {
-		int on;
-
+	if (dos_is_sock(fd)) {
 		switch (cmd) {
 		case F_GETFL:
-			return O_RDWR | (sock_nb[fd] ? O_NONBLOCK : 0);
+			return O_RDWR | (dos_sock_setnb(fd, -1) ? O_NONBLOCK : 0);
 		case F_SETFL:
-			on = (arg & O_NONBLOCK) != 0;
-			if (ioctlsocket(fd, FIONBIO, (char *)&on) == -1)
-				return -1;
-			sock_nb[fd] = on;
+			dos_sock_setnb(fd, (arg & O_NONBLOCK) != 0);
 			return 0;
-		case F_GETFD:
-		case F_SETFD:
+		default:
 			return 0;
 		}
 	}
 	return fcntl(fd, cmd, arg);
 }
 
-/* strerror() for Watt-32's network errnos too (DJGPP's stops at EILSEQ). */
+/* strerror() for the network errnos too (DJGPP's stops at EILSEQ; the
+   numbers are Watt-32's headers'). */
 #undef strerror
 char *
 dos_strerror(int e)
@@ -598,7 +472,7 @@ dos_strerror(int e)
 		{ ESOCKTNOSUPPORT, "Socket type not supported" },
 		{ EOPNOTSUPP, "Operation not supported" },
 		{ EPFNOSUPPORT, "Protocol family not supported" },
-		{ EAFNOSUPPORT, "IPv6 isn't supported yet (Watt-32's IPv6 TCP doesn't work)" },
+		{ EAFNOSUPPORT, "Address family not supported by protocol" },
 		{ EADDRINUSE, "Address already in use" },
 		{ EADDRNOTAVAIL, "Cannot assign requested address" },
 		{ ENETDOWN, "Network is down" },
@@ -623,7 +497,7 @@ dos_strerror(int e)
 	return strerror(e);
 }
 
-/* For Watt-32 and the rest of libc too: these replace DJGPP's at link time. */
+/* For the rest of libc too: these replace DJGPP's at link time. */
 int
 gettimeofday(struct timeval *tv, struct timezone *tz)
 {
@@ -657,29 +531,13 @@ dos_ask_user(const char *def)
 	return xstrdup(buf);
 }
 
-/*
- * IPv6: Watt-32's IPv6 TCP doesn't work (its state machine never parses
- * IPv6 segments, and more), so say so plainly rather than time out.
- */
-#undef connect
-int W32_CALL connect(int, const struct sockaddr *, socklen_t);
-
-int W32_CALL
-dos_connect(int s, const struct sockaddr *sa, socklen_t len)
-{
-	if (sa != NULL && sa->sa_family == AF_INET6) {
-		errno = EAFNOSUPPORT;
-		return -1;
-	}
-	return connect(s, sa, len);
-}
 
 /* Pipes and sockets aren't terminals (DOS calls both character devices). */
 #undef isatty
 int
 dos_isatty(int fd)
 {
-	if (dos_is_pipe(fd) || is_socket(fd))
+	if (dos_is_pipe(fd) || dos_is_sock(fd))
 		return 0;
 	return isatty(fd);
 }
@@ -786,9 +644,9 @@ dos_fstat(int fd, struct stat *st)
 {
 	int r;
 
-	if (dos_is_pipe(fd)) {
+	if (dos_is_pipe(fd) || dos_is_sock(fd)) {
 		memset(st, 0, sizeof *st);
-		st->st_mode = S_IFIFO | 0600;
+		st->st_mode = (dos_is_sock(fd) ? S_IFSOCK : S_IFIFO) | 0600;
 		return 0;
 	}
 	if ((r = fstat(fd, st)) == 0)

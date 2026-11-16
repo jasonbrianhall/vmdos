@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build third_party/openssh/bin/SSH.EXE: OpenSSH's ssh client for DOS
-# (DJGPP + Watt-32 on vmdos's packet driver; see third_party/openssh/README.vmdos).
+# Build third_party/openssh/bin/SSH.EXE, SFTP.EXE and SCP.EXE: OpenSSH's
+# clients for DOS (DJGPP, on vmdos's own TCP; see third_party/openssh/README.vmdos).
 # The normal build doesn't need this: the binary is committed. Needs:
 #   DJGPP   a cross gcc i586-pc-msdosdjgpp-gcc on PATH, or DJGPP=dir with bin/
 #           (github.com/andrewwutw/build-djgpp releases)
@@ -8,6 +8,7 @@
 #   SSHSRC=dir   an existing checkout of github.com/openssh/openssh-portable
 #   WATTSRC=dir  an existing checkout of github.com/gvanem/Watt-32
 #   SSH_KEEP=file  also keep the unstripped ssh.exe there (symbols, for debugging)
+#   KEEP_TMP=1     keep the build directory
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 port=$root/third_party/openssh
@@ -17,8 +18,11 @@ watt_rev=3cf6f4e504b46bea2302b8d88b5ff2431396ddc9
 dj=$(dirname "$(command -v i586-pc-msdosdjgpp-gcc)")/..
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+[ -n "$KEEP_TMP" ] && { trap - EXIT; echo "build dir: $tmp"; }
 
-# Watt-32: TCP/IP with BSD sockets on a packet driver (VMPKT).
+# Watt-32 (a DOS TCP/IP library): its socket headers and errno list for
+# the build, and functions for OpenSSH's configure to find. The programs
+# use none of its code (dos-sock.c: vmdos's TCP).
 if [ -n "$WATTSRC" ]; then
     git -C "$WATTSRC" archive --prefix=Watt-32/ $watt_rev | tar -x -C "$tmp"
 else
@@ -68,10 +72,14 @@ for f in dos-compat dos-term; do
     $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
         -DHAVE_CONFIG_H -c "$port/$f.c" -o $f.o
 done
-$CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
-    -DHAVE_CONFIG_H -c "$port/dos-co.c" -o dos-co.o
-i586-pc-msdosdjgpp-ar rcs libdoscompat.a dos-compat.o dos-term.o dos-co.o
-LIBS="-L. -ldoscompat -lopenbsd-compat -lwatt"
+for f in dos-co dos-sock dos-res; do
+    $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+        -DHAVE_CONFIG_H -c "$port/$f.c" -o $f.o
+done
+i586-pc-msdosdjgpp-ar rcs libdoscompat.a dos-compat.o dos-term.o dos-co.o dos-sock.o dos-res.o
+# The programs use vmdos's own TCP (dos-sock.c); Watt-32 gives configure
+# its headers and functions to find, and nothing to the programs.
+LIBS="-L. -ldoscompat -lopenbsd-compat -ldoscompat"
 make -j"$(nproc)" ssh.exe sftp.o sftp-usergroup.o progressmeter.o sftp-common.o \
     sftp-client.o sftp-glob.o ssherr-nolibcrypto.o scp.o CC="$CC" sysconfdir=c:/vmdos/ssh LIBS="$LIBS" \
     > make.log 2>&1 || { grep -E -A3 "error:|undefined reference" make.log | head -40; exit 1; }
@@ -88,7 +96,7 @@ SSH_IN="dos-spawn.o ssh-in.o readconf.o clientloop-in.o sshtty.o sshconnect.o
 for p in sftp scp; do
     i586-pc-msdosdjgpp-objcopy --redefine-sym _cleanup_exit=_prog_cleanup_exit $p.o $p-prog.o
 done
-LINK="-L. -Lopenbsd-compat -L$W/lib -lssh -lopenbsd-compat $LIBS"
+LINK="-L. -Lopenbsd-compat -lssh -lopenbsd-compat $LIBS"
 i586-pc-msdosdjgpp-gcc -o sftp.exe sftp-prog.o sftp-usergroup.o progressmeter.o \
     sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o $SSH_IN $LINK
 i586-pc-msdosdjgpp-gcc -o scp.exe scp-prog.o progressmeter.o \

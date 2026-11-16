@@ -30,6 +30,8 @@
 #include <pc.h>
 #include <sys/farptr.h>
 #include <sys/fsext.h>
+#include <signal.h>
+#include "dos-co.h"
 #include <io.h>
 #include <fcntl.h>
 
@@ -45,12 +47,18 @@
  * The console, by DOS's device bits (isatty() isn't enough: Watt-32's
  * sockets are NUL device handles, which DOS calls character devices too).
  */
+static int con_fsext(__FSEXT_Fnumber, int *, va_list);
+
 static int
 is_con(int fd, int bit)
 {
 	int info;
+	__FSEXT_Function *fn;
 
-	if (fd < 0 || __FSEXT_get_function(fd) != NULL)
+	if (fd < 0)
+		return 0;
+	fn = __FSEXT_get_function(fd);
+	if (fn != NULL && fn != con_fsext)
 		return 0;
 	info = _get_dev_info(fd);
 	return info != -1 && (info & 0x80) && (info & bit);
@@ -74,7 +82,9 @@ static int state;			/* parser */
 static int par[MAXP], npar, priv, inter;
 static unsigned utf_cp, utf_left;
 static int xterm_keys;
-static int raw_in, opost = 1;
+static int raw_in, opost = 1, echo_on = 1;
+static unsigned char lbuf[512];		/* a line typed in cooked mode */
+static int lpos, llen;
 static unsigned char inq[256];		/* input queued: replies, multi-byte keys */
 static int inq_len;
 static int orig_cursor_shape = 0x0607;
@@ -847,6 +857,7 @@ dos_term_mode(const struct termios *t)
 {
 	raw_in = !(t->c_lflag & ICANON);
 	opost = (t->c_oflag & OPOST) != 0;
+	echo_on = (t->c_lflag & ECHO) != 0;
 }
 
 ssize_t
@@ -858,6 +869,8 @@ dos_write(int fd, const void *buf, size_t len)
 
 	if (dos_is_pipe(fd))
 		return dos_pipe_write(fd, buf, len);
+	if (dos_is_sock(fd))
+		return dos_sock_write(fd, buf, len);
 	if (len == 0 || !CON_OUT(fd))
 		return write(fd, buf, len);
 	term_init();
@@ -1030,14 +1043,150 @@ dos_term_readable(int fd)
 	return inq_len > 0;
 }
 
+static void
+term_out(const char *p, int n)
+{
+	int y, x;
+
+	term_init();
+	ScreenGetCursor(&y, &x);
+	if (y != out_y || x != out_x) {
+		cx = x;
+		cy = y;
+		wrap_pending = 0;
+		clamp();
+	}
+	while (n-- > 0)
+		term_byte((unsigned char)*p++);
+	place_cursor();
+}
+
+/* A key from the BIOS, waiting (and letting sftp/scp's other side run). */
+static int
+wait_key(void)
+{
+	int k;
+
+	while ((k = bios_key(0)) == -1) {
+		if (co_ssh_state == CO_RUNNING)
+			co_yield();
+		else
+			__dpmi_yield();
+	}
+	return k;
+}
+
+/*
+ * The console in cooked mode (ssh's prompts: login as, the password, yes/no):
+ * a line edited here, as a terminal would: Backspace erases, Ctrl-U the
+ * whole line, Enter ends it; echoed unless ECHO is off (passwords).
+ * DJGPP's own line editing showed Backspace and Enter as ^H and ^M.
+ */
+static void
+edit_line(void)
+{
+	int n = 0;
+
+	for (;;) {
+		int k = wait_key(), ch = k & 0xff;
+
+		if (ch == 0xe0 && (k >> 8))
+			ch = 0;
+		if (ch == '\r' || ch == '\n') {
+			lbuf[n++] = '\n';
+			if (echo_on)		/* (ECHO off: no ECHONL either) */
+				term_out("\r\n", 2);
+			break;
+		}
+		if (ch == 8 || ch == 0x7f) {
+			if (n > 0) {
+				n--;
+				if (echo_on)
+					term_out("\b \b", 3);
+			}
+			continue;
+		}
+		if (ch == 0x15) {		/* Ctrl-U */
+			while (n > 0) {
+				n--;
+				if (echo_on)
+					term_out("\b \b", 3);
+			}
+			continue;
+		}
+		if (ch == 0x03) {		/* Ctrl-C */
+			term_out("^C\r\n", 4);
+			raise(SIGINT);
+			n = 0;
+			continue;
+		}
+		if (ch < 0x20 || n >= (int)sizeof lbuf - 2)
+			continue;
+		lbuf[n++] = ch;
+		if (echo_on)
+			term_out((char *)&lbuf[n - 1], 1);
+	}
+	lpos = 0;
+	llen = n;
+}
+
+/* A cooked read of the console: whole lines from edit_line(). */
+static ssize_t
+cooked_read(void *buf, size_t len)
+{
+	int n;
+
+	term_init();
+	if (lpos >= llen)
+		edit_line();
+	n = llen - lpos < (int)len ? llen - lpos : (int)len;
+	memcpy(buf, lbuf + lpos, n);
+	lpos += n;
+	return n;
+}
+
+/*
+ * libc's own reads of the console (sftp's prompt: fgets on stdin) come
+ * here too, through DJGPP's file system extension on fd 0.
+ */
+static int
+con_fsext(__FSEXT_Fnumber func, int *rv, va_list args)
+{
+	int fd;
+	void *buf;
+	size_t len;
+
+	if (func != __FSEXT_read || raw_in)
+		return 0;
+	fd = va_arg(args, int);
+	buf = va_arg(args, void *);
+	len = va_arg(args, size_t);
+	(void)fd;
+	*rv = cooked_read(buf, len);
+	return 1;
+}
+
+void
+dos_term_hook_stdin(void)
+{
+	int info = _get_dev_info(0);
+
+	if (info != -1 && (info & 0x81) == 0x81 && __FSEXT_get_function(0) == NULL)
+		__FSEXT_set_function(0, con_fsext);
+}
+
 ssize_t
 dos_read(int fd, void *buf, size_t len)
 {
 	int n;
 	if (dos_is_pipe(fd))
 		return dos_pipe_read(fd, buf, len);
-	if (!raw_in || len == 0 || !CON_IN(fd))
+	if (dos_is_sock(fd))
+		return dos_sock_read(fd, buf, len);
+	if (len == 0 || !CON_IN(fd))
 		return read(fd, buf, len);
+	if (!raw_in)
+		return cooked_read(buf, len);
 	term_init();
 	pump_keys();
 	if (inq_len == 0) {
