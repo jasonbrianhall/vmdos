@@ -31,6 +31,7 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/error.h"
 #include "psa/crypto.h"
+#include "mbedtls/platform_time.h"
 
 #ifdef __DJGPP__
 #include <fcntl.h>
@@ -113,6 +114,20 @@ mbedtls_hardware_poll(void *data, unsigned char *out, size_t len,
 	}
 	*olen = len;
 	return 0;
+}
+
+/* Milliseconds for mbedTLS (TLS 1.3 ticket ages): coarse is enough. */
+mbedtls_ms_time_t
+mbedtls_ms_time(void)
+{
+#ifdef __DJGPP__
+	return (mbedtls_ms_time_t)time(NULL) * 1000;
+#else
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (mbedtls_ms_time_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
 /* --- the connection: TCP, TLS over it --- */
