@@ -97,6 +97,7 @@ static int aux_reset(void)
     return st;
 }
 
+static int ps2_len = 3;                                /* 4: an IntelliMouse's wheel byte */
 void mouse_ps2_init(void)
 {
     if (inb(0x64) == 0xFF) return;                     /* no 8042 */
@@ -132,6 +133,16 @@ void mouse_ps2_init(void)
     }
     int id = -1;
     if (ok && aux_cmd(0xF2) == 0xFA) id = aux_read(50);   /* ID: 00 = standard mouse */
+    /* The wheel (IntelliMouse: rates 200, 100, 80, then ID 03h): 4-byte
+       packets, the 4th the wheel's. Only for vmdos (the scrollback): DOS's
+       mouse is the 3-byte one vmdos gives it (vdev.c), as before. */
+    if (ok && id == 0 && !strstr(cmdline, "nowheel")) {
+        static const u8 knock[] = { 200, 100, 80 };
+        int k = 1;
+        for (int i = 0; i < 3 && k; i++) k = aux_cmd(0xF3) == 0xFA && aux_cmd(knock[i]) == 0xFA;
+        if (k && aux_cmd(0xF2) == 0xFA && aux_read(50) == 3) { id = 3; ps2_len = 4; }
+        if (aux_cmd(0xF3) == 0xFA) aux_cmd(100);          /* back to 100 reports a second */
+    }
     if (ok) ok = aux_cmd(0xF4) == 0xFA;                /* stream mode on */
     kbc_flush();
 
@@ -158,15 +169,28 @@ void mouse_ps2_init(void)
 
 void mouse_ps2_byte(u8 b)
 {
-    static u8 pkt[3];
+    static u8 pkt[4];
     static int n;
     if (n == 0 && (b & 0xC8) != 0x08) return;          /* byte 0: bit 3 set, no overflow (skips ACKs) */
     pkt[n++] = b;
-    if (n < 3) return;
+    if (n < ps2_len) return;
     n = 0;
     int dx = pkt[1] - ((pkt[0] << 4) & 0x100);
     int dy = pkt[2] - ((pkt[0] << 3) & 0x100);
     mouse_input(dx, -dy, pkt[0] & 7);
+    if (ps2_len == 4) {
+        int z = pkt[3] & 0x0F;                         /* 4-bit signed: negative is up */
+        if (z & 8) z -= 16;
+        if (z) mouse_wheel(-z);
+    }
+}
+
+/* The wheel, clicks up (+) or down (-): the text screen's scrollback,
+   3 rows a click (video.c). DOS has no wheel to give it to. */
+void mouse_wheel(int up)
+{
+    int video_scrollback_key(int delta);
+    video_scrollback_key(up * 3);
 }
 
 void mouse_usb_attached(void) { present = 1; }

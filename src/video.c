@@ -990,6 +990,132 @@ static void refresh_text(const u16 *cells, int cursor_off)
     sh_blink = blink_phase;
 }
 
+/* ---------------- scrollback (Ctrl+Shift+PgUp) ----------------
+   The text rows that leave the top of the DOS screen are kept (SB_LINES of
+   them) and Ctrl+Shift+PgUp/PgDn/Up/Down/Home/End page back through them,
+   as a terminal's scrollback; any other key goes back to the live screen
+   (and to DOS). Two ways in: the BIOS's own scrolls (INT 10h AH=06h and
+   teletype output, DOS's CON: DIR, TYPE), row for row however fast, and
+   for programs that write the screen themselves (ssh, mTCP) each redraw
+   compared with the last one: the screen moved up k rows with the cursor
+   at the bottom, so the k rows that were at the top are kept. More than a
+   screen between two redraws is lost that way; DOS's own output isn't.
+   scrollback=off on the command line: none. */
+#define SB_LINES 2000
+#define SB_W 132
+static u16 *sb_buf;                                /* SB_LINES rows of SB_W cells, a ring */
+static u8 sb_wid[SB_LINES];                        /* each row's columns */
+static u32 sb_head, sb_count;                      /* the next row written, rows kept */
+static u32 sb_view;                                /* rows scrolled back; 0: the live screen */
+static u16 sb_snap[132 * 60];                      /* the screen at the last redraw */
+static int sb_snap_c, sb_snap_r, sb_off = -1;
+static volatile int sb_delta, sb_live_req;
+static u16 sb_cells[132 * 60];                     /* what's shown while scrolled back */
+
+static void sb_push(const u16 *cells, int cols)
+{
+    if (sb_off < 0) sb_off = strstr(cmdline, "scrollback=off") != 0;
+    if (sb_off) return;
+    if (!sb_buf) {
+        sb_buf = phys_try_alloc(SB_LINES * SB_W * 2);
+        if (!sb_buf) { sb_off = 1; kprintf("video: no memory for the scrollback\n"); return; }
+    }
+    if (cols > SB_W) cols = SB_W;
+    memcpy(sb_buf + sb_head * SB_W, cells, (u32)cols * 2);
+    sb_wid[sb_head] = (u8)cols;
+    sb_head = (sb_head + 1) % SB_LINES;
+    if (sb_count < SB_LINES) sb_count++;
+    if (sb_view && sb_view < sb_count) sb_view++;  /* scrolled back: the same rows stay in view */
+}
+
+/* The BIOS scrolled the shown page's whole screen up n rows (scroll()): the
+   top n rows go into the scrollback now, and the last redraw's picture
+   moves up with them so sb_watch doesn't take them a second time. */
+static void sb_bios_scroll(u32 base, int n)
+{
+    int C = text_cols, R = text_rows;
+    for (int i = 0; i < n; i++) sb_push((const u16 *)gptr(base + (u32)i * C * 2), C);
+    if (sb_snap_c != C || sb_snap_r != R) return;
+    memmove(sb_snap, sb_snap + n * C, (u32)(R - n) * C * 2);
+    for (int i = (R - n) * C; i < R * C; i++) sb_snap[i] = 0x0720;
+}
+
+static int sb_blank(const u16 *row, int C)
+{
+    for (int c = 0; c < C; c++) if ((row[c] & 0xFF) != ' ' && (row[c] & 0xFF) != 0) return 0;
+    return 1;
+}
+
+/* A redraw of the text screen: did it move up since the last one? */
+static void sb_watch(const u16 *cells, int cursor_off)
+{
+    int C = text_cols, R = text_rows, n = C * R;
+    if (sb_snap_c != C || sb_snap_r != R) {
+        sb_snap_c = C; sb_snap_r = R;
+        memcpy(sb_snap, cells, (u32)n * 2);
+        return;
+    }
+    if (!memcmp(sb_snap, cells, (u32)n * 2)) return;
+    int crow = cursor_off >= 0 && cursor_off < n ? cursor_off / C : -1;
+    if (crow >= R - 2) {                           /* output at the bottom: a scroll, maybe */
+        int best = 0, bestm = 0, m0 = 0;
+        for (int k = 0; k < R; k++) {
+            int m = 0;
+            for (int i = 0; i + k < R; i++) {
+                const u16 *o = sb_snap + (i + k) * C;
+                if (!memcmp(o, cells + i * C, (u32)C * 2) && !sb_blank(o, C)) m++;
+            }
+            if (k == 0) m0 = m;
+            else if (m > bestm) { bestm = m; best = k; }
+        }
+        /* most of what's left matched, moved up, better than in place */
+        if (best && bestm > m0 && bestm * 2 >= R - best && bestm >= 2)
+            for (int i = 0; i < best; i++) sb_push(sb_snap + i * C, C);
+    }
+    memcpy(sb_snap, cells, (u32)n * 2);
+}
+
+/* Ctrl+Shift+PgUp etc. (vdev.c): rows back (+) or forward (-); 1 if the
+   scrollback took the key (a text screen vmdos draws). */
+int video_scrollback_key(int delta)
+{
+    if (!fb || vga_native || console_on || !is_text(video_mode) || sb_off > 0) return 0;
+    sb_delta += delta;
+    return 1;
+}
+int video_text_page(void) { return text_rows > 2 ? text_rows - 1 : 1; }
+/* Any other key: the live screen again. */
+void video_scrollback_live(void) { if (sb_view) sb_live_req = 1; }
+
+/* What the text screen shows: the live cells, or rows back in the
+   scrollback with a note in the top row's corner. */
+static const u16 *sb_compose(const u16 *cells, int *cursor_off)
+{
+    int d = sb_delta;
+    sb_delta -= d;
+    if (sb_live_req) { sb_live_req = 0; sb_view = 0; d = 0; }
+    long v = (long)sb_view + d;
+    sb_view = v < 0 ? 0 : v > (long)sb_count ? sb_count : (u32)v;
+    if (!sb_view) return cells;
+    int C = text_cols, R = text_rows;
+    for (int i = 0; i < R; i++) {
+        long idx = (long)sb_count - (long)sb_view + i;     /* scrollback rows, then the screen's */
+        u16 *row = sb_cells + i * C;
+        if (idx < (long)sb_count) {
+            u32 slot = (sb_head + SB_LINES - sb_count + (u32)idx) % SB_LINES;
+            int w = sb_wid[slot] < C ? sb_wid[slot] : C;
+            memcpy(row, sb_buf + slot * SB_W, (u32)w * 2);
+            for (int c = w; c < C; c++) row[c] = 0x0720;
+        } else memcpy(row, cells + (idx - sb_count) * C, (u32)C * 2);
+    }
+    char note[48];
+    snprintf(note, sizeof note, " scrollback -%u/%u ", sb_view, sb_count);
+    int len = (int)strlen(note);
+    for (int i = 0; i < len && i < C; i++) sb_cells[C - len + i] = (u16)(0x7000 | (u8)note[i]);
+    *cursor_off = -1;
+    return sb_cells;
+}
+
 /* The mouse pointer in graphics modes: an arrow, 1 = outline, 2 = fill. */
 static const char *const arrow[16] = {
     "1", "11", "121", "1221", "12221", "122221", "1222221", "12222221",
@@ -2728,7 +2854,10 @@ static void video_refresh_(void)
     else if (is_text(video_mode)) {
         u16 start = crtc[0x0C] << 8 | crtc[0x0D];
         u16 cur = (u16)((crtc[0x0E] << 8 | crtc[0x0F]) - start);
-        refresh_text((const u16 *)gptr(text_base + start * 2), cur);
+        const u16 *cells = (const u16 *)gptr(text_base + start * 2);
+        int cur_off = cur;
+        sb_watch(cells, cur_off);
+        refresh_text(sb_compose(cells, &cur_off), cur_off);
     } else if (vbe_on) refresh_vbe();
     else if (video_mode == 0x13 || is_cga(video_mode) || is_ega(video_mode)) refresh_gfx();
     full_redraw = 0;
@@ -3193,6 +3322,8 @@ static void scroll(int up, int lines, u8 attr, int r0, int c0, int r1, int c1, i
         return;
     }
     if (!is_text(video_mode)) return;
+    if (up && lines < h && r0 == 0 && c0 == 0 && r1 == text_rows - 1 && c1 == text_cols - 1 && page == rd8(BDA + 0x62) && !console_on)
+        sb_bios_scroll(cell_addr(page, 0, 0), lines);   /* the top rows leave the screen: keep them */
     for (int i = 0; i < h; i++) {
         int dr = up ? r0 + i : r1 - i;
         int sr = up ? dr + lines : dr - lines;

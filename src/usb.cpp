@@ -19,7 +19,8 @@
 #include "usb.hpp"
 
 static void kbd_push(uint8_t b) { vkbd_real_scancode(b); }
-static void mouse_push(int dx, int dy, int buttons, int wheel) { (void)wheel; mouse_input(dx, dy, buttons); }
+extern "C" void mouse_wheel(int up);
+static void mouse_push(int dx, int dy, int buttons, int wheel) { mouse_input(dx, dy, buttons); if (wheel) mouse_wheel(wheel); }
 extern "C" void mouse_absolute(int x, int y, int buttons);
 
 // Delays: kdelay_us (lib.c), timed by the TSC, or by port 80h reads
@@ -188,7 +189,7 @@ enum Kind { KBD, MOUSE, HUB, MSD, JOY, AUDIO, NET };
 struct HidField { int bit, size; int32_t lmin, lmax; };
 struct PadLayout {
     int report_id;                         // 0: reports have no ID byte
-    HidField x, y, hat;
+    HidField x, y, hat, wheel;             // wheel: a tablet's (usage 38h), relative
     int btn_bit, btn_count;                // buttons 1..n, one bit each from btn_bit
     bool dragonrise;                       // 0079:0011 SNES clones: fixed layout
     bool tablet;                           // a pointer with absolute X/Y (QEMU's usb-tablet): the mouse
@@ -396,7 +397,7 @@ static int hid_axis(const volatile uint8_t* r, int len, const HidField& f) {
 // X, Y, hat switch and buttons (and their report ID). True if it is a
 // joystick or gamepad with something to steer by.
 static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
-    L.report_id = 0; L.x.bit = L.y.bit = L.hat.bit = -1; L.btn_bit = -1; L.btn_count = 0; L.tablet = false;
+    L.report_id = 0; L.x.bit = L.y.bit = L.hat.bit = L.wheel.bit = -1; L.btn_bit = -1; L.btn_count = 0; L.tablet = false;
     int page = 0, size = 0, count = 0, rid = 0, ids_used = 0;
     int32_t lmin = 0, lmax = 0;
     int usages[16], nu = 0, umin = 0, umax = -1;
@@ -440,6 +441,7 @@ static bool hid_parse(const volatile uint8_t* d, int n, PadLayout& L) {
                 if (usage == (1 << 16 | 0x30) && L.x.bit < 0 && take) { L.x = f; L.report_id = rid; xabs = !(u & 4); }
                 else if (usage == (1 << 16 | 0x31) && L.y.bit < 0 && take) { L.y = f; L.report_id = rid; }
                 else if (usage == (1 << 16 | 0x39) && L.hat.bit < 0 && take) { L.hat = f; L.report_id = rid; }
+                else if (usage == (1 << 16 | 0x38) && L.wheel.bit < 0 && take && (u & 4)) L.wheel = f;
                 else if (page == 9 && size == 1 && take && umax >= umin) {
                     if (L.btn_bit < 0) { L.btn_bit = bit; L.report_id = rid; }
                     if (bit == L.btn_bit + L.btn_count) L.btn_count++;
@@ -506,6 +508,10 @@ static void tablet_report(Keyboard& k, const volatile uint8_t* r, int len) {
         if (hid_bits(p, n, L.btn_bit + i, 1, false)) b |= 1 << i;
     dbg(3, "USB: tablet %d %d %x (raw %02x %02x %02x %02x %02x %02x)\n", hid_abs(p, n, L.x), hid_abs(p, n, L.y), b, p[0], p[1], p[2], p[3], p[4], p[5]);
     mouse_absolute(hid_abs(p, n, L.x), hid_abs(p, n, L.y), b);
+    if (L.wheel.bit >= 0) {
+        int32_t z = hid_bits(p, n, L.wheel.bit, L.wheel.size, true);
+        if (z) mouse_wheel((int)z);
+    }
 }
 
 static void pad_report(Keyboard& k, const volatile uint8_t* r, int len) {

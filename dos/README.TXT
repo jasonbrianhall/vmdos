@@ -15,6 +15,9 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F10   vmdos log over the game, on / off (the game keeps
                      running; Ctrl+Shift+arrows/PgUp/PgDn scroll it,
                      Ctrl+Shift+S saves it to C:\VMDOS\VMDOS.LOG)
+  Ctrl+Shift+PgUp  Scrollback: page back through what scrolled off the DOS
+                     screen (PgDn, Up/Down, Home/End too; the mouse
+                     wheel scrolls it as well); any other key goes back
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
   Ctrl+Alt+Del     Restart

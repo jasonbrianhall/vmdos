@@ -407,6 +407,17 @@ core can't keep up, and draw the Voodoo 3's triangles (in VMHV too);
 `render=N` uses at most N of them, `render=0` none.
 `nosmp` keeps everything on one core.
 
+Scrollback: in a text mode, what scrolls off the top of the screen is
+kept (2000 rows), and Ctrl+Shift+PgUp/PgDn/Up/Down/Home/End or the mouse
+wheel page back through it, as in a terminal; any other key goes back to
+the live screen and on to DOS. DOS's own output (INT 10h scrolls: DIR,
+TYPE) is kept row for row however fast it comes; programs that write the
+screen themselves (ssh, mTCP's telnet) are caught by comparing each redraw
+with the last one, so more than a screenful between two redraws can be
+lost. The wheel is vmdos's: the PS/2 mouse is switched to IntelliMouse
+mode (DOS still gets 3-byte packets; `nowheel` leaves it alone), and USB
+mice and tablets report theirs. `scrollback=off` turns it off.
+
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
 the display, at the screen's size, in memory until the next one; after
 quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current

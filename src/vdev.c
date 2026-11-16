@@ -745,6 +745,13 @@ void vkbd_real_scancode(u8 sc)
         }
         return;
     }
+    if (hot && !video_log_on() && (k == 0x48 || k == 0x50 || k == 0x49 || k == 0x51 || k == 0x47 || k == 0x4F)) {
+        int video_scrollback_key(int delta), video_text_page(void);   /* Ctrl+Shift+PgUp etc.: the DOS screen's scrollback (video.c) */
+        if (video_scrollback_key(0)) {
+            if (!up) video_scrollback_key(k == 0x48 ? 1 : k == 0x50 ? -1 : k == 0x49 ? video_text_page() : k == 0x51 ? -video_text_page() : k == 0x47 ? 100000 : -100000);
+            return;
+        }
+    }
     if (hot && k >= 0x3D && k <= 0x3F) {                     /* Ctrl+Shift+F3/F4: volume down/up, F5: mute */
         void sound_volume_key(int k);
         if (!up) sound_volume_key(k == 0x3D ? -1 : k == 0x3E ? 1 : 0);
@@ -769,6 +776,10 @@ void vkbd_real_scancode(u8 sc)
         void sound_next_output(void);
         if (!up) sound_next_output();
         return;
+    }
+    if (!up && sc != 0xE0 && k != 0x1D && k != 0x38 && k != 0x2A && k != 0x36) {
+        void video_scrollback_live(void);                 /* a key for DOS: back to the live screen */
+        video_scrollback_live();
     }
     kq_put(sc);
 }
