@@ -226,9 +226,14 @@ int8_t Dhcp6::run( void ) {
             (Ip6::raFlags & 0x80) ? ", managed (DHCPv6)" : "", (Ip6::raFlags & 0x40) ? ", other config (DHCPv6)" : "" );
     if ( Ip6::raLifetime ) memcpy( router, Ip6::router, 16 );
     if ( Ip6::raDnsCount ) memcpy( dns, Ip6::raDns[0], 16 );
+    // A global prefix (2000::/3) before a unique local one (fd00::/8):
+    // routers often advertise both, and only the global one reaches the
+    // internet. We keep one address.
+    for ( int pass = 0; pass < 2; pass++ )
     for ( int i=0; i < Ip6::raPrefixes && Addr::isZero6( addr ); i++ ) {
       Ip6Prefix *pr = &Ip6::raPrefix[i];
       if ( !(pr->flags & 0x40) || pr->len != 64 || pr->valid == 0 ) continue;
+      if ( ((pr->prefix[0] & 0xe0) == 0x20) != (pass == 0) ) continue;
       uint8_t a[16];
       Ip6::makeEui64( pr->prefix, a );
       printf( "IPv6: SLAAC %s/64 ... ", Addr::format6( a, buf ) );
