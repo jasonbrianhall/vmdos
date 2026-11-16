@@ -14,8 +14,11 @@ C:\VMDOS\NET\CACERT.PEM (third_party/cacert) and the host name; -k skips
 that. HTTP/1.1, chunked bodies, up to 8 redirects. Nothing of it is in
 vmdos's kernel.
 
-Build: tools/build-wget.sh (DJGPP, like tools/build-openssh.sh), which
-writes bin/WGET.EXE; the Makefile puts it in C:\VMDOS\NET when it's there.
+Build: tools/build-wget.sh writes bin/WGET.EXE; the Makefile puts it in
+C:\VMDOS\NET when it's there. DJGPP is a cross gcc on PATH
+(i586-pc-msdosdjgpp-gcc), or else Docker's djfdyuruiry/djgpp image
+(DJGPP_IMAGE= for another; DJGPP_DOCKER=1 to use Docker even with a
+cross gcc). It also needs git, a host gcc with -m32 and upx.
 On Linux, to test: build mbedTLS's library/*.c with
 -DMBEDTLS_USER_CONFIG_FILE='"wget_mbedtls_config.h"' -I third_party/wget,
 then  gcc wget.c libmbedtls.a  with the same flags.
