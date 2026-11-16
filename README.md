@@ -267,6 +267,10 @@ takes mode N from that list, `vga=640x480` the mode of that size, and
 scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
 submenu's sizes.
 
+Text size: `text=132x50` (any of VMRES's sizes; `text=50` is 80x50) starts
+the DOS prompt at that many columns and rows, as `VMRES 132x50` in
+AUTOEXEC.BAT would. A program that sets mode 3 goes back to 80x25.
+
 VBE or GOP (`video=`): `video=fb` (the default) is the above: vmdos's
 own VGA and VESA BIOS, drawn scaled onto the framebuffer the firmware set up
 (GOP on UEFI, GRUB's VESA mode on a BIOS/CSM boot). On a BIOS/CSM boot,
@@ -402,6 +406,34 @@ xBRZ, writing the framebuffer), for high resolutions or slow CPUs where one
 core can't keep up, and draw the Voodoo 3's triangles (in VMHV too);
 `render=N` uses at most N of them, `render=0` none.
 `nosmp` keeps everything on one core.
+
+Scrollback: in a text mode, what scrolls off the top of the screen is
+kept (2000 rows), and Ctrl+Shift+PgUp/PgDn/Up/Down/Home/End or the mouse
+wheel page back through it, as in a terminal; any other key goes back to
+the live screen and on to DOS. DOS's own output (INT 10h scrolls: DIR,
+TYPE) is kept row for row however fast it comes; programs that write the
+screen themselves (ssh, mTCP's telnet) are caught by comparing each redraw
+with the last one, so more than a screenful between two redraws can be
+lost. The wheel is vmdos's: the PS/2 mouse is switched to IntelliMouse
+mode (DOS still gets 3-byte packets; `nowheel` leaves it alone), and USB
+mice and tablets report theirs. `scrollback=off` turns it off.
+
+Copy and paste: Ctrl+Shift+C selects text on a text screen (a cursor
+where DOS's is: arrows move it, Shift+arrows or Space select, PgUp/PgDn and
+Home/End move further, into the scrollback too; Enter copies, Esc leaves),
+or hold Ctrl+Shift and drag with the mouse (letting go copies; a mouse
+that only reports motion moves the selection's cursor). Ctrl+Shift+V types
+the clipboard into DOS through the BIOS keyboard buffer, with US scan
+codes, once Ctrl, Shift and Alt are up: COMMAND.COM, EDIT and ssh take it;
+a program with its own keyboard handler doesn't; any key stops it. Text is
+code page 437 in DOS and UTF-8 to the host. Under QEMU or libvirt the
+clipboard is the host's too, through the SPICE agent's port
+com.redhat.spice.0 (virt-manager's SPICE display has it; plain QEMU:
+`-device virtio-serial-pci -chardev qemu-vdagent,id=vda,clipboard=on
+-device virtserialport,chardev=vda,name=com.redhat.spice.0`, with its GTK
+or VNC display): what the host copies is what Ctrl+Shift+V types, and
+what vmdos copies the host can paste. `clipboard=off` leaves the port
+alone.
 
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
 the display, at the screen's size, in memory until the next one; after
@@ -836,6 +868,24 @@ vmdos's VGA BIOS draws and a real card's (`video=vbe`) usually has; a program
 that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
+
+### Remote DOS prompt (telnet)
+
+Off unless asked for: without `remote=` vmdos listens on no port.
+`remote=23` on the command line (`remote=on` is 23, any port works) has
+vmdos take telnet connections to DOS's IPv4 address on that port, after
+STARTNET or VMTCP has given DOS one (vmdos sees it go by; nothing stays
+resident in DOS, and vmdos answers ARP for it meanwhile). The session shows
+the DOS text screen, ANSI colors and code page 437 as UTF-8, only what
+changes, and keys typed there go to DOS as scan codes: arrows, Home/End,
+PgUp/PgDn, Ins/Del, F1-F12, Ctrl+letters, so a program with its own
+keyboard handler gets them too (paced by the BIOS buffer, so a paste into
+the terminal isn't lost). Graphics modes show a note until text comes back.
+One session at a time; another gets "busy". `remotepw=WORD` asks for a
+password first (three tries). Telnet isn't encrypted: keep it on your own
+network, or reach it through an SSH tunnel. Under QEMU's user networking:
+`-nic user,hostfwd=tcp::2323-:23`, then `telnet localhost 2323`.
+IPv4 only.
 
 ### Memory statistics for the host (virtio-balloon)
 

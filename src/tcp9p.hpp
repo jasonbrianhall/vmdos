@@ -21,6 +21,12 @@ bool tcp9p_send(int c, const u8* p, u32 n);   // queue bytes (false: no room, or
 bool tcp9p_pump(int c);                       // poll, take, send; false: the connection is gone
 u8* tcp9p_data(int c, u32* have);             // what has come in, in order
 void tcp9p_consume(int c, u32 n);
+void tcp9p_listen(u16 port);                  // IPv4, DOS's address: connections from tcp9p_accept
+int tcp9p_accept();                           // a new connection to it, or -1
+bool tcp9p_service(int c);                    // take and send, without polling the card; false: gone
+void tcp9p_peer(int c, u8* ip4);
+u32 tcp9p_unacked(int c);
+void tcp9p_close_fin(int c);
 
 // net.cpp
 bool tcp9p_rx(const u8* f, unsigned len);     // a frame from the wire: true if it was ours (not for DOS)
