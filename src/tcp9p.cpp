@@ -50,9 +50,13 @@ int logging = -1;
 
 bool log_on()
 {
-    if (logging < 0) logging = strstr(cmdline, "tcplog") != 0;
+    if (logging < 0) {
+        const char* p = strstr(cmdline, "tcplog");
+        logging = !p ? 0 : p[6] == '=' && p[7] == '2' ? 2 : 1;   // tcplog=2: every segment too
+    }
     return logging;
 }
+#define tlog2(...) do { if (log_on() && logging == 2) kprintf(__VA_ARGS__); } while (0)
 #define tlog(...) do { if (log_on()) kprintf(__VA_ARGS__); } while (0)
 
 inline bool zero(const u8* p, int n) { while (n--) if (*p++) return false; return true; }
@@ -150,6 +154,8 @@ void segment(Conn& k, u8 flags, u32 seq, const u8* data, unsigned len)
     if (len) memcpy(t + th, data, len);
     u16 s = ~csum_add(ps, t, th + len);
     t[16] = (u8)(s >> 8); t[17] = (u8)s;
+    tlog2("tcp: out flags %02x seq %u ack %u len %u to %02x:%02x:%02x:%02x:%02x:%02x\n", flags, seq - k.iss,
+          (flags & F_ACK) ? k.rcv_nxt : 0, len, f[0], f[1], f[2], f[3], f[4], f[5]);
     send_frame(f, (unsigned)(t - f) + th + len);
     if (flags & F_ACK) k.need_ack = false;
 }
@@ -237,6 +243,9 @@ void neighbors(const u8* f, unsigned len)
             for (auto& k : conns)
                 if (k.state != CLOSED && k.c.family == 6 && !memcmp(target, k.c.hop6, 16)) {
                     if (k.state == SYN_SENT && zero(k.c.hop_mac, 6)) k.progress = ticks - k.rto;
+                    if (memcmp(k.c.hop_mac, mac, 6))
+                        tlog("tcp: next hop's MAC %02x:%02x:%02x:%02x:%02x:%02x (neighbor advertisement)\n",
+                             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
                     memcpy(k.c.hop_mac, mac, 6);
                 }
             return;
@@ -302,6 +311,7 @@ void segment_in(Conn& k, const u8* t, unsigned tl)
     u32 seq = g32(t + 4), ack = g32(t + 8);
     const u8* data = t + doff;
     unsigned n = tl - doff;
+    tlog2("tcp: in  flags %02x seq %u ack %u len %u\n", fl, seq - k.rcv_nxt, ack - k.iss, n);
     if (log_on() && (fl & (F_FIN | F_RST | F_SYN))) tlog("tcp: in flags %02x seq %u ack %u len %u (state %d)\n", fl, seq - k.rcv_nxt, ack - k.iss, n, k.state);
     if (fl & F_RST) {
         if (k.state == SYN_SENT && !((fl & F_ACK) && ack == k.iss + 1)) return;
@@ -334,6 +344,10 @@ void segment_in(Conn& k, const u8* t, unsigned tl)
         return;
     }
     if (k.state != OPEN) return;
+    if (fl & F_SYN) {                          // its SYN-ACK again: our ACK was lost
+        segment(k, F_ACK, k.snd_nxt, 0, 0);
+        return;
+    }
     if (fl & F_ACK) {
         if (sdiff(ack, k.snd_una) > 0 && sdiff(ack, k.snd_nxt) <= 0) {
             u32 done = ack - k.snd_una;
@@ -386,7 +400,12 @@ void output(Conn& k)
     if (k.state == SYN_SENT) {
         if (zero(k.c.hop_mac, 6)) {            // the next hop's MAC first
             const u8* hop = k.c.family == 4 ? k.c.hop4 : k.c.hop6;
-            if (nb_find(k.c.family, hop, k.c.hop_mac)) { k.progress = ticks - k.rto; return; }
+            if (nb_find(k.c.family, hop, k.c.hop_mac)) {
+                k.progress = ticks - k.rto;
+                tlog("tcp: next hop's MAC %02x:%02x:%02x:%02x:%02x:%02x (cache)\n", k.c.hop_mac[0], k.c.hop_mac[1],
+                     k.c.hop_mac[2], k.c.hop_mac[3], k.c.hop_mac[4], k.c.hop_mac[5]);
+                return;
+            }
             if ((u32)(ticks - k.progress) >= 300) { ask_hop(k.c); k.progress = ticks; }
             return;
         }
