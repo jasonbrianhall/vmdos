@@ -12,3 +12,5 @@
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
 /* DJGPP has no clock_gettime(): wget.c gives the milliseconds */
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
+/* WGET -d: mbedTLS's debugging output */
+#define MBEDTLS_DEBUG_C

@@ -1,7 +1,7 @@
 /*
  * wget.c: WGET.EXE, downloads over HTTP and HTTPS for vmdos.
  *
- *   WGET [-k] [-q] [--ca FILE] URL [FILE]
+ *   WGET [-k] [-q] [-d N] [--ca FILE] URL [FILE]
  *
  * A DJGPP program (tools/build-wget.sh): the network is vmdos's own TCP
  * through ssh's socket layer (third_party/openssh/dos-sock.c: socket(),
@@ -31,6 +31,7 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/error.h"
 #include "psa/crypto.h"
+#include "mbedtls/debug.h"
 #include "mbedtls/platform_time.h"
 
 #ifdef __DJGPP__
@@ -50,7 +51,8 @@
 #define DEFAULT_CA "/etc/ssl/certs/ca-certificates.crt"
 #endif
 
-static int insecure, quiet;
+static int insecure, quiet, debug_level;
+static int net_err;			/* errno of the last failed send or receive */
 static const char *ca_file;
 
 static void
@@ -146,8 +148,12 @@ bio_send(void *ctx, const unsigned char *p, size_t n)
 	ssize_t r = net_write(fd, p, n);
 
 	(void)ctx;
-	if (r < 0)
-		return errno == EAGAIN ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+	if (r < 0 && errno == EAGAIN)
+		return MBEDTLS_ERR_SSL_WANT_WRITE;
+	if (r < 0) {
+		net_err = errno;
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+	}
 	return (int)r;
 }
 
@@ -157,11 +163,24 @@ bio_recv(void *ctx, unsigned char *p, size_t n)
 	ssize_t r = net_read(fd, p, n);
 
 	(void)ctx;
-	if (r < 0)
-		return errno == EAGAIN ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+	if (r < 0 && errno == EAGAIN)
+		return MBEDTLS_ERR_SSL_WANT_READ;
+	if (r < 0) {
+		net_err = errno;
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+	}
 	if (r == 0)
 		return MBEDTLS_ERR_SSL_CONN_EOF;
 	return (int)r;
+}
+
+static void
+tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
+{
+	const char *f = strrchr(file, '/');
+
+	(void)ctx;
+	fprintf(stderr, "[%d %s:%d] %s", level, f ? f + 1 : file, line, msg);
 }
 
 static void
@@ -181,10 +200,40 @@ tls_init(void)
 	    (const unsigned char *)pers, sizeof pers - 1)) != 0)
 		die("TLS: no random numbers (-%x)", -e);
 	if (!insecure) {
-		e = mbedtls_x509_crt_parse_file(&cas, ca_file);
-		if (e < 0)
-			die("can't read the certificate authorities in %s "
-			    "(-k skips the check)", ca_file);
+		/* Read here, in big blocks: mbedtls_x509_crt_parse_file() turns
+		 * stdio's buffering off, and DJGPP then reads byte by byte, a DOS
+		 * call each: 180 KB of CAs took long enough that a server waiting
+		 * for the handshake gave up. */
+		FILE *f = fopen(ca_file, "rb");
+		unsigned char *pem = NULL;
+		size_t n = 0, room = 0, r;
+
+		if (f) {
+			for (;;) {
+				if (n + 65536 + 1 > room) {
+					unsigned char *p = realloc(pem, room = n + 65536 * 4 + 1);
+					if (!p)
+						die("out of memory reading %s", ca_file);
+					pem = p;
+				}
+				if ((r = fread(pem + n, 1, room - n - 1, f)) == 0)
+					break;
+				n += r;
+			}
+			fclose(f);
+		}
+		if (!f || !n)
+			die("can't read the certificate authorities in %s: %s "
+			    "(-k skips the check)", ca_file, f ? "empty" : strerror(errno));
+		pem[n] = '\0';
+		e = mbedtls_x509_crt_parse(&cas, pem, n + 1);
+		free(pem);
+		if (e < 0) {
+			char m[100];
+			mbedtls_strerror(e, m, sizeof m);
+			die("can't read the certificate authorities in %s: %s "
+			    "(-k skips the check)", ca_file, m);
+		}
 		cas_loaded = 1;
 	}
 	tls_ready = 1;
@@ -224,6 +273,9 @@ connect_to(const char *host, const char *port, int use_tls)
 	struct addrinfo hints, *ai, *a;
 	int e;
 
+	if (use_tls)
+		tls_init();		/* the CAs and random numbers before connecting: the server won't wait */
+
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -242,7 +294,6 @@ connect_to(const char *host, const char *port, int use_tls)
 		die("%s port %s: %s", host, port, strerror(errno));
 	if (!use_tls)
 		return;
-	tls_init();
 	mbedtls_ssl_init(&ssl);
 	mbedtls_ssl_config_init(&conf);
 	tls = 1;
@@ -250,6 +301,10 @@ connect_to(const char *host, const char *port, int use_tls)
 	    MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0)
 		die("TLS setup (-%x)", -e);
 	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
+	if (debug_level) {
+		mbedtls_debug_set_threshold(debug_level);
+		mbedtls_ssl_conf_dbg(&conf, tls_debug, NULL);
+	}
 	mbedtls_ssl_conf_authmode(&conf, insecure ? MBEDTLS_SSL_VERIFY_NONE :
 	    MBEDTLS_SSL_VERIFY_REQUIRED);
 	mbedtls_ssl_conf_ca_chain(&conf, &cas, NULL);
@@ -263,14 +318,26 @@ connect_to(const char *host, const char *port, int use_tls)
 		if (e == MBEDTLS_ERR_SSL_WANT_READ || e == MBEDTLS_ERR_SSL_WANT_WRITE)
 			continue;
 		vf = mbedtls_ssl_get_verify_result(&ssl);
-		if (e == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && vf)
-			die("%s: %s (-k skips the check)", host, verify_text(vf));
+		if (e == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && vf) {
+			char info[512];
+			mbedtls_x509_crt_verify_info(info, sizeof info, "  ", vf);
+			fprintf(stderr, "wget: %s: %s (-k skips the check)\n%s", host,
+			    verify_text(vf), info);
+			if (vf & (MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE)) {
+				time_t now = time(NULL);
+				fprintf(stderr, "  this PC's clock says %s", asctime(gmtime(&now)));
+			}
+			exit(1);
+		}
 		if (e == MBEDTLS_ERR_SSL_CONN_EOF)
 			die("%s closed the connection during the TLS handshake", host);
+		if (e == MBEDTLS_ERR_SSL_INTERNAL_ERROR && net_err)
+			die("%s: the connection failed during the TLS handshake: %s",
+			    host, strerror(net_err));
 		{
 			char m[100];
 			mbedtls_strerror(e, m, sizeof m);
-			die("%s: TLS handshake failed: %s", host, m);
+			die("%s: TLS handshake failed: %s (-%04x)", host, m, -e);
 		}
 	}
 	if (!quiet)
@@ -673,11 +740,12 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-	    "WGET [-k] [-q] [--ca FILE] URL [FILE]: download over HTTP or HTTPS\n"
+	    "WGET [-k] [-q] [-d N] [--ca FILE] URL [FILE]: download over HTTP or HTTPS\n"
 	    "  WGET https://example.com/file.zip        saves file.zip here\n"
 	    "  WGET http://host/page.html PAGE.HTM      saves PAGE.HTM\n"
 	    "  -k  don't check the server's certificate\n"
 	    "  -q  no progress\n"
+	    "  -d N  TLS debugging output, N 1 (least) to 4\n"
 	    "  --ca FILE  the certificate authorities (default %s)\n"
 	    "Run STARTNET first.\n", DEFAULT_CA);
 	exit(1);
@@ -699,6 +767,8 @@ main(int argc, char **argv)
 			insecure = 1;
 		else if (strcmp(argv[i], "-q") == 0)
 			quiet = 1;
+		else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc)
+			debug_level = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc)
 			ca_file = argv[++i];
 		else if (argv[i][0] == '-' || (argv[i][0] == '/' && argv[i][1] && !argv[i][2]))
