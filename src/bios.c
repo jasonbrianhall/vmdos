@@ -654,7 +654,7 @@ void bios_init(void)
     wr32(BDA + 0x6C, secs * 19663 / 1080);
 
     if (vga_native) vga_native_bios();                   /* video=vbe: the card's BIOS, vectors and data */
-    else video_set_mode(3, 1);
+    else { video_set_mode(3, 1); video_boot_text(); }
 
     disk_cyls = disk_sectors / (DISK_HEADS * DISK_SPT);
     if (disk_cyls > 1024) disk_cyls = 1024;

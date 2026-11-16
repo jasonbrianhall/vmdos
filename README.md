@@ -267,6 +267,10 @@ takes mode N from that list, `vga=640x480` the mode of that size, and
 scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
 submenu's sizes.
 
+Text size: `text=132x50` (any of VMRES's sizes; `text=50` is 80x50) starts
+the DOS prompt at that many columns and rows, as `VMRES 132x50` in
+AUTOEXEC.BAT would. A program that sets mode 3 goes back to 80x25.
+
 VBE or GOP (`video=`): `video=fb` (the default) is the above: vmdos's
 own VGA and VESA BIOS, drawn scaled onto the framebuffer the firmware set up
 (GOP on UEFI, GRUB's VESA mode on a BIOS/CSM boot). On a BIOS/CSM boot,

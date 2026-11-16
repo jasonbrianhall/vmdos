@@ -494,6 +494,7 @@ void vga_get(u32 lin, void *dst, u32 n);      /* guest -> kernel, the same */
     } while (0)
 int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
 int video_gfx_height(void);                   /* graphics mode height (8 per row in text modes) */
+void video_boot_text(void);                   /* text=COLSxROWS: the DOS prompt's size from boot */
 int video_mouse_width(void);                  /* INT 33h pointer width: 640, more in 132-column text */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;

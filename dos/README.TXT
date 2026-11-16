@@ -93,6 +93,8 @@ BOOT OPTIONS
     vga=max        UEFI: the largest mode (usually the panel's own size)
                    On a legacy BIOS boot, pick the size in the boot menu
                    instead ("screen resolution"), which UEFI has too.
+    text=132x50    The DOS prompt's size from boot (VMRES's sizes; text=50
+                   is 80x50)
   Speed
     speed=N        Run at N% of full speed from boot
   Sound

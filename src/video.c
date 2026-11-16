@@ -490,6 +490,40 @@ static void vtext_set(int i, int clear)
     text_vbe = vtext[i].no;
     kprintf("video: VESA text mode %x, %ux%u\n", vtext[i].no, vtext[i].cols, vtext[i].rows);
 }
+/* A text screen of cols x rows as VMRES sets it (80x25, 80x28, 80x43,
+   80x50, or a VESA text mode): 0, or -1 for a size there isn't. */
+static int text_size_(int cols, int rows)
+{
+    for (unsigned i = 0; i < sizeof vtext / sizeof vtext[0]; i++)
+        if (vtext[i].cols == cols && vtext[i].rows == rows) { vtext_set((int)i, 1); return 0; }
+    if (cols != 80) return -1;
+    int ch = rows == 25 ? 16 : rows == 28 ? 14 : rows == 43 || rows == 50 ? 8 : 0;
+    if (!ch) return -1;
+    vga_lines = rows == 43 ? 350 : 400;
+    video_set_mode(3, 1);
+    if (ch != 16) text_font(ch);
+    return 0;
+}
+
+/* text=COLSxROWS on the command line (vmdos.cfg, the boot menu): the DOS
+   prompt starts at that size, as VMRES would set it. */
+void video_boot_text(void)
+{
+    const char *t = strstr(cmdline, "text=");
+    if (!t || (t != cmdline && t[-1] != ' ') || vga_native) return;
+    t += 5;
+    int cols = 0, rows = 0;
+    while (*t >= '0' && *t <= '9') cols = cols * 10 + (*t++ - '0');
+    if (*t == 'x' || *t == 'X') { t++; while (*t >= '0' && *t <= '9') rows = rows * 10 + (*t++ - '0'); }
+    if (!rows && cols != 80 && cols != 132) { rows = cols; cols = 80; }   /* text=50: 80x50 */
+    if (!rows) rows = 25;
+    rlock_take(&video_lock);
+    int bad = text_size_(cols, rows);
+    rlock_drop(&video_lock);
+    if (bad) kprintf("text=%dx%d: no such text size (80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60)\n", cols, rows);
+    else kprintf("video: text %dx%d from text=\n", cols, rows);
+}
+
 static void vtext_info(int i, u32 a)
 {
     for (int k = 0; k < 256; k++) wr8(a + k, 0);
