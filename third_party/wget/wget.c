@@ -31,6 +31,7 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/error.h"
 #include "psa/crypto.h"
+#include "mbedtls/platform_time.h"
 
 #ifdef __DJGPP__
 #include <fcntl.h>
@@ -38,14 +39,14 @@
 #include <go32.h>
 #include <sys/farptr.h>
 #include "dos-sock.h"
-#define sock_read(fd, p, n) dos_sock_read(fd, p, n)
-#define sock_write(fd, p, n) dos_sock_write(fd, p, n)
-#define sock_close(fd) dos_sock_close(fd)
+#define net_read(fd, p, n) dos_sock_read(fd, p, n)
+#define net_write(fd, p, n) dos_sock_write(fd, p, n)
+#define net_close(fd) dos_sock_close(fd)
 #define DEFAULT_CA "C:\\VMDOS\\NET\\CACERT.PEM"
 #else
-#define sock_read(fd, p, n) read(fd, p, n)
-#define sock_write(fd, p, n) write(fd, p, n)
-#define sock_close(fd) close(fd)
+#define net_read(fd, p, n) read(fd, p, n)
+#define net_write(fd, p, n) write(fd, p, n)
+#define net_close(fd) close(fd)
 #define DEFAULT_CA "/etc/ssl/certs/ca-certificates.crt"
 #endif
 
@@ -115,6 +116,20 @@ mbedtls_hardware_poll(void *data, unsigned char *out, size_t len,
 	return 0;
 }
 
+/* Milliseconds for mbedTLS (TLS 1.3 ticket ages): coarse is enough. */
+mbedtls_ms_time_t
+mbedtls_ms_time(void)
+{
+#ifdef __DJGPP__
+	return (mbedtls_ms_time_t)time(NULL) * 1000;
+#else
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (mbedtls_ms_time_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
 /* --- the connection: TCP, TLS over it --- */
 
 static int fd = -1, tls;
@@ -128,7 +143,7 @@ static int tls_ready, cas_loaded;
 static int
 bio_send(void *ctx, const unsigned char *p, size_t n)
 {
-	ssize_t r = sock_write(fd, p, n);
+	ssize_t r = net_write(fd, p, n);
 
 	(void)ctx;
 	if (r < 0)
@@ -139,7 +154,7 @@ bio_send(void *ctx, const unsigned char *p, size_t n)
 static int
 bio_recv(void *ctx, unsigned char *p, size_t n)
 {
-	ssize_t r = sock_read(fd, p, n);
+	ssize_t r = net_read(fd, p, n);
 
 	(void)ctx;
 	if (r < 0)
@@ -199,7 +214,7 @@ disconnect(void)
 		tls = 0;
 	}
 	if (fd >= 0)
-		sock_close(fd);
+		net_close(fd);
 	fd = -1;
 }
 
@@ -219,7 +234,7 @@ connect_to(const char *host, const char *port, int use_tls)
 			continue;
 		if (connect(fd, a->ai_addr, a->ai_addrlen) == 0)
 			break;
-		sock_close(fd);
+		net_close(fd);
 		fd = -1;
 	}
 	freeaddrinfo(ai);
@@ -274,7 +289,7 @@ c_send(const char *p, size_t n)
 			if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
 				continue;
 		} else
-			r = (int)sock_write(fd, p, n);
+			r = (int)net_write(fd, p, n);
 		if (r <= 0)
 			die("sending the request failed");
 		p += r;
@@ -290,7 +305,7 @@ c_recv(unsigned char *p, size_t n)
 		int r;
 
 		if (!tls) {
-			ssize_t s = sock_read(fd, p, n);
+			ssize_t s = net_read(fd, p, n);
 			if (s < 0 && errno == EINTR)
 				continue;
 			if (s < 0)

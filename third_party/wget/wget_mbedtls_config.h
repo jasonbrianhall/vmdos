@@ -10,3 +10,5 @@
 #undef MBEDTLS_PSA_CRYPTO_STORAGE_C
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
+/* DJGPP has no clock_gettime(): wget.c gives the milliseconds */
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
