@@ -496,7 +496,15 @@ int vga16_fault(struct emu_cpu *e, u32 cr2);  /* 1: emulated */
 int video_gfx_height(void);                   /* graphics mode height (8 per row in text modes) */
 void video_boot_text(void);                   /* text=COLSxROWS: the DOS prompt's size from boot */
 int video_mouse_width(void);
-void mouse_wheel(int up);                     /* wheel clicks up (+) / down (-): the scrollback */                  /* INT 33h pointer width: 640, more in 132-column text */
+void mouse_wheel(int up);
+void clip_set(const u8 *s, u32 n);            /* clip.c: text copied off the screen (CP437, '\n' rows) */
+void clip_from_host(const u8 *s, u32 n);      /* the host's clipboard, UTF-8 */
+u32 clip_to_utf8(u8 *out, u32 max);
+u32 clip_size(void);
+int clip_paste(void);                         /* Ctrl+Shift+V: 1 if there was text */
+void clip_paste_stop(void);
+void clip_tick(void);
+extern volatile int clip_grab_req;                     /* wheel clicks up (+) / down (-): the scrollback */                  /* INT 33h pointer width: 640, more in 132-column text */
 void video_puts(const char *s);
 extern const u8 *vga_font16, *vga_font8;
 

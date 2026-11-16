@@ -35,6 +35,8 @@ static volatile int abs_x = -1, abs_y;
 static int abs_px = -1, abs_py;
 void mouse_absolute(int x, int y, int b)
 {
+    int video_select_mouse(int abs, int x, int y, int b, int mods), vkbd_mods(void);
+    if (video_select_mouse(1, x, y, b, vkbd_mods())) return;   /* Ctrl+Shift+drag: copy (video.c) */
     abs_x = x; abs_y = y;
     raw_buttons = b & 7;
     have_input = 1;
@@ -46,6 +48,8 @@ void mouse_absolute(int x, int y, int b)
 /* Called from interrupt handlers: motion in counts (dy positive = down). */
 void mouse_input(int dx, int dy, int b)
 {
+    int video_select_mouse(int abs, int x, int y, int b, int mods), vkbd_mods(void);
+    if (video_select_mouse(0, dx, dy, b, vkbd_mods())) return;
     raw_dx += dx;
     raw_dy += dy;
     raw_buttons = b & 7;

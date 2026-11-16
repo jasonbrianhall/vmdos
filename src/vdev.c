@@ -745,6 +745,23 @@ void vkbd_real_scancode(u8 sc)
         }
         return;
     }
+    {
+        int video_selecting(void), video_scrollback_key(int delta);
+        void video_select_start(void), video_select_key(int k, int up, int shift, int ctrl);
+        int modkey = k == 0x1D || k == 0x38 || k == 0x2A || k == 0x36 || sc == 0xE0;
+        if (hot && k == 0x2E && !video_log_on() && (video_selecting() || video_scrollback_key(0))) {
+            if (!up) video_select_start();                    /* Ctrl+Shift+C: select (again: copy) */
+            return;
+        }
+        if (hot && k == 0x2F && !video_log_on()) {            /* Ctrl+Shift+V: type the clipboard */
+            if (!up && clip_paste()) return;
+            if (up && clip_size()) return;
+        }
+        if (video_selecting() && !modkey) {                   /* selecting: the keys are the selection's */
+            video_select_key(k, up, lshift || rshift, ctrl);
+            return;
+        }
+    }
     if (hot && !video_log_on() && (k == 0x48 || k == 0x50 || k == 0x49 || k == 0x51 || k == 0x47 || k == 0x4F)) {
         int video_scrollback_key(int delta), video_text_page(void);   /* Ctrl+Shift+PgUp etc.: the DOS screen's scrollback (video.c) */
         if (video_scrollback_key(0)) {
@@ -780,6 +797,7 @@ void vkbd_real_scancode(u8 sc)
     if (!up && sc != 0xE0 && k != 0x1D && k != 0x38 && k != 0x2A && k != 0x36) {
         void video_scrollback_live(void);                 /* a key for DOS: back to the live screen */
         video_scrollback_live();
+        clip_paste_stop();                                /* and a paste stops */
     }
     kq_put(sc);
 }

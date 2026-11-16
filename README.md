@@ -418,6 +418,23 @@ lost. The wheel is vmdos's: the PS/2 mouse is switched to IntelliMouse
 mode (DOS still gets 3-byte packets; `nowheel` leaves it alone), and USB
 mice and tablets report theirs. `scrollback=off` turns it off.
 
+Copy and paste: Ctrl+Shift+C selects text on a text screen (a cursor
+where DOS's is: arrows move it, Shift+arrows or Space select, PgUp/PgDn and
+Home/End move further, into the scrollback too; Enter copies, Esc leaves),
+or hold Ctrl+Shift and drag with the mouse (letting go copies; a mouse
+that only reports motion moves the selection's cursor). Ctrl+Shift+V types
+the clipboard into DOS through the BIOS keyboard buffer, with US scan
+codes, once Ctrl, Shift and Alt are up: COMMAND.COM, EDIT and ssh take it;
+a program with its own keyboard handler doesn't; any key stops it. Text is
+code page 437 in DOS and UTF-8 to the host. Under QEMU or libvirt the
+clipboard is the host's too, through the SPICE agent's port
+com.redhat.spice.0 (virt-manager's SPICE display has it; plain QEMU:
+`-device virtio-serial-pci -chardev qemu-vdagent,id=vda,clipboard=on
+-device virtserialport,chardev=vda,name=com.redhat.spice.0`, with its GTK
+or VNC display): what the host copies is what Ctrl+Shift+V types, and
+what vmdos copies the host can paste. `clipboard=off` leaves the port
+alone.
+
 Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
 the display, at the screen's size, in memory until the next one; after
 quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current

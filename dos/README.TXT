@@ -18,6 +18,11 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+PgUp  Scrollback: page back through what scrolled off the DOS
                      screen (PgDn, Up/Down, Home/End too; the mouse
                      wheel scrolls it as well); any other key goes back
+  Ctrl+Shift+C     Select text to copy: arrows move, Shift+arrows select
+                     (PgUp goes into the scrollback), Enter copies, Esc
+                     leaves. Or Ctrl+Shift and drag the mouse.
+  Ctrl+Shift+V     Type the clipboard into DOS (the host's too, under
+                     QEMU or virt-manager with the SPICE agent channel)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
   Ctrl+Alt+Del     Restart

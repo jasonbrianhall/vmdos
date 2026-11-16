@@ -724,6 +724,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
             if ((ticks & 63) == 32) balloon_tick();
             if ((ticks & 63) == 48) acpi_tick();
             if ((ticks & 7) == 2) agent_tick();
+            clip_tick();
             /* A protected-mode client can't change IF with POPF (IOPL 0), and
                PUSHF/CLI/.../POPF is common anyway: if its virtual IF has
                been off for a few ms with an interrupt waiting, take that as

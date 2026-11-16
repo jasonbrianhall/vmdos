@@ -51,6 +51,8 @@ static int kbuf_put(u16 w)
     return 1;
 }
 
+int bios_kbuf_put(u16 w) { return kbuf_put(w); }   /* clip.c: a pasted key */
+
 static int kbuf_get(u16 *w, int remove)
 {
     u16 head = rd16(BDA + 0x1A), tail = rd16(BDA + 0x1C);
