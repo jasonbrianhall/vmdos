@@ -15,10 +15,18 @@
 #include "kernel.h"
 
 static u8 rp = 16, gp = 8, bp = 0;           /* where the 8-bit primaries are in a pixel */
-static struct dc { u32 a, b, d, c; } dcache[65536];
+static struct dc { u32 a, b, d, c; } *dcache;  /* 65536 of them (1 MiB): allocated by xbrz_format, on first use */
+#define DC_N 65536u
 #define DC_SALT 0x5BD1E995u
 
-void xbrz_format(u8 rpos, u8 gpos, u8 bpos) { rp = rpos; gp = gpos; bp = bpos; memset(dcache, 0, sizeof dcache); }
+/* 0: no memory for the distance cache. */
+int xbrz_format(u8 rpos, u8 gpos, u8 bpos)
+{
+    if (!dcache && !(dcache = phys_try_alloc(DC_N * sizeof *dcache))) return 0;
+    rp = rpos; gp = gpos; bp = bpos;
+    memset(dcache, 0, DC_N * sizeof *dcache);
+    return 1;
+}
 
 static u32 isqrt(u32 v)
 {

@@ -540,7 +540,7 @@ static void vtext_info(int i, u32 a)
 
 /* ---------------- drawing ---------------- */
 static u16 shadow_text[132 * 60];
-static u8 shadow_gfx[GFX_MAXW * GFX_MAXH];
+static u8 *shadow_gfx;                          /* GFX_MAXW x GFX_MAXH; vbe_init (not with video=vbe) */
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
 static int vd_on;                              /* the Voodoo 3's video processor owns the screen (voodoo3.h) */
@@ -594,7 +594,7 @@ static int xbrz_opt = -1;
 static u32 xbrz_k, x_w, x_h;                   /* xBRZ on: its factor and the source size */
 static u32 *xs, xs_cap;                         /* the source (x_w * x_h), kept for the next frame */
 static u8 *xcor, xdirty[4096];                  /* its corner flags, x_w * x_h */
-void xbrz_format(u8 rpos, u8 gpos, u8 bpos);
+int xbrz_format(u8 rpos, u8 gpos, u8 bpos);
 void xbrz_corners(const u32 *src, u32 w, u32 h, u32 y, u8 *out);
 void xbrz_row(const u32 *src, const u8 *cor, u32 w, u32 h, u32 y, u32 k, u32 *dst);
 
@@ -638,9 +638,9 @@ static void smooth_setup(u32 w, u32 h)
         if (k > 6) k = 6;
         while (k > 2 && (w * k > 4096 || h * k > 4096)) k--;
         static int formatted;
-        if (!formatted) { xbrz_format(rpos, gpos, bpos); formatted = 1; }
-        xbrz_k = k; x_w = w; x_h = h;
-        w *= k; h *= k;
+        if (!formatted && !(formatted = xbrz_format(rpos, gpos, bpos)))
+            kprintf("video: no memory for scale=xbrz's cache: smooth\n");
+        else { xbrz_k = k; x_w = w; x_h = h; w *= k; h *= k; }
     }
     if (!xbrz_k && g_w == w && g_h == h) return;   /* pixel for pixel: nothing to smooth (xBRZ, asked for, still runs) */
     if (h > sizeof sdirty || g_h > 4096 || w > 4096 || w < 2 || h < 2) { xbrz_k = 0; return; }
@@ -758,7 +758,7 @@ static void bl_row(u32 y, const u32 *src)
 
 /* Per-CPU scratch for the rows par_for shares out (smp.c), and the
    lists of rows it works through. */
-static u32 sc_line[SMP_SLOTS][4096], sc_cvt[SMP_SLOTS][4096], sc_big[SMP_SLOTS][6 * 4096];
+static u32 (*sc_line)[4096], (*sc_cvt)[4096], (*sc_big)[6 * 4096];   /* [SMP_SLOTS]; vbe_init (not with video=vbe) */
 static u8 sc_ovr[SMP_SLOTS][GFX_MAXW];
 static u16 sm_list[4096];
 static u32 sm_bw;
@@ -915,9 +915,10 @@ static int sh_mouse = -1, sh_blink = -1;
    that changed is rendered into a buffer in RAM at its native width (640
    pixels for 80 or 40 columns) and scaled into the picture's box, so it
    fills the screen as games do; nothing is read back from the framebuffer. */
+static u32 (*tr_band)[132 * 8];                 /* [16], text_row's; vbe_init (not with video=vbe) */
 static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_and, u16 m_xor)
 {
-    static u32 band[16][132 * 8];
+    u32 (*band)[132 * 8] = tr_band;
     static u32 line[4096];
     int cw = text_cols == 40 ? 16 : 8;
     int cs = crtc[0x0A] & 0x1F, ce = crtc[0x0B] & 0x1F;
@@ -1955,6 +1956,12 @@ static void vbe_init(void)
 {
     vram = phys_alloc(VRAM_SIZE);
     vshadow = phys_alloc(VRAM_SIZE);
+    /* What drawing the screen needs, only when vmdos draws it (video=vbe: never). */
+    shadow_gfx = phys_alloc(GFX_MAXW * GFX_MAXH);
+    sc_line = phys_alloc(SMP_SLOTS * sizeof *sc_line);
+    sc_cvt = phys_alloc(SMP_SLOTS * sizeof *sc_cvt);
+    sc_big = phys_alloc(SMP_SLOTS * sizeof *sc_big);
+    tr_band = phys_alloc(16 * sizeof *tr_band);
     set_user((u32)(uintptr_t)vram, VRAM_SIZE, 1);
 }
 
