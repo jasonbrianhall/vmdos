@@ -27,6 +27,11 @@
 #define CURL_DISABLE_TFTP 1
 #define CURL_DISABLE_WEBSOCKETS 1
 
+/* No socketpair: curl's stand-in is a TCP connection to itself, which
+   dos-sock.c can't make (no bind/listen/accept); curl then failed every
+   transfer as "Out of memory" (curl_multi_wakeup isn't needed) */
+#define CURL_DISABLE_SOCKETPAIR 1
+
 #define USE_MBEDTLS 1
 #define HAVE_MBEDTLS_DES_CRYPT_ECB 1
 #define USE_IPV6 1			/* dos-sock.c does IPv6 (VMTCP.CFG's) */
