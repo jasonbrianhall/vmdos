@@ -1,0 +1,43 @@
+diff --git a/WWW/Library/Implementation/HTDOS.c b/WWW/Library/Implementation/HTDOS.c
+index 84bff79..ef391d9 100644
+--- a/WWW/Library/Implementation/HTDOS.c
++++ b/WWW/Library/Implementation/HTDOS.c
+@@ -194,11 +194,20 @@ char *HTDOS_short_name(const char *path)
+ #include <libc/farptrgs.h>
+ #include <go32.h>
+ 
++#ifdef USE_MOUSE
++extern int lynx_dos_mouse_pending(void);	/* vmdos: lynx-dos.c */
++#endif
++
+ void djgpp_idle_loop(void)
+ {
+     while (_farpeekw(_dos_ds, 0x41a) == _farpeekw(_dos_ds, 0x41c)) {
+ 	tcp_tick(NULL);
+ 	__dpmi_yield();
++#ifdef USE_MOUSE
++	/* a mouse button too: curses' getch() then has the click */
++	if (lynx_dos_mouse_pending())
++	    break;
++#endif
+ #if defined(USE_SLANG)
+ 	if (SLang_input_pending(1))
+ 	    break;
+diff --git a/src/LYCurses.h b/src/LYCurses.h
+index a9b0692..f88c077 100644
+--- a/src/LYCurses.h
++++ b/src/LYCurses.h
+@@ -264,9 +264,11 @@ typedef char chtype;
+ #endif /* HAVE_CONFIG_H */
+ 
+ /*
+- * PDCurses' mouse code does nothing in the DJGPP configuration.
++ * PDCurses' mouse code did nothing in the DJGPP configuration (PDCurses
++ * 2.x); PDCurses 3's DOS port reads INT 33h (vmdos: HTDOS.c's idle loop
++ * wakes up for the mouse too).
+  */
+-#if defined(PDCURSES) && !defined(__DJGPP__) && !defined(HAVE_XCURSES)
++#if defined(PDCURSES) && !defined(HAVE_XCURSES)
+ #define USE_MOUSE 1
+ #endif
+ 

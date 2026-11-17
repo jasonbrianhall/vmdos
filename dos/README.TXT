@@ -72,6 +72,12 @@ NETWORK: TCP/IP, IPv4 AND IPv6 (in C:\VMDOS\NET; STARTNET loads it all)
                    check the certificate)
   CURL URL         curl: HTTP(S), FTP(S); curl -O URL saves it (after
                    STARTNET; -k: don't check the certificate)
+  LYNX [URL]       Browse the web, text mode (after STARTNET; arrows follow
+                   links, G opens a URL, Q quits; LYNX -dump URL > F.TXT
+                   saves a page as text; the mouse clicks links).
+                   Settings: C:\VMDOS\NET\LYNX.CFG
+  OPENSSL ...      OpenSSL 3: DGST -sha256 FILE, GENPKEY, REQ, X509, VERIFY,
+                   ENC, S_CLIENT -connect host:443 (OPENSSL HELP lists them)
 
   Remote prompt (off unless asked for): boot with remote=23 (remotepw=WORD for a password), run
   STARTNET, then "telnet <DOS's address>" from another computer shows this

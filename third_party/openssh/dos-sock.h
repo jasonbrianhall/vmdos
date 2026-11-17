@@ -7,7 +7,8 @@
 #define SOCK_FD0 240		/* sockets: fds 240-247 */
 #define NSOCK_FDS 8
 
-void dos_sock_config(void);
+int dos_sock_config(void);
+extern void (*dos_sock_fail)(const char *);	/* see dos-sock.c */
 int dos_is_sock(int);
 ssize_t dos_sock_read(int, void *, size_t);
 ssize_t dos_sock_write(int, const void *, size_t);
