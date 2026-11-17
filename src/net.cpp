@@ -22,7 +22,8 @@
 // (BCM570x/575x/578x/5906/5717-5762 NetXtreme and NetLink, Linux's tg3), Atheros/Killer AR8161/8162/8171/8172
 // and E2200/E2400/E2500 (alx), Atheros AR8131/8132/8151/8152 (atl1c), virtio-net (QEMU,
 // -nic model=virtio-net-pci), the DEC 21140 "Tulip" (Hyper-V Gen 1's Legacy Network
-// Adapter; nic_tulip.cpp), Hyper-V's synthetic network adapter (VMBus, nic_netvsc.cpp;
+// Adapter; nic_tulip.cpp), PCI NE2000s (Realtek RTL8029: PCem, 86Box, QEMU's -nic
+// model=ne2k_pci; nic_ne2k.cpp), Hyper-V's synthetic network adapter (VMBus, nic_netvsc.cpp;
 // netvsc=off skips it). Kernel options: net=off (none), nic=N,
 // netlog (every call and frame in the log), e1000=plain|nobits,nophy,nolink,noflag
 // (leave out the ICH/PCH setup steps, to find one a card won't send with).
@@ -30,7 +31,7 @@
 // INT 2Fh AX=564Eh ('N'), BL = function; BX = 564Dh ('VM') on return:
 //   0  query: AX = 1 card / 0 none, CL = link up, CH = card kind
 //      (1 e1000, 2 RTL8139, 3 RTL8168/8125, 4 USB, 5 Broadcom, 6 igb, 7 igc, 8 alx, 9 atl1c, 10 virtio,
-//      11 Hyper-V, 12 DEC 21140), DX = frames waiting,
+//      11 Hyper-V, 12 DEC 21140, 13 NE2000/RTL8029), DX = frames waiting,
 //      ES:DI <- the MAC (6 bytes). From then on that MAC stays.
 //   1  CL = IRQ to raise while frames wait (FFh: none)
 //   2  send DS:SI, CX bytes (14..1514): AX = 0 sent, 1 failed
@@ -182,7 +183,7 @@ uint8_t dos_mac[6];
 
 // ---------------- the cards ----------------
 // Probed in this order: the first whose match() claims the PCI ID drives it.
-const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio, &nic_tulip };
+const NicDriver* const drivers[] = { &nic_e1000, &nic_rtl8139, &nic_r8169, &nic_tg3, &nic_igb, &nic_igc, &nic_alx, &nic_atl1c, &nic_virtio, &nic_tulip, &nic_ne2k };
 
 // Asking the driver can mean several PHY reads over MDIO (Broadcom: about a
 // millisecond), and the packet driver asks with every poll: at most every 100 ms.

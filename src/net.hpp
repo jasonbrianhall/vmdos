@@ -10,7 +10,7 @@
 namespace net {
 
 // card kinds, as INT 2Fh AX=564Eh BL=0 (CH) and BL=6 report them
-enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB, KIND_IGC, KIND_ALX, KIND_ATL1C, KIND_VIRTIO, KIND_HYPERV, KIND_TULIP };
+enum { KIND_NONE, KIND_E1000, KIND_RTL8139, KIND_R8169, KIND_USB, KIND_TG3, KIND_IGB, KIND_IGC, KIND_ALX, KIND_ATL1C, KIND_VIRTIO, KIND_HYPERV, KIND_TULIP, KIND_NE2000 };
 const int QLEN = 64, FRAME_MAX = 1536, MAXCARDS = 8;
 
 struct Stats { uint32_t rx, tx, rx_bytes, tx_bytes, rx_err, tx_err, dropped; };
@@ -113,7 +113,7 @@ struct NicDriver {
     bool (*send)(Card&, const uint8_t* f, unsigned len);
     void (*debug)(Card&, const char* why);      // debug=1: what it says while there's no link (0: nothing)
 };
-extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_alx, nic_atl1c, nic_virtio, nic_netvsc, nic_tulip, nic_usb;
+extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_alx, nic_atl1c, nic_virtio, nic_netvsc, nic_tulip, nic_ne2k, nic_usb;
 
 inline uint32_t r32(Card& c, int r) { return *(volatile uint32_t*)(c.mm + r); }
 inline uint16_t r16(Card& c, int r) { return *(volatile uint16_t*)(c.mm + r); }
