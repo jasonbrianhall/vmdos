@@ -880,6 +880,17 @@ vmdos's own TCP as ssh does (its socket layer), with nothing in the kernel
 and no packet driver. `tools/build-wget.sh` builds it (DJGPP);
 `third_party/wget/README.vmdos` has the rest.
 
+### curl
+
+`CURL` (after STARTNET) is curl 8.23 for DOS: HTTP and HTTPS (mbedTLS,
+TLS 1.2 and 1.3), FTP and FTPS, FILE, with curl's usual options (`-O`, `-L`,
+`-I`, `-d`, `-H`, `-u`, `-T` ...). Certificates are checked against
+C:\VMDOS\NET\CACERT.PEM, as for WGET. Like WGET and ssh it runs on
+vmdos's own TCP, with nothing in the kernel: curl's DOS code expects
+Watt-32, and `third_party/curl/dos/curl-dos.c` gives it the few Watt-32
+calls it makes on ssh's socket layer. `tools/build-curl.sh` builds it
+(DJGPP, or Docker); `third_party/curl/README.vmdos` has the rest.
+
 ### Remote DOS prompt (telnet)
 
 Off unless asked for: without `remote=` vmdos listens on no port.
