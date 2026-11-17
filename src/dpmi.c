@@ -1301,6 +1301,7 @@ static int insn_len(const u8 *p, int big)
 static int tcg = -1;
 static int under_tcg(void)
 {
+    if (tcg < 0 && !has_cpuid()) tcg = 0;          /* a 386 or early 486: real hardware */
     if (tcg < 0) {
         u32 a, b, c, d;
         __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));

@@ -14,3 +14,5 @@ tests/voodoo/obj/
 tests/voodoo/hosttest
 tests/voodoo/emutest
 tests/hvsim/hvsim
+build-486/
+.vmdos-cpu

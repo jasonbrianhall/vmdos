@@ -1,5 +1,6 @@
 # Builds the bootable USB-stick image (vmdos + FreeDOS, no games, no RAM disk;
-# boots on UEFI and legacy BIOS through GRUB)
+# boots on UEFI and legacy BIOS through GRUB), twice: the standard one (a
+# Pentium Pro or later) and vmdos-usb-486.img (CPU=486: runs on a 486 too)
 # and publishes it as a GitHub release named by date (UTC): v20261029, and
 # v20261029a, v20261029b, ... for further releases the same day.
 # Pushing a tag (git tag v20261031d && git push origin v20261031d) makes a
@@ -83,6 +84,18 @@ jobs:
           mv esp.img out/vmdos-usb.img
           xz -T0 -6 out/vmdos-usb.img
           cp vmdos.efi out/
+
+      - name: Build esp.img for a 486 (CPU=486)
+        run: |
+          make -j"$(nproc)" esp CPU=486 FRESH=1 ESP_MB=$ESP_MB ESP_FAT=$ESP_FAT EXTRA= RAMDISK= ISO=
+          # no P6 instructions outside the Voodoo 3 code (which only runs with voodoo3)
+          if objdump -d build-486/*.o build-486/sb/*.o | grep -wE 'cmov[a-z]+|fc?u?comip?|fcmov[a-z]+'; then
+            echo 'P6-only instructions in the 486 build'; exit 1
+          fi
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/boot/vmdos.elf   # the legacy BIOS boot path a 486 uses
+          head -c 440 esp.img | grep -aq GRUB || { echo 'no GRUB boot code in the MBR'; exit 1; }
+          mv esp.img out/vmdos-usb-486.img
+          xz -T0 -6 out/vmdos-usb-486.img
           (cd out && sha256sum * > SHA256SUMS)
           ls -l out
 
@@ -119,5 +132,9 @@ jobs:
           Your own boot-menu entries go in /boot/grub/custom.cfg on the stick (both modes).
 
           vmdos.efi alone: for an existing EFI system partition (see the README).
+
+          **vmdos-usb-486.img.xz**: the same image built for 486 CPUs (CPU=486), for old PCs with no
+          Pentium Pro-class CPU; boot it from the legacy BIOS. Use vmdos-usb.img.xz on anything newer:
+          it is built for the Pentium Pro and later and is the faster one there.
           EOF
           gh release create "$tag" out/* --title "vmdos $tag" --notes-file notes.md --target "$GITHUB_SHA" $flags

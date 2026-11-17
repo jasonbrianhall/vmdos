@@ -159,6 +159,7 @@ void idle_wait(void);                         /* sti; hlt; cli */
 void reboot(void) __attribute__((noreturn));
 void map_mmio(u32 phys, u32 len);
 void io_allow(u16 port, u32 n);               /* ports straight to the hardware for the guest (no trap) */
+int has_cpuid(void);                          /* cpu.c: 0 on a 386 or an early 486 (CPUID faults there) */
 u32 wc_flags(void);                           /* cpu.c: PTE bits for write-combining (PWT with the PAT), else PCD */
 int io_allowed(u16 port);                     /* cpu.c: a port io_allow gave to the guest (video=vbe: the card's) */
 void map_fb(u32 phys, u32 len);               /* write-combining (PAT) when the CPU has it */

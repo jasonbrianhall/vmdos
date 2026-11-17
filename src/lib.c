@@ -125,6 +125,7 @@ static u64 tsc_now(void)
 
 static void tsc_calibrate(void)
 {
+    if (!has_cpuid()) return;                    /* a 386 or early 486: no TSC */
     u32 a, b, c, d;
     __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
     if (!(d & 0x10)) return;                     /* no TSC */

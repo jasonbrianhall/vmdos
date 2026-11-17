@@ -32,6 +32,7 @@ static void io_delay(int n) { kdelay_us((uint32_t)n); }   // microseconds
 static int has_clflush = -1;
 static uint32_t clflush_line = 64;
 static bool clflush_ok() {
+    if (has_clflush < 0 && !has_cpuid()) has_clflush = 0;   // a 386 or early 486
     if (has_clflush < 0) {
         uint32_t a = 1, b, c, d;
         __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));

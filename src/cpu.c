@@ -307,6 +307,15 @@ u32 page_dirty_scan(u32 lin, u32 n, u8 *out)
    SSE2 blitters died with SIGILL). vmdos has one guest context and never
    switches FPU state, so that's all there is to it. */
 int host_osfxsr;
+/* CPUID exists when EFLAGS.ID (bit 21) can be flipped: not on a 386 or an early 486. */
+int has_cpuid(void)
+{
+    u32 a, b;
+    __asm__ volatile("pushfl; pop %0; mov %0,%1; xor $0x200000,%0; push %0; popfl; pushfl; pop %0; push %1; popfl"
+                     : "=&r"(a), "=&r"(b));
+    return ((a ^ b) & 0x200000) != 0;
+}
+
 static void sse_on(void)
 {
     u32 a, b;
@@ -355,6 +364,7 @@ static u32 pat_wc;
 u32 wc_flags(void) { return pat_wc ? pat_wc : 0x10; }   /* PTE bits: write-combining, else uncached */
 static void pat_init(void)
 {
+    if (!has_cpuid()) return;                          /* a 386 or early 486: no PAT */
     u32 a = 1, b, c, d;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
     if (!(d & (1u << 16)) || strstr(cmdline, "nowc")) return;

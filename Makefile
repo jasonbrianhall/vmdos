@@ -27,6 +27,9 @@
 #   with no C: (no disk with KERNEL.SYS vmdos can drive, no RAM disk dos.img)
 #   vmdos boots it as A: rather than stopping.
 # VERSION: shown by vmdos.efi and the kernel (default: git describe)
+# CPU=486: a kernel that runs on a 486 (no CMOV etc.; built in build-486/).
+#   Default 686 (Pentium Pro and later). The Voodoo 3 code is always 686:
+#   voodoo3 needs a P6 anyway.
 
 FREEDOS  ?= freedos
 DISK_MB  ?= 64
@@ -37,12 +40,21 @@ RAM_IMG  := $(if $(USE_RAM),dos.img)
 EXTRA    ?=
 FB_W     ?= 640
 FB_H     ?= 480
+CPU      ?= 686
+ifeq ($(CPU),486)
+ARCH     := -march=i486 -mtune=i486
+BUILD    := build-486
+else ifeq ($(CPU),686)
+ARCH     := -march=i686 -mtune=generic
 BUILD    := build
+else
+$(error CPU=$(CPU): 486 or 686)
+endif
 VERSION  ?= $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo unknown)
 FLOPPY   := $(BUILD)/floppy.img
 
 CC       := gcc
-CFLAGS   := -m32 -march=i686 -mtune=generic -I$(BUILD) -ffreestanding -fno-builtin -fno-pic -fno-pie \
+CFLAGS   := -m32 $(ARCH) -I$(BUILD) -ffreestanding -fno-builtin -fno-pic -fno-pie \
             -fno-stack-protector -fcf-protection=none -mgeneral-regs-only \
             -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
             -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks --param=min-pagesize=0 -Wall -Wextra -Wno-unused-parameter -MMD
@@ -69,6 +81,12 @@ $(BUILD)/version.h: FORCE | $(BUILD)
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/cpu.o $(BUILD)/bootcon.o $(BUILD)/agent.o: $(BUILD)/version.h
 
+# Which CPU the top-level outputs (vmdos.elf and what's made from it) were
+# built for: switching CPU= relinks them from that CPU's build directory.
+.vmdos-cpu: FORCE
+	@echo $(CPU) > $@.new
+	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+
 $(BUILD):
 	mkdir -p $@
 
@@ -90,7 +108,7 @@ $(BUILD)/sb/%.o: src/sb/%.cpp | $(BUILD)
 
 # The Voodoo code uses the x87 (v3.c saves the guest's state around it) and
 # needs a Pentium Pro or later (CMOV); its own <string.h> etc. are voodoo/libc.
-VOODOO_FLAGS := $(filter-out -march=i386 -mtune=i486 -Wall -Wextra,$(FPFLAGS)) -march=i686 -mtune=generic \
+VOODOO_FLAGS := $(filter-out $(ARCH) -Wall -Wextra,$(FPFLAGS)) -march=i686 -mtune=generic \
               -DV3_CODEGEN -DVMDOS_V3 -DTEX_CACHE_MAX=16 -Isrc/voodoo/libc -Isrc/voodoo -w
 $(BUILD)/voodoo/%.o: src/voodoo/%.c | $(BUILD)
 	@mkdir -p $(BUILD)/voodoo
@@ -113,7 +131,7 @@ $(BUILD)/biosblob.o: src/biosblob.S $(BUILD)/bios.bin
 $(BUILD)/bootblob.o: src/bootblob.S $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin
 	$(CC) -m32 -DFAT16_BIN='"$(BUILD)/fat16.bin"' -DFAT32_BIN='"$(BUILD)/fat32lba.bin"' -c $< -o $@
 
-vmdos.elf: $(OBJS) src/linker.ld
+vmdos.elf: $(OBJS) src/linker.ld .vmdos-cpu
 	ld -m elf_i386 -T src/linker.ld -o $@ $(OBJS) $(LIBGCC)
 
 $(BUILD)/fat32lba.bin: boot/boot32lb.asm boot/magic.mac | $(BUILD)
@@ -575,7 +593,7 @@ run-usb: esp.img
 	    -drive if=none,id=stick,format=raw,file=esp.img -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 $(QEMU_ARGS)
 
 clean:
-	rm -rf $(BUILD) vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
+	rm -rf build build-486 .vmdos-cpu vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
 # Rebuild net/bin (VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX) with Open Watcom:
 # WATCOM=/path, or tools/fetch-watcom.sh puts a copy in .watcom/.

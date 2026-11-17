@@ -56,6 +56,7 @@ uint64_t rdmsr(uint32_t m) { uint32_t lo, hi; __asm__ volatile("rdmsr" : "=a"(lo
 void wrmsr(uint32_t m, uint64_t v) { __asm__ volatile("wrmsr" :: "c"(m), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)) : "memory"); }
 void cpuid(uint32_t leaf, uint32_t* r)
 {
+    if (!has_cpuid()) { r[0] = r[1] = r[2] = r[3] = 0; return; }   // a 386 or early 486: no hypervisor
     __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(0));
 }
 

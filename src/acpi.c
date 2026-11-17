@@ -88,6 +88,7 @@ void acpi_tick(void)
 
 static int hypervisor(void)
 {
+    if (!has_cpuid()) return 0;                       /* a 386 or early 486: real hardware */
     u32 a = 1, b, c, d;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
     return (c >> 31) & 1;

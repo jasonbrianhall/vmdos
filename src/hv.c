@@ -858,6 +858,7 @@ static void wait_for_guest_irq(void)
 /* ---------------- setup ---------------- */
 static int svm_check(void)
 {
+    if (!has_cpuid()) return 1;                                    /* a 386 or early 486 */
     u32 a, b, c, d;
     cpuid(0, &a, &b, &c, &d);
     if (b == 0x756E6547) return 5;                                 /* "Genu"ineIntel: VT-x (hvvmx.c) */
