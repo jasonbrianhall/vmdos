@@ -891,6 +891,25 @@ Watt-32, and `third_party/curl/dos/curl-dos.c` gives it the few Watt-32
 calls it makes on ssh's socket layer. `tools/build-curl.sh` builds it
 (DJGPP, or Docker); `third_party/curl/README.vmdos` has the rest.
 
+### Web browsing: LYNX, and OPENSSL
+
+Lynx 2.9.3, the text web browser, is in C:\VMDOS\NET: after STARTNET,
+`LYNX https://example.com/` (or `LYNX` for the start page, `LYNX -dump URL`
+for a page as text, `LYNX C:\DOCS\INDEX.HTM` for local files). HTTP and
+HTTPS (OpenSSL 3.6: TLS 1.2 and 1.3, certificates checked against
+CACERT.PEM as WGET's; a bad one is asked about), gzip, cookies kept in
+C:\HOME, forms, tables, and the mouse (click a link to follow it). Its
+screen is PDCurses on the PC's text screen, code page 437. It runs on
+vmdos's own TCP as ssh and WGET do; the settings are C:\VMDOS\NET\LYNX.CFG.
+`tools/build-lynx.sh` builds it (DJGPP); `third_party/lynx/README.vmdos`
+has the rest.
+
+The `openssl` command (OpenSSL 3.6.5) is there too: `OPENSSL DGST -sha256
+FILE`, keys and certificates (`GENPKEY`, `REQ`, `X509`, `VERIFY`),
+`ENC`, and `OPENSSL S_CLIENT -connect host:443` on the same TCP.
+`tools/build-openssl.sh` builds it; `third_party/openssl/README.vmdos`
+has the rest.
+
 ### Remote DOS prompt (telnet)
 
 Off unless asked for: without `remote=` vmdos listens on no port.

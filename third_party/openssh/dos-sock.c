@@ -90,8 +90,32 @@ close_all(void)
 	kernel(&r, 14);
 }
 
+/*
+ * With nothing to go on: the message, and exit (ssh, WGET); or, when the
+ * program set dos_sock_fail (LYNX: a full-screen program), the message to
+ * it and -1, and the next call tries again (after STARTNET in a shell).
+ */
+void (*dos_sock_fail)(const char *msg);
+
+static int
+cfg_fail(const char *fmt, const char *arg)
+{
+	char m[200];
+
+	snprintf(m, sizeof m, fmt, arg);
+	if (dos_sock_fail == NULL) {
+		fprintf(stderr, "ssh: %s\n", m);
+		exit(255);
+	}
+	cfg_read = 0;
+	have4 = have6 = have_gw4 = have_gw6 = 0;
+	nns4 = nns6 = 0;
+	dos_sock_fail(m);
+	return -1;
+}
+
 /* Read VMTCP.CFG once: exit with a message if there is nothing to go on. */
-void
+int
 dos_sock_config(void)
 {
 	const char *path = getenv("MTCPCFG");
@@ -100,15 +124,13 @@ dos_sock_config(void)
 	FILE *f;
 
 	if (cfg_read)
-		return;
+		return 0;
 	cfg_read = 1;
 	if (path == NULL)
 		path = "C:\\VMDOS\\NET\\VMTCP.CFG";
-	if ((f = fopen(path, "r")) == NULL) {
-		fprintf(stderr, "ssh: can't read the TCP/IP settings (%s): "
-		    "run STARTNET first\n", path);
-		exit(255);
-	}
+	if ((f = fopen(path, "r")) == NULL)
+		return cfg_fail("can't read the TCP/IP settings (%s): "
+		    "run STARTNET first", path);
 	while (fgets(line, sizeof line, f) != NULL) {
 		char *v = line, *slash;
 
@@ -148,25 +170,22 @@ dos_sock_config(void)
 	r.x.es = __tb >> 4;
 	r.x.di = __tb & 15;
 	kernel(&r, 0);
-	if (r.x.bx != 0x564d || r.x.ax != 1) {
-		fprintf(stderr, "ssh: no network card that vmdos drives "
-		    "(this needs vmdos)\n");
-		exit(255);
-	}
+	if (r.x.bx != 0x564d || r.x.ax != 1)
+		return cfg_fail("no network card that vmdos drives "
+		    "(this needs vmdos)%s", "");
 	dosmemget(__tb, 6, mac);
 	memset(my6ll, 0, 16);
 	my6ll[0] = 0xfe; my6ll[1] = 0x80;
 	my6ll[8] = mac[0] ^ 2; my6ll[9] = mac[1]; my6ll[10] = mac[2];
 	my6ll[11] = 0xff; my6ll[12] = 0xfe;
 	my6ll[13] = mac[3]; my6ll[14] = mac[4]; my6ll[15] = mac[5];
-	if (!have4 && !have6) {
-		fprintf(stderr, "ssh: no IP address in %s: run STARTNET (DHCP) "
-		    "or set one with VMTCP IPADDR\n", path);
-		exit(255);
-	}
+	if (!have4 && !have6)
+		return cfg_fail("no IP address in %s: run STARTNET (DHCP) "
+		    "or set one with VMTCP IPADDR", path);
 	/* Close what a program before us left open; ours at exit. */
 	close_all();
 	atexit(close_all);
+	return 0;
 }
 
 /* --- the kernel's connection settings (src/tcp9p.hpp, Tcp9pCfg) --- */
@@ -329,7 +348,10 @@ socket(int domain, int type, int protocol)
 	int i;
 
 	(void)protocol;
-	dos_sock_config();
+	if (dos_sock_config() < 0) {
+		errno = ENETDOWN;
+		return -1;
+	}
 	if (domain != AF_INET && domain != AF_INET6) {
 		errno = EAFNOSUPPORT;
 		return -1;
@@ -1017,7 +1039,8 @@ getaddrinfo(const char *host, const char *serv, const struct addrinfo *hints,
 	} else {
 		if (hints && (hints->ai_flags & AI_NUMERICHOST))
 			return EAI_NONAME;
-		dos_sock_config();
+		if (dos_sock_config() < 0)
+			return EAI_FAIL;
 		if (family != AF_INET)
 			n6 = dns_ask(host, 28, a6, 8);
 		if (family != AF_INET6)

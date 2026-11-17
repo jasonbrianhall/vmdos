@@ -1,0 +1,86 @@
+LYNX.EXE: Lynx 2.9.3, the text web browser, for DOS on vmdos's own TCP.
+
+    STARTNET                         (once: the TCP/IP settings, by DHCP)
+    LYNX                             (the start page: LYNX.CFG's STARTFILE)
+    LYNX https://example.com/
+    LYNX -dump https://example.com/ > PAGE.TXT     (the page as text)
+    LYNX -source https://example.com/ > PAGE.HTM   (the HTML as it came)
+    LYNX C:\DOCS\INDEX.HTM           (local files and folders too)
+
+Keys are Lynx's: arrows move between links and follow them (Right/Enter)
+and go back (Left), G opens a URL, / searches, Space and B page, Q quits,
+H is the help (on lynx.invisible-island.net), O the options, A bookmarks,
+D downloads a link to a file, \ shows the HTML. Z or Ctrl-G stops a page
+that's loading.
+
+The mouse (vmdos's own, or CTMOUSE): click a link to follow it. On the
+bottom line the left end goes back, the next bit forward, the right end
+cancels, the middle pages down; on the top line the middle pages up.
+USE_MOUSE:FALSE in LYNX.CFG for keys only.
+
+Built from:
+  Lynx       github.com/ThomasDickey/lynx-snapshots, the commit labelled
+             v2-9-3 (Lynx 2.9.3, May 2026), GPL-2.0, with lynx-dos.patch;
+             configured for DJGPP with OpenSSL, IPv6, zlib, nested tables,
+             source cache, persistent cookies
+  OpenSSL    3.6.5 (tools/build-openssl.sh, third_party/openssl): HTTPS,
+             TLS 1.2 and 1.3, Lynx's own OpenSSL code
+  PDCurses   github.com/wmcbrine/PDCurses 3.9, its DOS port (BIOS, the
+             text screen, INT 33h for the mouse), public domain
+  zlib       github.com/madler/zlib 1.3.1: gzip/deflate encoded pages
+DJGPP gcc 12 (32-bit, needs DPMI: vmdos's own), UPX --best.
+
+The files here:
+  lynx-dos.patch     the changes to Lynx: the mouse with PDCurses under
+                     DJGPP (Lynx left it out: "PDCurses' mouse code does
+                     nothing in the DJGPP configuration", true of PDCurses
+                     2.x in 2000); its DOS idle loop, which waited for a key
+                     only, wakes up for a mouse button too
+  lynx-dos.h         forced into every Lynx file: Lynx's calls to connect,
+                     read_s, close_s and SSL_read go to lynx-dos.c; the
+                     clock is ossl-dos.c's (../openssl/dos-time.h); what
+                     Lynx's (Windows) PDCurses mouse code wants
+  lynx-dos.c         Lynx's part of the network glue on top of
+                     ../openssl/ossl-dos.c (the Watt-32 calls Lynx's DJGPP
+                     port makes, shared with OPENSSL.EXE): connect() as
+                     Lynx's non-blocking loop wants it (EINPROGRESS,
+                     EALREADY, EISCONN); a read the user stops returns
+                     HT_INTERRUPTED; the mouse for the idle loop; HOME and
+                     TEMP when DOS has none; "run STARTNET" as an alert
+  LYNX.CFG           the settings (C:\VMDOS\NET\LYNX.CFG): start page, help
+                     page, code page 437 for the screen, cookies, EDIT as
+                     the editor, timeouts, the mouse
+
+Networking is ssh's and WGET's (third_party/openssh/README.vmdos): vmdos
+runs the TCP connections itself on the PC's network card, IPv4 and IPv6;
+names are looked up with the DNS servers in VMTCP.CFG. No packet driver or
+DOS TCP/IP stack, nothing in vmdos's kernel. Without the TCP/IP settings
+(no STARTNET yet) Lynx shows an alert saying so, and local files still work.
+
+HTTPS is OpenSSL's, through Lynx's own OpenSSL code: certificates are
+checked against %SSL_CERT_FILE%, C:\VMDOS\NET\CACERT.PEM unless set (the CAs
+WGET uses), and the host name; when that fails Lynx asks ("SSL error:...
+-Continue?"; FORCE_SSL_PROMPT in LYNX.CFG or -noprompt change that).
+
+Files. LYNX.CFG next to LYNX.EXE (C:\VMDOS\NET), or LYNX_CFG=file, or
+LYNX -cfg=file. Lynx's own lynx.cfg (in its source) lists every setting.
+HOME is C:\HOME unless set (bookmarks: lynx_bookmarks.html, cookies:
+.lynx_cookies; long names: DOSLFN, which AUTOEXEC.BAT loads); temporary
+files go to %TEMP%, else C:\TEMP.
+
+Not there: FTP's active mode (no listening sockets; Lynx uses passive), the
+help pages on disk (H shows them from the web).
+
+Build: tools/build-lynx.sh writes bin/LYNX.EXE (the normal build doesn't
+need it: the binary is committed); the Makefile puts it and LYNX.CFG in
+C:\VMDOS\NET when it's there. It needs DJGPP (a cross gcc
+i586-pc-msdosdjgpp-gcc on PATH, or DJGPP=dir), git, make, perl, a host gcc
+with -m32, python3 and upx; it fetches Lynx, OpenSSL (through
+tools/build-openssl.sh), PDCurses, zlib and Watt-32 (only its headers;
+none of its code is linked) at the pinned versions. Lynx's configure runs
+as a cross build with the glue standing in for Watt-32; then lynx-dos.h
+goes into every file.
+
+Found on the way: Lynx's restart_curses() (for "default colors") wants
+ncurses, so that's off (DOS has no default colors anyway); color styles
+(LYNX.LSS) are off too: Lynx's classic colors (COLOR: in LYNX.CFG).

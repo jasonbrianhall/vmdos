@@ -1,0 +1,63 @@
+diff --git a/apps/openssl.c b/apps/openssl.c
+index cd015e2..00460c1 100644
+--- a/apps/openssl.c
++++ b/apps/openssl.c
+@@ -10,6 +10,7 @@
+ #include "internal/e_os.h"
+ 
+ #include <stdio.h>
++#include <ctype.h>
+ #include <stdlib.h>
+ #include "internal/common.h"
+ #include <openssl/bio.h>
+@@ -268,6 +269,17 @@ int main(int argc, char *argv[])
+     win32_utf8argv(&argc, &argv);
+ #endif
+ 
++#ifdef __DJGPP__
++    /* DOS: OPENSSL VERSION as well as openssl version (the command names
++       are all lower case) */
++    if (argc > 1) {
++        char *c;
++
++        for (c = argv[1]; *c != '\0'; c++)
++            *c = (char)tolower((unsigned char)*c);
++    }
++#endif
++
+ #ifndef OPENSSL_NO_TRACE
+     setup_trace(getenv("OPENSSL_TRACE"));
+ #endif
+diff --git a/crypto/bio/bio_sock.c b/crypto/bio/bio_sock.c
+index 5b793b9..b516173 100644
+--- a/crypto/bio/bio_sock.c
++++ b/crypto/bio/bio_sock.c
+@@ -10,6 +10,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include "bio_local.h"
++#ifdef __DJGPP__
++#include <sys/ioctl.h> /* Watt-32's FIONBIO: non-blocking by ioctlsocket(), not fcntl() */
++#endif
+ 
+ #ifndef OPENSSL_NO_SOCK
+ #define SOCKET_PROTOCOL IPPROTO_TCP
+diff --git a/providers/implementations/rands/seeding/rand_unix.c b/providers/implementations/rands/seeding/rand_unix.c
+index 3f5db3b..27fe4af 100644
+--- a/providers/implementations/rands/seeding/rand_unix.c
++++ b/providers/implementations/rands/seeding/rand_unix.c
+@@ -353,6 +353,14 @@ static ssize_t syscall_random(void *buf, size_t buflen)
+      * Note: Sometimes getentropy() can be provided but not implemented
+      * internally. So we need to check errno for ENOSYS
+      */
++#if defined(__DJGPP__)
++    {
++        /* DOS: the program's own (RDRAND/RDSEED, TSC jitter, the clocks) */
++        extern int getentropy(void *buffer, size_t length);
++
++        return getentropy(buf, buflen) == 0 ? (ssize_t)buflen : -1;
++    }
++#endif
+ #if !defined(__DragonFly__) && !defined(__NetBSD__) && !defined(__FreeBSD__)
+ #if defined(__GNUC__) && __GNUC__ >= 2 && defined(__ELF__) && !defined(__hpux)
+     extern int getentropy(void *buffer, size_t length) __attribute__((weak));
