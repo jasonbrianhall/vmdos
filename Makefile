@@ -245,6 +245,10 @@ C_ONLY_MAP   += $(foreach f,SSH.EXE SFTP.EXE SCP.EXE,third_party/openssh/bin/$(f
 # WGET (DJGPP, mbedTLS, ssh's socket layer: tools/build-wget.sh) in C:\VMDOS\NET
 # when it's been built, with the certificate authorities it checks https against
 WGET_EXE     := $(wildcard third_party/wget/bin/WGET.EXE)
+# curl the same way (tools/build-curl.sh), with the same CAs
+CURL_EXE     := $(wildcard third_party/curl/bin/CURL.EXE)
+C_ONLY_DEPS  += $(CURL_EXE)
+C_ONLY_MAP   += $(if $(CURL_EXE),$(CURL_EXE)=VMDOS/NET/CURL.EXE)
 C_ONLY_DEPS  += $(WGET_EXE) third_party/cacert/CACERT.PEM
 C_ONLY_MAP   += $(if $(WGET_EXE),$(WGET_EXE)=VMDOS/NET/WGET.EXE) third_party/cacert/CACERT.PEM=VMDOS/NET/CACERT.PEM
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
