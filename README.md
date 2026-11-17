@@ -277,6 +277,12 @@ submenu's sizes.
 Text size: `text=132x50` (any of VMRES's sizes; `text=50` is 80x50) starts
 the DOS prompt at that many columns and rows, as `VMRES 132x50` in
 AUTOEXEC.BAT would. A program that sets mode 3 goes back to 80x25.
+`VMRES 1024x768` (or `text=1024x768`) fills a screen resolution with 8x16
+characters, 128x48 there: 800x600, 1024x768, 1280x720, 1280x800,
+1280x1024, 1440x900, 1600x900, 1600x1200 and 1920x1080 (240x67, the most
+B800h's 32 KB holds). They're vmdos's own VESA text modes 150h-158h; the
+wide ones keep their shape, and on a screen of that size they're drawn
+pixel for pixel.
 
 VBE or GOP (`video=`): `video=fb` (the default) is the above: vmdos's
 own VGA and VESA BIOS, drawn scaled onto the framebuffer the firmware set up
@@ -870,8 +876,9 @@ code page 437, F-keys, Alt), so no ANSI driver is needed. sftp and scp
 carry ssh inside them (DOS runs one program at a time). ~/.ssh is
 C:\HOME\.ssh (HOME= to change; DOSLFN for the long name). ssh takes the
 remote terminal's size from the DOS screen: `VMRES 132x50` (or 80x28,
-80x43, 80x50, 80x60, 132x25, 132x43, 132x60; `VMRES` shows it, `VMRES 25`
-goes back) first gives a bigger one. VMRES uses plain INT 10h (the BIOS's
+80x43, 80x50, 80x60, 132x25, 132x43, 132x60, or a resolution such as
+`VMRES 1920x1080`; `VMRES` shows it, `VMRES 25` goes back) first gives a
+bigger one. VMRES uses plain INT 10h (the BIOS's
 8x14/8x8 fonts, AX=1111h/1112h, and the VESA text modes 108h-10Ch), which
 vmdos's VGA BIOS draws and a real card's (`video=vbe`) usually has; a program
 that sets mode 3 goes back to 80x25, as on a PC.

@@ -35,7 +35,8 @@ DOS COMMANDS (in C:\VMDOS, on the PATH)
   VMSHOT [file]         Save the last Ctrl+Shift+F9 screenshot as a BMP
                           (default VMSHOT.BMP)
   VMRES [COLSxROWS]     Show or set the text screen size, for SSH and the rest
-                          (VMRES 80x50, VMRES 132x43, VMRES 25 goes back)
+                          (VMRES 80x50, VMRES 132x43, VMRES 25 goes back;
+                          VMRES 1024x768 fills that resolution: 128x48)
   VMSPEED [percent]     Show or set the speed (VMSPEED 2, VMSPEED 0.05, VMSPEED 100)
   DMESG                 vmdos's log (DMESG > LOG.TXT, DMESG | MORE)
   DMESG /K              Make C:\VMDOS\VMDOS.LOG: vmdos saves its log there
@@ -118,7 +119,7 @@ BOOT OPTIONS
                    On a legacy BIOS boot, pick the size in the boot menu
                    instead ("screen resolution"), which UEFI has too.
     text=132x50    The DOS prompt's size from boot (VMRES's sizes; text=50
-                   is 80x50)
+                   is 80x50, text=1920x1080 is 240x67)
   Speed
     speed=N        Run at N% of full speed from boot
   Sound

@@ -31,7 +31,7 @@ int tries;
 char pwbuf[32];
 int pwn;
 
-const int MAXC = 132 * 60;
+const int MAXC = 240 * 75;                      // video.c's TEXT_CELLS
 u16 cur[MAXC], sent[MAXC];
 int s_cols, s_rows, s_crow = -2, s_ccol, s_mode;    // what the terminal shows (s_mode 0: text, 1: the graphics note)
 bool dirty_all = true;

@@ -4,10 +4,15 @@
 ;   VMRES 80x50      80 columns, 50 rows (the screen is cleared)
 ;   VMRES 132        132 columns, the rows as they are (25 if none fit)
 ;   VMRES 50         80 columns, 50 rows
-; Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60.
+;   VMRES 1024x768   a screen resolution: as many 8x16 characters as fill
+;                    it (128x48), for a big prompt at the monitor's size
+; Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60, and
+; 800x600 1024x768 1280x720 1280x800 1280x1024 1440x900 1600x900 1600x1200
+; 1920x1080 (100x37 128x48 160x45 160x50 160x64 180x56 200x56 200x75 240x67).
 ; Plain INT 10h, as on a real VGA: 80x28/43/50 are mode 3 with the BIOS's
 ; 8x14 or 8x8 font (AX=1111h/1112h, 350 lines for 43: AX=1201h BL=30h),
-; 80x60 and 132 columns the VESA text modes 108h-10Ch (AX=4F02h).
+; 80x60 and 132 columns the VESA text modes 108h-10Ch (AX=4F02h), the
+; resolutions vmdos's own VESA text modes 150h-158h.
         org 100h
         mov si, 81h
         call skipsp
@@ -57,7 +62,7 @@
         mov ax, [di + 2]
         cmp ax, [rows]
         je .find
-.next:  add di, 8
+.next:  add di, ENTRY
         jmp .try
 .r25:   mov word [rows], 25
 .find:  mov di, sizes
@@ -65,14 +70,27 @@
         or ax, ax
         jz nosize
         cmp ax, [cols]
-        jne .skip
+        jne .pix
         mov ax, [di + 2]
         cmp ax, [rows]
         je set
-.skip:  add di, 8
+.pix:   mov ax, [di + 8]                ; or the screen resolution it fills
+        or ax, ax
+        jz .skip
+        cmp ax, [cols]
+        jne .skip
+        mov ax, [di + 10]
+        cmp ax, [rows]
+        je .res
+.skip:  add di, ENTRY
         jmp .look
+.res:   mov ax, [di]                    ; the size it is in characters, for the check after
+        mov [cols], ax
+        mov ax, [di + 2]
+        mov [rows], ax
 
-; DI: the entry. +4: VESA mode or 0; +6: font (AL for AH=11h: 14h, 11h, 12h), scan-line choice (AL for 12h BL=30h).
+; DI: the entry. +4: VESA mode or 0; +6: font (AL for AH=11h: 14h, 11h, 12h), scan-line choice (AL for 12h BL=30h);
+; +8, +10: the screen resolution it fills (0: none).
 set:    mov bx, [di + 4]
         or bx, bx
         jz .vga
@@ -204,7 +222,7 @@ num:    xor bx, bx
         mov dx, 10
         mul dx
         add bx, ax
-        cmp bx, 1000
+        cmp bx, 10000
         jae .bad
         inc cx
         lodsb
@@ -228,32 +246,74 @@ cols:   dw 0
 rows:   dw 0
 cur_c:  dw 0
 cur_r:  dw 0
-; columns, rows, VESA mode (0: VGA mode 3), AH=11h font, AH=12h BL=30h scan lines
+; columns, rows, VESA mode (0: VGA mode 3), AH=11h font, AH=12h BL=30h scan lines, resolution (0, 0: none)
+ENTRY   equ 12
 sizes:  dw 80, 25, 0
         db 14h, 2
+        dw 0, 0
         dw 80, 28, 0
         db 11h, 2
+        dw 0, 0
         dw 80, 43, 0
         db 12h, 1
+        dw 0, 0
         dw 80, 50, 0
         db 12h, 2
+        dw 0, 0
         dw 80, 60, 108h
         db 0, 0
+        dw 0, 0
         dw 132, 25, 109h
         db 0, 0
+        dw 0, 0
         dw 132, 43, 10Ah
         db 0, 0
+        dw 0, 0
         dw 132, 50, 10Bh
         db 0, 0
+        dw 0, 0
         dw 132, 60, 10Ch
         db 0, 0
+        dw 0, 0
+        dw 100, 37, 150h                ; vmdos's: a resolution in the 8x16 font
+        db 0, 0
+        dw 800, 600
+        dw 128, 48, 151h
+        db 0, 0
+        dw 1024, 768
+        dw 160, 45, 152h
+        db 0, 0
+        dw 1280, 720
+        dw 160, 50, 153h
+        db 0, 0
+        dw 1280, 800
+        dw 160, 64, 154h
+        db 0, 0
+        dw 1280, 1024
+        dw 180, 56, 155h
+        db 0, 0
+        dw 1440, 900
+        dw 200, 56, 156h
+        db 0, 0
+        dw 1600, 900
+        dw 200, 75, 157h
+        db 0, 0
+        dw 1600, 1200
+        dw 240, 67, 158h
+        db 0, 0
+        dw 1920, 1080
         dw 0
 
 msg_now:    db 'Screen: $'
-msg_list:   db 13, 10, 'Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60', 13, 10, '$'
-msg_use:    db 'VMRES [COLSxROWS]: set or show the text screen size', 13, 10
+msg_list:   db 13, 10, 'Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60', 13, 10
+            db 'Resolutions (8x16 characters): 800x600 1024x768 1280x720 1280x800', 13, 10
+            db '  1280x1024 1440x900 1600x900 1600x1200 1920x1080', 13, 10, '$'
+msg_use:    db 'VMRES [COLSxROWS | WIDTHxHEIGHT]: set or show the text screen size', 13, 10
             db '  VMRES 80x50   VMRES 132x43   VMRES 132   VMRES 50   VMRES 80x25', 13, 10
-            db 'Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60', 13, 10, '$'
+            db '  VMRES 1024x768 (128x48)   VMRES 1920x1080 (240x67)', 13, 10
+            db 'Sizes: 80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60', 13, 10
+            db 'Resolutions: 800x600 1024x768 1280x720 1280x800 1280x1024 1440x900', 13, 10
+            db '  1600x900 1600x1200 1920x1080', 13, 10, '$'
 msg_nosize: db 'VMRES: no such size$'
 msg_novesa: db 'VMRES: the video BIOS has no VESA text mode for that size$'
 msg_notset: db 'VMRES: the video BIOS left the screen at $'

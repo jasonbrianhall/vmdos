@@ -207,6 +207,11 @@ static void default_palette(int kind)
 }
 
 /* ---------------- modes ---------------- */
+/* The largest text screen vmdos draws: 240x75 cells, and no more than the
+   32 KB at B800h (1920x1080's 240x67 is 31.4 KB of it). */
+#define TEXT_MAXC 240
+#define TEXT_MAXR 75
+#define TEXT_CELLS (TEXT_MAXC * TEXT_MAXR)
 static int text_cols = 80, text_rows = 25;
 static u32 text_base = 0xB8000;
 /* Text modes' character height (8, 14 or 16 scan lines: the 8x14 font is
@@ -444,7 +449,7 @@ static void text_geometry(int ch)
 {
     text_ch = ch;
     text_rows = text_scan / ch;
-    if (text_rows > 60) text_rows = 60;            /* shadow_text, refresh_text's rows */
+    if (text_rows > TEXT_MAXR) text_rows = TEXT_MAXR;   /* shadow_text, refresh_text's rows */
     wr16(BDA + 0x4A, (u16)text_cols);
     wr8(BDA + 0x84, (u8)(text_rows - 1));
     wr16(BDA + 0x85, (u16)ch);
@@ -453,7 +458,9 @@ static void text_geometry(int ch)
     crtc[0x01] = (u8)(text_cols - 1);
     crtc[0x13] = (u8)(text_cols / 2);
     crtc[0x09] = (u8)((crtc[0x09] & 0xE0) | (ch - 1));
-    crtc[0x12] = (u8)(text_rows * ch - 1);
+    u32 vde = (u32)(text_rows * ch - 1);           /* past 255 for the big ones: the overflow bits too */
+    crtc[0x12] = (u8)vde;
+    crtc[0x07] = (u8)((crtc[0x07] & ~0x42) | (vde >> 7 & 0x02) | (vde >> 3 & 0x40));
     crtc[0x0A] = (u8)(ch > 8 ? ch - 3 : ch - 2); crtc[0x0B] = (u8)(crtc[0x0A] + 1);
     full_redraw = 1;
 }
@@ -471,11 +478,25 @@ static void text_font(int ch)
 /* The VESA text modes: 108h 80x60, 109h 132x25, 10Ah 132x43, 10Bh 132x50,
    10Ch 132x60. Mode 3 with more columns and rows: the same B800h memory
    (132x60 is 15.5 KB of it), drawn as any text mode. Not in 4F00h's list
-   (games take it for graphics), but 4F01h and 4F02h take them. */
-static const struct { u16 no; u8 cols, rows, ch; u16 scan; } vtext[] = {
-    { 0x108, 80, 60, 8, 480 }, { 0x109, 132, 25, 16, 400 }, { 0x10A, 132, 43, 8, 350 },
-    { 0x10B, 132, 50, 8, 400 }, { 0x10C, 132, 60, 8, 480 },
+   (games take it for graphics), but 4F01h and 4F02h take them.
+
+   150h-158h are vmdos's own: a screen resolution filled with the 8x16 font
+   (VMRES 1024x768 is 128x48), for a big DOS prompt at the monitor's own
+   size. 1920x1080 (240x67) is the most that fits in B800h's 32 KB. The
+   wide ones are shown at their own shape, as the wide VESA graphics modes. */
+static const struct { u16 no; u8 cols, rows, ch; u16 scan, w, h; } vtext[] = {
+    { 0x108, 80, 60, 8, 480, 0, 0 }, { 0x109, 132, 25, 16, 400, 0, 0 }, { 0x10A, 132, 43, 8, 350, 0, 0 },
+    { 0x10B, 132, 50, 8, 400, 0, 0 }, { 0x10C, 132, 60, 8, 480, 0, 0 },
+    { 0x150, 100, 37, 16, 592, 800, 600 }, { 0x151, 128, 48, 16, 768, 1024, 768 },
+    { 0x152, 160, 45, 16, 720, 1280, 720 }, { 0x153, 160, 50, 16, 800, 1280, 800 },
+    { 0x154, 160, 64, 16, 1024, 1280, 1024 }, { 0x155, 180, 56, 16, 896, 1440, 900 },
+    { 0x156, 200, 56, 16, 896, 1600, 900 }, { 0x157, 200, 75, 16, 1200, 1600, 1200 },
+    { 0x158, 240, 67, 16, 1072, 1920, 1080 },
 };
+#define TEXT_SIZES "80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60 100x37 128x48 160x45 160x50 " \
+                   "160x64 180x56 200x56 200x75 240x67; or 800x600 1024x768 1280x720 1280x800 1280x1024 " \
+                   "1440x900 1600x900 1600x1200 1920x1080"
+
 static int vtext_find(u16 no)
 {
     for (unsigned i = 0; i < sizeof vtext / sizeof vtext[0]; i++) if (vtext[i].no == (no & 0x1FF)) return (int)i;
@@ -491,11 +512,15 @@ static void vtext_set(int i, int clear)
     kprintf("video: VESA text mode %x, %ux%u\n", vtext[i].no, vtext[i].cols, vtext[i].rows);
 }
 /* A text screen of cols x rows as VMRES sets it (80x25, 80x28, 80x43,
-   80x50, or a VESA text mode): 0, or -1 for a size there isn't. */
+   80x50, or a VESA text mode; or a screen resolution, 1024x768): 0, or -1
+   for a size there isn't. */
 static int text_size_(int cols, int rows)
 {
     for (unsigned i = 0; i < sizeof vtext / sizeof vtext[0]; i++)
-        if (vtext[i].cols == cols && vtext[i].rows == rows) { vtext_set((int)i, 1); return 0; }
+        if ((vtext[i].cols == cols && vtext[i].rows == rows) || (vtext[i].w && vtext[i].w == cols && vtext[i].h == rows)) {
+            vtext_set((int)i, 1);
+            return 0;
+        }
     if (cols != 80) return -1;
     int ch = rows == 25 ? 16 : rows == 28 ? 14 : rows == 43 || rows == 50 ? 8 : 0;
     if (!ch) return -1;
@@ -520,7 +545,7 @@ void video_boot_text(void)
     rlock_take(&video_lock);
     int bad = text_size_(cols, rows);
     rlock_drop(&video_lock);
-    if (bad) kprintf("text=%dx%d: no such text size (80x25 80x28 80x43 80x50 80x60 132x25 132x43 132x50 132x60)\n", cols, rows);
+    if (bad) kprintf("text=%dx%d: no such text size (" TEXT_SIZES ")\n", cols, rows);
     else kprintf("video: text %dx%d from text=\n", cols, rows);
 }
 
@@ -539,7 +564,7 @@ static void vtext_info(int i, u32 a)
 }
 
 /* ---------------- drawing ---------------- */
-static u16 shadow_text[132 * 60];
+static u16 shadow_text[TEXT_CELLS];
 static u8 *shadow_gfx;                          /* GFX_MAXW x GFX_MAXH; vbe_init (not with video=vbe) */
 static int sh_cursor = -1, blink_phase;
 static u32 frame_no;
@@ -881,7 +906,7 @@ static void layout(void)
     /* The widescreen VESA modes (848 wide or more and 16:10 or wider: not
        640x400, which a monitor shows at 4:3) fill the whole screen,
        stretched to it, with no bars; everything else is 4:3. */
-    int wide = vbe_on && !vd_on && w >= 848 && w * 10 >= h * 16;
+    int wide = (vbe_on || text) && !vd_on && w >= 848 && w * 10 >= h * 16;
     g_h = fb_h; g_w = fb_h * 4 / 3;
     if (g_w > fb_w || aspect_fill || wide) { g_w = fb_w; g_h = aspect_fill || wide ? fb_h : fb_w * 3 / 4; }
     if (no_scale) {
@@ -901,6 +926,7 @@ static void layout(void)
         if (ow <= fb_w && oh <= fb_h) { g_w = ow; g_h = oh; }
     }
     if (w == fb_w && h == fb_h) { g_w = w; g_h = h; }   /* the screen's own size: as is, whatever its shape */
+    else if (text && !unscaled && w <= fb_w && h <= fb_h && fb_w - w < 16 && fb_h - h < 16) { g_w = w; g_h = h; }   /* 1920x1072 text on 1080 lines: 1:1 */
     if (g_w > 4096) g_w = 4096;
     g_x = (fb_w - g_w) / 2; g_y = (fb_h - g_h) / 2;
     u32 xw = vd_on ? vd_w : vbe_on ? vbe_w : text ? 320 : (u32)gfx_w();
@@ -916,10 +942,10 @@ static int sh_mouse = -1, sh_blink = -1;
    that changed is rendered into a buffer in RAM at its native width (640
    pixels for 80 or 40 columns) and scaled into the picture's box, so it
    fills the screen as games do; nothing is read back from the framebuffer. */
-static u32 (*tr_band)[132 * 8];                 /* [16], text_row's; vbe_init (not with video=vbe) */
+static u32 (*tr_band)[TEXT_MAXC * 8];                 /* [16], text_row's; vbe_init (not with video=vbe) */
 static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_and, u16 m_xor)
 {
-    u32 (*band)[132 * 8] = tr_band;
+    u32 (*band)[TEXT_MAXC * 8] = tr_band;
     static u32 line[4096];
     int cw = text_cols == 40 ? 16 : 8;
     int cs = crtc[0x0A] & 0x1F, ce = crtc[0x0B] & 0x1F;
@@ -962,7 +988,7 @@ static void text_row(const u16 *cells, int r, int cursor_off, int mcell, u16 m_a
 
 static void refresh_text(const u16 *cells, int cursor_off)
 {
-    static u8 dirty[60];
+    static u8 dirty[TEXT_MAXR];
     int n = text_cols * text_rows;
     int mcell = -1, px, py;
     u16 m_and = 0xFFFF, m_xor = 0;
@@ -1004,16 +1030,16 @@ static void refresh_text(const u16 *cells, int cursor_off)
    screen between two redraws is lost that way; DOS's own output isn't.
    scrollback=off on the command line: none. */
 #define SB_LINES 2000
-#define SB_W 132
+#define SB_W TEXT_MAXC
 static u16 *sb_buf;                                /* SB_LINES rows of SB_W cells, a ring */
 static u8 sb_wid[SB_LINES];                        /* each row's columns */
 static u32 sb_head, sb_count;                      /* the next row written, rows kept */
 static u32 sb_total;                               /* rows ever kept: row numbers for a selection */
 static u32 sb_view;                                /* rows scrolled back; 0: the live screen */
-static u16 sb_snap[132 * 60];                      /* the screen at the last redraw */
+static u16 sb_snap[TEXT_CELLS];                      /* the screen at the last redraw */
 static int sb_snap_c, sb_snap_r, sb_off = -1;
 static volatile int sb_delta, sb_live_req;
-static u16 sb_cells[132 * 60];                     /* what's shown while scrolled back */
+static u16 sb_cells[TEXT_CELLS];                     /* what's shown while scrolled back */
 
 static void sb_push(const u16 *cells, int cols)
 {
@@ -3198,7 +3224,7 @@ static void video_native_pointer_(void)
     u32 a = 0;
     if (shown) {
         u32 cols = rd16(BDA + 0x4A), rows = rd8(BDA + 0x84) + 1u;
-        if (!cols || cols > 132) cols = 80;
+        if (!cols || cols > TEXT_MAXC) cols = 80;
         if (rows < 25) rows = 25;
         u32 col = (u32)(x < 0 ? 0 : x) / (cols <= 40 ? 16 : 8), row = (u32)(y < 0 ? 0 : y) / 8;
         if (col >= cols) col = cols - 1;
