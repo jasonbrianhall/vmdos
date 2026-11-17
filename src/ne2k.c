@@ -135,17 +135,30 @@ static void receive(const u8 *buf, int size)
 
 int ne2k_running(void) { return enabled && !(cmd & CR_STP) && (cmd & CR_STA); }
 
-/* From the timer tick: frames waiting in net.cpp into the ring. */
-void ne2k_tick(void)
+/* Frames waiting in net.cpp (or still in the real card: net_peek_len polls
+   it) into the ring, as far as there's room. */
+static void fill(void)
 {
     static u8 f[1536];
-    if (pci && line) { if (++stuck >= 50) { stuck = 0; vpic_raise(irq); } }   /* the level line, not serviced */
-    else stuck = 0;
     if (!ne2k_running() || (tcr & 0x06)) return;          /* loopback: nothing from the wire */
     while (net_peek_len() && !buffer_full()) {
         int n = net_take(f, sizeof f);
         if (n >= 14 && want(f)) { receive(f, n); rx_seen++; }
     }
+}
+
+/* From the timer tick. Not the only time the ring is filled: with only the
+   tick, DOS got at most a ring's worth (~9 full frames) per millisecond and
+   every TCP round trip was rounded up to whole ticks, which held receiving
+   to a few tens of Mbps on gigabit. The ring is also topped up whenever the
+   driver frees room in it (BNRY), acknowledges a receive (ISR PRX) or sends,
+   the way a real 8390 keeps receiving while its interrupt is being handled.
+   (Kernel handlers run with interrupts off: no race with the tick.) */
+void ne2k_tick(void)
+{
+    if (pci && line) { if (++stuck >= 50) { stuck = 0; vpic_raise(irq); } }   /* the level line, not serviced */
+    else stuck = 0;
+    fill();
 }
 
 static void real_mode(void)                     /* the real card's filter, to match */
@@ -207,6 +220,7 @@ static void write_cr(u8 v)
         isr |= ISR_PTX;
         cmd &= ~CR_TXP;
         update_irq();
+        fill();                                      /* replies to what DOS sent before: no tick wait */
     }
     real_mode();
 }
@@ -218,11 +232,11 @@ static void reg_write(int r, u8 v)
     if (page == 0) switch (r) {
         case 0x01: start = v << 8; break;
         case 0x02: stop = v << 8; break;
-        case 0x03: boundary = v; break;
+        case 0x03: boundary = v; fill(); break;          /* room freed: more in now, not at the next tick */
         case 0x04: tpsr = v; break;
         case 0x05: tcnt = (tcnt & 0xFF00) | v; break;
         case 0x06: tcnt = (tcnt & 0x00FF) | v << 8; break;
-        case 0x07: isr &= ~(v & 0x7F); update_irq(); break;
+        case 0x07: isr &= ~(v & 0x7F); update_irq(); if (v & ISR_PRX) fill(); break;
         case 0x08: rsar = (rsar & 0xFF00) | v; break;
         case 0x09: rsar = (rsar & 0x00FF) | v << 8; break;
         case 0x0A: rcnt = (rcnt & 0xFF00) | v; break;
