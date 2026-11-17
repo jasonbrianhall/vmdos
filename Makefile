@@ -251,6 +251,16 @@ C_ONLY_DEPS  += $(CURL_EXE)
 C_ONLY_MAP   += $(if $(CURL_EXE),$(CURL_EXE)=VMDOS/NET/CURL.EXE)
 C_ONLY_DEPS  += $(WGET_EXE) third_party/cacert/CACERT.PEM
 C_ONLY_MAP   += $(if $(WGET_EXE),$(WGET_EXE)=VMDOS/NET/WGET.EXE) third_party/cacert/CACERT.PEM=VMDOS/NET/CACERT.PEM
+# The openssl command (OpenSSL 3, DJGPP, ssh's socket layer: tools/build-openssl.sh)
+# in C:\VMDOS\NET with its OPENSSL.CNF: third_party/openssl/README.vmdos
+OPENSSL_EXE  := $(wildcard third_party/openssl/bin/OPENSSL.EXE)
+C_ONLY_DEPS  += $(OPENSSL_EXE) $(if $(OPENSSL_EXE),third_party/openssl/OPENSSL.CNF)
+C_ONLY_MAP   += $(if $(OPENSSL_EXE),$(OPENSSL_EXE)=VMDOS/NET/OPENSSL.EXE third_party/openssl/OPENSSL.CNF=VMDOS/NET/OPENSSL.CNF)
+# Lynx, the text web browser (DJGPP, OpenSSL, PDCurses, ssh's socket layer:
+# tools/build-lynx.sh) in C:\VMDOS\NET with its LYNX.CFG: third_party/lynx/README.vmdos
+LYNX_EXE     := $(wildcard third_party/lynx/bin/LYNX.EXE)
+C_ONLY_DEPS  += $(LYNX_EXE) $(if $(LYNX_EXE),third_party/lynx/LYNX.CFG)
+C_ONLY_MAP   += $(if $(LYNX_EXE),$(LYNX_EXE)=VMDOS/NET/LYNX.EXE third_party/lynx/LYNX.CFG=VMDOS/NET/LYNX.CFG)
 # TCP/IP (IPv4 + IPv6) and the DOSBox IPX bridge, in C:\VMDOS\NET: built with
 # Open Watcom on mTCP (make net), committed prebuilt in net/bin.
 NET_FILES := net/bin/VMTCP.EXE net/bin/DHCP.EXE net/bin/PING.EXE net/bin/NSLOOKUP.EXE net/bin/VMIPXBOX.EXE \

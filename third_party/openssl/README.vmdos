@@ -1,0 +1,58 @@
+OPENSSL.EXE: the openssl command (OpenSSL 3.6.5) for DOS on vmdos's own TCP.
+Its libraries are also LYNX.EXE's HTTPS (third_party/lynx).
+
+    OPENSSL VERSION -a
+    OPENSSL DGST -sha256 FILE.ZIP
+    OPENSSL RAND -hex 16
+    OPENSSL GENPKEY -algorithm ED25519 -out KEY.PEM
+    OPENSSL REQ -new -x509 -key KEY.PEM -subj /CN=me -days 365 -out CERT.PEM
+    OPENSSL X509 -in CERT.PEM -noout -text
+    OPENSSL VERIFY -CAfile CA.PEM CERT.PEM
+    OPENSSL ENC -aes-256-cbc -pbkdf2 -in FILE -out FILE.ENC
+    OPENSSL S_CLIENT -connect example.com:443     (after STARTNET)
+
+The command's name may be in capitals (OPENSSL VERSION); options are as
+OpenSSL has them (-in, not -IN). OPENSSL HELP lists the commands.
+
+Built from github.com/openssl/openssl tag openssl-3.6.5 (Apache-2.0), its
+DJGPP target: static, no threads, DSOs or engines; DJGPP gcc 12 with
+OpenSSL's x86 assembly; UPX --best.
+
+Files. C:\VMDOS\NET is OpenSSL's directory (OPENSSLDIR, /dev/c/VMDOS/NET to
+DJGPP): OPENSSL.CNF there is OpenSSL's sample configuration (what REQ and
+CA use; OPENSSL_CONF=file for another). Certificates are checked against
+%SSL_CERT_FILE%, C:\VMDOS\NET\CACERT.PEM unless set (third_party/cacert, as
+WGET); -CAfile overrides.
+
+The files here:
+  openssl-dos.patch  the changes to OpenSSL: its random numbers seeded by
+                     getentropy() (DOS has no /dev/urandom, DJGPP isn't
+                     ELF); sockets made non-blocking by ioctlsocket()
+                     (DJGPP's fcntl() doesn't know them); the command's
+                     name in any case
+  ossl-dos.c         what OpenSSL's DJGPP port wants from Watt-32 and from
+                     DOS, on ssh's sockets (third_party/openssh/dos-sock.c):
+                     read_s, write_s, close_s, send, recv, select_s and
+                     select (the console is ready when a key is waiting),
+                     ioctlsocket, sock_init, gethostbyname; getentropy()
+                     (RDSEED/RDRAND, TSC-against-8254 jitter, the clocks);
+                     the clock. Shared with LYNX.EXE.
+  dos-time.h         forced into every OpenSSL (and Lynx) file: time(),
+                     gettimeofday(), gmtime(), localtime() are ossl-dos.c's,
+                     the DOS clock taken as UTC (as ssh). DJGPP's own got
+                     the date wrong here: certificates made "in 2027",
+                     good ones "expired".
+  OPENSSL.CNF        OpenSSL's apps/openssl.cnf (CR LF)
+
+Networking is ssh's (third_party/openssh/README.vmdos): vmdos runs the TCP
+connections itself, IPv4 and IPv6, names from VMTCP.CFG's DNS servers.
+Not there: listening sockets (S_SERVER), UDP (DTLS), engines and providers
+loaded from files.
+
+Build: tools/build-openssl.sh writes bin/OPENSSL.EXE and OPENSSL.CNF (the
+normal build doesn't need it: the binary is committed); the Makefile puts
+them in C:\VMDOS\NET when they're there. It needs DJGPP (a cross gcc
+i586-pc-msdosdjgpp-gcc on PATH, or DJGPP=dir), git, make, perl, a host gcc
+with -m32, python3 and upx; it fetches OpenSSL and Watt-32 (its socket
+headers only) at the pinned versions. OPENSSL_PREFIX=dir NO_EXE=1 builds
+just the libraries and headers (tools/build-lynx.sh does).
