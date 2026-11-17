@@ -10,7 +10,8 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F6    Media console over the game, on / off: change CD
                      images, floppies and VMHD drives without leaving it
                      (type help; Esc closes it; the game keeps running)
-  Ctrl+Shift+F8    Smooth scaling on / off (games like Warcraft 2 look much better but games like DOOM do not)
+  Ctrl+Shift+F8    Scaling: sharp, smooth, xBRZ, widescreen (stretched to
+                     fill the screen, no black bars), no scaling
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
   Ctrl+Shift+F10   vmdos log over the game, on / off (the game keeps
                      running; Ctrl+Shift+arrows/PgUp/PgDn scroll it,
@@ -104,11 +105,11 @@ BOOT OPTIONS
 
   Screen
     (default)      Whole-pixel scaling to the largest 4:3 box that fits
-    scale=smooth   Blended (bilinear) scaling; Ctrl+Shift+F8 toggles it
+    scale=smooth   Blended (bilinear) scaling; Ctrl+Shift+F8 steps the modes
     scale=sharp    Whole-pixel scaling, no blending (the default)
     scale=off      No resampling: 640x480 is drawn 1:1, centered, with
                    black borders (whole multiples on bigger screens)
-    aspect=fill    Stretch to the whole screen
+    aspect=fill    Stretch to the whole screen (Ctrl+Shift+F8's widescreen)
     nowc           Framebuffer not write-combining
     vga=ask        UEFI: list the screen modes at boot and ask which
     vga=N          UEFI: screen mode N (the number vga=ask shows)

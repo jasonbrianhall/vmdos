@@ -785,7 +785,7 @@ void vkbd_real_scancode(u8 sc)
         if (!up) color_toggle_req = 1;
         return;
     }
-    if (hot && k == 0x42) {                                   /* Ctrl+Shift+F8: sharp, smooth, xBRZ, no scaling (video.c) */
+    if (hot && k == 0x42) {                                   /* Ctrl+Shift+F8: sharp, smooth, xBRZ, widescreen, no scaling (video.c) */
         extern volatile int smooth_toggle_req;
         if (!up) smooth_toggle_req = 1;
         return;

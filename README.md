@@ -74,6 +74,13 @@ menuentry "QuickBASIC clone" {
 }
 ```
 
+On a legacy BIOS (or CSM) boot, the menu's last entry, "FreeDOS from the
+built-in floppy, booted normally (no vmdos)", boots floppy.img on the bare
+machine with syslinux's memdisk, as a real floppy would: plain FreeDOS, the
+vmdos drivers on it stay out of memory. It's there when the build finds
+memdisk (Debian/Ubuntu `syslinux-common`, Fedora `syslinux`; `MEMDISK=path`
+to point at it).
+
 `make run-bios` boots esp.img under SeaBIOS; `GRUB=0` (or no GRUB tools:
 Fedora grub2-tools grub2-pc-modules grub2-efi-x64-modules, Debian
 grub-common grub-pc-bin grub-efi-amd64-bin) makes the old UEFI-only image
@@ -329,7 +336,8 @@ enlarge at all: the picture at the size a VGA card puts out (320x200
 doubled to 640x400, 640x480 as is), centered with black all around; on a
 big screen it's by far the least to draw. `aspect=fill` stretches
 the picture to the whole screen. Ctrl+Shift+F8 steps through sharp,
-smooth, xBRZ and no scaling while a program runs, whatever the command line chose. Set them on the kernel command line
+smooth, xBRZ, widescreen (as `aspect=fill`, smoothly: the whole screen,
+no black bars) and no scaling while a program runs, whatever the command line chose. Set them on the kernel command line
 (`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
 The framebuffer is mapped write-combining (`nowc` turns that off).
 

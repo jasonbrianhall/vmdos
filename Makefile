@@ -330,6 +330,7 @@ vmdos.iso: vmdos.elf $(RAM_IMG) $(FLOPPY) $(BUILD)/grub.cfg $(ISO_RAM)
 	rm -rf $(BUILD)/iso && mkdir -p $(BUILD)/iso/boot/grub
 	cp vmdos.elf $(BUILD)/iso/boot/
 	$(if $(USE_RAM),gzip -9c dos.img > $(BUILD)/iso/boot/dos.img.gz,cp $(FLOPPY) $(BUILD)/iso/boot/floppy.img)
+	$(if $(MEMDISK),cp $(FLOPPY) $(BUILD)/iso/boot/floppy.img; cp $(MEMDISK) $(BUILD)/iso/boot/memdisk)
 	cp $(BUILD)/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
 	$(if $(ISO_RAM),mkdir -p $(BUILD)/iso/boot/cd && cp $(ISO_RAM) $(BUILD)/iso/boot/cd/)
 	$(GRUB_MKRESCUE) -o $@ $(BUILD)/iso
@@ -384,12 +385,23 @@ GRUB_MKIMAGE ?= $(firstword $(shell command -v grub-mkimage grub2-mkimage 2>/dev
 GRUB_LIB ?= $(firstword $(wildcard /usr/lib/grub /usr/share/grub2 /usr/lib64/grub))
 GRUB_OK  := $(and $(GRUB_MKIMAGE),$(wildcard $(GRUB_LIB)/i386-pc/boot.img),$(wildcard $(GRUB_LIB)/x86_64-efi/normal.mod))
 GRUB     ?= $(if $(GRUB_OK),1,0)
+# syslinux's memdisk (Debian/Ubuntu syslinux-common, Fedora syslinux): the
+# BIOS/CSM menu's last entry boots floppy.img on the bare machine with it
+# (real FreeDOS, no vmdos). Not found: no such entry.
+MEMDISK  ?= $(firstword $(wildcard /usr/lib/syslinux/memdisk /usr/share/syslinux/memdisk /usr/lib/syslinux/bios/memdisk /usr/lib/syslinux/modules/bios/memdisk))
+# linux16 for memdisk: its own module upstream (Debian, Ubuntu, Arch), part
+# of linux.mod on Fedora/RHEL (no linux16.mod there). The entry tries
+# linux16 and falls back to linux / initrd.
+GRUB_LINUX16 = $(basename $(notdir $(wildcard $(GRUB_LIB)/i386-pc/linux16.mod $(GRUB_LIB)/i386-pc/linux.mod)))
+MEMDISK_ENTRY = echo '  menuentry "FreeDOS from the built-in floppy, booted normally (no vmdos)" {'; \
+	echo '    if linux16 /boot/memdisk floppy; then initrd16 /EFI/vmdos/floppy.img'; \
+	echo '    else linux /boot/memdisk floppy; initrd /EFI/vmdos/floppy.img; fi'; echo '  }';
 GRUB_MODS := part_msdos part_gpt fat normal configfile search search_fs_file test echo sleep chain multiboot boot \
              video video_fb all_video gfxterm videoinfo read
 VMDOS_EFI_DIR := $(if $(filter 1,$(GRUB)),EFI/vmdos,EFI/BOOT)
 # Rebuild esp.img when what goes on it changes (RAM disk on/off, ISO list, GRUB).
 $(BUILD)/esp.opts: FORCE | $(BUILD)
-	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT) $(OEM_PATH) $(ESP_TYPE)' > $@.new
+	@echo '$(USE_RAM) $(ISO_C) $(GRUB) $(ESP_FAT) $(OEM_PATH) $(ESP_TYPE) $(MEMDISK)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/vmdos.cfg: FORCE | $(BUILD)
 	@echo '$(KARGS_ALL)' > $@.new
@@ -403,7 +415,7 @@ $(BUILD)/grub/mods: FORCE | $(BUILD)
 	@echo '$(GRUB_MODS)' > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
 $(BUILD)/grub/core.img: $(BUILD)/grub/early.cfg $(BUILD)/grub/mods
-	$(GRUB_MKIMAGE) -O i386-pc -d $(GRUB_LIB)/i386-pc -o $@ -c $< -p /boot/grub biosdisk vbe vga $(GRUB_MODS)
+	$(GRUB_MKIMAGE) -O i386-pc -d $(GRUB_LIB)/i386-pc -o $@ -c $< -p /boot/grub biosdisk vbe vga $(GRUB_LINUX16) $(GRUB_MODS)
 $(BUILD)/grub/BOOTX64.EFI: $(BUILD)/grub/early.cfg $(BUILD)/grub/mods
 	$(GRUB_MKIMAGE) -O x86_64-efi -d $(GRUB_LIB)/x86_64-efi -o $@ -c $< -p /boot/grub efi_gop efi_uga $(GRUB_MODS)
 # The fixed choices in the boot menu's screen resolution submenu.
@@ -486,6 +498,7 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '    set gfxpayload=text'; \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
 	   echo '  }'; \
+	   $(if $(MEMDISK),$(MEMDISK_ENTRY)) \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@
@@ -503,7 +516,7 @@ ESP_TYPE ?= $(if $(filter 1,$(GRUB)),$(if $(filter 16,$(ESP_FAT)),0E,0C),EF)
 ESP_OEM_FILE = $(if $(filter 1,$(OEM_PATH)),$(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI,vmdos.efi)=EFI/Microsoft/Boot/bootmgfw.efi)
 ESP_GRUB_DEPS  := $(if $(filter 1,$(GRUB)),vmdos.elf $(BUILD)/grub/core.img $(BUILD)/grub/BOOTX64.EFI $(BUILD)/grub/grub.cfg)
 ESP_GRUB_FILES  = $(if $(filter 1,$(GRUB)),$(BUILD)/grub/BOOTX64.EFI=EFI/BOOT/BOOTX64.EFI vmdos.elf=boot/vmdos.elf \
-                    $(BUILD)/grub/grub.cfg=boot/grub/grub.cfg --bios=$(GRUB_LIB)/i386-pc/boot.img$(comma)$(BUILD)/grub/core.img)
+                    $(BUILD)/grub/grub.cfg=boot/grub/grub.cfg $(if $(MEMDISK),$(MEMDISK)=boot/memdisk) --bios=$(GRUB_LIB)/i386-pc/boot.img$(comma)$(BUILD)/grub/core.img)
 esp: esp.img
 esp.img: vmdos.efi $(RAM_IMG) $(FLOPPY) $(DOS_DEPS) $(BUILD)/fat16.bin $(BUILD)/fat32lba.bin $(BUILD)/vmdos.cfg $(BUILD)/esp.opts $(BUILD)/extra.stamp tools/mkdisk.py $(ISO) $(ESP_GRUB_DEPS)
 	$(if $(filter 1,$(GRUB)),,@echo "esp.img: UEFI only (GRUB=0, or grub-mkimage / GRUB's i386-pc and x86_64-efi modules not found)")

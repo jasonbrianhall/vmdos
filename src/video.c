@@ -564,6 +564,7 @@ static void dest_span(u32 x0, u32 x1, u32 *X0, u32 *X1)
 }
 static int aspect_fill = -1, no_scale = -1;
 static int unscaled = -1;                       /* scale=none / Ctrl+Shift+F8: the VGA's own size, black around it */
+/* aspect_fill: aspect=fill, or Ctrl+Shift+F8's widescreen step: the whole screen, no bars */
 static u16 console_cells[80 * 25];
 static int console_on;
 
@@ -575,7 +576,7 @@ static int console_on;
    row is blended from the two source rows it falls between. Needs 8 bits
    a primary in the framebuffer's low three bytes (24 and 32 bpp).
 
-   scale=xbrz (or Ctrl+Shift+F8, which steps sharp, smooth, xBRZ; off by
+   scale=xbrz (or Ctrl+Shift+F8, which steps sharp, smooth, xBRZ, widescreen, none; off by
    default): graphics modes up to 640x480 go through xBRZ (xbrz.c) first,
    enlarged k times (2-6, the least that reaches the
    picture's size), and that is then scaled to fit as above. The source is
@@ -3035,13 +3036,18 @@ static void video_refresh_(void)
     if (smooth_toggle_req) {                       /* Ctrl+Shift+F8 */
         smooth_toggle_req = 0;
         if (smooth_opt < 0) layout();              /* the command line's choice first */
-        if (unscaled) unscaled = 0, smooth_opt = 0, xbrz_opt = 0;  /* sharp -> smooth -> xBRZ -> none -> sharp */
+        /* sharp -> smooth -> xBRZ -> widescreen -> none -> sharp. Widescreen:
+           stretched to the whole screen (no black bars), smoothly, since
+           whole pixels can't stretch evenly to another shape. */
+        if (unscaled) unscaled = 0, aspect_fill = 0, smooth_opt = 0, xbrz_opt = 0;
+        else if (aspect_fill) aspect_fill = 0, smooth_opt = 0, xbrz_opt = 0, unscaled = 1;
         else if (!smooth_opt) smooth_opt = 1, xbrz_opt = 0;
         else if (!xbrz_opt) xbrz_opt = 1;
-        else smooth_opt = 0, xbrz_opt = 0, unscaled = 1;
+        else aspect_fill = 1, no_scale = 0, smooth_opt = 1, xbrz_opt = 0;
         last_layout_mode = -1;
         layout();
         const char *m = unscaled ? "No scaling (VGA size, black border)" :
+                        aspect_fill ? (smooth ? "Widescreen (stretched to fill the screen)" : "Widescreen (stretched, whole pixels)") :
                         !smooth_opt ? "Sharp scaling (whole pixels)" :
                         !smooth ? (xbrz_opt ? "xBRZ scaling: not on this screen" : "Smooth scaling: not on this screen") :
                         xbrz_k ? "xBRZ scaling" : xbrz_opt ? "xBRZ scaling (smooth in text modes)" : "Smooth scaling";

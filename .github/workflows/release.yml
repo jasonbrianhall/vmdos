@@ -62,7 +62,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
-            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin
+            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin syslinux-common
 
       - name: Build esp.img (no EXTRA, no RAMDISK)
         run: |
