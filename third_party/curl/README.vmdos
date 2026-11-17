@@ -1,0 +1,21 @@
+CURL.EXE: curl 8.23.0 (https://curl.se, curl license) for DOS, on vmdos's
+own TCP. HTTP, HTTPS, FTP, FTPS and FILE; TLS 1.2 and 1.3 by mbedTLS 3.6,
+WGET's configuration (third_party/wget) with stdio buffering kept on
+(curl_mbedtls_config.h: unbuffered, DJGPP read the CA bundle a byte at a
+time, a DOS call each, and servers gave up waiting). Certificates are
+checked against C:\VMDOS\NET\CACERT.PEM (third_party/cacert).
+
+curl's DOS code is Watt-32's: dos/curl-dos.c gives it the Watt-32 calls it
+makes (select_s, close_s, ioctlsocket) and recv/send on ssh's socket layer
+(third_party/openssh/dos-sock.c), which talks to vmdos's TCP; the clock
+reads DOS's date and time (dos/curl-dos.h, included first everywhere), as
+ssh's does: DJGPP's gettimeofday() can hang under vmdos. curl_config.h is
+the configuration, by hand (CMake isn't run): written from a CMake
+configuration of the same features, and checked by building curl with it
+as a 32-bit Linux program (same type sizes) and downloading over verified
+HTTPS, chunked, and with redirects. mbedtls-alt.c gives mbedTLS entropy
+and milliseconds.
+
+Build: tools/build-curl.sh writes bin/CURL.EXE; the Makefile puts it in
+C:\VMDOS\NET when it's there. DJGPP is a cross gcc on PATH, or else the
+djfdyuruiry/djgpp Docker image, as for WGET.
