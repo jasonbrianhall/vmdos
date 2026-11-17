@@ -769,12 +769,20 @@ static struct regs *isr_dispatch_inner(struct regs *r)
                         b1, b2, stat_irq0, stat_vec8, stat_pmirq, stat_reflirq, stat_rmirq);
             }
             { void video_debug(void), v3_debug(void), hv_debug(void); hv_debug(); video_debug(); v3_debug(); }   /* a frozen screen: why */
+            if (vga_native && !vga_native_logscreen()) {
+                /* video=vbe with nowhere to show the log: take a snapshot into
+                   it and save it to C:\VMDOS\VMDOS.LOG; the game runs on */
+                void dpmi_snapshot(u32 cs, u32 eip, int pm);
+                dpmi_snapshot(r->cs & 0xFFFF, r->eip, from_pm);
+                log_save_req = 1;
+                goto log_done;
+            }
             video_log_toggle();
             bootcon_show(1);                      /* video=vbe: the log screen on the other card */
         }
     log_done:
         if (irq == 0) bootcon_tick();
-        if (irq == 0 && log_save_req && !in_usb && usb_quiet()) {             /* Ctrl+Shift+S in the log */
+        if (irq == 0 && log_save_req && !in_usb && usb_quiet() && !disk_busy() && !hd_busy()) {   /* Ctrl+Shift+S in the log; waits out a disk request */
             log_save_req = 0;
             const char *e = log_save();
             video_osd(e ? e : "Log saved to C:\\VMDOS\\VMDOS.LOG");

@@ -64,8 +64,22 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg);
    interrupts off: one trap an instruction was a third of the CPU. */
 static int stepping;
 static int step_tf;                             /* resume set TF for this step itself */
+static u32 st_steps, st_hlt, st_exc[32], st_exc_cs, st_exc_eip, st_exc_n;   /* for dpmi_snapshot */
+static struct { u32 n, err, cs, eip, ss, esp, fl; u8 code[24]; } st_first[3];   /* the first exceptions */
+static int st_nfirst;
 static u32 step_cs, step_eip, step_ss, step_esp;
-static int step_arm(struct ctx *k);             /* 1: single-step this one (TF); 0: DR0 set further on; -1: neither (a HLT) */
+static int step_arm(struct ctx *k);
+static int late_armed, late_prev;               /* pm_gp's late CLI/STI: just taken one */
+static u32 late_cs, late_eip;
+static int nostep_on(void)
+{
+    static int nostep = -1;
+    if (nostep < 0) {
+        nostep = strstr(cmdline, "nostep") != 0;
+        if (nostep) kprintf("DPMI: nostep: clients' CLI ignored, no single-stepping\n");
+    }
+    return nostep;
+}             /* 1: single-step this one (TF); 0: DR0 set further on; -1: neither (a HLT) */
 static u32 dr7_now;
 static void dr7_set(u32 v)
 {
@@ -1193,11 +1207,18 @@ static struct regs *pm_fault(struct ctx *c, int n, u32 errc)
     {
         u32 a = sel_base(c->cs) + c->eip;
         if (lin_ok(a, 8))
-            dbg(1, "DPMI exception %u err %x at %x:%x (cs base %x big %u): %02x %02x %02x %02x %02x %02x %02x %02x"
+            dbg(1, "DPMI exception %u err %x at %x:%x (cs base %x big %u, byte before %02x): %02x %02x %02x %02x %02x %02x %02x %02x"
                 " DS %x(%x) ES %x(%x) FS %x GS %x EAX %x EBX %x ESI %x EDI %x\n",
-                n, errc, c->cs, c->eip, sel_base(c->cs), sel_big(c->cs),
+                n, errc, c->cs, c->eip, sel_base(c->cs), sel_big(c->cs), lin_ok(a - 1, 1) ? rd8(a - 1) : 0xEE,
                 rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3), rd8(a + 4), rd8(a + 5), rd8(a + 6), rd8(a + 7),
                 c->ds, sel_base(c->ds), c->es, sel_base(c->es), c->fs, c->gs, c->eax, c->ebx, c->esi, c->edi);
+    }
+    if (n < 32) { st_exc[n]++; st_exc_n = n; st_exc_cs = c->cs; st_exc_eip = c->eip; }
+    if (st_nfirst < 3) {
+        typeof(&st_first[0]) f = &st_first[st_nfirst++];
+        u32 a = sel_base(c->cs) + c->eip - 8;
+        f->n = n; f->err = errc; f->cs = c->cs; f->eip = c->eip; f->ss = c->ss; f->esp = c->esp; f->fl = c->eflags;
+        for (int i = 0; i < 24; i++) f->code[i] = lin_ok(a + i, 1) ? rd8(a + i) : 0xEE;
     }
     if (n < 32 && exc_vec[n].sel) {
         struct ctx h = *c;
@@ -1401,7 +1422,13 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
     int sz = op32 ? 4 : 2;
 #define NEXT(x) do { c->eip = (x); if (!code32(c)) c->eip &= 0xFFFF; } while (0)
     switch (op) {
-    case 0xFA: c->vif = 0; stepping = 1; NEXT(ip); return resume(c);
+    case 0xFA: {
+        /* nostep (a test for emulators like PCem, whose single-step traps
+           misreport faults): a protected-mode client's CLI is ignored, so it
+           is never single-stepped; its interrupts may then come in the
+           middle of what it meant to protect */
+        if (!nostep_on()) { c->vif = 0; stepping = 1; }
+        NEXT(ip); return resume(c); }
     case 0xFB: c->vif = 1; NEXT(ip); return resume(c);
     case 0xF4:
         if ((c->cs & 0xFFFF) == HOST_CS) {
@@ -1468,6 +1495,28 @@ static struct regs *pm_gp(struct ctx *c, u32 errc)
         break;
     }
 #undef NEXT
+    /* PCem (v17): its recompiled CLI/STI ignore IOPL unless CR4.VME/PVI is
+       set, and the #GP that follows comes in on the next instruction. So a
+       #GP nothing above explains, just after a CLI or STI byte: take it as
+       that CLI/STI, already done, and go on. If the same instruction faults
+       again straight away (no other exception between), the fault is its
+       own: then it goes to the client. */
+    if (!errc && lin_ok(base + eip - 1, 1)) {
+        u8 prev = rd8(base + eip - 1);
+        static int told;
+        int again = late_prev && late_cs == c->cs && late_eip == c->eip;   /* straight back here: a real fault */
+        if ((prev == 0xFB || prev == 0xFA) && !again) {
+            late_armed = 1; late_cs = c->cs; late_eip = c->eip;
+            if (told < 3) {
+                told++;
+                kprintf("DPMI: #GP at %x:%x just after a%s: taken as it (an emulator's late fault)\n",
+                        c->cs, c->eip, prev == 0xFB ? "n STI" : " CLI");
+            }
+            if (prev == 0xFB) c->vif = 1;
+            else if (!nostep_on() && c->vif) { c->vif = 0; stepping = 1; }
+            return resume(c);
+        }
+    }
     return pm_fault(c, 13, 0);
 }
 
@@ -1476,6 +1525,7 @@ struct regs *dpmi_exception(struct regs *r)
     struct ctx c;
     get_ctx(r, &c);
     if (!client) panic("protected-mode fault without a DPMI client (vector %u at %x:%x)", r->vec, r->cs, r->eip);
+    late_prev = late_armed; late_armed = 0;     /* pm_gp: was the last exception a late CLI/STI taken? */
     /* Any exception inside the host stubs is one of their HLT traps: the
        client never runs there otherwise. PCem has been seen to report it
        one byte late (EIP just past the HLT, sometimes not as #GP); take it
@@ -1492,6 +1542,7 @@ struct regs *dpmi_exception(struct regs *r)
                     told++;
                 }
                 c.eip = e - 1;
+                st_hlt++;
                 e--;
             }
             if (rd8(b + e) == 0xF4) {
@@ -1535,6 +1586,7 @@ struct regs *dpmi_exception(struct regs *r)
             return pm_fault(&c, 1, 0);
         }
         __asm__ volatile("mov %0,%%dr6" ::"r"(0));
+        st_steps++;
         /* what did the stepped instruction do to IF? */
         u32 a = sel_base(step_cs) + step_eip;
         int o32 = sel_big(step_cs);
@@ -1785,6 +1837,32 @@ void dpmi_timer_report(void)
     }
     kprintf("\n");
     last_raw = dstat_raw; last_hw[0] = dstat_hw8[0]; last_hw[1] = dstat_hw8[1]; last_rf = dstat_rf8;
+}
+
+void dpmi_dump_code(u32 sel, u32 off, int n);
+/* Ctrl+Shift+F10 with video=vbe: the DPMI side of a hang, into the log */
+void dpmi_snapshot(u32 cs, u32 eip, int pm)
+{
+    kprintf("snap: DPMI client %d, stepping %d tf %d dr_ok %d, steps %u, host-HLT fixups %u, depth %d\n",
+            client, stepping, step_tf, dr_ok, st_steps, st_hlt, xdepth);
+    kprintf("snap: exceptions");
+    for (int i = 0; i < 32; i++) if (st_exc[i]) kprintf(" #%d:%u", i, st_exc[i]);
+    if (st_exc_n || st_exc[0]) kprintf(", last #%u at %x:%x", st_exc_n, st_exc_cs, st_exc_eip);
+    kprintf("\n");
+    for (int i = 0; i < xdepth && i < 8; i++)
+        kprintf("snap: nest %d kind %d %s%x:%x\n", i, xs[i].kind, xs[i].saved.pm ? "p" : "r", xs[i].saved.cs, xs[i].saved.eip);
+    for (int i = 0; i < st_nfirst; i++) {
+        kprintf("snap: first #%u err %x at %x:%x SS:ESP %x:%x (base %x big %u) FL %x\n", st_first[i].n, st_first[i].err,
+                st_first[i].cs, st_first[i].eip, st_first[i].ss, st_first[i].esp, sel_base(st_first[i].ss),
+                sel_big(st_first[i].ss), st_first[i].fl);
+        kprintf("snap:   code -8..+15:");
+        for (int j = 0; j < 24; j++) kprintf(j == 8 ? " [%02x]" : " %02x", st_first[i].code[j]);
+        kprintf("\n");
+    }
+    kprintf("snap: client %u-bit; handlers #13 %x:%x #12 %x:%x #14 %x:%x #6 %x:%x; HOST_CS %x HOST_SS %x\n",
+            client32 ? 32 : 16, exc_vec[13].sel, exc_vec[13].off, exc_vec[12].sel, exc_vec[12].off,
+            exc_vec[14].sel, exc_vec[14].off, exc_vec[6].sel, exc_vec[6].off, HOST_CS, HOST_SS);
+    if (pm && client) dpmi_dump_code(cs, eip, 16);
 }
 
 int dpmi_depth(char *buf, int n)
