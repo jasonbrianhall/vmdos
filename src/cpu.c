@@ -846,6 +846,7 @@ void kmain(u32 magic, struct mb_info *mb)
              bootcon_start(fb_lin, fbi.fb_pitch, fbi.fb_width, fbi.fb_height, fbi.fb_bpp, fbi.rpos, fbi.gpos, fbi.bpos))
         log_to_bootcon();
     tables_init();
+    dpmi_probe_dr();
     pic_init();
     pit_init();
 

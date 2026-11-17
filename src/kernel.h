@@ -331,6 +331,7 @@ int mouse_pointer(int *x, int *y, u16 *and_mask, u16 *xor_mask);
 void dpmi_detect(struct regs *r);             /* INT 2Fh AX=1687h */
 int dpmi_rm_trap(struct regs *r, int id);     /* v86-side stubs; BIOS_* */
 struct regs *dpmi_exception(struct regs *r);  /* any fault from a protected-mode client */
+void dpmi_probe_dr(void);                     /* do DR0 breakpoints work? (boot, after tables_init) */
 struct regs *dpmi_take_switch(void);          /* frame of a mode switch, or NULL */
 int dpmi_pm_hooked(int vec);
 int dpmi_hw_active(int vec);                 /* its PM handler is still running */

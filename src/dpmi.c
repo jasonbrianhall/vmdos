@@ -63,8 +63,9 @@ struct regs *dpmi_pm_trap(struct ctx *c, int id, int arg);
    that one is single-stepped. DOOM's sound code runs long stretches with
    interrupts off: one trap an instruction was a third of the CPU. */
 static int stepping;
+static int step_tf;                             /* resume set TF for this step itself */
 static u32 step_cs, step_eip, step_ss, step_esp;
-static int step_arm(struct ctx *k);             /* 1: single-step this one (TF); 0: DR0 set further on */
+static int step_arm(struct ctx *k);             /* 1: single-step this one (TF); 0: DR0 set further on; -1: neither (a HLT) */
 static u32 dr7_now;
 static void dr7_set(u32 v)
 {
@@ -72,7 +73,30 @@ static void dr7_set(u32 v)
     dr7_now = v;
     __asm__ volatile("mov %0,%%dr7" :: "r"(v | 0x400));
 }
-void dpmi_bp_off(void) { dr7_set(0); u32 z = 0xFFFF0FF0; __asm__ volatile("mov %0,%%dr6" :: "r"(z)); }
+static volatile u32 bp_hits;
+void dpmi_bp_off(void) { bp_hits++; dr7_set(0); u32 z = 0xFFFF0FF0; __asm__ volatile("mov %0,%%dr6" :: "r"(z)); }
+
+/* Some emulators (PCem at least) keep DR0-DR7 as plain storage: a DR0
+   breakpoint never fires, and the single-step #DB leaves DR6's BS clear.
+   At boot, with the IDT up: set DR0 on an instruction just ahead and see
+   whether it traps (v86.c passes the hit to dpmi_bp_off). If not, step_arm
+   single-steps every instruction instead of setting DR0. */
+static int dr_ok = 1;
+void dpmi_probe_dr(void)
+{
+    u32 before = bp_hits;
+    dr7_now = 1;                                /* so dpmi_bp_off's dr7_set(0) writes DR7 */
+    __asm__ volatile("movl $1f, %%eax\n\t"
+                     "mov %%eax, %%dr0\n\t"
+                     "movl $0x401, %%eax\n\t"
+                     "mov %%eax, %%dr7\n\t"
+                     "jmp 1f\n"
+                     "1:\tnop\n\t"
+                     "nop" ::: "eax", "memory");
+    dr_ok = bp_hits != before;
+    dr7_set(0);
+    if (!dr_ok) kprintf("DPMI: debug-register breakpoints don't fire here (an emulator?): single-stepping instead\n");
+}
 
 /* Build the frame for c at the top of the ring-0 stack and resume it. */
 static struct regs *resume(struct ctx *c)
@@ -86,15 +110,17 @@ static struct regs *resume(struct ctx *c)
     r->eip = k.eip; r->cs = k.cs; r->esp = k.esp; r->ss = k.ss;
     if (k.pm) {
         if (stepping && !k.vif) {
-            if (step_arm(&k)) {
+            int sa = step_arm(&k);
+            step_tf = sa > 0;
+            if (step_tf) {
                 k.eflags |= EFL_TF;
                 step_cs = k.cs; step_eip = k.eip; step_ss = k.ss; step_esp = k.esp;
             } else k.eflags &= ~EFL_TF;
         } else if (stepping) {
-            stepping = 0;
+            stepping = 0; step_tf = 0;
             k.eflags &= ~EFL_TF;
             dr7_set(0);
-        } else dr7_set(0);
+        } else { step_tf = 0; dr7_set(0); }
         r->eflags = (k.eflags & 0x0DD5) | EFL_IF | 2;
         r->ds = sel_valid_data(k.ds) ? k.ds : 0;
         r->es = sel_valid_data(k.es) ? k.es : 0;
@@ -1318,7 +1344,8 @@ static int step_arm(struct ctx *k)
 {
     u32 base = sel_base(k->cs), a = base + k->eip;
     int big = sel_big(k->cs);
-    if (base && under_tcg()) { dr7_set(0); return 1; }
+    if (lin_ok(a, 1) && rd8(a) == 0xF4) { dr7_set(0); return -1; }   /* HLT: faults to us anyway, don't step it */
+    if (!dr_ok || (base && under_tcg())) { dr7_set(0); return 1; }
     u32 win = 256;
     if (a < 0xA0000 && a + win > 0xA0000) win = 0xA0000 - a;   /* never read into the VGA window */
     while (win >= 32 && !lin_ok(a, win)) win /= 2;
@@ -1449,6 +1476,31 @@ struct regs *dpmi_exception(struct regs *r)
     struct ctx c;
     get_ctx(r, &c);
     if (!client) panic("protected-mode fault without a DPMI client (vector %u at %x:%x)", r->vec, r->cs, r->eip);
+    /* Any exception inside the host stubs is one of their HLT traps: the
+       client never runs there otherwise. PCem has been seen to report it
+       one byte late (EIP just past the HLT, sometimes not as #GP); take it
+       as the trap rather than hand the client an exception in host code. */
+    if (c.cs == HOST_CS && r->vec != 14) {
+        u32 b = sel_base(c.cs), e = c.eip;
+        if (lin_ok(b + e - 1, 4)) {
+            if (rd8(b + e) != 0xF4 && rd8(b + e - 1) == 0xF4) {
+                static int told;
+                if (told < 3) {
+                    u32 dr6; __asm__ volatile("mov %%dr6,%0" : "=r"(dr6));
+                    kprintf("DPMI: exception %u (err %x) at %x:%x, just past a host HLT: taken as its trap (FL %x DR6 %x)\n",
+                            r->vec, r->err, c.cs, c.eip, c.eflags, dr6);
+                    told++;
+                }
+                c.eip = e - 1;
+                e--;
+            }
+            if (rd8(b + e) == 0xF4) {
+                if (r->vec == 1) { u32 z = 0; __asm__ volatile("mov %0,%%dr6" :: "r"(z)); }
+                c.eflags &= ~EFL_TF;
+                return dpmi_pm_trap(&c, rd8(b + e + 1), rd8(b + e + 2));
+            }
+        }
+    }
     switch (r->vec) {
     case 13: return pm_gp(&c, r->err);
     case 14: {                                        /* the 16-color VGA window? */
@@ -1476,7 +1528,9 @@ struct regs *dpmi_exception(struct regs *r)
             dpmi_bp_off();
             return resume(&c);
         }
-        if (!(dr6 & 0x4000) || !stepping) {            /* not our single step */
+        /* our single step: DR6.BS, or (PCem: BS never set) a trap after
+           resume set TF itself with no breakpoint bit */
+        if (!stepping || !((dr6 & 0x4000) || (step_tf && !(dr6 & 0xF)))) {   /* not our single step */
             if (!stepping) { c.eflags &= ~EFL_TF; return resume(&c); }
             return pm_fault(&c, 1, 0);
         }
