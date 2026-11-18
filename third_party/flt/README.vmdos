@@ -1,0 +1,5 @@
+Felix Terminal DOS Edition from https://github.com/jasonbrianhall/felixterminal
+
+Felix Terminal is an SSH shell supporting Sixel, Kitty protocol, and is VT100 compatible.  It supports scroll back with shift+pageup/pagedown and has multiple themese to select.  It also supports copy and paste.
+
+
