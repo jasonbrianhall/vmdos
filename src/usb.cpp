@@ -1858,23 +1858,43 @@ extern "C" void usb_audio_pump(void) {
 
 // The rest of setting up a device that has slot k.slot: its memory, an
 // address, and a keyboard, mouse or hub on top. False: not driven.
-// ---------------------------------------------------------------- USB Ethernet (CDC-ECM)
-// The standard USB Ethernet class: a communications interface (class 02h,
-// subclass 06h) whose Ethernet descriptor names the MAC address string, and
-// a data interface (0Ah) whose alternate setting 1 has a bulk IN and a bulk
-// OUT endpoint; one frame per transfer. Adapters with a vendor protocol of
-// their own (RTL8153...) often offer ECM as another configuration, and
-// QEMU's usb-net has RNDIS first: every configuration is looked through.
-// Received frames go to net.cpp (net_usb_rx) as their transfers complete;
-// UNET_RX transfers wait on the bulk IN endpoint all the time (xHCI); on
-// EHCI, UHCI and OHCI the endpoint is polled from the periodic schedule
-// (usb2.inc's un2_*).
+// ---------------------------------------------------------------- USB Ethernet (CDC-ECM, CDC-NCM, RNDIS)
+// Three ways a USB device can be an Ethernet card, all with a communications
+// (control) interface and a data interface (0Ah) with a bulk IN and a bulk
+// OUT endpoint:
+// - CDC-ECM (class 02h, subclass 06h): the standard one. The control
+//   interface's Ethernet descriptor names the MAC address string; the data
+//   interface's alternate setting 1 has the endpoints; one frame per transfer.
+// - CDC-NCM (02h, 0Dh): the same, but frames travel in NTBs (usbnet_frame.h),
+//   sized with GET_NTB_PARAMETERS and SET_NTB_INPUT_SIZE. Newer Android
+//   phones tether with it, and many USB 3 adapters offer it.
+// - RNDIS (02h/02h/FFh, E0h/01h/03h, EFh/04h/01h or EFh/01h/01h): Microsoft's,
+//   what most Android phones tether with. Messages go both ways over
+//   SEND_ENCAPSULATED_COMMAND / GET_ENCAPSULATED_RESPONSE (INITIALIZE, then
+//   QUERY the MAC address, SET the packet filter); each frame on the bulk
+//   endpoints has a packet message header.
+// Adapters with a vendor protocol of their own (RTL8153...) often offer ECM
+// or NCM as another configuration, and QEMU's usb-net has RNDIS first: every
+// configuration is looked through, ECM picked over NCM over RNDIS
+// (usbnet=ncm or usbnet=rndis on the command line to prefer another).
+// Received transfers go through un_rx to net.cpp (net_usb_rx) as they
+// complete; UNET_RX transfers wait on the bulk IN endpoint all the time
+// (xHCI); on EHCI, UHCI and OHCI the endpoint is polled from the periodic
+// schedule (usb2.inc's un2_*).
+#include "usbnet_frame.h"
 extern "C" void net_usb_rx(const uint8_t* f, unsigned len);
 #define UNET_RX 16
-#define UNET_BUF 2048
+#define UNET_BUF 2048                                   // a receive transfer; RNDIS's and NCM's largest too
+#define UNET_TXBUF 4096                                 // NCM's alignment can push a frame past 2048
+enum { UN_ECM, UN_NCM, UN_RNDIS };
+static const char* const un_proto_name[] = { "CDC-ECM", "CDC-NCM", "RNDIS" };
+static int un_pref = UN_ECM;                            // usbnet=: the protocol tried first
 static struct {
     int dev = -1;
+    int proto;
     int ctl_iface, data_iface;
+    uint32_t rndis_id;                                  // RNDIS: the last request's id
+    usbnet::NcmOut ncm;                                 // NCM: how to lay out what we send
     uint8_t mac[6];
     char name[24];
     volatile uint8_t *rxb, *txb;
@@ -1893,6 +1913,15 @@ static struct {
 extern "C" volatile uint32_t ticks;
 
 static bool un_is() { return un.dev >= 0 && kbds[un.dev].active && kbds[un.dev].kind == NET; }
+
+// A received transfer: the frame (ECM) or the frames in it (NCM, RNDIS).
+static void un_rx(const uint8_t* b, unsigned len)
+{
+    auto rx = [](const uint8_t* f, unsigned n) { net_usb_rx(f, n); };
+    if (un.proto == UN_NCM) usbnet::ncm_unwrap(b, len, rx);
+    else if (un.proto == UN_RNDIS) usbnet::rndis_unwrap(b, len, rx);
+    else if (len >= 14) net_usb_rx(b, len);
+}
 static bool un2_start(Keyboard& k);                    // EHCI / UHCI / OHCI (usb2.inc)
 static const char* hc_type_name(int t);
 
@@ -1987,7 +2016,7 @@ static bool un_dispatch(int slot, int ep, const Trb& e)
     int b = un.buf_of[idx];
     if (cc == 1 || cc == 13) {
         uint32_t len = UNET_BUF - (e.d2 & 0xFFFFFF);
-        if (len >= 14) net_usb_rx((const uint8_t*)(un.rxb + b * UNET_BUF), len);
+        un_rx((const uint8_t*)(un.rxb + b * UNET_BUF), len);
         un_queue(k, b);
         H->db[k.slot] = k.dci;
         return true;
@@ -2001,92 +2030,239 @@ static bool un_dispatch(int slot, int ep, const Trb& e)
     return true;
 }
 
-// Look through the device's configurations for CDC-ECM; set it up if found.
+// What one configuration offers: the control and data interfaces of the
+// first USB Ethernet function in it, and which protocol.
+struct UnFunc {
+    int proto = -1, ctl = -1, data = -1, alt = 0, mac_idx = 0, ep_in = 0, ep_out = 0, mps = 512;
+    int st_ep = 0, st_mps = 8, st_int = 8;
+    int ncm_caps = 0;                                   // NCM functional descriptor's bmNetworkCapabilities
+};
+
+static int un_ctl_proto(int cls, int sub, int prot)
+{
+    if (cls == 2 && sub == 6) return UN_ECM;
+    if (cls == 2 && sub == 0x0D) return UN_NCM;
+    if ((cls == 2 && sub == 2 && prot == 0xFF) || (cls == 0xE0 && sub == 1 && prot == 3) ||
+        (cls == 0xEF && sub == 4 && prot == 1) || (cls == 0xEF && sub == 1 && prot == 1)) return UN_RNDIS;
+    return -1;
+}
+
+static UnFunc un_parse(volatile uint8_t* desc, int total)
+{
+    UnFunc u;
+    int cur = -1, cur_alt = 0, cur_class = -1, in_ep = 0, out_ep = 0, cur_mps = 512;
+    bool in_ctl = false;
+    auto data_done = [&]() {
+        if (cur_class == 0x0A && in_ep && out_ep && u.data < 0 && u.ctl >= 0) {
+            u.data = cur; u.alt = cur_alt; u.ep_in = in_ep; u.ep_out = out_ep; u.mps = cur_mps;
+        }
+    };
+    for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
+        uint8_t t = desc[i + 1];
+        if (t == 4 && i + 7 < total) {
+            data_done();
+            cur = desc[i + 2]; cur_alt = desc[i + 3]; cur_class = desc[i + 5];
+            in_ep = out_ep = 0;
+            int p = un_ctl_proto(cur_class, desc[i + 6], desc[i + 7]);
+            if (p >= 0 && u.ctl < 0) { u.ctl = cur; u.proto = p; }
+            in_ctl = u.ctl >= 0 && cur == u.ctl;
+        } else if (t == 0x24 && in_ctl && i + 3 < total && desc[i + 2] == 0x0F) {
+            u.mac_idx = desc[i + 3];                    // Ethernet networking functional descriptor
+        } else if (t == 0x24 && in_ctl && i + 5 < total && desc[i + 2] == 0x1A) {
+            u.ncm_caps = desc[i + 5];                   // NCM functional descriptor
+        } else if (t == 5 && in_ctl && (desc[i + 3] & 3) == 3 && (desc[i + 2] & 0x80) && !u.st_ep) {
+            u.st_ep = desc[i + 2];                      // notifications
+            u.st_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+            u.st_int = desc[i + 6] ? desc[i + 6] : 1;
+        } else if (t == 5 && cur_class == 0x0A && (desc[i + 3] & 3) == 2) {
+            if (desc[i + 2] & 0x80) in_ep = desc[i + 2]; else out_ep = desc[i + 2];
+            cur_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
+        }
+    }
+    data_done();
+    if (u.ctl < 0 || u.data < 0 || (u.proto != UN_RNDIS && !u.mac_idx)) u.proto = -1;
+    return u;
+}
+
+// RNDIS: send the message in un_msg (len bytes; type and length filled in
+// here, and a new request id), and wait for its completion, which comes back
+// in un_msg. False: no answer, or not a success.
+static volatile uint8_t un_msg[256] __attribute__((aligned(64)));
+static bool rndis_cmd(Keyboard& k, uint32_t type, unsigned len)
+{
+    using namespace usbnet;
+    uint8_t* m = (uint8_t*)un_msg;
+    uint32_t id = ++un.rndis_id;
+    wr32(m, type); wr32(m + 4, len); wr32(m + 8, id);
+    if (!control(k, 0x21, 0x00, 0, (uint16_t)un.ctl_iface, (uint16_t)len, un_msg)) return false;   // SEND_ENCAPSULATED_COMMAND
+    // The device says RESPONSE_AVAILABLE on its interrupt endpoint; rather
+    // than wait for that, ask a few times (as Linux's rndis_host does).
+    // Status messages that come first are skipped.
+    for (int tries = 0; tries < 50; tries++) {
+        delay_ms(tries < 5 ? 2 : 20);
+        memset(m, 0, 16);
+        if (!control(k, 0xA1, 0x01, 0, (uint16_t)un.ctl_iface, sizeof un_msg, un_msg)) continue;   // GET_ENCAPSULATED_RESPONSE
+        if (rd32(m) == (type | RNDIS_CMPLT) && rd32(m + 8) == id) return rd32(m + 12) == 0;
+    }
+    return false;
+}
+
+// RNDIS: QUERY an OID. Its answer (up to cap bytes) to out; its length, or -1.
+static int rndis_query(Keyboard& k, uint32_t oid, unsigned in_len, uint8_t* out, unsigned cap)
+{
+    using namespace usbnet;
+    uint8_t* m = (uint8_t*)un_msg;
+    memset(m, 0, 28 + in_len);
+    wr32(m + 12, oid); wr32(m + 16, in_len); wr32(m + 20, 20);   // the buffer right after the header (Linux sends one)
+    if (!rndis_cmd(k, RNDIS_QUERY_MSG, 28 + in_len)) return -1;
+    uint32_t n = rd32(m + 16), off = rd32(m + 20) + 8;
+    if (off > sizeof un_msg || n > sizeof un_msg - off) return -1;
+    if (n > cap) n = cap;
+    memcpy(out, m + off, n);
+    return (int)n;
+}
+
+static bool rndis_set32(Keyboard& k, uint32_t oid, uint32_t v)
+{
+    using namespace usbnet;
+    uint8_t* m = (uint8_t*)un_msg;
+    memset(m, 0, 32);
+    wr32(m + 12, oid); wr32(m + 16, 4); wr32(m + 20, 20); wr32(m + 28, v);
+    return rndis_cmd(k, RNDIS_SET_MSG, 32);
+}
+
+// The MAC address string an ECM or NCM function names, to un.mac.
+static bool un_mac_string(Keyboard& k, int idx)
+{
+    static volatile uint8_t str[64] __attribute__((aligned(64)));
+    if (!control(k, 0x80, 6, (uint16_t)(0x0300 | idx), 0x0409, sizeof str, str) || str[0] < 26) return false;
+    for (int j = 0; j < 6; j++) {                       // 12 hex digits, UTF-16
+        int v = 0;
+        for (int n = 0; n < 2; n++) {
+            int ch = str[2 + 2 * (2 * j + n)] | 0x20;
+            v = v * 16 + (ch >= 'a' ? ch - 'a' + 10 : ch - '0');
+        }
+        un.mac[j] = (uint8_t)v;
+    }
+    return true;
+}
+
+// NCM, before the data interface gets its endpoints: what the device wants
+// of what we send, and receive blocks of UNET_BUF bytes at most.
+static bool ncm_setup(Keyboard& k, const UnFunc& u)
+{
+    using namespace usbnet;
+    static volatile uint8_t p[28] __attribute__((aligned(64)));
+    if (!control(k, 0xA1, 0x80, 0, (uint16_t)u.ctl, sizeof p, p)) return false;   // GET_NTB_PARAMETERS
+    const uint8_t* q = (const uint8_t*)p;
+    if (!(rd16(q + 2) & 1)) return false;               // no NTB16
+    un.ncm = NcmOut();
+    un.ncm.max = rd32(q + 16);
+    un.ncm.divisor = rd16(q + 20);
+    un.ncm.remainder = rd16(q + 22);
+    un.ncm.align = rd16(q + 24);
+    ncm_out_fix(un.ncm);
+    uint32_t in_max = rd32(q + 4);
+    if (in_max != UNET_BUF) {                           // SET_NTB_INPUT_SIZE, its 8-byte form if the device has it
+        static volatile uint8_t s[8] __attribute__((aligned(64)));
+        memset((void*)s, 0, sizeof s);
+        wr32((uint8_t*)s, UNET_BUF);
+        if (!control(k, 0x21, 0x86, 0, (uint16_t)u.ctl, (u.ncm_caps & 0x20) ? 8 : 4, s)) {
+            printf("USB: %s: NCM: the device keeps blocks of %u bytes\n", k.where, (unsigned)in_max);
+            if (in_max > UNET_BUF) return false;
+        }
+    }
+    return true;
+}
+
+// Look through the device's configurations for USB Ethernet; set up the
+// one with the protocol we'd rather have.
 static bool un_probe(Keyboard& k, int ki, volatile uint8_t* desc, int total, int nconf, uint16_t vid, uint16_t pid)
 {
     if (nconf < 1) nconf = 1;
-    for (int ci = 0; ci < nconf && ci < 4; ci++) {
-        if (ci > 0) {                                   // the next configuration
+    if (nconf > 4) nconf = 4;
+    int best = -1, best_rank = 99;
+    for (int ci = 0; ci < nconf; ci++) {                // which configuration
+        if (ci > 0) {
             if (!control(k, 0x80, 6, (uint16_t)(0x0200 | ci), 0, 9, desc)) break;
             total = desc[2] | desc[3] << 8;
             if (total > 1024) total = 1024;
             if (!control(k, 0x80, 6, (uint16_t)(0x0200 | ci), 0, (uint16_t)total, desc)) break;
         }
-        int config = desc[5];
-        int ctl = -1, data = -1, alt = 0, mac_idx = 0, ep_in = 0, ep_out = 0, mps = 512;
-        int cur = -1, cur_alt = 0, cur_class = -1, cur_sub = -1, in_ep = 0, out_ep = 0, cur_mps = 512;
-        int st_ep = 0, st_mps = 8, st_int = 8;
-        for (int i = 0; i + 1 < total && desc[i] >= 2; i += desc[i]) {
-            uint8_t t = desc[i + 1];
-            if (t == 4) {
-                if (cur_class == 0x0A && in_ep && out_ep && data < 0) { data = cur; alt = cur_alt; ep_in = in_ep; ep_out = out_ep; mps = cur_mps; }
-                cur = desc[i + 2]; cur_alt = desc[i + 3]; cur_class = desc[i + 5]; cur_sub = desc[i + 6];
-                in_ep = out_ep = 0;
-                if (cur_class == 2 && cur_sub == 6 && ctl < 0) ctl = cur;
-            } else if (t == 0x24 && cur == ctl && cur_class == 2 && i + 3 < total && desc[i + 2] == 0x0F) {
-                mac_idx = desc[i + 3];                  // Ethernet networking functional descriptor
-            } else if (t == 5 && cur == ctl && cur_class == 2 && (desc[i + 3] & 3) == 3 && (desc[i + 2] & 0x80) && !st_ep) {
-                st_ep = desc[i + 2];                    // notifications
-                st_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
-                st_int = desc[i + 6] ? desc[i + 6] : 1;
-            } else if (t == 5 && cur_class == 0x0A && (desc[i + 3] & 3) == 2) {
-                if (desc[i + 2] & 0x80) in_ep = desc[i + 2]; else out_ep = desc[i + 2];
-                cur_mps = (desc[i + 4] | desc[i + 5] << 8) & 0x7FF;
-            }
-        }
-        if (cur_class == 0x0A && in_ep && out_ep && data < 0) { data = cur; alt = cur_alt; ep_in = in_ep; ep_out = out_ep; mps = cur_mps; }
-        if (ctl < 0 || data < 0 || !mac_idx) continue;
-
-        if (!control(k, 0x00, 9, (uint16_t)config, 0, 0, nullptr)) { printf("USB: %s: SET_CONFIGURATION %d failed\n", k.where, config); return false; }
-        static volatile uint8_t str[64] __attribute__((aligned(64)));
-        if (!control(k, 0x80, 6, (uint16_t)(0x0300 | mac_idx), 0x0409, sizeof str, str) || str[0] < 26) {
-            printf("USB: %s: Ethernet adapter %04x:%04x: no MAC address string\n", k.where, vid, pid);
-            return false;
-        }
-        for (int j = 0; j < 6; j++) {                   // 12 hex digits, UTF-16
-            int v = 0;
-            for (int n = 0; n < 2; n++) {
-                int ch = str[2 + 2 * (2 * j + n)] | 0x20;
-                v = v * 16 + (ch >= 'a' ? ch - 'a' + 10 : ch - '0');
-            }
-            un.mac[j] = (uint8_t)v;
-        }
-        if (!un.rxb) {
-            un.rxb = (volatile uint8_t*)dma_alloc(UNET_RX * UNET_BUF, 4096);
-            un.txb = (volatile uint8_t*)dma_alloc(UNET_BUF, 4096);
-            if (!un.rxb || !un.txb) { printf("USB: out of memory for the Ethernet adapter\n"); un.rxb = nullptr; return false; }
-        }
-        // The data interface to alternate 0 (no endpoints: the function resets
-        // its data path, as the CDC spec has it), then to the one with them.
-        if (alt) {
-            control(k, 0x01, 11, 0, (uint16_t)data, 0, nullptr);
-            control(k, 0x01, 11, (uint16_t)alt, (uint16_t)data, 0, nullptr);
-        }
-        k.iface = data; k.ep_in = ep_in; k.ep_out = ep_out; k.mps = mps;
-        if (!configure_bulk(k)) return false;
-        un.ctl_iface = ctl; un.data_iface = data;
-        un.st_ep = st_ep; un.st_mps = st_mps ? st_mps : 8; un.st_int = st_int;
-        un_st_start(k);
-        control(k, 0x21, 0x43, 0x0C, (uint16_t)ctl, 0, nullptr);   // SET_ETHERNET_PACKET_FILTER: directed, broadcast
-        k.kind = NET;
-        if (H->type == HC_XHCI) {
-            for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
-            H->db[k.slot] = k.dci;
-        } else if (!un2_start(k)) {                     // EHCI / UHCI / OHCI: polled from the periodic schedule
-            printf("USB: %s: Ethernet adapter %04x:%04x: receive not set up\n", k.where, vid, pid);
-            k.kind = KBD;
-            return false;
-        }
-        k.active = true;
-        un.dev = ki;
-        un.gen++;
-        un.errors = 0;
-        snprintf(un.name, sizeof un.name, "USB %04x:%04x", vid, pid);
-        printf("USB: Ethernet adapter %04x:%04x on %s (CDC-ECM, configuration %d, %s, %s speed), MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-               vid, pid, k.where, config, hc_type_name(H->type), speed_name(k.speed), un.mac[0], un.mac[1], un.mac[2], un.mac[3], un.mac[4], un.mac[5]);
-        return true;
+        int p = un_parse(desc, total).proto;
+        if (p < 0) continue;
+        int rank = p == un_pref ? -1 : p;               // ECM, NCM, RNDIS; the preferred one first
+        if (rank < best_rank) { best = ci; best_rank = rank; }
     }
-    return false;
+    if (best < 0) return false;
+    if (!control(k, 0x80, 6, (uint16_t)(0x0200 | best), 0, 9, desc)) return false;
+    total = desc[2] | desc[3] << 8;
+    if (total > 1024) total = 1024;
+    if (!control(k, 0x80, 6, (uint16_t)(0x0200 | best), 0, (uint16_t)total, desc)) return false;
+    UnFunc u = un_parse(desc, total);
+    if (u.proto < 0) return false;
+    int config = desc[5];
+
+    if (!control(k, 0x00, 9, (uint16_t)config, 0, 0, nullptr)) { printf("USB: %s: SET_CONFIGURATION %d failed\n", k.where, config); return false; }
+    if (!un.rxb) {
+        un.rxb = (volatile uint8_t*)dma_alloc(UNET_RX * UNET_BUF, 4096);
+        un.txb = (volatile uint8_t*)dma_alloc(UNET_TXBUF, 4096);
+        if (!un.rxb || !un.txb) { printf("USB: out of memory for the Ethernet adapter\n"); un.rxb = nullptr; return false; }
+    }
+    const char* pn = un_proto_name[u.proto];
+    un.proto = u.proto;
+    un.ctl_iface = u.ctl; un.data_iface = u.data;
+    if (u.proto != UN_RNDIS && !un_mac_string(k, u.mac_idx)) {
+        printf("USB: %s: Ethernet adapter %04x:%04x: no MAC address string\n", k.where, vid, pid);
+        return false;
+    }
+    if (u.proto == UN_NCM) {
+        // NTB sizes only while the data interface has no endpoints (alternate 0).
+        control(k, 0x01, 11, 0, (uint16_t)u.data, 0, nullptr);
+        if (!ncm_setup(k, u)) { printf("USB: %s: Ethernet adapter %04x:%04x: NCM parameters not usable\n", k.where, vid, pid); return false; }
+    }
+    // The data interface to alternate 0 (no endpoints: the function resets
+    // its data path, as the CDC spec has it), then to the one with them.
+    if (u.alt) {
+        control(k, 0x01, 11, 0, (uint16_t)u.data, 0, nullptr);
+        control(k, 0x01, 11, (uint16_t)u.alt, (uint16_t)u.data, 0, nullptr);
+    }
+    k.iface = u.data; k.ep_in = u.ep_in; k.ep_out = u.ep_out; k.mps = u.mps;
+    if (!configure_bulk(k)) return false;
+    un.st_ep = u.st_ep; un.st_mps = u.st_mps ? u.st_mps : 8; un.st_int = u.st_int;
+    int link = -1;
+    if (u.proto == UN_RNDIS) {
+        using namespace usbnet;
+        uint8_t* m = (uint8_t*)un_msg;
+        memset(m, 0, 24);
+        wr32(m + 12, 1); wr32(m + 16, 0); wr32(m + 20, UNET_BUF);   // version 1.0; what one transfer to us may hold
+        if (!rndis_cmd(k, RNDIS_INITIALIZE_MSG, 24)) { printf("USB: %s: RNDIS %04x:%04x: INITIALIZE failed\n", k.where, vid, pid); return false; }
+        uint8_t a[48];
+        if (rndis_query(k, OID_802_3_PERMANENT_ADDRESS, 48, a, sizeof a) < 6) { printf("USB: %s: RNDIS %04x:%04x: no MAC address\n", k.where, vid, pid); return false; }
+        memcpy(un.mac, a, 6);
+        if (rndis_query(k, OID_GEN_MEDIA_CONNECT_STATUS, 4, a, 4) == 4 && rd32(a) == 0) link = 1;   // 0: connected
+        if (!rndis_set32(k, OID_GEN_CURRENT_PACKET_FILTER, rndis_filter(0x0C))) { printf("USB: %s: RNDIS %04x:%04x: packet filter not set\n", k.where, vid, pid); return false; }
+    }
+    un_st_start(k);
+    if (link >= 0) un.link = link;
+    if (u.proto != UN_RNDIS) control(k, 0x21, 0x43, 0x0C, (uint16_t)u.ctl, 0, nullptr);   // SET_ETHERNET_PACKET_FILTER: directed, broadcast
+    k.kind = NET;
+    if (H->type == HC_XHCI) {
+        for (int i = 0; i < UNET_RX; i++) un_queue(k, i);
+        H->db[k.slot] = k.dci;
+    } else if (!un2_start(k)) {                         // EHCI / UHCI / OHCI: polled from the periodic schedule
+        printf("USB: %s: Ethernet adapter %04x:%04x: receive not set up\n", k.where, vid, pid);
+        k.kind = KBD;
+        return false;
+    }
+    k.active = true;
+    un.dev = ki;
+    un.gen++;
+    un.errors = 0;
+    snprintf(un.name, sizeof un.name, "USB %04x:%04x", vid, pid);
+    printf("USB: Ethernet adapter %04x:%04x on %s (%s, configuration %d, %s, %s speed), MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+           vid, pid, k.where, pn, config, hc_type_name(H->type), speed_name(k.speed), un.mac[0], un.mac[1], un.mac[2], un.mac[3], un.mac[4], un.mac[5]);
+    return true;
 }
 
 // net.cpp's side (from the kernel, interrupts off: never inside usb_poll).
@@ -2104,11 +2280,22 @@ extern "C" const char* usb_net_name(void) { return un.name; }
 extern "C" void usb_net_mac(uint8_t* m) { memcpy(m, un.mac, 6); }
 extern "C" int usb_net_send(const uint8_t* f, unsigned len)
 {
-    if (!un_is() || usb_busy || in_poll || len > UNET_BUF - 1) return 0;
+    if (!un_is() || usb_busy || in_poll) return 0;
     Keyboard& k = kbds[un.dev];
     H = k.hc;
-    memcpy((void*)un.txb, f, len);
-    if (len % (unsigned)k.mps == 0) un.txb[len++] = 0;  // no zero-length packet needed: a byte of padding
+    uint8_t* t = (uint8_t*)un.txb;
+    if (un.proto == UN_NCM) {                           // the frame in an NTB; padded past a packet boundary there
+        len = usbnet::ncm_wrap(t, UNET_TXBUF, un.ncm, f, len, (unsigned)k.mps);
+        if (!len) return 0;
+    } else {
+        unsigned hdr = un.proto == UN_RNDIS ? (unsigned)usbnet::RNDIS_HDR : 0;
+        if (len + hdr > UNET_BUF - 1) return 0;
+        if (hdr) len = usbnet::rndis_wrap(t, f, len); else memcpy(t, f, len);
+        if (len % (unsigned)k.mps == 0) {               // no zero-length packet needed: a byte of padding,
+            t[len++] = 0;                               // in RNDIS counted in the message (some devices
+            if (hdr) usbnet::wr32(t + 4, len);          // read the pipe as a stream of messages)
+        }
+    }
     in_poll = 1;                                        // usb_tick stays out while we wait
     uint32_t got = 0;
     int cc = bulk(k, false, un.txb, len, &got);
@@ -2122,7 +2309,8 @@ extern "C" void usb_net_filter(int bits)                // SET_ETHERNET_PACKET_F
     Keyboard& k = kbds[un.dev];
     H = k.hc;
     in_poll = 1;
-    control(k, 0x21, 0x43, (uint16_t)bits, (uint16_t)un.ctl_iface, 0, nullptr);
+    if (un.proto == UN_RNDIS) rndis_set32(k, usbnet::OID_GEN_CURRENT_PACKET_FILTER, usbnet::rndis_filter(bits));
+    else control(k, 0x21, 0x43, (uint16_t)bits, (uint16_t)un.ctl_iface, 0, nullptr);
     in_poll = 0;
 }
 
@@ -2811,6 +2999,11 @@ bool usb_init(const char* cmdline) {
     ua.dev = -1; um.dev = -1;
     for (const char* p = cmdline; p && *p; p++)
         if (strncmp(p, "usb=off", 7) == 0) { printf("USB: disabled\n"); return false; }
+    if (const char* o = cmdline ? strstr(cmdline, "usbnet=") : nullptr) {
+        if (!strncmp(o + 7, "ncm", 3)) un_pref = UN_NCM;
+        else if (!strncmp(o + 7, "rndis", 5)) un_pref = UN_RNDIS;
+        else un_pref = UN_ECM;
+    }
     pad_keys_option(cmdline);
     if (const char* d = cmdline ? strstr(cmdline, "usbdelay=") : nullptr) {
         uint32_t n = 0;

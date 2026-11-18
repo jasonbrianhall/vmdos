@@ -792,8 +792,10 @@ virtio 1.0), the DEC 21140 "Tulip" (Hyper-V Gen 1's Legacy Network Adapter, and 
 cards like the DE500; `tulip=21143` also takes QEMU's `-nic model=tulip`, a 21143), PCI NE2000s
 (the Realtek RTL8029 of PCem and 86Box, QEMU's `-nic model=ne2k_pci`, and other DP8390 clones), Hyper-V's
 synthetic network adapter (see "Hyper-V" below), and USB Ethernet adapters
-that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
-them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
+and phones that speak CDC-ECM, CDC-NCM or RNDIS (Android USB tethering:
+RNDIS on most phones, NCM on newer ones), on xHCI, EHCI, UHCI or OHCI, plugged
+in before or after boot; `net=off` skips them, `netlog` logs frames) and DOS
+reaches them through TSRs in C:\VMDOS:
 
     VMPKT [0x60 [10]]    packet driver (FTP spec 1.11) on INT 60h, IRQ 10
     VMIPX [802.3]        IPX (INT 2Fh 7A00h / INT 7Ah) on that packet driver
@@ -808,6 +810,18 @@ use (NetWare ODI drivers default to 802.3); `VMIPX 802.3` fixes it. The RTL8168/
 the firmware having set up the PHY (`debug=1` logs what vmdos found); the
 Broadcom 5700-5704's fiber (TBI) ports aren't driven, and a 5701 A0 wants a
 firmware patch vmdos doesn't have.
+
+USB Ethernet: when a device offers more than one of CDC-ECM, CDC-NCM and
+RNDIS (in different configurations, as QEMU's usb-net and many RTL8153
+adapters do), vmdos picks ECM, then NCM, then RNDIS; `usbnet=ncm` or
+`usbnet=rndis` on the kernel command line puts that one first. For a phone,
+turn on USB tethering after plugging it in; the boot log shows the adapter
+appear (`USB: Ethernet adapter ... (RNDIS ...)`). Not driven: iPhones
+(Apple's own protocol) and adapters that only speak a vendor protocol
+(ASIX AX88179/AX88772, RTL8152 without its ECM configuration). In QEMU,
+`make run NIC=usb` gives an ECM/RNDIS device (`KARGS=usbnet=rndis` for
+RNDIS); `tests/usbnet` has the framing's tests and a patch that turns
+QEMU's usb-net into an NCM device.
 
 vmdos also shows DOS an NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
 `ne2k=off` removes it) on the same card and address, for drivers that want
@@ -1162,7 +1176,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
 | `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP); tcp9p's connections and DNS for DOS programs too (INT 2Fh AX=564Eh BL=13-18: SSH) |
 | `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
-| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, DEC 21140 Tulip, NE2000 (RTL8029), Hyper-V netvsc, USB (CDC-ECM) |
+| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, DEC 21140 Tulip, NE2000 (RTL8029), Hyper-V netvsc, USB (CDC-ECM, CDC-NCM and RNDIS: the protocols in `src/usb.cpp`, their framing in `src/usbnet_frame.h`, tested by `tests/usbnet`) |
 | `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / NVMe / Hyper-V / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, NVMe, Hyper-V storvsc, USB), FAT reader |
 | `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |
 | `src/vmbus.cpp` | Hyper-V's VMBus (hypercalls, SynIC, channels, ring buffers), for storvsc and netvsc |

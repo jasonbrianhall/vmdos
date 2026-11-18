@@ -813,11 +813,17 @@ static void un2_rx(Keyboard& k, int got, bool err) {
             memcpy((void*)(f + un2_have), (const void*)k.reports, (size_t)got);
             un2_have += (uint32_t)got;
         } else if (got > 0) un2_have = UNET_BUF + 1;    // too long: dropped at its end
-        if (got < k.mps) {                              // a short packet ends the frame
-            if (un2_have >= 14 && un2_have <= UNET_BUF) net_usb_rx((const uint8_t*)f, un2_have);
+        // A short packet ends the transfer; so does a full buffer (an NCM
+        // block of exactly the size we asked for has no zero-length packet),
+        // and RNDIS messages or an NCM block that end with this packet.
+        const uint8_t* fb = (const uint8_t*)f;
+        if (got < k.mps || un2_have == UNET_BUF ||
+            (un.proto == UN_RNDIS && usbnet::rndis_complete(fb, un2_have)) ||
+            (un.proto == UN_NCM && usbnet::ncm_complete(fb, un2_have))) {
+            if (un2_have >= 14 && un2_have <= UNET_BUF) un_rx((const uint8_t*)f, un2_have);
             un2_have = 0;
         }
-    } else if (got >= 14) net_usb_rx((const uint8_t*)k.reports, (unsigned)got);
+    } else if (got >= 14) un_rx((const uint8_t*)k.reports, (unsigned)got);
     if (H->type == HC_EHCI) e_intr_arm(k); else if (H->type == HC_OHCI) o_intr_arm(k); else u_intr_arm(k);
 }
 

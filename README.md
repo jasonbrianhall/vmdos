@@ -59,7 +59,8 @@ FreeDOS's kernel and FreeCOM run **unmodified**. So do your games.
 - Boots from **UEFI or legacy BIOS**, from a **USB stick**, SATA, IDE, NVMe or virtio. It's one image for both.
 - **USB everything**: xHCI, EHCI, UHCI, OHCI; keyboards, mice, hubs, mass storage, audio, CD drives, Ethernet. Hot-plug included.
 - Network drivers for **Intel (e1000/e1000e/igb/igc), Realtek (8139/8169/8111/8125/8126), Broadcom tg3,
-  Atheros/Killer, virtio-net, Tulip, NE2000** and CDC-ECM USB adapters.
+  Atheros/Killer, virtio-net, Tulip, NE2000**, USB adapters (CDC-ECM and CDC-NCM),
+  and **Android phones over USB tethering** (RNDIS and NCM).
 - Real CD/DVD drives, partitions on other disks (`VMHD`), and **FDISK/FORMAT** that just work.
 - Also runs as a VM under **QEMU/KVM, libvirt and Hyper-V** (VMBus storage and network), with ACPI shutdown,
   the guest agent and host clipboard sharing.

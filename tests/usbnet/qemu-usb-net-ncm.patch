@@ -1,0 +1,137 @@
+diff --git a/hw/usb/dev-network.c b/hw/usb/dev-network.c
+index 2c33e36..1b96465 100644
+--- a/hw/usb/dev-network.c
++++ b/hw/usb/dev-network.c
+@@ -192,10 +192,10 @@ static const USBDescIface desc_iface_cdc[] = {
+         .bInterfaceNumber              = 0,
+         .bNumEndpoints                 = 1,
+         .bInterfaceClass               = USB_CLASS_COMM,
+-        .bInterfaceSubClass            = USB_CDC_SUBCLASS_ETHERNET,
++        .bInterfaceSubClass            = 0x0d, /* NCM (vmdos test build) */
+         .bInterfaceProtocol            = USB_CDC_PROTO_NONE,
+         .iInterface                    = STRING_CONTROL,
+-        .ndesc                         = 3,
++        .ndesc                         = 4,
+         .descs = (USBDescOther[]) {
+             {
+                 /* Header Descriptor */
+@@ -227,6 +227,9 @@ static const USBDescIface desc_iface_cdc[] = {
+                     0x00, 0x00,                 /*  le16  wNumberMCFilters */
+                     0x00,                       /*  u8    bNumberPowerFilters */
+                 },
++            },{
++                /* NCM functional descriptor */
++                .data = (uint8_t[]) { 0x06, USB_DT_CS_INTERFACE, 0x1a, 0x00, 0x01, 0x20 },
+             },
+         },
+         .eps = (USBDescEndpoint[]) {
+@@ -249,6 +252,7 @@ static const USBDescIface desc_iface_cdc[] = {
+         .bAlternateSetting             = 1,
+         .bNumEndpoints                 = 2,
+         .bInterfaceClass               = USB_CLASS_CDC_DATA,
++        .bInterfaceProtocol            = 0x01, /* NTB */
+         .iInterface                    = STRING_DATA,
+         .eps = (USBDescEndpoint[]) {
+             {
+@@ -645,6 +649,8 @@ struct USBNetState {
+     uint16_t connection;
+ 
+     unsigned int out_ptr;
++    uint32_t ntb_in_max;
++    uint16_t ntb_seq;
+     uint8_t out_buf[2048];
+ 
+     unsigned int in_ptr, in_len;
+@@ -1132,6 +1138,26 @@ static void usb_net_handle_control(USBDevice *dev, USBPacket *p,
+         }
+         break;
+ 
++    case ClassInterfaceRequest | 0x80: { /* GET_NTB_PARAMETERS */
++        static const uint8_t prm[28] = {
++            28, 0, 1, 0,            /* wLength, bmNtbFormatsSupported: NTB16 */
++            0x00, 0x40, 0, 0,       /* dwNtbInMaxSize 16384 (host must lower it) */
++            4, 0, 0, 0, 4, 0, 0, 0, /* in divisor 4, remainder 0, alignment 4 */
++            0x00, 0x40, 0, 0,       /* dwNtbOutMaxSize 16384 */
++            32, 0, 2, 0, 4, 0,      /* out divisor 32, remainder 2, alignment 4 */
++            1, 0 };
++        if (is_rndis(s) || length < 28) goto fail;
++        memcpy(data, prm, 28);
++        p->actual_length = 28;
++        fprintf(stderr, "usbnet-ncm: GET_NTB_PARAMETERS\n");
++        break;
++    }
++    case ClassInterfaceOutRequest | 0x86: /* SET_NTB_INPUT_SIZE */
++        if (is_rndis(s) || (length != 4 && length != 8)) goto fail;
++        s->ntb_in_max = ldl_le_p(data);
++        fprintf(stderr, "usbnet-ncm: SET_NTB_INPUT_SIZE %u (%d bytes)\n", s->ntb_in_max, length);
++        break;
++
+     default:
+     fail:
+         fprintf(stderr, "usbnet: failed control transaction: "
+@@ -1188,6 +1214,7 @@ static void usb_net_handle_datain(USBNetState *s, USBPacket *p)
+         p->status = USB_RET_NAK;
+         return;
+     }
++    if (getenv("NCMDBG")) fprintf(stderr, "usbnet-ncm: datain iov %zu in_len %u ptr %u\n", p->iov.size, s->in_len, s->in_ptr);
+     len = s->in_len - s->in_ptr;
+     if (len > p->iov.size) {
+         len = p->iov.size;
+@@ -1226,7 +1253,23 @@ static void usb_net_handle_dataout(USBNetState *s, USBPacket *p)
+ 
+     if (!is_rndis(s)) {
+         if (p->iov.size % 64 || p->iov.size == 0) {
+-            qemu_send_packet(qemu_get_queue(s->nic), s->out_buf, s->out_ptr);
++            uint8_t *b = s->out_buf;
++            if (getenv("NCMDBG")) fprintf(stderr, "usbnet-ncm: tx %u\n", s->out_ptr);
++            uint32_t n = s->out_ptr, blk, ndp;
++            if (n < 12 || ldl_le_p(b) != 0x484D434E) {
++                fprintf(stderr, "usbnet-ncm: bad NTH16\n"); goto out;
++            }
++            blk = lduw_le_p(b + 8); ndp = lduw_le_p(b + 10);
++            if (blk > n || ndp + 16 > blk || ldl_le_p(b + ndp) != 0x304D434E) {
++                fprintf(stderr, "usbnet-ncm: bad NTB block %u ndp %u got %u\n", blk, ndp, n); goto out;
++            }
++            for (uint32_t e = ndp + 8; e + 4 <= ndp + lduw_le_p(b + ndp + 4); e += 4) {
++                uint32_t at = lduw_le_p(b + e), dl = lduw_le_p(b + e + 2);
++                if (!at || !dl) break;
++                if (at % 32 != 2) fprintf(stderr, "usbnet-ncm: datagram at %u breaks divisor 32 rem 2\n", at);
++                if (at + dl <= blk) qemu_send_packet(qemu_get_queue(s->nic), b + at, dl);
++            }
++        out:
+             s->out_ptr = 0;
+         }
+         return;
+@@ -1335,6 +1378,24 @@ static ssize_t usbnet_receive(NetClientState *nc, const uint8_t *buf, size_t siz
+         in_buf += sizeof(*msg);
+     }
+ 
++    if (getenv("NCMDBG")) fprintf(stderr, "usbnet-ncm: rx %zu in_len %u\n", size, s->in_len);
++    if (!is_rndis(s)) {
++        uint32_t dg = 12, ndp = (dg + size + 3) & ~3u, blk = ndp + 16;
++        if (blk > sizeof(s->in_buf) || blk > s->ntb_in_max) {
++            fprintf(stderr, "usbnet-ncm: NTB of %u over the host's %u\n", blk, s->ntb_in_max);
++            return size;
++        }
++        memset(in_buf, 0, blk);
++        stl_le_p(in_buf, 0x484D434E); stw_le_p(in_buf + 4, 12);
++        stw_le_p(in_buf + 6, s->ntb_seq++); stw_le_p(in_buf + 8, blk); stw_le_p(in_buf + 10, ndp);
++        memcpy(in_buf + dg, buf, size);
++        stl_le_p(in_buf + ndp, 0x304D434E); stw_le_p(in_buf + ndp + 4, 16);
++        stw_le_p(in_buf + ndp + 8, dg); stw_le_p(in_buf + ndp + 10, size);
++        s->in_len = blk;
++        s->in_ptr = 0;
++        usb_wakeup(s->bulk_in, 0);
++        return size;
++    }
+     memcpy(in_buf, buf, size);
+     s->in_len = total_size;
+     s->in_ptr = 0;
+@@ -1367,6 +1428,7 @@ static NetClientInfo net_usbnet_info = {
+ 
+ static void usb_net_realize(USBDevice *dev, Error **errp)
+ {
++    ((USBNetState *)dev)->ntb_in_max = 16384;
+     USBNetState *s = USB_NET(dev);
+ 
+     usb_desc_create_serial(dev);
