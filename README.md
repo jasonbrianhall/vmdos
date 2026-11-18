@@ -885,6 +885,20 @@ that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
 
+### FLT: Felix Terminal (SSH with sixel and kitty graphics)
+
+C:\VMDOS\NET\FLT.EXE (on C: only) is Felix Terminal for DOS: an SSH client
+(libssh2) drawn on a VESA mode with FreeType, xterm-256color, sixel and kitty
+graphics, so `timg`, `img2sixel` and gnuplot's sixel output show pictures on
+the DOS screen. After STARTNET: `FLT user@host` (`FLT user@host:2222`,
+`FLT -g 1280x800 user@host` for another mode, `-t` a theme, `-f` the font
+size). Shift+PgUp/PgDn scroll back; with a mouse driver, drag to copy,
+middle-click to paste, right-click for themes and resolutions (kept in
+%HOME%\FLT.CFG). Keys and known_hosts are in C:\HOME\.ssh, as for SSH, and it
+runs on the same vmdos TCP. `third_party/flt/README.vmdos` has the options;
+it's built from [felixterminal](https://github.com/jasonbrianhall/felixterminal)'s
+`msdos/` folder.
+
 ### Downloads: WGET
 
 `WGET https://example.com/file.zip` (after STARTNET) saves FILE.ZIP in the
@@ -1165,6 +1179,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
 | `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
 | `third_party/openssh/` | OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's TCP) with their DOS glue, sockets, terminal and OpenSSH patch (prebuilt; licenses, notes in its README.vmdos; `tools/build-openssh.sh`) |
+| `third_party/flt/` | FLT, Felix Terminal DOS Edition (SSH terminal with Sixel, Kitty and VT100; prebuilt; in C:\VMDOS\NET, C: only; notes in its README.vmdos) |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
 | `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT; CWSDPMI built in for VMHV) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |

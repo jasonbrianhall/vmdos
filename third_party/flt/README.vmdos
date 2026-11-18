@@ -1,5 +1,48 @@
-Felix Terminal DOS Edition from https://github.com/jasonbrianhall/felixterminal
+FLT, Felix Terminal for MS-DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), in
+C:\VMDOS\NET on C: only (the boot floppy has no room).
 
-Felix Terminal is an SSH shell supporting Sixel, Kitty protocol, and is VT100 compatible.  It supports scroll back with shift+pageup/pagedown and has multiple themese to select.  It also supports copy and paste.
+  FLT.EXE   github.com/jasonbrianhall/felixterminal, msdos/ (prebuilt,
+            unmodified; `make` there, `make dist` for FLT.EXE and README.TXT)
 
+Felix Terminal's terminal, its sixel and kitty graphics and its built-in SSH
+client (libssh2), drawn on a VESA mode: SSH from DOS to a Linux box and run
+timg, img2sixel, gnuplot's sixel terminal and the like, with the pictures on
+the DOS screen. It uses vmdos's own TCP (the same socket layer as SSH, WGET
+and LYNX), IPv4 and IPv6.
 
+    STARTNET                       (once: the TCP/IP settings, by DHCP)
+    FLT user@host                  (or FLT host, FLT user@host:2222)
+    FLT -g 1280x800 user@host      (another screen mode)
+
+    FLT [-4|-6] [-p port] [-l user] [-i keyfile] [-g WxH[xBITS]] [-f size]
+        [-t theme] [user@]host[:port] [command]
+
+  -g WxH[xBITS]  the VESA mode (or SET FLT_VIDEO=WxH). Default 1024x768,
+                 32-bit if there is one, else 16-bit; otherwise the largest
+                 mode of 640x480 or more.
+  -f size        font size in pixels (16: 10x22 cells, 102x34 characters at
+                 1024x768). DejaVu Sans Mono, built in.
+  -i keyfile     the private key. Otherwise ~/.ssh/config's IdentityFile, then
+                 ~/.ssh/id_ed25519, id_rsa, ... ~ is %HOME%, C:\HOME if not set
+                 (as vmdos's SSH); known_hosts is there too.
+  -4 / -6        IPv4 or IPv6 only. Otherwise IPv6 first only if this PC has a
+                 global address.
+  -t theme       a theme by name (or its start) or number (or SET FLT_THEME=).
+
+Keys and mouse (a DOS mouse driver: CTMOUSE, or vmdos's):
+
+  Shift+PgUp/PgDn/Home/End   scroll back (images too); any other key returns
+  Left-drag                  select; copies on release
+  Middle-click, Shift+Ins    paste (FLT's own clipboard; bracketed paste)
+  Shift+mouse                select even when a program (vim mouse=a, htop,
+                             mc) has asked for the mouse
+  Right-click                menu: Copy, Paste, Themes, Resolution (lists the
+                             VESA modes and switches at once); Esc closes it
+
+The theme and mode chosen are kept in %HOME%\FLT.CFG (theme=, mode=WxHxBITS);
+-g/FLT_VIDEO and -t/FLT_THEME override it. SET FLT_LOG=file writes a debug log.
+TERM is xterm-256color; timg -pk draws with kitty graphics, timg -ps with sixel.
+
+Not in the DOS build: OpenGL effects, sound, SFTP, port forwarding, X11
+forwarding, the SSH key manager, telnet, serial, a local shell and the
+system clipboard.
