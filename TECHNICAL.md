@@ -1020,7 +1020,7 @@ the kernel command line logs the connection.
 
 ## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
 
-Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
+Some software has to own the CPU: HIMEM and EMM386, Windows 3.x to ME, DOS
 extenders' raw and VCPI kernels (DOS/32A's own, its SD/32A debugger),
 games that are their own memory manager. vmdos can't give them that in
 virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
@@ -1101,9 +1101,10 @@ turns it off; `wdtest` hangs vmdos 20 s into VMHV to try it.
 Ctrl+Shift+F10 logs the same state (the VM, the screen's redraws, the
 Voodoo 3) when the screen freezes but the keyboard still works.
 
+Windows 3.x, 95, 98 and ME all run in the VM.
+
 Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
-PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
-untested.
+PAE-paging guest; the CD-ROM (VMCD) inside the VM.
 
 ## Hyper-V
 
@@ -1137,8 +1138,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 
 ## Not yet
 
-- Mode X's 240-line timing, EMS, SB16 (16-bit)
-  sound, saving C: to a real disk.
+- Mode X's 240-line timing, saving C: to a real disk.
 
 ## Layout
 

@@ -78,7 +78,7 @@ FreeDOS's kernel and FreeCOM run **unmodified**. So do your games.
   and **ZCOPY**, an XCOPY with long names and a progress bar.
 
 **🧪 And for the stubborn ones: VMHV**
-Some software insists on owning the CPU: HIMEM/EMM386, Windows 3.x, DOS extenders' raw kernels.
+Some software insists on owning the CPU: HIMEM/EMM386, Windows 3.x/95/98/ME, DOS extenders' raw kernels.
 `VMHV` restarts DOS inside a **hardware virtual machine** (AMD-V or Intel VT-x) where it can, while
 vmdos still provides the disks, sound, video and input. *(Draft; see [TECHNICAL.md](TECHNICAL.md#vmhv-dos-in-a-virtual-machine-draft-amd-v-or-intel-vt-x).)*
 
