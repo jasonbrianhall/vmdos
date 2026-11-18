@@ -144,4 +144,4 @@ BOOT OPTIONS
     norouteirq     DPMI games: IRQs from real mode via real-mode handlers
     bootlog=off    No boot messages on screen
 
-More: README.md at https://github.com/jasonbrianhall/vmdos
+More: README.md and TECHNICAL.md at https://github.com/jasonbrianhall/vmdos
