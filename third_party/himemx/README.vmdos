@@ -8,4 +8,4 @@ HIMEMX.EXE is prebuilt, unmodified: jwasm -mz -Fo HIMEMX.EXE HimemX.asm
 
 vmdos doesn't use it in V86 mode (it has its own XMS); it is for VMHV's
 virtual machine, where DOS brings its own memory managers (FDCONFIG.SYS
-menu choice 2, see README.md).
+menu choice 2, see TECHNICAL.md).

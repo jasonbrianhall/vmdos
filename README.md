@@ -1,1188 +1,182 @@
-# vmdos
+<p align="center">
+  <img src="icon.png" alt="vmdos: powered by FreeDOS" width="220">
+</p>
 
-Virtual Monitor DOS is a type 1 hypervisor designed to boot FreeDOS
-and other versions of DOS (MS-DOS) on modern hardware and run at full 
-speed on the 80x86 platform.  It virtualizes the hardware so DOS thinks
-it owns the computer.
+<h1 align="center">vmdos</h1>
 
-FreeDOS running in virtual-8086 mode under a small 32-bit protected-mode
-kernel. Boots from GRUB (BIOS or UEFI) or QEMU `-kernel`. The kernel emulates
-the BIOS and the PC hardware DOS touches; FreeDOS's kernel and FreeCOM run
-unmodified. Drive C: is the FAT partition of the EFI disk (SATA, IDE or USB), so
-changes are kept; a RAM disk (dos.img) is the option and the fallback.
+<p align="center">
+  <b>Boot straight into DOS on a modern PC, at full speed, with today's hardware working.</b><br>
+  A tiny bare-metal hypervisor that makes FreeDOS (or MS-DOS) believe it owns a 1990s PC,<br>
+  while it actually runs on your UEFI laptop's USB 3, NVMe, HD Audio and gigabit Ethernet.
+</p>
 
-## Build and run
+<p align="center">
+  <a href="https://github.com/jasonbrianhall/vmdos/releases"><b>⬇ Download the USB image</b></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="TECHNICAL.md">Technical reference</a>
+</p>
 
+---
+
+<p align="center">
+  <img src="docs/screenshots/flt-sixel-kitty.png" alt="FLT, Felix Terminal for DOS, showing kitty and sixel images over SSH" width="760"><br>
+  <sub>Yes, that's DOS. Felix Terminal over SSH to a Linux box, drawing kitty and sixel graphics.</sub>
+</p>
+
+## Why vmdos?
+
+DOS on a modern PC is usually painful. There's no Sound Blaster, no PS/2 port, USB
+keyboards that vanish once the BIOS hands over, no CSM on new laptops, and drivers that
+stopped at 2001. Emulators work, but they're emulators.
+
+**vmdos takes a different approach.** It's a small 32-bit kernel that boots on the bare
+machine from UEFI or legacy BIOS, puts DOS in virtual-8086 mode, and *pretends to be the
+PC DOS expects*. Your game writes to a Sound Blaster at 220h and hears it through HD Audio,
+HDMI or a USB headset. It reads a USB 3 stick as drive C:. It uses the mouse driver that
+was built into the monitor before it booted. The CPU runs DOS code natively: no
+interpretation, no JIT, just your actual hardware.
+
+FreeDOS's kernel and FreeCOM run **unmodified**. So do your games.
+
+## Highlights
+
+**🎮 Built for games**
+- **Sound Blaster Pro / 16** with **OPL3** FM, **AdLib**, **MPU-401 General MIDI**, a **Gravis UltraSound**,
+  an **Ensoniq AudioPCI** and the PC speaker, played through **HD Audio, HDMI/DisplayPort, AC'97, USB audio** or a real SB.
+  Plug in USB headphones mid-game and sound follows them. You can even record from a USB mic.
+- **XMS, EMS and DPMI built in**: about 620 KB of free conventional memory, and DOS/4GW, PMODE/W,
+  DOS/32A and DJGPP programs (DOOM, Quake) run on vmdos's own DPMI host.
+- **VGA, Mode X, EGA planar and VESA 3.0** up to 1920x1080, with **sharp, smooth or xBRZ pixel-art
+  scaling** onto any panel and `Ctrl+Shift+F8` to cycle the modes live.
+- An emulated **3dfx Voodoo 3** (86Box's code, its JIT, spread over extra CPU cores) for Glide and Direct3D.
+- **USB gamepads become the PC game port**, with spare buttons mappable to keys.
+- **CD images (ISO and CUE/BIN with CD audio tracks)**, floppy images, and **booter games** that start from
+  their own disk. Swap discs mid-game with the media console.
+- **Too fast?** `VMSPEED 5` or `Ctrl+Shift+F11` slows the machine down, as MoSlo does.
+
+**🖥️ Runs on real, modern hardware**
+- Boots from **UEFI or legacy BIOS**, from a **USB stick**, SATA, IDE, NVMe or virtio. It's one image for both.
+- **USB everything**: xHCI, EHCI, UHCI, OHCI; keyboards, mice, hubs, mass storage, audio, CD drives, Ethernet. Hot-plug included.
+- Network drivers for **Intel (e1000/e1000e/igb/igc), Realtek (8139/8169/8111/8125/8126), Broadcom tg3,
+  Atheros/Killer, virtio-net, Tulip, NE2000** and CDC-ECM USB adapters.
+- Real CD/DVD drives, partitions on other disks (`VMHD`), and **FDISK/FORMAT** that just work.
+- Also runs as a VM under **QEMU/KVM, libvirt and Hyper-V** (VMBus storage and network), with ACPI shutdown,
+  the guest agent and host clipboard sharing.
+
+**🌐 DOS, online**
+- **TCP/IP with IPv4 and IPv6** (DHCP, SLAAC, DHCPv6), kept alive by vmdos underneath DOS.
+- **OpenSSH 10.6** (`SSH`, `SFTP`, `SCP`), **FLT** (Felix Terminal: SSH with sixel and kitty graphics),
+  **WGET**, **curl 8**, **Lynx** with TLS 1.3, and the `openssl` command.
+- **IPX for LAN games**, plus a bridge to **DOSBox's IPXNET**, so a real PC can play with DOSBox players over the internet.
+- **Host folders as DOS drives** over 9P (QEMU virtio-9p, or any diod server on the network), with long file names.
+- A **remote DOS prompt** over telnet, if you ask for it.
+
+**🧰 Batteries included**
+- EDIT (vmdos's own, with long names), **Vim**, **Felix BASIC** (a QBasic-style IDE with graphics and sound),
+  LESS, ZIP/UNZIP, XCOPY, DELTREE, TREE, MEM, MKEYB keyboard layouts, CuteMouse, DOSLFN long file names,
+  and **ZCOPY**, an XCOPY with long names and a progress bar.
+
+**🧪 And for the stubborn ones: VMHV**
+Some software insists on owning the CPU: HIMEM/EMM386, Windows 3.x, DOS extenders' raw kernels.
+`VMHV` restarts DOS inside a **hardware virtual machine** (AMD-V or Intel VT-x) where it can, while
+vmdos still provides the disks, sound, video and input. *(Draft; see [TECHNICAL.md](TECHNICAL.md#vmhv-dos-in-a-virtual-machine-draft-amd-v-or-intel-vt-x).)*
+
+## Screenshots
+
+All taken from the release USB image, booted in QEMU.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/bootlog.png" alt="vmdos boot log"><br><sub><b>Boot.</b> vmdos finds the hardware, then asks which DOS to start.</sub></td>
+<td width="50%"><img src="docs/screenshots/dos-prompt.png" alt="FreeDOS prompt under vmdos"><br><sub><b>C:\&gt;</b> FreeDOS with XMS, EMS, CD-ROM and mouse, all provided by vmdos.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/memory.png" alt="MEM output"><br><sub><b>MEM.</b> 614 KB free conventional memory, 32 MB EMS and plenty of XMS, with no HIMEM or EMM386.</sub></td>
+<td><img src="docs/screenshots/startnet.png" alt="STARTNET: DHCP and IPv6"><br><sub><b>STARTNET.</b> DHCP, then IPv6 SLAAC and DHCPv6, on the PC's own network card.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/felix-basic-editor.png" alt="Felix BASIC editor"><br><sub><b>Felix BASIC.</b> A QBasic-style IDE, ready to go. Press F5…</sub></td>
+<td><img src="docs/screenshots/felix-basic-graphics.png" alt="Felix BASIC graphics output"><br><sub>…and you get SCREEN 12 graphics.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/lynx.png" alt="Lynx web browser in DOS"><br><sub><b>Lynx.</b> A real web browser with TLS 1.3, here reading this very README in a 128x48 text mode.</sub></td>
+<td><img src="docs/screenshots/media-console.png" alt="vmdos media console"><br><sub><b>Media console</b> (<code>Ctrl+Shift+F6</code>). Swap CDs, floppies and disks without leaving the game.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/edit.png" alt="vmdos EDIT"><br><sub><b>EDIT.</b> vmdos's own text editor, long file names included.</sub></td>
+<td><img src="docs/screenshots/flt-sixel-kitty.png" alt="FLT with images"><br><sub><b>FLT.</b> <code>timg</code> and <code>img2sixel</code> output on a DOS screen.</sub></td>
+</tr>
+</table>
+
+## Quick start
+
+### On a real PC (USB stick)
+
+1. Grab **`vmdos-usb.img.xz`** from the [releases](https://github.com/jasonbrianhall/vmdos/releases).
+   It's FreeDOS plus vmdos and every tool above on a 2000 MiB C:. For an actual 486, use `vmdos-usb-486.img.xz`.
+2. Write it to a stick. This erases the stick:
+   ```sh
+   xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync
+   ```
+   On Windows or macOS, Etcher or Rufus works too.
+3. Turn **Secure Boot off**, pick the stick in the boot menu (UEFI or legacy), and you're at `C:\>`.
+
+The stick *is* drive C:, so saved games persist. Mount it on Linux (it's FAT32) to drop your games in.
+
+### In QEMU
+
+```sh
+xz -dk vmdos-usb.img.xz
+qemu-system-x86_64 -M q35 -accel kvm -smp 2 -m 512 -bios /usr/share/ovmf/OVMF.fd \
+    -drive file=vmdos-usb.img,format=raw -nic user,model=e1000 \
+    -device intel-hda -device hda-duplex
 ```
-# Fedora: sudo dnf install gcc nasm python3 mtools dosfstools gnu-efi-devel glibc-devel.i686 libgcc.i686 \
-#         grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso qemu-system-x86 edk2-ovmf
+
+(Fedora's OVMF is `/usr/share/edk2/ovmf/OVMF_CODE.fd`. Drop `-bios ...` to boot through SeaBIOS instead.)
+
+### Build it yourself
+
+```sh
 sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf
-make            # vmdos.elf (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
-make efi        # vmdos.efi: a UEFI application, no GRUB needed
-make esp        # esp.img: the EFI disk, also C: (FreeDOS at its root, EFI/BOOT/BOOTX64.EFI); dd it to a disk
-make iso        # vmdos.iso (GRUB), hybrid BIOS/UEFI
-make run        # QEMU, BIOS (-kernel)
-make run-efi-app  # QEMU, UEFI (OVMF), booting esp.img
-make run-efi    # QEMU, UEFI, from vmdos.iso
+make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: bootable disk with your games and CDs
+make run-efi-app                              # try it in QEMU (UEFI)
+sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync
 ```
 
-### Booting from a USB stick
+Fedora packages, `make iso`, `make efi`, chainloading from your existing GRUB and many
+more options are in [TECHNICAL.md → Build and run](TECHNICAL.md#build-and-run).
 
-Ready-made image: the [releases](https://github.com/jasonbrianhall/vmdos/releases)
-have `vmdos-usb.img.xz` (FreeDOS + vmdos, no games, a 2000 MiB C:) built by
-GitHub Actions (`.github/workflows/release.yml`: a `v*` tag makes a release,
-running the workflow by hand updates the `latest` pre-release). Write it with
-`xz -dc vmdos-usb.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync`, or Etcher /
-Rufus. Or build your own with games:
+## Handy keys
 
-```
-make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: EFI boot files + FreeDOS + your games
-sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync   # sdX = the stick (lsblk); everything on it is replaced
-```
-
-Plug it in, pick the stick in the PC's boot menu (UEFI or legacy BIOS). The stick is then
-C: (vmdos reads it through its own USB driver: xHCI, EHCI, UHCI or OHCI, bulk-only mass
-storage, USB 2 and 3), so changes and saved games stay on it. Turn Secure
-Boot off (vmdos.efi isn't signed). `make run-usb` tries the same in QEMU.
-Afterwards the stick can be mounted on Linux to add games (it's FAT32).
-The image's C: is 2000 MiB; to use the rest of a bigger stick, grow the
-partition and its file system together (GParted's Resize/Move does both;
-`fatresize` from the command line). `ESP_FAT=16` builds FAT16 instead (at
-most ~4 GB; for MS-DOS 6.22 booting from C:).
-
-### Boot menu (UEFI and legacy BIOS)
-
-esp.img boots both ways through GRUB: on UEFI, `EFI/BOOT/BOOTX64.EFI` is
-GRUB, which chainloads `EFI/vmdos/vmdos.efi`; on a legacy BIOS (or CSM),
-GRUB's boot code in the MBR and in the gap before the partition boots
-`boot/vmdos.elf`. The partition is FAT32 (type 0C) and active, as on
-Windows install sticks: some InsydeH2O (HP, Acer) and other CSMs skip a
-stick in legacy mode without the active flag or with an EFI-typed (EF)
-partition (`ESP_TYPE=EF` for that anyway). If the stick still doesn't show
-in the legacy boot menu: enable Legacy Support, disable Secure Boot, put
-"USB Diskette on Key/USB Hard Drive" first, and on some older HP Pavilions
-enable floppy boot and put "USB Floppy" first. Both read `boot/grub/grub.cfg` (made by `make esp`). Your
-own entries go in `boot/grub/custom.cfg` on the stick, which nothing
-overwrites. The menu waits 5 s; its second entry boots with `noxms` (no
-XMS driver):
-
-```
-menuentry "QuickBASIC clone" {
-    if [ "$grub_platform" = "efi" ]; then chainloader /EFI/qb/qb.efi
-    else multiboot /qb/qb.elf; fi
-}
-```
-
-On a legacy BIOS (or CSM) boot, the menu's last entry, "FreeDOS from the
-built-in floppy, booted normally (no vmdos)", boots floppy.img on the bare
-machine with syslinux's memdisk, as a real floppy would: plain FreeDOS, the
-vmdos drivers on it stay out of memory. It's there when the build finds
-memdisk (Debian/Ubuntu `syslinux-common`, Fedora `syslinux`; `MEMDISK=path`
-to point at it).
-
-`make run-bios` boots esp.img under SeaBIOS; `GRUB=0` (or no GRUB tools:
-Fedora grub2-tools grub2-pc-modules grub2-efi-x64-modules, Debian
-grub-common grub-pc-bin grub-efi-amd64-bin) makes the old UEFI-only image
-with vmdos.efi as BOOTX64.EFI.
-
-### Drive C:
-
-The RAM disk (dos.img) is only built and packed with `RAMDISK=1` (or
-`C=ram`): then esp.img carries EFI/BOOT/dos.img, the ISO carries the GRUB
-module and `make run` passes it to QEMU, as a fallback for machines whose
-disk vmdos can't drive (not SATA, IDE, virtio, NVMe or USB) and for `c=ram`.
-
-Without a C: (no disk with DOS that vmdos can drive, and no
-dos.img), vmdos boots the built-in boot floppy instead of stopping: every
-image carries floppy.img (FreeDOS and vmdos's tools on a 1.44M disk, next
-to vmdos.efi and as a GRUB module), held in RAM as drive A:. Changes to it
-are lost at power-off; VMHD still reaches the PC's disks. A dos.img that is
-a floppy image (1.44M and so on) is used the same way. vmdos.efi shows its
-version and what it loads before starting the kernel, and the kernel
-then shows its log on the screen as it starts, until DOS takes over (or
-vmdos stops with its own screen); `bootlog=off` hides it, `debug=1` adds
-more detail.
-
-C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
-vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, VMRES, SHSUCDX,
-CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
-DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
-(Vim 7.4, also as VI; on C: only), BASIC (Felix BASIC, a QBasic-style BASIC with
-graphics and sound, in C:\VMDOS\BASIC; on C: only), MORE,
-LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM, FORMAT, FDISK,
-CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
-FDCONFIG.SYS to take the `;` off). WHICH is built into FreeCOM.
-ZCOPY is vmdos's own XCOPY: the same switches (and COPYCMD), with long file
-names (quoted, spaces and all, where DOSLFN is loaded; 8.3 names otherwise),
-a progress bar for the whole copy (current file, total, speed, time left;
-`/NP` turns it off), `/EXCLUDE:list.txt` and Ctrl-C that removes the half-written
-file: `ZCOPY "C:\My Games" D:\BACKUP /S /E /I`.
-`third_party/dosutils/README.vmdos`, `third_party/vim/README.vmdos` and `third_party/felixbasic/README.vmdos` say where each comes from.
-
-AUTOEXEC.BAT loads DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
-`DIR /LFN`, DJGPP programs and file managers use) on FAT drives and CDs; an
-install updated from an older one has to add the line
-(`LH C:\VMDOS\DOSLFN.COM`).
-
-`C=disk` (default): C: is the FAT partition of `esp.img`, which the run
-targets attach as a SATA (AHCI) disk (`run-usb`: as a USB stick); what DOS writes stays there. Rebuilding
-updates esp.img in place: programs and FreeDOS files are refreshed,
-AUTOEXEC.BAT, FDCONFIG.SYS and files already copied from `EXTRA` are kept
-(`FRESH=1` starts over). `C=ram`: C: is dos.img in RAM, changes lost (kernel
-option `c=ram`; `make run-efi-app KARGS=c=ram` writes it to
-EFI/vmdos/vmdos.cfg, which vmdos.efi reads, and to boot/grub/grub.cfg).
-
-The kernel picks C: from the FAT partitions on SATA (AHCI) disks, IDE disks
-(parallel ATA, or SATA in IDE mode; PIO, `ide=off` skips them), virtio
-disks (QEMU `-drive if=virtio`, `make run DISK=virtio`; `virtio=off` skips them), NVMe disks (`make run DISK=nvme`; `nvme=off` skips them; namespaces
-with 512-byte sectors), Hyper-V's synthetic SCSI disks (see "Hyper-V" below; `storvsc=off` skips them) and USB
-sticks that hold DOS at their root (FreeDOS KERNEL.SYS, MS-DOS or
-Windows 9x IO.SYS, PC DOS IBMBIO.COM), preferring the one vmdos.efi
-started from (it passes the partition's start and disk signature);
-when there is more than one thing to boot, the boot log lists them and
-waits 5 s for a number (Enter or the countdown: the preferred one;
-`cmenu=N` seconds, `cmenu=0` no menu): each such partition, the built-in
-RAM disk (floppy.img / dos.img, when there is one) and every floppy image
-(`*.IMG` of a floppy's size: 360 KB to 2.88 MB) in `\EFI\vmdos` on those
-partitions and on the one vmdos.efi started from. A floppy image is read
-into RAM and DOS boots from it as A:, with no C: (`VMHD C: n` puts a
-partition there); changes to it are lost at power-off. FreeDOS boots through vmdos's
-own boot code; other DOSes through the partition's boot sector (`SYS C:`;
-MS-DOS 6.22 needs FAT12/FAT16 of at most 2 GB); other
-partitions are only touched when you put one in a VMHD drive (below; DOS
-sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe formatted with 4 KiB sectors, say): the RAM
-disk if built with `RAMDISK=1`. To use an
-existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
-COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)
-to the ESP's root and vmdos.efi + dos.img to a folder on it.
-
-#### Other disks: VMHD
-
-Partitions of the other disks (SATA, IDE, USB, sticks plugged in later
-too) become DOS drives only when you ask. VMHD.SYS reserves empty drive
-letters at boot (`DEVICE=C:\VMDOS\VMHD.SYS` in FDCONFIG.SYS: D: and E:;
-`VMHD.SYS 4` for four, up to 8; an install updated from an older one has to
-add the line), and VMHD.COM fills them. It loads in every menu choice, VMHV's
-too, so the drive letters after it (the CD drives from F:) are the same
-whichever one boots; an older FDCONFIG.SYS with `1?DEVICE=C:\VMDOS\VMHD.SYS`
-wants `123?` there:
-
-    VMHD                 lists the drives and every disk's partitions
-    VMHD D: 3            puts partition 3 in D:
-    VMHD D: 3 /R         ... read-only
-    VMHD D: /E           takes it out
-
-Only a FAT partition (FAT12/16/32; MBR primary or logical, GPT, or a disk
-without a partition table) goes in, never C: and never one that's in
-another drive. One with FAT but a partition type that isn't DOS's (an EFI
-system partition, a Linux- or hidden-typed one, a GPT partition other than
-basic data) needs a Y first.
-
-FDISK (FreeDOS's Free FDISK, in C:\VMDOS and on the boot floppy, as is FreeDOS's FORMAT) works as on any PC: the BIOS shows every
-other disk as hard disk 81h, 82h ... (C:'s disk is 80h, a one-partition
-view of C:; booted from the floppy, with no C:, the disks start at 80h). They appear once the DOS kernel has set up its drives, so DOS
-never gives their partitions letters by itself. A partition FDISK made
-gets its letter from VMHD (`VMHD D: 2`; no file system yet: a Y first),
-and `FORMAT D:` formats it (VMHD.SYS gives FORMAT the device parameters,
-FAT16 or FAT32 by the partition's type and size). No restart needed. VMHD's drives come before the CD drives, so
-those move along: the first CD drive is F: with two VMHD drives.
-
-QEMU targets use KVM when `/dev/kvm` is usable (else plain emulation, which
-is many times slower; `ACCEL=` overrides). `SOUND=hda|ac97|sb|none` (default hda), `AUDIODEV=pa|alsa|sdl|wav`
-(default pa: PulseAudio/PipeWire; wav records vmdos.wav), `USB=1` for a USB
-keyboard and mouse, `USBHOST=0079:0011` to hand the PC's own USB devices
-(vendor:product as `lsusb` shows them; a gamepad, say) to vmdos on an xHCI
-controller (QEMU needs access to /dev/bus/usb: root or a udev rule), `QEMU_MEM=` (512), `KARGS="debug=2 ..."` for the ISO's kernel command line.
-
-### UEFI without GRUB
-
-Copy `vmdos.efi` and `dos.img` into one folder of the EFI system partition,
-e.g. `/boot/efi/EFI/vmdos/`, then either add a firmware boot entry:
-
-```
-sudo efibootmgr -c -d /dev/nvme0n1 -p 1 -L vmdos -l '\EFI\vmdos\vmdos.efi'
-```
-
-or chainload it from GRUB:
-
-```
-menuentry "FreeDOS (vmdos.efi)" {
-    insmod part_gpt
-    insmod fat
-    insmod chain
-    search --no-floppy --file --set=root /EFI/vmdos/vmdos.efi
-    chainloader /EFI/vmdos/vmdos.efi
-}
-```
-
-Some laptops (InsydeH2O firmware on certain Acer, HP and Lenovo models)
-ignore boot entries and only start `\EFI\Microsoft\Boot\bootmgfw.efi` or
-`\EFI\BOOT\BOOTX64.EFI`. esp.img has the boot program at both (`OEM_PATH=0`
-leaves the first out). On such a machine's own disk, copying vmdos.efi to
-`\EFI\Microsoft\Boot\bootmgfw.efi` replaces Windows's boot manager (back it
-up first); vmdos.efi takes dos.img and vmdos.cfg from `\EFI\vmdos\` or
-`\EFI\BOOT\` when they aren't next to it.
-
-The loader puts the 32-bit kernel at 16 MiB, leaves long mode and enters it
-as GRUB would. Load options go to the kernel (`debug=2`, `nopae`); `debug`
-alone pauses before leaving the firmware. A small ESP may need a smaller C:
-(`make efi DISK_MB=34`).
-
-Adding programs: put them in a folder (e.g. `games/POP/...`) and build with
-`EXTRA=games`; its contents land in C:\ (here C:\POP). `make esp EXTRA=games`
-or `make iso EXTRA=games` rebuild C: and the image that carries it (esp.img and
-vmdos.iso hold their own copy of dos.img). By hand: `mcopy -s -i dos.img@@1M POP ::/`.
-
-Options: `EXTRA=dir` copies a directory's contents into C:\, `DISK_MB=` sets
-the size of the RAM disk C: (8 or more; FAT16 with 8 KB clusters up to 2 GB, since
-FreeDOS walks the cluster chain on every seek and DOOM's WAD on 512-byte
-FAT32 clusters took minutes to load; esp.img is FAT32 with clusters of up
-to 32 KiB for the same reason, `ESP_FAT=16` for FAT16), `FREEDOS=dir` uses your own KERNEL.SYS and
-COMMAND.COM. Kernel command line `debug=2` or `debug=3` logs ports and
-interrupts to COM1.
-
-Booting from an existing GRUB (copy `vmdos.elf` and `dos.img` to `/boot/vmdos/`):
-
-```
-menuentry "FreeDOS (vmdos)" {
-    insmod all_video
-    search --no-floppy --file --set=root /boot/vmdos/vmdos.elf
-    multiboot /boot/vmdos/vmdos.elf
-    module /boot/vmdos/dos.img dos.img
-}
-```
-
-Screen resolution: the screen mode is picked once, at boot, and every DOS
-mode is drawn into it, scaled. vmdos doesn't switch the PC's real mode as a
-VGA card would: the firmware's graphics service (UEFI GOP, or the VESA BIOS
-GRUB uses) only sets modes before the kernel starts, and switching later
-would need a driver for each graphics card (Intel, AMD, NVIDIA). Firmware
-doesn't offer DOS's own sizes (320x200, 640x400) anyway, and a flat panel
-shows only its own size, so something scales either way. The boot menu has
-a "screen resolution" submenu (640x480 up to 1280x1024, the widescreen
-1280x720 and 1920x1080, "Ask" and
-"Largest"; on a BIOS/CSM boot, "Ask" shows GRUB's list of the card's VESA
-modes and takes a size typed as 1024x768, and "Largest" is the monitor's
-preferred mode from its EDID); the `vga=` kernel option picks it too (on a
-BIOS/CSM boot, `vga=ask`, `vga=max` and `vga=WxH` given to `make esp
-KARGS=...` go into the GRUB menu's main entries; GRUB doesn't read
-vmdos.cfg, so there it takes a rebuild):
-`vga=ask` lists the modes the screen has and asks for a number, `vga=N`
-takes mode N from that list, `vga=640x480` the mode of that size, and
-`vga=max` the largest, usually the panel's own (vmdos then does all the
-scaling and the monitor none). `make esp GRUB_RES="640x480 1024x768"` sets the
-submenu's sizes.
-
-Text size: `text=132x50` (any of VMRES's sizes; `text=50` is 80x50) starts
-the DOS prompt at that many columns and rows, as `VMRES 132x50` in
-AUTOEXEC.BAT would. A program that sets mode 3 goes back to 80x25.
-`VMRES 1024x768` (or `text=1024x768`) fills a screen resolution with 8x16
-characters, 128x48 there: 800x600, 1024x768, 1280x720, 1280x800,
-1280x1024, 1440x900, 1600x900, 1600x1200 and 1920x1080 (240x67, the most
-B800h's 32 KB holds). They're vmdos's own VESA text modes 150h-158h; the
-wide ones keep their shape, and on a screen of that size they're drawn
-pixel for pixel.
-
-VBE or GOP (`video=`): `video=fb` (the default) is the above: vmdos's
-own VGA and VESA BIOS, drawn scaled onto the framebuffer the firmware set up
-(GOP on UEFI, GRUB's VESA mode on a BIOS/CSM boot). On a BIOS/CSM boot,
-`video=vbe` (the boot menu's "video card's own BIOS (VBE, no scaling)" entry)
-gives DOS the PC's real card instead: its VGA BIOS from C000h with INT 10h
-and the VESA modes it has, the VGA ports and the card's I/O straight to the
-hardware, A0000h-BFFFFh on the card's memory, its PCI configuration space
-(and the PCI BIOS), and DPMI 0800h maps its linear framebuffer
-write-combining. Modes are the card's own, unscaled; vmdos draws nothing
-(no scaling, log overlay or screenshots; the INT 33h pointer of vmdos's
-mouse driver is drawn only in text modes; CTMOUSE draws its own). VMHV
-gives the VM the card the same way: its BIOS at C000h, A0000h-BFFFFh, the
-VGA ports and its I/O (no exit), its LFB where its BAR is. On a UEFI boot nothing ran a VGA BIOS, but a card's
-option ROM often carries a legacy x86 image beside its UEFI driver (discrete
-cards usually do; Intel's integrated graphics have none): vmdos.efi takes it
-from the copy UEFI keeps of the ROM and the card is started with it as
-below; with no such image `video=vbe` is ignored (logged) and the framebuffer
-is used. `display=ask` / `display=N` pick the card there too (vmdos.efi
-asks). When the screen vmdos.efi started on (GOP) is on another card, one a
-bridge keeps apart from the VBE card, the boot log stays on it while DOS
-runs on the VBE card, kept but blacked out (no distraction while gaming):
-Ctrl+Shift+F10 shows it, live, and hides it again, and the other
-Ctrl+Shift keys' messages (speed, volume, sound output ...) show there for 2 s; on the same card it stops as before. `make esp KARGS=video=vbe` makes
-it the BIOS/CSM menu's default. With more than one card, `display=ask` lists
-them on the text screen and asks (`display=N` takes card N): another card
-than the one the PC's BIOS started gets legacy VGA routed to it (the bridges'
-VGA Enable, decoding off on the others) and its own option ROM, copied from
-its expansion ROM and started as a BIOS does before the boot sector.
-
-Which screen (UEFI, before `vga=`): `display=ask` lists the display outputs
-the firmware has (a laptop's panel and its HDMI port, two graphics cards)
-with their kind, size and framebuffer and asks for a number (it first
-connects every PCI display controller, so a second card or a port the
-firmware left off shows up too), `display=N` takes output N,
-`display=external` the first HDMI/DisplayPort/DVI/VGA one and
-`display=internal` the built-in panel. Without it vmdos uses the screen the
-firmware shows its console on. Some firmware gives the GPU only one output
-and picks the connector itself; then there is nothing to choose here, and
-the firmware's own display setting (if it has one) decides.
-
-The picture is scaled to the largest 4:3 box that fits (text too),
-black bars at the sides of a wide screen, by whole pixels. `scale=smooth`
-blends instead, as a QEMU window does (needs a 24- or 32-bit framebuffer):
-at sizes like 1.6x, whole pixels come out one wide and some two, which can
-break up dithered art and make letters uneven, but blending costs a lot of
-CPU on a slow machine. `scale=sharp` is the default, whole pixels;
-`scale=off` draws without resampling, at the size a VGA card puts out
-(320x200 doubled to 640x400 as it does, 640x480 as is) times the largest
-whole number that fits, centered with black borders. `scale=xbrz` (off by
-default) runs graphics modes up to 640x480 through xBRZ, the pixel-art
-scaler, first (2x-6x, rounding off edges and diagonals without blurring),
-then fits that to the box as `scale=smooth` does; text modes are scaled
-smoothly. It costs several ms a full frame: meant for a PC with a second
-core (see below), where it runs alongside DOS. `scale=none` doesn't
-enlarge at all: the picture at the size a VGA card puts out (320x200
-doubled to 640x400, 640x480 as is), centered with black all around; on a
-big screen it's by far the least to draw. `aspect=fill` stretches
-the picture to the whole screen. Ctrl+Shift+F8 steps through sharp,
-smooth, xBRZ, widescreen (as `aspect=fill`, smoothly: the whole screen,
-no black bars) and no scaling while a program runs, whatever the command line chose. Set them on the kernel command line
-(`make esp KARGS="scale=smooth"`, or EFI/vmdos/vmdos.cfg on the stick).
-The framebuffer is mapped write-combining (`nowc` turns that off).
-
-`voodoo3` on the kernel command line (the boot menu's last entry, "with Voodoo 3"; off otherwise) makes the PC's video card an emulated
-3dfx Voodoo 3 3000 (16 MB, PCI): 86Box's card (its Voodoo, Banshee and SVGA
-code) running the card's own BIOS, as 86Box does. The BIOS is built into
-vmdos from `roms/voodoo3/3k12sd.rom` (86Box's file); a build without it
-leaves `voodoo3` off. The VGA, its modes and VESA are then the card's BIOS's,
-and Windows finds a Voodoo 3. Needs a Pentium Pro or later and about 60 MB of
-RAM. VGA memory, register and command FIFO accesses are trapped and emulated
-(x87, MMX and SSE stores and loads included, as Glide and the Direct3D and
-DirectDraw drivers make them into the command FIFO, the tiled back buffers
-and the texture port); the frame buffer is mapped straight onto the card's
-memory (`v3trap` traps it too), the command FIFOs in it included: what
-the driver wrote there is handed to the card whenever vmdos looks at it
-(an access to the card, the timer tick), so a Direct3D driver's frame of
-commands costs no VM exit a word (`v3fifotrap` traps the FIFOs as before). The card's vertical retrace interrupt goes to
-the IRQ in its PCI configuration (10; each raise is logged, the first 20,
-and `v3noirq` never sends it), and BARs Windows moves are followed
-(trapped there). The card's work (the FIFO and render threads) runs in
-time slices, 2 ms an access and 0.3 ms a timer tick, the rest at the next
-look, so a frame of triangles never holds up the screen, the sound and
-the keyboard (in VMHV it runs inside a VM exit, with the host's
-interrupts off). The triangles' pixels are drawn by 86Box's JIT (its
-32-bit x86 code generator: code made for each combination of the card's
-modes, over ten times faster than the C loop) when vmdos has SSE on and
-the CPU has SSE2; the few modes it doesn't draw as the C loop does go to
-the C loop, and `v3nojit` sends everything there. `tests/voodoo` has the
-tests (`emutest` for the MMX/SSE emulation; `hosttest random jitcmp`
-compares the JIT with the C loop; `hosttest random mp=4` draws with four
-threads standing in for render helper CPUs).
-
-With render helper CPUs (below), the triangles are drawn on them instead:
-one helper draws them all, two or three split each triangle's scan lines
-between two, four between four. The boot CPU then only sets triangles up,
-so in VMHV a frame no longer has to be drawn inside VM exits. The log says
-`voodoo3: triangles drawn by ...`; `v3mp=N` uses at most N helpers,
-`v3mp=0` none.
-
-With a PCI bus for the guest (`voodoo3`, the AudioPCI, the PCI NE2000) the
-BIOS is also a Plug and Play BIOS (`$PnP`, functions 00h/01h and 40h; `nopnp`
-leaves it out): its device nodes give Windows 9x the board's devices (PIC,
-timer, PS/2 mouse, RTC, speaker, FPU, POST and A20 ports, system memory) as
-16-bit decoders, and the PCI bus, keyboard and DMA controllers, as a PC's
-PnP BIOS lists them. `pnpmin` leaves those three out, for a Windows
-installed before the PnP BIOS was there: it keeps the ones it detected
-itself, and the BIOS's copies stay yellow beside them (the second PCI bus
-can't be removed). `pcilog[=N]` logs the guest's first N (300) PCI
-configuration accesses and PCI BIOS calls (`pci:` lines), to see whether
-Windows looks at a card at all. Without one, Windows detects them itself and
-takes them as 10-bit ISA decoders, aliased every 400h, which leaves no
-256-byte I/O range for the Voodoo 3 (Code 12, "no free I/O range"). A
-Windows installed before needs Add New Hardware (let it search) to find
-the "Plug and Play BIOS"; after a restart the old system devices are
-replaced. Remove an ET4000 Windows found too (it holds the VGA's ports). The
-card shows no expansion ROM BAR (its BIOS is at C0000h already): Windows
-found no 64 KB for one and rejected the card's whole configuration.
-Test: `tests/pnpbios.asm`. What the guest writes to the Voodoo's command
-register and BARs is logged (`voodoo3: guest config write`; Ctrl+Shift+F10
-shows it, Ctrl+Shift+S saves it). `v3log` logs the first 4000 accesses to
-the card's I/O registers and configuration space (the card's BIOS takes about
-2000); `v3log=N` the first N, to follow a driver further on the serial log.
-`v3trace` (`v3trace=N` lines, default 30000) logs the guest's accesses to
-the card's init, command FIFO and 3D registers through BAR0 (not the 2D
-engine's or pixels), a run of the same access as one line with a count:
-what a Direct3D or Glide driver asks of the card and reads back.
-
-On a PC with more than one core, a second core (found in the ACPI MADT)
-redraws the screen and renders the sound while DOS keeps the first one, so
-neither takes time from the game (the log says `smp: ...`). Between frames
-it halts, so a still screen costs next to nothing. With more cores, up to
-four more share the drawing of each frame's changed rows with it (scaling,
-xBRZ, writing the framebuffer), for high resolutions or slow CPUs where one
-core can't keep up, and draw the Voodoo 3's triangles (in VMHV too);
-`render=N` uses at most N of them, `render=0` none.
-`nosmp` keeps everything on one core.
-
-Scrollback: in a text mode, what scrolls off the top of the screen is
-kept (2000 rows), and Ctrl+Shift+PgUp/PgDn/Up/Down/Home/End or the mouse
-wheel page back through it, as in a terminal; any other key goes back to
-the live screen and on to DOS. DOS's own output (INT 10h scrolls: DIR,
-TYPE) is kept row for row however fast it comes; programs that write the
-screen themselves (ssh, mTCP's telnet) are caught by comparing each redraw
-with the last one, so more than a screenful between two redraws can be
-lost. The wheel is vmdos's: the PS/2 mouse is switched to IntelliMouse
-mode (DOS still gets 3-byte packets; `nowheel` leaves it alone), and USB
-mice and tablets report theirs. `scrollback=off` turns it off.
-
-Copy and paste: Ctrl+Shift+C selects text on a text screen (a cursor
-where DOS's is: arrows move it, Shift+arrows or Space select, PgUp/PgDn and
-Home/End move further, into the scrollback too; Enter copies, Esc leaves),
-or hold Ctrl+Shift and drag with the mouse (letting go copies; a mouse
-that only reports motion moves the selection's cursor). Ctrl+Shift+V types
-the clipboard into DOS through the BIOS keyboard buffer, with US scan
-codes, once Ctrl, Shift and Alt are up: COMMAND.COM, EDIT and ssh take it;
-a program with its own keyboard handler doesn't; any key stops it. Text is
-code page 437 in DOS and UTF-8 to the host. Under QEMU or libvirt the
-clipboard is the host's too, through the SPICE agent's port
-com.redhat.spice.0 (virt-manager's SPICE display has it; plain QEMU:
-`-device virtio-serial-pci -chardev qemu-vdagent,id=vda,clipboard=on
--device virtserialport,chardev=vda,name=com.redhat.spice.0`, with its GTK
-or VNC display): what the host copies is what Ctrl+Shift+V types, and
-what vmdos copies the host can paste. `clipboard=off` leaves the port
-alone.
-
-Screenshots: Ctrl+Shift+F9 (in a game or anywhere) keeps what vmdos sent to
-the display, at the screen's size, in memory until the next one; after
-quitting the game, `VMSHOT` saves it as VMSHOT.BMP in the current
-directory (`VMSHOT WAR2.BMP` names it).
-
-Slowdown for games that time themselves by the CPU (as MoSlo does):
-`VMSPEED 2` in DOS runs at 2% of full speed (`VMSPEED 0.5`, `VMSPEED 0.05`, `VMSPEED 100`,
-`VMSPEED` alone shows it), Ctrl+Shift+F11 / Ctrl+Shift+F12 step it slower /
-faster while a program runs (shown at the top right), and `speed=N` on the
-kernel command line sets it from boot (`KARGS="speed=2"` for the ISO).
-
-Serial ports: by default COM1 carries vmdos's log and DOS gets every other
-UART (COM2 stays DOS's COM2; COM1 is left out of the BIOS data area).
-`serial=dos` on the kernel command line keeps the log off COM1 and gives
-DOS every UART that's there: COM1 (3F8h, IRQ 4), COM2 (2F8h, IRQ 3), COM3
-(3E8h, IRQ 4), COM4 (2E8h, IRQ 3), then the 16550 UARTs of PCI and PCIe
-serial cards (I/O-port ones: MosChip, ASIX, WCH and most others; not
-memory-mapped-only cards), at their own address with the IRQ the firmware
-routed, up to four in all. The UARTs' ports go straight to the chip: no
-trap, the guest's IN and OUT reach the hardware as on a PC, so programs
-that take full control of the port work: terminal programs and file
-transfer at 115200 baud, null-modem links, serial mice, and PIC / EPROM /
-AVR programmers that bit-bang DTR, RTS and TxD and read CTS and DSR. Their
-interrupts reach DOS (a PCI card's level-triggered one is held masked until
-DOS's handler sends its EOI), and INT 14h and the BIOS data area know the
-ports. `comN=base[,irq]` (hex base, decimal IRQ, 0 for none) puts a UART in
-slot N by hand (a card the scan guesses wrong, or one whose IRQ the firmware
-didn't route) and implies `serial=dos`; `serial=dos,trap` traps every access
-as before (slower, for debugging). A USB-to-serial adapter isn't seen.
-`C:\VMDOS\SERTEST` checks each port (loopback data, modem lines, which IRQ
-it interrupts on). `serial=off` only turns the log off.
-
-Sound output: when vmdos finds more than one (speakers/headphones, HDMI or
-DisplayPort, a second card, AC'97, a Sound Blaster, the PC speaker),
-Ctrl+Shift+F2 switches to the next one; the new one is shown at the top right.
-Ctrl+Shift+F3 / Ctrl+Shift+F4 turn the volume down / up 10% and
-Ctrl+Shift+F5 mutes and unmutes.
-
-C:\README.TXT lists the shortcuts, vmdos's DOS commands and the main boot
-options (`dos/README.TXT`).
-
-Ctrl+Shift+F10 shows vmdos's log over whatever is running (handy on a PC
-with no serial port, when a game misbehaves), over the whole screen,
-following new lines as they come; Ctrl+Shift+F10 again hides it. Nothing
-pauses: the game keeps running and gets every other key (pause it with
-its own controls if you want). With the log showing, Ctrl+Shift with the
-arrow keys, PgUp/PgDn or Home/End scrolls it, and Ctrl+Shift+S saves it
-to C:\VMDOS\VMDOS.LOG (made by `DMESG /K`). The "vmdos stopped" screen
-shows the same log.
-
-Ctrl+Shift+F6 opens the media console: a command line over whatever is
-running, to swap discs and disks without quitting the game (an installer
-or a game asking for disc 2, a floppy for a booter's save disk). While it
-is open it has the keyboard; the game keeps running underneath, and Esc
-or Ctrl+Shift+F6 closes it. It opens with what every drive holds.
-Commands (paths are long or 8.3 names, on the current drive unless another is
-given, and relative to that drive's current folder unless they start with a
-backslash; quote names with spaces, except after cd):
-
-    status                     what every drive holds
-    A:, D:, F:                 make it the current drive (C:, floppy images, VMHD drives, CDs)
-    cd \ISOS, cd .., cd\, cd   change the current folder, or show it (each drive has its own)
-    dir [FOLDER]               files and folders (the current one; dir A:, dir F:\GAMES ...)
-    vmcd                       the CD drives (1, 2 ...; their letters once VMCD has run)
-    vmcd 1 DISC2.ISO           an ISO or CUE sheet in CD drive 1 (vmcd F: ... works too)
-    vmcd 1 eject               empty it (a real drive: open its tray)
-    vmcd 1 #2                  boot-module image 2, as VMCD 1 2
-    vmfd A: DISK2.IMG [/R]     a floppy image in A:, read-only with /R
-    vmfd A: eject              empty A:
-    vmhd                       VMHD's drives and the partitions of the other disks
-    vmhd D: 3 [/R] [/Y]        partition 3 in D: (/Y confirms a non-DOS one)
-    vmhd D: eject              take it out of D:
-    rescan                     look at every disk again (formatted since, plugged in since)
-    lspci [-v] [-x], lsusb [-v]  what LSPCI.COM and LSUSB.COM show
-
-They do what the DOS commands VMCD, VMFD and VMHD do (`cdrom`, `fd` and
-`hd` work as short names), so DOS and Windows see a disk change as usual. Up/Down bring
-back earlier lines, PgUp/PgDn scroll, Ctrl+U clears the line, Ctrl+L the
-screen. Keys only edit the line; a command runs at the next timer tick
-with no disk or USB transfer under way, as Ctrl+Shift+S's log save does
-(`src/media.c`). It is drawn where vmdos draws the screen (the
-framebuffer: GOP, GRUB's mode, Bochs VBE); with `video=vbe` it doesn't
-open (a note says so).
-
-CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
-ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
-it, the master being VMCD's drive 1 and the slave its drive 2 (an image or a
-real drive, the same discs). The Plug and Play BIOS reports it, so Windows
-finds a "Standard IDE/ESDI Hard Disk Controller" (PNP0603, which MSHDC.INF
-installs as a good IDE controller; PNP0600 it installs as BAD_IDE, and its
-driver then refuses it: Code 10), drives it with its own IDE driver and reads the discs with
-its CDFS: long file names (Joliet), which DOS's CD layer only shows as 8.3
-names (installers then can't find their files), and autoplay. The drives
-DOS gave letters to stay too (8.3 names). `atapi=off` leaves the channel
-out; `atapilog` logs the commands it gets and how they ended. Test:
-`tests/atapitest.asm`.
-
-CD-ROM: any ISO file on C: can be put in the CD drive (F:, after VMHD's D:
-and E:; D: without VMHD.SYS) while running: `VMCD F: C:\ISOS\WAR2.ISO` (or `VMCD 1 WAR2.ISO`, relative paths work; 8.3
-names). It is read straight from the disk, nothing is copied to RAM; `VMCD`
-lists the drives. `ISO="game.iso disc2.iso"` copies ISOs to C:\ISOS (8.3
-names) and puts the first in the drive at boot (`cd=/ISOS/GAME.ISO` on the
-kernel command line). `cdrives=N` gives up to 4 drives. With `C=ram`, ISO=
-images are held in RAM as boot modules instead, one drive each, and
-`VMCD 1 2` swaps them (also: ISOs next to vmdos.efi, GRUB module lines).
-
-Disk speed: C: on a real disk is cached (8 MiB by default, `diskcache=MB` on
-the kernel command line, 0 to turn it off). Reads fetch 32 KiB at a time and
-writes are cached and written back in the background (4 MiB by default,
-`wcache=MB`, 0 to write straight through), so saving a game doesn't freeze
-it while the disk catches up; on a USB stick (xHCI) the stick's own slow
-writes run while the game and its music go on. Writes go out when DOS is idle, or about a
-quarter of a second after the last one (at most 2 s while writes keep
-coming), and before a restart: wait a couple of seconds after saving
-before switching off.
-
-Floppy drives: A: and B: hold disk images from C: (there is no floppy
-controller): `VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
-`VMFD A: /E` (empty), `VMFD` alone lists them; `fda=/DISKS/BOOT.IMG` (and
-`fdb=`) on the kernel command line fill them at boot. A new image is a disk
-change to DOS, so "insert disk 2" works; an empty drive says "not ready".
-Writes go into the image file on C:, and are refused if that file has been
-replaced, resized or moved since it went in. 160K to 2.88M images, DMF
-included; other sizes are taken from the boot sector.
-
-Self-booting floppies (booter games): `VMFD A: C:\DISKS\GAME.IMG /BOOT`
-restarts the PC from that disk, without DOS (`VMFD A: /BOOT` boots what's in
-A: already); `fda=/DISKS/GAME.IMG boot=a` on the kernel command line boots it
-instead of DOS. To get back to DOS, restart the machine.
-
-CUE/BIN images work like ISOs (`VMCD F: C:\GAMES\QUAKE.CUE`, `cd=` too), with
-their CD audio tracks: one BIN or one per track, MODE1/2048, MODE1/2352,
-MODE2/2352, MODE2/2336 and AUDIO tracks, PREGAP. C: only has 8.3 names, so
-the BIN names in the sheet have to be 8.3 ones (a single BIN may also just be
-named like the sheet: QUAKE.CUE + QUAKE.BIN).
-
-Real CD/DVD drives on SATA (AHCI), IDE and USB get a drive letter each after the
-image drives (G: with one image drive and VMHD's two before it): the disc is read from the drive,
-swapping discs works, and eject/close requests go to the drive. `cdphys=off`
-leaves them out. In QEMU: `-M q35 -drive if=none,id=cd,media=cdrom,file=game.iso
--device ide-cd,drive=cd,bus=ide.2`, `-drive file=game.iso,if=ide,index=2,media=cdrom`
-(IDE, the default machine), or `-device qemu-xhci -drive
-if=none,id=ucd,media=cdrom,file=game.iso -device usb-storage,drive=ucd` for USB.
-
-CD audio (MSCDEX play, stop/pause, resume, track position, audio status,
-volume) plays through the sound card, mixed in with the Sound Blaster: from
-a CUE image's audio tracks, or read digitally from a real drive. A drive that
-can't read audio digitally is told to play the tracks itself, through its own
-output (a headphone jack, or an analog cable to a sound card). With no sound
-card a play still runs for its length, so games waiting on a track go on.
-`tests/cdplay.asm` (CDPLAY.COM) plays a track and shows the position.
-
-Mouse trouble in a game: boot with `KARGS="mouselog"` (or `mouselog` in the
-load options); the log shows every INT 33h call, event-handler call and
-command sent to the PS/2 mouse port. If the built-in driver doesn't satisfy
-a game, try CuteMouse (loaded by AUTOEXEC.BAT; see below).
-
-The kernel loads at 16 MiB.
-Give a machine or VM at least 256 MB (QEMU targets use 512 MB, `QEMU_MEM=`): GRUB needs room to unpack
-dos.img.gz and place it in one piece, or it stops with "out of memory". Ctrl+Alt+Del restarts.
-
-## What works
-
-- FreeDOS 1.x kernel and FreeCOM to the `C:\>` prompt: GRUB on BIOS or UEFI,
-  or `vmdos.efi` straight from the UEFI firmware.
-- BIOS: INT 10h (text modes, mode 13h, DAC/palette), 11h, 12h, 13h (CHS and
-  LBA), 15h (A20, wait, config), 16h, 1Ah (RTC time/date), keyboard IRQ.
-- USB controllers: xHCI (USB 3), EHCI (USB 2), UHCI (USB 1.1, the
-  companions EHCI hands low/full-speed devices to on Intel boards and in
-  QEMU/libvirt) and OHCI (USB 1.1, the same on AMD, ATI, NVIDIA, VIA and SiS
-  chipsets, or on their own on older PCs). Everything below works on any of them.
-- Keyboards: PS/2, and USB (boot protocol, hubs, hot-plug; polled).
-  `usb=off` on the command line skips USB; `ehci=off` skips only the EHCI, UHCI and OHCI controllers, leaving them (and any legacy keyboard/mouse emulation) to the firmware.
-- Joysticks: USB gamepads as the PC game port (201h, INT 15h AH=84h); the
-  first is joystick A, a second joystick B (with one, its buttons 3 and 4
-  are B's). Any HID gamepad with X/Y or a hat switch; the DragonRise SNES
-  clones (0079:0011) by their own layout: D-pad, B = button 1, A = 2,
-  Y = 3, X = 4. Games calibrate as with any analog stick. The game port
-  has four buttons, so L, R, Select and Start (other pads: buttons 5, 6,
-  9, 10) do nothing, unless `joykeys=39,2A,01,1C` on the kernel command
-  line (vmdos.cfg) makes them press keys: set-1 scancodes in hex for L,
-  R, Select, Start (here Space, Left Shift, Esc, Enter), 1xx for
-  E0-prefixed ones, 0 for none.
-- Mouse: PS/2 and USB mice behind an INT 33h driver in the monitor (no
-  MOUSE.COM): position, buttons, ranges, mickeys, press/release counts and
-  the program's event handler (0Ch/14h; for DOS extenders' programs too,
-  run from protected mode through their real-mode callback), and a PS/2
-  mouse on the virtual keyboard controller (IRQ 12 packets) for programs
-  with their own mouse code. The pointer is drawn over text and
-  mode 13h by the renderer. BIOS PS/2 mouse services (INT 15h C2xx, IRQ 12
-  handler) let a real DOS driver run too: AUTOEXEC.BAT loads CuteMouse
-  (`LH C:\VMDOS\CTMOUSE.COM`), which takes over INT 33h. Some games need it
-  (Warcraft II), most don't: put REM in front of that line to use the
-  built-in driver.
-- Memory: XMS, EMS and DPMI share the RAM above 16 MiB (every free stretch
-  of it). Nothing is set aside at boot: a program's XMS block or EMS pages
-  take RAM when allocated and give it back when freed; the kernel keeps
-  4 MiB for itself. A 64 MB machine leaves DPMI programs (Quake) about
-  22 MB, 128 MB about 80 MB.
-- XMS 3.0 in the monitor (don't load HIMEM): HMA, extended memory (up to 1 GB or half the free
-  RAM below 4 GB, `xms=MB`; the old XMS 2.0 calls report at most 64 MB) and 96 KB of upper memory (C800h-DFFFh; 160 KB to EFFFh with
-  `ems=0`). `VMXMS.SYS`, loaded first in FDCONFIG.SYS, is the HIMEM-style
-  front (device XMSXXXX0, INT 2Fh hook). `DOS=HIGH,UMB`, LOADHIGH/DEVICEHIGH
-  and FreeCOM's XMS swapping work: about 620 KB free for programs.
-  `noxms` hides the XMS driver altogether (no installation check answer,
-  VMXMS.SYS doesn't load, DOS loads low), for software that brings its
-  own, such as Windows 3.1x Setup.
-- EMS 4.0 (expanded memory, INT 67h) in the monitor, as EMM386 gives it:
-  up to 32 MB (`ems=MB`, `ems=0` for none), page frame E000h, functions 40h-5Ch
-  (allocate, map, map multiple, reallocate, save/restore and partial page
-  maps, handle names and directory, move/exchange region, mappable pages,
-  hardware info). `VMEMS.SYS` is the EMMXXXX0 device programs look for
-  (Master of Magic). No VCPI: DOS extenders use the DPMI host.
-- DPMI 0.9 host in the monitor, for DOS extenders: DOS/4GW (DOOM runs: demo,
-  menus, keyboard, mouse, Sound Blaster effects and music), PMODE/W. Clients run at ring 3 with LDT descriptors;
-  INT 31h descriptor, memory, interrupt, real-mode call/callback, DOS
-  memory, physical-mapping and virtual-IF services; protected-mode hardware
-  interrupt and exception handlers; selector 0040h for the BIOS data
-  area. Client memory appears at linear
-  2-16 MiB (DOS/4GW's DOS/16M core keeps 24-bit addresses), so the kernel
-  now loads at 16 MiB; what doesn't fit there comes from above 16 MiB, up to
-  1 GB in all (`dpmi=MB`), and 0503h grows blocks in place where it can
-  (DJGPP programs such as Quake). DOS/32A runs on it too: the guest's
-  IOPL reads as 3 and can't be cleared (as in any V86 mode), so DOS/32A
-  sees it isn't in real mode and takes the DPMI host instead of starting
-  its own kernel (test: `tests/iopltest.asm`). Its debugger SD/32A, which
-  needs DOS/32A's own kernel, refuses as it does under Windows.
-- Tseng ET4000 for drivers that know SVGA chips rather than VESA (Windows
-  3.1's SVGA256/VDDSVGA): its 256-color BIOS modes 2Eh, 30h, 38h and its
-  segment select register (3CDh, separate read and write segments), 1 MB.
-- VESA BIOS 3.0: 320x200 to 1024x768 in 8, 15, 16, 24 (power-of-two line
-  pitch, so no pixel crosses a bank) and 32 bits per pixel,
-  800x600 in 16 colors (102h / 6Ah, planar), widescreen 848x480,
-  1280x720, 1280x800 (138h-146h, all depths) and 1920x1080 (147h-149h,
-  8/15/16 bits), stretched to fill the whole screen (no bars),
-  except 320x200 in 15, 16, 24 and 32 bits (10Dh, 10Eh, 10Fh, 121h),
-  offered only with `vesa320hi`: Need for Speed SE plays its videos in a
-  320x200 high or true color mode whenever there is one, but draws them
-  8 bits a pixel,
-  4 MB, banked window (4F05h / WinFuncPtr) and linear framebuffer (DPMI
-  0800h maps it), scan line length, display start, palette, the DAC
-  switchable to 8 bits a color (4F08h, as most SVGA cards; test:
-  `tests/dac8.asm`), state save/restore (4F04h), and the protected-mode
-  interface (4F00h-4F0Bh). VBE 3: CRTC timings on mode set (a
-  CRTCInfoBlock, doublescan and interlace included) program the CRTC and
-  set the vertical retrace rate, so AdvanceMAME's vbeline/vbe3 driver can
-  set a game's own modeline; scheduled display start (triple buffering),
-  pixel clocks (4F0Bh) and the linear-framebuffer mode info fields. Tests:
-  `tests/vbepat.asm` (every byte of the 4 MB through the bank window, then
-  a wider line and a display start, from real mode, DPMI 0300h or the
-  protected-mode interface), `tests/vbeplan.asm` (102h). The
-  VGA pixel mask (3C6h) applies too.
-- Graphics: CGA modes 4, 5, 6 (palettes and background via INT 10h AH=0Bh
-  or port 3D9h), mode 13h, unchained 256-color (Mode X/Y, as DOOM uses:
-  single-plane access mapped directly, latch copies and the rest emulated),
-  and the EGA/VGA 16-color modes 0Dh, 0Eh, 10h, 12h. In the 16-color modes
-  every access to A000h faults and the instruction is emulated against the
-  four planes with the VGA's latches, write modes 0-3, set/reset, bit mask
-  and read modes; the screen honors the CRTC start/offset, pel panning and
-  line compare, and takes its size from the CRTC, so a 640x480 (or other)
-  screen a game sets up through the registers itself, from mode 0Dh or from
-  text mode, is shown whole (Genesia; test: `tests/reg640.asm`). A graphics
-  mode turned on through the registers with no INT 10h mode set is picked
-  up too, as is a 16-color BIOS mode switched to unchained 256 colors
-  (Ultrabots: mode 12h made 320x240; test: `tests/m12x.asm`). INT 10h draws pixels and text in all of them, with the
-  program's own font from INT 1Fh (CGA characters 128-255) or INT 43h.
-- Sound: Sound Blaster Pro 2.0 (220h, IRQ 5, DMA 1) with OPL3, AdLib (388h)
-  and MPU-401 General MIDI (330h), from SBPRO; PC speaker. Played through USB
-  audio, HD Audio, AC'97 or a real Sound Blaster (`audio=usb|hda|hdmi|ac97|sb|off`,
-  `latency=ms`, as in baremetaldoom). `BLASTER=A220 I5 D1 T4 P330` is set.
-  USB audio (headphones, headsets, DACs; USB Audio Class 1 or 2, on xHCI,
-  EHCI or UHCI controllers): plugged in, it's used first; plugged in later, sound switches
-  to it, and back when it's unplugged. 48 kHz 16-bit stereo when the device
-  takes it, else converted (44.1 kHz, 24/32-bit, mono). On USB 2 boards a
-  full-speed device plays through the UHCI or OHCI companion, or through split
-  transactions when it's behind a hub (including the one built into later
-  Intel chipsets); a high-speed one through EHCI directly. Test in QEMU:
-  `-device qemu-xhci -device usb-audio,audiodev=a0 -audiodev wav,id=a0,path=out.wav`
-  (or `-device piix3-usb-uhci` or `-device pci-ohci` in place of `qemu-xhci`).
-  A real Sound Blaster's DMA ring is in 64 KB reserved below 16 MB.
-  Recording (DSP 20h/24h/2Ch/98h/99h, 8-bit) from a USB microphone (USB
-  Audio Class 1 or 2 on xHCI: a USB mic, a headset's mic, a webcam's mic;
-  any rate, resampled to 48 kHz mono), or the PC's mic jack (else
-  internal mic, else line in) when playing through HD Audio analog;
-  silence otherwise. A USB one is used when it's plugged in, else the HD
-  Audio input with something plugged in (jack sense, checked every half
-  second: a mic jack before line in, then the internal mic). `VMMIC` lists
-  every input (`mic jack, rear pink`, `line in, rear blue`, `internal mic`,
-  the USB mic) and `VMMIC n` records from one (`VMMIC OFF`, `VMMIC AUTO`);
-  `mic=hda|usb|off` at boot.
-  `VMSB MIC` shows the level, `VMSB BOOST n` raises it. Test: `tests/sbrec.asm`.
-  `VMSB 16` (or `sb16=1`) switches to a Sound Blaster 16 (DSP 4.05: 16-bit
-  play/record on DMA 5, `BLASTER=A220 I5 D1 H5 P330 T6`); `VMSB PRO` back.
-  See AUTOEXEC.BAT. Test: `tests/sb16test.asm`.
-  Direct DAC (DSP 10h) samples play at the time they were written, and a
-  guest timer set faster than vmdos's 1 kHz tick (Creative's Parrot and its
-  VOICE.DRV: 8 kHz) runs at its own rate from the local APIC timer
-  (`nofastpit`: capped at 1 kHz as before). Test: `tests/dacdir.asm`
-  (3 s of a 440 Hz sine from an 8 kHz timer).
-  Gravis UltraSound (GF1, 1 MB of DRAM; 240h, IRQ 7, DMA 3; `src/gus.c`):
-  32 voices with loops, 8/16-bit samples, volume ramps and pan, mixed at the
-  GF1's own rate (44.1 kHz at 14 voices, 19.3 kHz at 32), timers, DMA
-  uploads and downloads, voice/ramp/timer/DMA IRQs; the IRQ and DMA the
-  game writes to the card's latches are used. Its MIDI port plays on the
-  General MIDI synth. Games find it by `ULTRASND=240,3,3,7,7`, which
-  AUTOEXEC.BAT leaves off (take the REM off): many games pick the GUS over
-  the Sound Blaster when it's set, and those that play MIDI on it (Doom's
-  DMX, ULTRAMID) load Gravis's patches from `%ULTRADIR%\MIDI`, which aren't
-  included. `gus=off` takes it away, `gus=2X0` moves it (210h-260h).
-  Recording isn't emulated. Test: `tests/gustest.asm`.
-  Ensoniq AudioPCI 97 (ES1371; `src/es1371.c`), on by default (`es1371=off`
-  removes it, and with it the guest's PCI bus unless `voodoo3` is on):
-  a PCI card on the guest's bus at 00:02.0, I/O D280h, IRQ 9 (`es1371=N`
-  for IRQ N), for Creative's "AudioPCI (ES1371,ES1373)" drivers for
-  Windows 9x (the 5.12.01 WDM driver for 98 SE/Me, the VxD one for 95/98).
-  Under Windows, remove the Sound Blaster from Device Manager if it was
-  set up there, so the AudioPCI is the one Windows uses. Both playback channels (bus-master DMA, 8/16-bit mono/stereo,
-  the sample rate converter), the AC'97 codec's volumes, sample-count
-  interrupts and MIDI out (to the GM synth); recording returns silence; no
-  legacy SB traps (the Sound Blaster at 220h is still there). Test:
-  `tests/estest.asm`.
-- Virtual 8259 pair, 8254 (guest can reprogram channel 0), 8042, port 61h,
-  A20 (port 92h, 8042, INT 15h), VGA DAC/CRTC/attribute/status ports.
-- Text and mode 13h drawn to the GRUB/GOP framebuffer (any size, 15/16/24/32 bpp,
-  above 4 GiB too, via PAE), or Bochs VBE under QEMU `-kernel`.
-
-## Network: packet driver and IPX
-
-vmdos drives the PC's Ethernet cards itself (Intel e1000/e1000e family,
-Intel 82566-82579 and I217-I219 on the chipset, Intel 82575/82576/82580,
-I350/I354 and I210/I211 (Linux's igb), I225/I226 (igc), Realtek RTL8111/8168,
-RTL8125/8126/8127, RTL810x, the PCI RTL8169/8110 (every chip Linux's r8169
-drives) and RTL8139, Broadcom NetXtreme/NetLink (every chip
-Linux's tg3 drives: BCM570x, 575x, 578x, 5906, 5717-5762), the Qualcomm Atheros
-laptop chips (AR8161/8162/8171/8172 and Killer E2200/E2400/E2500, Linux's alx;
-AR8131/8132/8151/8152, Linux's atl1c), QEMU's virtio-net (legacy and
-virtio 1.0), the DEC 21140 "Tulip" (Hyper-V Gen 1's Legacy Network Adapter, and PCI
-cards like the DE500; `tulip=21143` also takes QEMU's `-nic model=tulip`, a 21143), PCI NE2000s
-(the Realtek RTL8029 of PCem and 86Box, QEMU's `-nic model=ne2k_pci`, and other DP8390 clones), Hyper-V's
-synthetic network adapter (see "Hyper-V" below), and USB Ethernet adapters
-that speak CDC-ECM, on xHCI, plugged in before or after boot; `net=off` skips
-them, `netlog` logs frames) and DOS reaches them through TSRs in C:\VMDOS:
-
-    VMPKT [0x60 [10]]    packet driver (FTP spec 1.11) on INT 60h, IRQ 10
-    VMIPX [802.3]        IPX (INT 2Fh 7A00h / INT 7Ah) on that packet driver
-    VMNIC [n | AUTO]     list the cards, or pick the one to use
-
-With several cards, vmdos uses one with a link, and changes to another if
-that one loses it for 3 s; `nic=2` on the kernel command line or `VMNIC 2`
-fixes the choice. A card changed to takes over the address DOS already has,
-so VMPKT and the programs on it carry on. VMIPX sends Ethernet II, and
-changes to raw 802.3, 802.2 or SNAP when that is all the other IPX machines
-use (NetWare ODI drivers default to 802.3); `VMIPX 802.3` fixes it. The RTL8168/8125 and Broadcom drivers rely on
-the firmware having set up the PHY (`debug=1` logs what vmdos found); the
-Broadcom 5700-5704's fiber (TBI) ports aren't driven, and a 5701 A0 wants a
-firmware patch vmdos doesn't have.
-
-vmdos also shows DOS an NE2000 (300h, IRQ 11; `ne2k=320,10` moves it,
-`ne2k=off` removes it) on the same card and address, for drivers that want
-hardware: Windows 95/98/ME (under VMHV), NE2000 packet drivers, ODI/NDIS
-drivers for Windows 3.x. Use it or VMPKT, not both. It is a PCI card, a
-Realtek RTL8029 (the PCI NE2000, 10ECh:8029h) at 00:03.0 on the guest's
-bus, so Windows' Plug and Play finds it and installs its RTL8029 driver;
-its I/O starts at 300h, IRQ 11, so NE2000 drivers that don't look for PCI
-find it there too (Windows may move it; the ports follow). `ne2k=isa` (or
-`ne2k=isa,320,10`) makes it the plain ISA card again, Windows' "NE2000
-Compatible" added by hand; remove that one from Device Manager when going
-to the PCI card. Tests: `tests/ne2ktest.asm`, `tests/rtl8029.asm`.
-
-IPX goes out as Ethernet II frames (type 8137h) on network 0, so two vmdos
-PCs on a LAN, or a vmdos PC and a real one using Ethernet II, see each other.
-`make run NET=lan` (any number of times, `NIC=rtl8139`, `NIC=igb` or `NIC=virtio-net-pci` for another card,
-`NIC=usb` for a USB adapter) puts QEMU machines on one virtual LAN for trying
-it out.
-
-### TCP/IP (IPv4 and IPv6) and the DOSBox IPX bridge
-
-C:\VMDOS\NET has TCP/IP tools on the packet driver, built on
-[mTCP](https://github.com/mbbrutman/mTCP) with IPv6 added (SLAAC, DHCPv6,
-neighbor discovery, ICMPv6, UDP over IPv6). STARTNET.BAT runs DHCP; the
-settings are mTCP's config file (`MTCPCFG`, C:\VMDOS\NET\VMTCP.CFG), so
-mTCP's own FTP, TELNET, etc. work with it too.
-
-    DHCP [-4 | -6] [-norenew]   DHCPv4, then router discovery, SLAAC, DHCPv6
-    DHCP -status | -stop        how vmdos's renewal of the IPv4 lease is going / stop it
-    VMTCP                       show the settings (VMTCP KEY value sets one)
-    PING [-4 | -6] host
-    NSLOOKUP [-type=T] name [server]
-    VMIPXBOX SERVER [port]      DOSBox players: IPXNET CONNECT <this PC>
-    VMIPXBOX CONNECT host [port]   join a DOSBox IPXNET server (IPv4 or IPv6)
-    VMIPXBOX [STOP]             how it's doing / stop it
-
-VMIPXBOX sets up IPXNET, DOSBox's IPX over UDP (port 213), which vmdos then
-runs itself underneath DOS (`src/ipxnet.cpp`): load VMIPX and play, and this
-PC's games reach the DOSBox players; the LAN's IPX machines are bridged too.
-In CONNECT mode vmdos checks the link every 5 s and registers again if the
-server stops answering (it restarted, a NAT mapping changed). It logs nothing
-unless the kernel command line has `ipxlog`, which logs its events and
-every packet (DMESG).
-DHCP hands the IPv4 lease to vmdos, which keeps it renewed underneath DOS
-(`src/dhcpc.cpp`), so nothing stays resident and games or long sessions
-keep their address: at T1 (half the lease unless the server says) it asks
-the server that gave it, from T2 (7/8) any server, and after the lease runs
-out it keeps asking for the same address every 60 s. Its own answers never
-reach DOS. While vmdos renews it, VMTCP.CFG has no LEASE_TIME, so mTCP's
-programs don't warn about a lease that was only renewed. If the server
-refuses (NAK) or gives another address, vmdos stops and `DHCP -status`
-says to run DHCP again. `DHCP -norenew` leaves renewal out; `dhcplog` on
-the kernel command line logs each step. (IPv6 addresses aren't renewed.)
-The programs are prebuilt in net/bin;
-`make net` rebuilds them with Open Watcom (`tools/fetch-watcom.sh`).
-
-### SSH, SFTP and SCP
-
-C:\VMDOS\NET has OpenSSH's ssh, sftp and scp (10.6p2, its own crypto:
-Ed25519 keys, ChaCha20-Poly1305/AES-CTR; on C: only): after STARTNET,
-`SSH user@host` (`SSH host` asks `login as:`), `SFTP user@host`,
-`SCP C:\FILE.TXT user@host:`. They use vmdos's own TCP (the one VMDOSNET
-uses, `src/tcp9p.cpp`), IPv4 and IPv6, through INT 2Fh AX=564Eh BL=13-18
-(connections, and DNS questions); no packet driver or DOS TCP/IP stack is
-involved, and nothing runs DHCP: the addresses, gateways and DNS servers
-are VMTCP.CFG's (STARTNET's DHCP and SLAAC, or VMTCP). ssh is its own
-terminal (TERM=linux: colors, full-screen programs, UTF-8 line drawing in
-code page 437, F-keys, Alt), so no ANSI driver is needed. sftp and scp
-carry ssh inside them (DOS runs one program at a time). ~/.ssh is
-C:\HOME\.ssh (HOME= to change; DOSLFN for the long name). ssh takes the
-remote terminal's size from the DOS screen: `VMRES 132x50` (or 80x28,
-80x43, 80x50, 80x60, 132x25, 132x43, 132x60, or a resolution such as
-`VMRES 1920x1080`; `VMRES` shows it, `VMRES 25` goes back) first gives a
-bigger one. VMRES uses plain INT 10h (the BIOS's
-8x14/8x8 fonts, AX=1111h/1112h, and the VESA text modes 108h-10Ch), which
-vmdos's VGA BIOS draws and a real card's (`video=vbe`) usually has; a program
-that sets mode 3 goes back to 80x25, as on a PC.
-`third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
-rebuilds them.
-
-### FLT: Felix Terminal (SSH with sixel and kitty graphics)
-
-C:\VMDOS\NET\FLT.EXE (on C: only) is Felix Terminal for DOS: an SSH client
-(libssh2) drawn on a VESA mode with FreeType, xterm-256color, sixel and kitty
-graphics, so `timg`, `img2sixel` and gnuplot's sixel output show pictures on
-the DOS screen. After STARTNET: `FLT user@host` (`FLT user@host:2222`,
-`FLT -g 1280x800 user@host` for another mode, `-t` a theme, `-f` the font
-size). Shift+PgUp/PgDn scroll back; with a mouse driver, drag to copy,
-middle-click to paste, right-click for themes and resolutions (kept in
-%HOME%\FLT.CFG). Keys and known_hosts are in C:\HOME\.ssh, as for SSH, and it
-runs on the same vmdos TCP. `third_party/flt/README.vmdos` has the options;
-it's built from [felixterminal](https://github.com/jasonbrianhall/felixterminal)'s
-`msdos/` folder.
-
-### Downloads: WGET
-
-`WGET https://example.com/file.zip` (after STARTNET) saves FILE.ZIP in the
-current directory (`WGET URL NAME` names it; `-k` skips the certificate
-check, `-q` the progress). HTTP and HTTPS (TLS 1.2 and 1.3, mbedTLS),
-redirects, chunked answers; certificates are checked against
-C:\VMDOS\NET\CACERT.PEM (Mozilla's list) and the host name. It runs on
-vmdos's own TCP as ssh does (its socket layer), with nothing in the kernel
-and no packet driver. `tools/build-wget.sh` builds it (DJGPP);
-`third_party/wget/README.vmdos` has the rest.
-
-### curl
-
-`CURL` (after STARTNET) is curl 8.23 for DOS: HTTP and HTTPS (mbedTLS,
-TLS 1.2 and 1.3), FTP and FTPS, FILE, with curl's usual options (`-O`, `-L`,
-`-I`, `-d`, `-H`, `-u`, `-T` ...). Certificates are checked against
-C:\VMDOS\NET\CACERT.PEM, as for WGET. Like WGET and ssh it runs on
-vmdos's own TCP, with nothing in the kernel: curl's DOS code expects
-Watt-32, and `third_party/curl/dos/curl-dos.c` gives it the few Watt-32
-calls it makes on ssh's socket layer. `tools/build-curl.sh` builds it
-(DJGPP, or Docker); `third_party/curl/README.vmdos` has the rest.
-
-### Web browsing: LYNX, and OPENSSL
-
-Lynx 2.9.3, the text web browser, is in C:\VMDOS\NET: after STARTNET,
-`LYNX https://example.com/` (or `LYNX` for the start page, `LYNX -dump URL`
-for a page as text, `LYNX C:\DOCS\INDEX.HTM` for local files). HTTP and
-HTTPS (OpenSSL 3.6: TLS 1.2 and 1.3, certificates checked against
-CACERT.PEM as WGET's; a bad one is asked about), gzip, cookies kept in
-C:\HOME, forms, tables, and the mouse (click a link to follow it). Its
-screen is PDCurses on the PC's text screen, code page 437. It runs on
-vmdos's own TCP as ssh and WGET do; the settings are C:\VMDOS\NET\LYNX.CFG.
-`tools/build-lynx.sh` builds it (DJGPP); `third_party/lynx/README.vmdos`
-has the rest.
-
-The `openssl` command (OpenSSL 3.6.5) is there too: `OPENSSL DGST -sha256
-FILE`, keys and certificates (`GENPKEY`, `REQ`, `X509`, `VERIFY`),
-`ENC`, and `OPENSSL S_CLIENT -connect host:443` on the same TCP.
-`tools/build-openssl.sh` builds it; `third_party/openssl/README.vmdos`
-has the rest.
-
-### Remote DOS prompt (telnet)
-
-Off unless asked for: without `remote=` vmdos listens on no port.
-`remote=23` on the command line (`remote=on` is 23, any port works) has
-vmdos take telnet connections to DOS's IPv4 address on that port, after
-STARTNET or VMTCP has given DOS one (vmdos sees it go by; nothing stays
-resident in DOS, and vmdos answers ARP for it meanwhile). The session shows
-the DOS text screen, ANSI colors and code page 437 as UTF-8, only what
-changes, and keys typed there go to DOS as scan codes: arrows, Home/End,
-PgUp/PgDn, Ins/Del, F1-F12, Ctrl+letters, so a program with its own
-keyboard handler gets them too (paced by the BIOS buffer, so a paste into
-the terminal isn't lost). Graphics modes show a note until text comes back.
-One session at a time; another gets "busy". `remotepw=WORD` asks for a
-password first (three tries). Telnet isn't encrypted: keep it on your own
-network, or reach it through an SSH tunnel. Under QEMU's user networking:
-`-nic user,hostfwd=tcp::2323-:23`, then `telnet localhost 2323`.
-IPv4 only.
-
-### Memory statistics for the host (virtio-balloon)
-
-With a virtio-balloon device (QEMU `-device virtio-balloon-pci,id=bal`), vmdos reports
-total, free and available memory (what XMS, EMS and DPMI can still get) on its statistics
-queue. QMP: `qom-set bal guest-stats-polling-interval 2`, then `qom-get bal guest-stats`;
-libvirt: `virsh dommemstat`. Inflating isn't supported (the balloon stays empty);
-`balloon=off` skips the device.
-
-### Shutdown, guest agent and pvpanic (QEMU/KVM, libvirt)
-
-- ACPI power button: virt-manager's Shut Down, `virsh shutdown` or QMP `system_powerdown` turn vmdos
-  off once the disks are quiet (vmdos's write caches flushed first). `POWEROFF.COM` does the same from
-  DOS, after DOS's own buffers and SMARTDRV. `acpi=off` skips it.
-- QEMU guest agent on virtio-serial (`org.qemu.guest_agent.0`, which virt-manager adds): sync, ping,
-  info, shutdown (powerdown/reboot), get-time, get-osinfo, get-host-name (`hostname=`) and
-  network-get-interfaces (DOS's address, learned from its DHCP or traffic). `agent=off` skips it.
-- pvpanic (`<panic model='isa'/>` or PCI): a vmdos panic is reported as CRASH_LOADED, so the host
-  logs it but leaves the VM on the panic screen until Ctrl+Alt+Del. `pvpanic=panic` reports
-  PANICKED instead (libvirt then applies `<on_crash>`, destroy by default); `pvpanic=off` skips it.
-
-### Host folders: VMDOSNET (9P: QEMU's virtio-9p, or a server on the network)
-
-A folder as a DOS drive, over 9P2000.L: one QEMU shares (virtio-9p), or a
-9P server on the network (diod), over TCP on IPv4 or IPv6:
-
-    make run SHARE=~/dosfiles            # or: -virtfs local,path=DIR,mount_tag=share,security_model=none
-    VMDOSNET V: share                    # in DOS (C:\VMDOS\NET)
-
-    diod -f -n -S -U $USER -l 0.0.0.0:564 -e /home/me/dos      # on the server (-l IP:port for another port)
-    VMDOSNET V: 192.168.1.10/home/me/dos                       # after STARTNET (DHCP)
-    VMDOSNET V: fileserver:5640/home/me/dos                    # a name, another port
-    VMDOSNET V: [2001:db8::10]:5640/home/me/dos                # IPv6
-
-`VMDOSNET V: target [/SFN] [/WT] [/RO] [/C:kb] [/T:ms] [/UID:n]`,
-`VMDOSNET V: /D`, `VMDOSNET` lists. vmdos answers DOS's redirector calls
-(INT 2Fh AH=11h) for the drive itself (`src/fs9p.cpp`); nothing stays
-resident. For a network server VMDOSNET.EXE uses the TCP/IP settings (DHCP's)
-to look the server up and find the next hop, then vmdos runs the TCP
-connection itself (`src/tcp9p.cpp`), as IPXNET does with UDP: DOS's own
-TCP/IP keeps working beside it with the same address, and if the connection
-drops (the server restarted) vmdos connects again on the next access (open
-files are lost). Host names that aren't 8.3 get a stable short name
-(`LONG~K3Q.TXT`), and the long-name API (INT 21h 71xxh) works on the drive
-too (FreeCOM: `DIR /LFN`, quoted long names in COPY/CD/MD/DEL/REN), for DPMI
-programs as well: through INT 31h 0300h as DJGPP's C library calls it, and as
-INT 21h straight from protected mode, taken with the program's own selectors
-and offsets as a host that translates these calls would (`tests/dpmilfn.asm`).
-`/SFN` leaves the API out (short names only); `/LFN`, the old switch for it,
-is still taken.
-Listings and file data are cached (4 MiB of 32 KiB blocks, checked against
-the file's time and size when opened; listings trusted for /T ms); writes
-are gathered and sent on close, commit or after 0.5 s (`/WT`: straight
-through). Files' times are taken as the PC clock's time (QEMU's RTC is UTC
-by default). VMCD takes CD images from these drives too. In VMHV's
-virtual machine the drive has short names only. `tcplog` on
-the kernel command line logs the connection.
-
-## VMHV: DOS in a virtual machine (draft; AMD-V or Intel VT-x)
-
-Some software has to own the CPU: HIMEM and EMM386, Windows 3.x, DOS
-extenders' raw and VCPI kernels (DOS/32A's own, its SD/32A debugger),
-games that are their own memory manager. vmdos can't give them that in
-virtual-8086 mode, so `VMHV` restarts DOS inside a hardware virtual
-machine (AMD-V with nested paging, or Intel VT-x with EPT and unrestricted
-guest: Intel CPUs from 2010 on) where it can. The guest sees a 386
-with 640 KB and 31 MB of extended memory (1-32 MB; `vmmem=N` on the
-command line for another size in MB, halved until it fits) and nothing else at
-C000-EFFF, so HIMEM and EMM386 manage that memory themselves (UMBs, an
-EMS page frame, VCPI). Disks, keyboard, mouse, video and sound are still
-vmdos's: the BIOS stubs and every I/O port exit to the same code as in
-V86 mode. With `video=vbe` the card is the VM's own: its BIOS at C000h
-(a page of upper memory it writes into, where the PC's BIOS gave it room,
-becomes RAM), A0000h-BFFFFh, its ports without an exit, and its linear
-framebuffer at the BAR's address (write-combining).
-
-    VMHV            restart DOS in the VM; pick at FDCONFIG.SYS's menu,
-                    or let the countdown run out for the VMHV choice
-    VMHV n          ... picking choice n at once
-    vmhv / vmhv=n   on the kernel command line: boot straight into it
-
-The VM boots C: again. vmdos's FDCONFIG.SYS has a menu for that: choice 1
-(the default after 5 seconds) is vmdos as usual, choice 2 leaves out vmdos's
-own drivers and loads FreeDOS's HimemX and JEMM386 (in C:\VMDOS,
-`third_party/`) instead. In the VM the menu waits as usual; if no key is
-pressed, VMHV types the choice whose MENU line mentions VMHV just before
-MENUDEFAULT's timeout would pick choice 1. Choice 3 loads HimemX only, for Windows 3.x (`VMHV 3`): JEMM386
-doesn't do the handshake (INT 2Fh 1605h) by which Windows takes over from
-an EMM386 for 386 Enhanced mode, and Windows says it can't run while
-protected-mode software is running; without EMM386 the CPU is in real
-mode in the VM and Windows takes it itself. MS-DOS's HIMEM.SYS and
-EMM386.EXE (which has the handshake) can take HimemX's and JEMM386's
-place. A C: made
-before this keeps its FDCONFIG.SYS (`make esp` doesn't overwrite it):
-`FRESH=1`, or copy the menu over. With it, a program gets about 618 KB
-of conventional memory in the VM.
-
-The VM keeps the machine until it reboots, which restarts vmdos.
-Ctrl+Alt+End sends Ctrl+Alt+Del into it (DOS and SMARTDRV write their
-buffers first; Windows shows its own restart screen); pressed twice
-within 3 seconds it offers a forced restart, which loses whatever the VM
-hadn't written. A triple fault or `HLT` with interrupts off ends it too.
-
-Tested in QEMU (TCG, `-cpu EPYC`): FreeDOS boots in the VM, HimemX and
-JEMM386 load (EMS, VCPI, UMBs at C800-DFFF), DOS/32A runs its own raw
-kernel and over VCPI, Ctrl+Alt+End restarts. `make run-hv` runs it;
-QEMU 8.2's TCG doesn't apply nested paging to a guest that hasn't turned
-paging on (current QEMU does), so use a newer QEMU or 8.2 with `tools/qemu-8.2-npt-unpaged.patch` (`QEMU=path`).
-
-Trapped VGA memory (the planar modes, DOOM's Mode X) is emulated from
-any code, paged or not: the emulator reads the guest's memory through
-its own page tables (test: `tests/hvplanar.asm`, protected mode with
-paging, code above 1 MB).
-
-On Intel, `src/hvvmx.c` keeps the VMCS and translates its exits into
-AMD-V's terms, so both share the exit handling in `src/hv.c`; EPT mirrors
-the host's mappings of the VM's memory. Tested in Bochs 3.1 (built with
-`--enable-vmx=2`, `cpu: model=corei7_sandy_bridge_2600k`): FreeDOS, HimemX,
-JEMM386 and DOS/32A over VCPI run in the VM; `debug=3` writes the text
-screen to the log every 20 s.
-
-`faultlog` on the kernel command line logs the VM's invalid-opcode (#UD)
-and general-protection (#GP) faults in protected mode, at any privilege
-level (each faulting address once, up to 300; the first few with code and
-stack): a Windows program
-or driver that dies quietly shows there.
-
-While VMHV runs, the first CPU redraws the screen itself, and the render
-helpers take rows of each redraw as they did the second CPU's (`nohvrows`:
-not), and of the Voodoo 3's picture, turned from its memory into pixels at
-the end of each frame; they also go on drawing the Voodoo's triangles. The second CPU
-(otherwise halted) is a watchdog: if
-vmdos's own timer tick stops for 3 s (vmdos stuck with its interrupts
-off: no screen, sound or keyboard, so Ctrl+Shift+F10 can't help), it sends
-the first CPU an NMI, and vmdos stops with the red screen and logs where it
-was (the VM's state, the Voodoo 3's, the kernel's EIP and the return
-addresses on its stack, for `addr2line -f -e vmdos.elf`). `nowatchdog`
-turns it off; `wdtest` hangs vmdos 20 s into VMHV to try it.
-Ctrl+Shift+F10 logs the same state (the VM, the screen's redraws, the
-Voodoo 3) when the screen freezes but the keyboard still works.
-
-Not yet: SD/32A gets stuck in a loop in DOS/32A's kernel; a
-PAE-paging guest; the CD-ROM (VMCD) inside the VM; Windows 3.x and 9x are
-untested.
-
-## Hyper-V
-
-In a Hyper-V virtual machine (Gen 1 or Gen 2) vmdos talks to the host over
-VMBus, as Linux's hv_vmbus does (`src/vmbus.cpp`): the hypercall page and
-the SynIC, then VMBus protocol 6.0 down to the one Server 2008 spoke, the
-channel offers, GPADLs, and each channel's ring buffers, polled. On it:
-
-- **SCSI disks** (`src/blk_storvsc.cpp`, after Linux's storvsc): every disk on
-  the VM's SCSI controllers (up to 4 controllers, LUN 0-63 each, 512-byte
-  sectors, over 2 TiB too), for VMHD like any other disk, and for C: if one
-  holds DOS. A Gen 1 VM boots from IDE, so C: is normally on its IDE disk,
-  which vmdos drives through Hyper-V's emulated IDE controller as on a PC;
-  put the disks you want under DOS on the SCSI controller.
-  `storvsc=off` skips them.
-- **Legacy Network Adapter** (Gen 1): an emulated DEC 21140, driven by
-  `src/nic_tulip.cpp` (after Linux's tulip) like a PCI card. Slower than
-  the synthetic adapter but needs nothing from VMBus. Hyper-V drops frames
-  from other MAC addresses here too unless spoofing is enabled.
-- **Network adapter** (`src/nic_netvsc.cpp`, after Linux's netvsc and
-  rndis_filter): Hyper-V Manager's "Network Adapter" (not "Legacy Network
-  Adapter"), for VMPKT/VMIPX/mTCP like a PCI card (VMNIC lists it as
-  "Hyper-V"). Hyper-V drops frames sent from any MAC address but the
-  adapter's own unless "Enable MAC address spoofing" is on in its advanced
-  features. `netvsc=off` skips it.
-
-`vmbus=off` leaves VMBus alone; `vmbuslog` logs its messages. The drivers
-are tested against a simulated Hyper-V host (`tests/hvsim`: `make -C
-tests/hvsim`, a 32-bit Linux program), which checks everything they send
-with Linux's own structures; not yet on a real Hyper-V host.
-
-## Not yet
-
-- Mode X's 240-line timing, EMS, SB16 (16-bit)
-  sound, saving C: to a real disk.
-
-## Layout
-
-| File | |
+| Keys | What it does |
 |---|---|
-| `src/boot.S` | Multiboot header, entry, interrupt stubs, entry into v86 |
-| `src/cpu.c` | kmain, memory, paging, GDT/TSS/IDT, real PIC/PIT |
-| `src/v86.c` | the monitor: #GP decoding, INT/IRET/PUSHF/POPF/CLI/STI, I/O, IRQ delivery |
-| `src/vdev.c` | virtual PIC, PIT, keyboard controller, A20, CMOS |
-| `src/bios.c`, `src/bios.asm` | BIOS data area, IVT, services; F000h stub segment |
-| `src/video.c` | VGA state, INT 10h, framebuffer renderer |
-| `src/vgabios.c` | `video=vbe`: the card's own VGA/VESA BIOS, ports and memory (BIOS/CSM boots) |
-| `boot/boot.asm`, `boot/boot32lb.asm` | FreeDOS FAT16 and FAT32 LBA boot sectors (from the FreeDOS kernel, GPL) |
-| `efi/loader.c`, `efi/tramp.S` | vmdos.efi: UEFI loader, long mode to 32-bit handoff |
-| `src/usb.cpp`, `src/usb2.inc`, `src/pci.cpp` | USB: xHCI (usb.cpp), EHCI, UHCI and OHCI (usb2.inc); keyboards, mice (from baremetaldoom), gamepads, hubs and mass storage (C: on a stick) |
-| `src/audio.cpp`, `src/sound.c` | sound card driver (from baremetaldoom), SB glue |
-| `src/sb/` | SBPRO core: DSP, playback + virtual 8237, OPL3 (dbopl), GM synth, MPU-401 |
-| `src/gus.c` | Gravis UltraSound (GF1) |
-| `src/mouse.c` | PS/2 + USB mouse, INT 33h |
-| `src/net.cpp`, `src/net.hpp`, `src/ne2k.c` | network: the receive queue, the card in use, the INT 2Fh interface for VMPKT; the emulated NE2000 |
-| `net/`, `third_party/mtcp/` | TCP/IP for DOS (VMTCP, DHCP, PING, NSLOOKUP) with IPv6, and VMIPXBOX, on mTCP (GPL-3.0-or-later); prebuilt in `net/bin` |
-| `src/fs9p.cpp`, `src/tcp9p.cpp`, `net/vmdosnet/` | 9P folders as DOS drives: virtio-9p and TCP transports, DOS redirector, long-name API, caches; VMDOSNET.EXE (on mTCP); tcp9p's connections and DNS for DOS programs too (INT 2Fh AX=564Eh BL=13-18: SSH) |
-| `src/ipxnet.cpp` | IPXNET: DOSBox's IPX over UDP (server or client), run under DOS; set up by VMIPXBOX |
-| `src/nic_*.cpp` | network card drivers: e1000/e1000e/ICH-PCH, igb, igc, RTL8139, r8169 (RTL8111/8125/8169), tg3 (Broadcom), alx and atl1c (Atheros/Killer), virtio-net, DEC 21140 Tulip, NE2000 (RTL8029), Hyper-V netvsc, USB (CDC-ECM) |
-| `src/disk.c`, `src/blk.h`, `src/blk_*.c(pp)`, `src/fat.c` | drive C: (a SATA / IDE / virtio / NVMe / Hyper-V / USB partition or RAM disk), the disk drivers (AHCI, IDE, virtio-blk, NVMe, Hyper-V storvsc, USB), FAT reader |
-| `src/virtio.cpp` | virtio over PCI (legacy and 1.0), for virtio-net and virtio-blk |
-| `src/vmbus.cpp` | Hyper-V's VMBus (hypercalls, SynIC, channels, ring buffers), for storvsc and netvsc |
-| `tests/hvsim/` | a simulated Hyper-V host to test the VMBus drivers against (Linux's structures in `linux_hv.h`) |
-| `src/dpmi.c` | DPMI host |
-| `src/hv.c`, `src/hvasm.S`, `dos/vmhv.asm` | VMHV: DOS in an AMD-V virtual machine; VMHV.COM |
-| `third_party/himemx/`, `third_party/jemm/` | HimemX and JEMM386 (prebuilt, unmodified), for the VM |
-| `src/mememu.c` | instruction emulator for the trapped 16-color VGA window and the Voodoo 3 (x87, MMX, SSE moves) |
-| `src/es1371.c` | the Ensoniq AudioPCI 97 (`es1371`) on the guest's PCI bus |
-| `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
-| `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
-| `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
-| `src/media.c` | the media console (Ctrl+Shift+F6): CD, floppy and VMHD changes from a command line over the game |
-| `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
-| `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
-| `third_party/shsucd/` | SHSUCDX by Jason Hood (unmodified, zlib-style license) |
-| `dos/edit/`, `dos/tree/`, `dos/zcopy/`, `dos/bin/` | EDIT, vmdos's text editor, TREE and ZCOPY (C, Open Watcom; prebuilt in `dos/bin`, `tools/build-tools.sh`) |
-| `third_party/dosutils/`, `dos/subst.asm` | MORE, LESS, FIND, SORT, ATTRIB, XCOPY, MOVE, DELTREE, LABEL, MEM, FORMAT, FDISK, CHOICE, MKEYB, NANSI, ZIP, UNZIP (prebuilt; sources, licenses and vmdos's few fixes in its README.vmdos; `tools/build-dosutils.sh`); SUBST |
-| `third_party/openssh/` | OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's TCP) with their DOS glue, sockets, terminal and OpenSSH patch (prebuilt; licenses, notes in its README.vmdos; `tools/build-openssh.sh`) |
-| `third_party/flt/` | FLT, Felix Terminal DOS Edition (SSH terminal with Sixel, Kitty and VT100; prebuilt; in C:\VMDOS\NET, C: only; notes in its README.vmdos) |
-| `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
-| `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT; CWSDPMI built in for VMHV) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
-| `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
-| `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
+| `Ctrl+Shift+F6` | Media console: change CDs, floppies and disks while a program runs |
+| `Ctrl+Shift+F8` | Cycle scaling: sharp, smooth, xBRZ, widescreen, none |
+| `Ctrl+Shift+F9` | Screenshot (save it afterwards with `VMSHOT`) |
+| `Ctrl+Shift+F10` | Show vmdos's log over the game (`Ctrl+Shift+S` saves it) |
+| `Ctrl+Shift+F11` / `F12` | Slower / faster CPU, for speed-sensitive games |
+| `Ctrl+Shift+F2` / `F3` / `F4` / `F5` | Next sound output / volume down / up / mute |
+| `Ctrl+Shift+C` / `V` | Copy screen text / paste (shared with the host clipboard under QEMU) |
+| `Ctrl+Shift+PgUp` | Scrollback, or just use the mouse wheel |
 
-License: GPL-2.0-or-later (it includes FreeDOS's boot sector).
+Everything is also on the disk as `C:\README.TXT`.
+
+## Learn more
+
+[**TECHNICAL.md**](TECHNICAL.md) is the full reference. It covers every boot option, how C: is
+chosen, video and scaling, VBE passthrough, the Voodoo 3, serial ports, sound devices, the
+network stack, VMHV, Hyper-V and a map of the source tree. Some good places to start:
+
+- [Booting from a USB stick](TECHNICAL.md#booting-from-a-usb-stick) and [the boot menu](TECHNICAL.md#boot-menu-uefi-and-legacy-bios)
+- [Drive C: and other disks](TECHNICAL.md#drive-c)
+- [What works](TECHNICAL.md#what-works): BIOS, USB, memory, graphics, sound
+- [Networking](TECHNICAL.md#network-packet-driver-and-ipx), [SSH](TECHNICAL.md#ssh-sftp-and-scp), [FLT](TECHNICAL.md#flt-felix-terminal-ssh-with-sixel-and-kitty-graphics), [Lynx](TECHNICAL.md#web-browsing-lynx-and-openssl), [host folders](TECHNICAL.md#host-folders-vmdosnet-9p-qemus-virtio-9p-or-a-server-on-the-network)
+- [VMHV](TECHNICAL.md#vmhv-dos-in-a-virtual-machine-draft-amd-v-or-intel-vt-x) and [Hyper-V](TECHNICAL.md#hyper-v)
+- [Source layout](TECHNICAL.md#layout)
+
+## License
+
+GPL-2.0-or-later (it includes FreeDOS's boot sector). Bundled third-party tools keep their own
+licenses; each `third_party/*/README.vmdos` says where it came from.
