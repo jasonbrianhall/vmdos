@@ -260,6 +260,10 @@ C_ONLY_MAP   += third_party/felixbasic/bin/FELIXBAS.EXE=VMDOS/BASIC/FELIXBAS.EXE
 # third_party/openssh/README.vmdos
 C_ONLY_DEPS  += $(addprefix third_party/openssh/bin/,SSH.EXE SFTP.EXE SCP.EXE)
 C_ONLY_MAP   += $(foreach f,SSH.EXE SFTP.EXE SCP.EXE,third_party/openssh/bin/$(f)=VMDOS/NET/$(f))
+# FLT, Felix Terminal (SSH terminal: Sixel, Kitty, VT100) in C:\VMDOS\NET:
+# third_party/flt/README.vmdos
+C_ONLY_DEPS  += third_party/flt/FLT.EXE
+C_ONLY_MAP   += third_party/flt/FLT.EXE=VMDOS/NET/FLT.EXE
 # WGET (DJGPP, mbedTLS, ssh's socket layer: tools/build-wget.sh) in C:\VMDOS\NET
 # when it's been built, with the certificate authorities it checks https against
 WGET_EXE     := $(wildcard third_party/wget/bin/WGET.EXE)
