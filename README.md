@@ -885,6 +885,20 @@ that sets mode 3 goes back to 80x25, as on a PC.
 `third_party/openssh/README.vmdos` has the rest; `tools/build-openssh.sh`
 rebuilds them.
 
+### FLT: Felix Terminal (SSH with sixel and kitty graphics)
+
+C:\VMDOS\NET\FLT.EXE (on C: only) is Felix Terminal for DOS: an SSH client
+(libssh2) drawn on a VESA mode with FreeType, xterm-256color, sixel and kitty
+graphics, so `timg`, `img2sixel` and gnuplot's sixel output show pictures on
+the DOS screen. After STARTNET: `FLT user@host` (`FLT user@host:2222`,
+`FLT -g 1280x800 user@host` for another mode, `-t` a theme, `-f` the font
+size). Shift+PgUp/PgDn scroll back; with a mouse driver, drag to copy,
+middle-click to paste, right-click for themes and resolutions (kept in
+%HOME%\FLT.CFG). Keys and known_hosts are in C:\HOME\.ssh, as for SSH, and it
+runs on the same vmdos TCP. `third_party/flt/README.vmdos` has the options;
+it's built from [felixterminal](https://github.com/jasonbrianhall/felixterminal)'s
+`msdos/` folder.
+
 ### Downloads: WGET
 
 `WGET https://example.com/file.zip` (after STARTNET) saves FILE.ZIP in the
