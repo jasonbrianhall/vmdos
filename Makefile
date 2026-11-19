@@ -264,6 +264,11 @@ C_ONLY_MAP   += $(foreach f,SSH.EXE SFTP.EXE SCP.EXE,third_party/openssh/bin/$(f
 # third_party/flt/README.vmdos
 C_ONLY_DEPS  += third_party/flt/FLT.EXE
 C_ONLY_MAP   += third_party/flt/FLT.EXE=VMDOS/NET/FLT.EXE
+
+# Felix Chirp
+C_ONLY_DEPS  += third_party/flt/CHIRP.EXE
+C_ONLY_MAP   += third_party/flt/CHIRP.EXE=VMDOS/CHRIP.EXE
+
 # WGET (DJGPP, mbedTLS, ssh's socket layer: tools/build-wget.sh) in C:\VMDOS\NET
 # when it's been built, with the certificate authorities it checks https against
 WGET_EXE     := $(wildcard third_party/wget/bin/WGET.EXE)
