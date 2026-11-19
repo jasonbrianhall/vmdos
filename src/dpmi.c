@@ -282,7 +282,6 @@ static int nest;                                /* clients put aside, waiting fo
 static u32 nest_stack[NEST_MAX + 1];            /* each level's own locked stack */
 int xms_range_ok(u32 a, u32 n);
 static int alloc_block(u32 size);
-static void merge_free(void);
 static int lin_ok(u32 a, u32 n)
 {
     if (a + n < a) return 0;
@@ -671,25 +670,6 @@ static u32 win_find(u32 size)
 
 static int in_window(int i) { return blk[i].lin >= WIN_LO && blk[i].lin + blk[i].size <= WIN_HI; }
 
-/* Freed window blocks that touch are one block (each page is mapped on its
-   own, so a block is only a range of the window): after Quake's many
-   resizes the window would otherwise stay in pieces for the next program. */
-static void merge_free(void)
-{
-    for (int again = 1; again;) {
-        again = 0;
-        for (int i = 0; i < MAX_BLOCKS; i++) {
-            if (!blk[i].size || blk[i].used || !in_window(i)) continue;
-            for (int j = 0; j < MAX_BLOCKS; j++) {
-                if (j == i || !blk[j].size || blk[j].used || !in_window(j)) continue;
-                if (blk[i].lin + blk[i].size == blk[j].lin) {
-                    blk[i].size += blk[j].size; blk[j].size = 0; again = 1;
-                }
-            }
-        }
-    }
-}
-
 /* The client is gone: what it had goes back to the kernel, and the window
    is whole again. Kept while it ran (freed blocks are reused), its memory
    left in place after it ended had the window in pieces: a freed block
@@ -697,22 +677,26 @@ static void merge_free(void)
    pages behind it), so after a small program (or a game's setup) the next
    one could find no window piece big enough ("out of memory", where the
    same game had just run). */
+/* Block i (freed) back to the kernel: its pages, and its place in the window. */
+static void release_block(int i)
+{
+    if (in_window(i)) {
+        for (u32 a = blk[i].lin; a < blk[i].lin + blk[i].size; a += 4096) {
+            u32 p = page_phys(a);
+            if (p) phys_release((void *)(uintptr_t)p, 4096);
+            map_page(a, guest_phys(0), 0);
+        }
+    } else if (blk[i].lin >= WIN_HI) {          /* above 16 MiB, where it is */
+        set_user(blk[i].lin, blk[i].size, 0);
+        phys_release((void *)(uintptr_t)blk[i].lin, blk[i].size);
+    } else return;
+    blk[i].size = 0;
+}
+
 static void release_free(void)
 {
-    for (int i = 0; i < MAX_BLOCKS; i++) {
-        if (!blk[i].size || blk[i].used) continue;
-        if (in_window(i)) {
-            for (u32 a = blk[i].lin; a < blk[i].lin + blk[i].size; a += 4096) {
-                u32 p = page_phys(a);
-                if (p) phys_release((void *)(uintptr_t)p, 4096);
-                map_page(a, guest_phys(0), 0);
-            }
-        } else if (blk[i].lin >= WIN_HI) {          /* above 16 MiB, where it is */
-            set_user(blk[i].lin, blk[i].size, 0);
-            phys_release((void *)(uintptr_t)blk[i].lin, blk[i].size);
-        } else continue;
-        blk[i].size = 0;
-    }
+    for (int i = 0; i < MAX_BLOCKS; i++)
+        if (blk[i].size && !blk[i].used) release_block(i);
     tlb_flush();
 }
 
@@ -1019,7 +1003,16 @@ static struct regs *int31(struct ctx *c)
         SET16(ebx, blk[i].lin >> 16); SET16(ecx, blk[i].lin); SET16(esi, (i + 1) >> 16); SET16(edi, i + 1); break; }
     case 0x0502: { u32 h = rSI << 16 | rDI;
         if (!h || h > MAX_BLOCKS || blk[h - 1].used != 1) { err(c, 0x8023); break; }
-        blk[h - 1].used = 0; merge_free(); break; }
+        blk[h - 1].used = 0;
+        /* Back to the kernel at once. Kept for reuse while the program ran,
+           a freed block was handed whole to the next request it could hold
+           (no split), and the memory it took was counted as used until the
+           program ended: a picture viewer that freed a 36 MB picture before
+           opening the next held every picture's peak, and then more (its
+           next 1 MB request took the 36 MB; the next picture, 36 MB more). */
+        release_block(h - 1);
+        tlb_flush();
+        break; }
     case 0x0503: { u32 h = rSI << 16 | rDI, size = rBX << 16 | rCX;
         if (!h || h > MAX_BLOCKS || !blk[h - 1].used) { err(c, 0x8023); break; }
         int o = h - 1;
@@ -1029,6 +1022,8 @@ static struct regs *int31(struct ctx *c)
         int n = alloc_block(size);
         if (n < 0) { blk[o].used = 1; err(c, 0x8013); break; }
         memcpy(gptr(blk[n].lin), gptr(blk[o].lin), blk[o].size);
+        release_block(o);                           /* the old place: back to the kernel */
+        tlb_flush();
         SET16(ebx, blk[n].lin >> 16); SET16(ecx, blk[n].lin); SET16(esi, (n + 1) >> 16); SET16(edi, n + 1); break; }
     case 0x0600: case 0x0601: case 0x0602: case 0x0603: case 0x0702: case 0x0703: case 0x0801: break;
     case 0x0604: SET16(ebx, 0); SET16(ecx, 4096); break;
