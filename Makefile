@@ -267,7 +267,7 @@ C_ONLY_MAP   += third_party/flt/FLT.EXE=VMDOS/NET/FLT.EXE
 
 # Felix Chirp
 C_ONLY_DEPS  += third_party/flt/CHIRP.EXE
-C_ONLY_MAP   += third_party/flt/CHIRP.EXE=VMDOS/CHRIP.EXE
+C_ONLY_MAP   += third_party/flt/CHIRP.EXE=VMDOS/CHIRP.EXE
 
 # WGET (DJGPP, mbedTLS, ssh's socket layer: tools/build-wget.sh) in C:\VMDOS\NET
 # when it's been built, with the certificate authorities it checks https against
