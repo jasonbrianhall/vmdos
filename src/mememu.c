@@ -4,8 +4,9 @@
    what programs use on video memory: MOV, MOVZX/MOVSX, the ALU group,
    TEST, XCHG, INC/DEC, NOT/NEG, shifts/rotates by 1/CL/imm, and the string
    instructions MOVS/STOS/LODS (with REP, all iterations at once), SETcc,
-   and for the Voodoo 3 x87, MMX and SSE loads and stores (Glide and
-   Direct3D drivers, DirectDraw surface copies), in 16- and 32-bit code.
+   and x87, MMX and SSE loads and stores (Glide and Direct3D drivers,
+   DirectDraw surface copies on the Voodoo 3; games filling and copying an
+   unchained 256-color screen 8 bytes at a time), in 16- and 32-bit code.
    Memory outside the window is accessed directly (the guest and the kernel
    share the address space). */
 #include "kernel.h"
@@ -330,13 +331,28 @@ static int x87_size(u8 op, int reg, int *rd, int *wr)
     return 0;
 }
 
+/* The guest's x87 has an unmasked exception pending (FSW.ES): its next
+   x87 or MMX instruction raises #MF (or IRQ 13) in the guest, and run here
+   it would raise it in vmdos. Left to the guest. */
+static int x87_pending(void)
+{
+    u16 sw;
+    __asm__ volatile("fnstsw %0" : "=m"(sw));
+    return sw & 0x80;
+}
+
 static int x87_op(u8 op)
 {
-    /* Only for the Voodoo 3, and only if the guest would run it itself:
-       with CR0.TS (Windows switches x87 state lazily, on the #NM it
-       raises) or CR0.EM set the instruction must fault in the guest, and
-       running it here would use another thread's x87 state. */
-    if (!v3_on || (hv_guest_cr0() & 0xC)) return 0;
+    /* Only if the guest would run it itself: with CR0.TS (Windows switches
+       x87 state lazily, on the #NM it raises) or CR0.EM set the instruction
+       must fault in the guest, and running it here would use another
+       thread's x87 state; and not without an x87. On the VGA's window as
+       well as the Voodoo's: games clear and copy unchained 256-color
+       screens eight bytes at a time with FILD/FISTP or FLD/FSTP QWORD
+       (Need for Speed SE: FST QWORD [EDX] to A0000h). vmdos's own x87 code
+       (the FM synth, the Voodoo) saves and restores the guest's. */
+    extern u32 fpu_present;
+    if (!fpu_present || (hv_guest_cr0() & 0xC) || x87_pending()) return 0;
     modrm();
     u8 *c = x87_code;
     if (mod_ == 3) {                                    /* registers only: as it is */
@@ -381,7 +397,6 @@ static u32 cpu_feat;                                /* CPUID 1 EDX, once */
 
 static int simd_can(u32 need, int xmm)
 {
-    if (!v3_on) return 0;
     if (!cpu_feat) {
         u32 a = 1, b, c, d;
         __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
@@ -389,6 +404,7 @@ static int simd_can(u32 need, int xmm)
     }
     if ((cpu_feat & need) != need) return 0;
     if (hv_guest_cr0() & 0xC) return 0;             /* EM, TS */
+    if (!xmm && x87_pending()) return 0;            /* MMX: #MF */
     if (xmm) {
         if (!host_osfxsr) return 0;                 /* this CPU won't run it */
         if (hv_active && !(hv_guest_cr4() & 0x200)) return 0;   /* nor the guest's (no OSFXSR: #UD there) */
