@@ -377,7 +377,9 @@ the CPU has SSE2; the few modes it doesn't draw as the C loop does go to
 the C loop, and `v3nojit` sends everything there. `tests/voodoo` has the
 tests (`emutest` for the MMX/SSE emulation; `hosttest random jitcmp`
 compares the JIT with the C loop; `hosttest random mp=4` draws with four
-threads standing in for render helper CPUs).
+threads standing in for render helper CPUs). `tests/voodoo/glide/glidetest.sh`
+builds 3dfx's own Glide 2 (DJGPP) and Glide 3 (Open Watcom, DOS/4GW and
+DOS/32A) for the Voodoo 3 and runs their test programs in DOS under QEMU.
 
 With render helper CPUs (below), the triangles are drawn on them instead:
 one helper draws them all, two or three split each triangle's scan lines

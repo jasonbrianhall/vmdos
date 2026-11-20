@@ -238,7 +238,18 @@ void v3_poll_timers(void)
     if (!use_tsc) d = (u32)d;                  /* pit_clock wraps at 32 bits */
     if (d > max_step) d = max_step;            /* 50 ms */
     tsc += d;
-    if (TIMER_VAL_LESS_THAN_VAL(timer_target, tsc)) timer_process();
+    if (TIMER_VAL_LESS_THAN_VAL(timer_target, tsc)) {
+        timer_process();
+        /* Slower than the card's own time (its scan lines cost more to draw
+           than they last, as the 8-bit desktop under a Glide overlay does
+           on a slow or emulated CPU): the time spent drawing them is not
+           owed again. Owed, each tick would draw more than the last, up to
+           50 ms of lines, and DOS would never run again. The card's clock
+           falls behind instead. */
+        uint64_t spent = clock_now() - now;
+        if (!use_tsc) spent = (u32)spent;
+        if (spent > d) last = clock_now();
+    }
 }
 
 /* The clock's rate, Hz: what cpuclock is. */
