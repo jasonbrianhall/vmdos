@@ -141,6 +141,7 @@ void ipxnet_tick();
 void ipxnet_api(struct regs* r, int fn);           // INT 2Fh AX=564Eh BL=8, 9
 // ... and these from net.cpp
 const uint8_t* net_cur_mac();                       // the address DOS uses
+bool net_link_up();                                 // the card in use has a link
 bool net_wire_send(const uint8_t* f, unsigned len);
 void net_dos_inject(const uint8_t* f, unsigned len);
 void net_promisc(bool on);                          // the card takes everything (DOS still gets its own)

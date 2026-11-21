@@ -437,6 +437,8 @@ extern "C" void net_usb_rx(const uint8_t* f, unsigned len)
     enqueue(f, len);
 }
 
+bool net_link_up() { return active >= 0 && card_link(cards[active]); }
+
 extern "C" void net_tick(void)
 {
     usb_check(true);

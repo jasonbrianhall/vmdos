@@ -14,6 +14,9 @@
 // (DHCP -status shows it), since only running DHCP again gives DOS's
 // TCP/IP stack its new settings.
 //
+// While the card has no link nothing is sent; an overdue request goes
+// out as soon as the link comes back.
+//
 // The answers are vmdos's (its own transaction ID) and go no further; DOS
 // never sees them. dhcplog on the kernel command line logs each step.
 #include "net.hpp"
@@ -225,6 +228,15 @@ void dhcpc_tick()
     uint32_t el = ticks - sec_mark;
     if (el >= 1000) { now_s += el / 1000; sec_mark += el / 1000 * 1000; }
     if ((int32_t)(now_s - next_at) < 0) return;
+    // No link: nothing would get there. Leave next_at as it is, so the
+    // request goes as soon as the link is back.
+    static bool no_link;
+    if (!net_link_up()) {
+        if (!no_link) dlog("dhcp: no link; waiting for it before asking\n");
+        no_link = true;
+        return;
+    }
+    if (no_link) { no_link = false; dlog("dhcp: link is back\n"); }
     State was = state;
     if (state == BOUND || state == RENEWING) {
         if ((int32_t)(now_s - t2_at) >= 0) state = REBINDING;
