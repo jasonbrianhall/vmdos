@@ -456,6 +456,13 @@ bool link(Card& c)
     return up;
 }
 
+// STATUS: bits 7-6 the speed (00 10, 01 100, 1x 1000), bit 0 full duplex
+uint8_t speed(Card& c)
+{
+    uint32_t s = r32(c, STATUS);
+    return link_info(s & 0x80 ? 1000 : s & 0x40 ? 100 : 10, s & 1);
+}
+
 // debug=1: what the card has done, every 5 s for the first minute and a
 // half (from the first frame sent): frames sent and received by the MAC,
 // missed, no descriptors, ring heads and tails. "Nothing comes in or out"
@@ -535,5 +542,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_e1000 = {
     KIND_E1000, [](uint32_t id, uint32_t) { return e1k::match(id); },
-    e1k::init, e1k::link, e1k::set_mode, e1k::set_mac, e1k::poll, e1k::send, nullptr,
+    e1k::init, e1k::link, e1k::set_mode, e1k::set_mac, e1k::poll, e1k::send, nullptr, e1k::speed,
 };

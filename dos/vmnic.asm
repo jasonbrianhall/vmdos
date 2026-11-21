@@ -1,5 +1,6 @@
 ; VMNIC.COM: which network card vmdos uses (VMPKT and VMIPX run on it).
-;   VMNIC          list the cards; * marks the one in use
+;   VMNIC          list the cards; * marks the one in use. With a link: the
+;                  speed and duplex it negotiated, where the card says
 ;   VMNIC 2        use card 2 (programs on VMPKT carry on: the new card
 ;                  is given the address they already have)
 ;   VMNIC AUTO     let vmdos pick: one with a link (the default)
@@ -145,6 +146,9 @@ list:   mov ax, 564Eh
         cmp byte [si + 2], 0
         je .st
         mov dx, msg_up
+        call puts
+        call putspeed
+        mov dx, msg_crlf
 .st:    call puts
         ; the address it sends with, if not its own
         cmp bx, [inuse]
@@ -184,6 +188,32 @@ novm:   mov dx, msg_novm
         int 21h
 
 %include "vmapi.inc"
+
+; The link byte at [si + 2] (BL=6): bits 7-3 the speed (spd_tab), bit 2
+; the duplex is known, bit 1 full.
+putspeed:
+        push bx
+        mov al, [si + 2]
+        mov ah, al
+        shr al, 3
+        jz .dup
+        cmp al, NSPEEDS
+        ja .dup
+        mov bl, al
+        xor bh, bh
+        dec bx
+        shl bx, 1
+        mov dx, [spd_tab + bx]
+        call puts
+.dup:   test ah, 4
+        jz .e
+        mov dx, msg_full
+        test ah, 2
+        jnz .p
+        mov dx, msg_half
+.p:     call puts
+.e:     pop bx
+        ret
 
 putc:   push ax
         mov ah, 2
@@ -227,7 +257,22 @@ msg_auto:   db ', picked automatically (VMNIC n to choose)$'
 msg_crlf:   db 13, 10, '$'
 msg_sp2:    db '  $'
 msg_usb:    db 'USB    $'
-msg_up:     db '  link up', 13, 10, '$'
+msg_up:     db '  link up$'
+msg_full:   db ' full$'
+msg_half:   db ' half$'
+spd_tab:    dw s10, s100, s1g, s2g5, s5g, s10g, s20g, s25g, s40g, s50g, s100g
+NSPEEDS     equ ($ - spd_tab) / 2
+s10:        db ' 10 Mbit/s$'
+s100:       db ' 100 Mbit/s$'
+s1g:        db ' 1 Gbit/s$'
+s2g5:       db ' 2.5 Gbit/s$'
+s5g:        db ' 5 Gbit/s$'
+s10g:       db ' 10 Gbit/s$'
+s20g:       db ' 20 Gbit/s$'
+s25g:       db ' 25 Gbit/s$'
+s40g:       db ' 40 Gbit/s$'
+s50g:       db ' 50 Gbit/s$'
+s100g:      db ' 100 Gbit/s$'
 msg_down:   db '  no link', 13, 10, '$'
 msg_off:    db '  not running', 13, 10, '$'
 msg_as:     db '        sending as $'

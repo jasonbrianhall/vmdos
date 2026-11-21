@@ -76,7 +76,8 @@ enum DhcpStatus_t {
   Dhcp_Ack,
   Dhcp_Nack,
   Dhcp_Timeout,
-  Dhcp_UserAbort
+  Dhcp_UserAbort,
+  Dhcp_NoLink
 };
 
 

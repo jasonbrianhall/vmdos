@@ -6,6 +6,7 @@ using namespace net;
 extern "C" {
 int usb_net_present(void);
 int usb_net_link(void);
+uint32_t usb_net_mbps(void);
 const char* usb_net_name(void);
 void usb_net_mac(uint8_t* m);
 int usb_net_send(const uint8_t* f, unsigned len);
@@ -24,6 +25,7 @@ bool init(Card& c)
     return true;
 }
 bool link(Card&) { return usb_net_link(); }
+uint8_t speed(Card&) { uint32_t m = usb_net_mbps(); return m ? link_info(m, -1) : 0; }   // if the adapter said
 void set_mode(Card& c, int m)
 {
     int bits = 0;                               // SET_ETHERNET_PACKET_FILTER
@@ -44,5 +46,5 @@ bool send(Card&, const uint8_t* f, unsigned len) { return usb_net_send(f, len); 
 
 const NicDriver net::nic_usb = {
     KIND_USB, nullptr,
-    usbnet::init, usbnet::link, usbnet::set_mode, usbnet::set_mac, nullptr, usbnet::send, nullptr,
+    usbnet::init, usbnet::link, usbnet::set_mode, usbnet::set_mac, nullptr, usbnet::send, nullptr, usbnet::speed,
 };

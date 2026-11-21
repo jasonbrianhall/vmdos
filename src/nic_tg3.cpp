@@ -886,6 +886,8 @@ bool link(Card& c)
     return c.t.speed > 0;
 }
 
+uint8_t speed(Card& c) { return c.t.speed > 0 ? link_info(c.t.speed, c.t.full) : 0; }
+
 void poll(Card& c)
 {
     volatile Status* s = (volatile Status*)c.t.stblk;
@@ -947,5 +949,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_tg3 = {
     KIND_TG3, [](uint32_t id, uint32_t) { return tg3::match(id); },
-    tg3::init, tg3::link, tg3::set_mode, tg3::set_mac, tg3::poll, tg3::send, nullptr,
+    tg3::init, tg3::link, tg3::set_mode, tg3::set_mac, tg3::poll, tg3::send, nullptr, tg3::speed,
 };

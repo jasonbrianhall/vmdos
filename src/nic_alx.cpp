@@ -412,6 +412,8 @@ bool link(Card& c)
     return speed != 0;
 }
 
+uint8_t speed(Card& c) { return c.x.speed ? link_info(c.x.speed, c.x.full) : 0; }
+
 void poll(Card& c)
 {
     volatile uint32_t* rrd = (volatile uint32_t*)c.x.rrd;
@@ -467,5 +469,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_alx = {
     KIND_ALX, alx::match,
-    alx::init, alx::link, alx::set_mode, alx::set_mac, alx::poll, alx::send, nullptr,
+    alx::init, alx::link, alx::set_mode, alx::set_mac, alx::poll, alx::send, nullptr, alx::speed,
 };
