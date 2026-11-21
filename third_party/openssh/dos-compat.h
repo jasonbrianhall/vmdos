@@ -200,6 +200,14 @@ struct tm *dos_gmtime_r(const time_t *, struct tm *);
 #define gmtime_r(t, r)   dos_gmtime_r(t, r)
 #define localtime_r(t, r) dos_gmtime_r(t, r)
 
+/*
+ * See dos-compat.c: basename() as POSIX has it. DJGPP's returns what follows
+ * the last / or \, so "dir/" gave "" and sftp's get -r / mget -r made the
+ * local directory "" (mkdir: ENOENT): sftp's glob marks directories with /.
+ */
+char *dos_basename(const char *);
+#define basename(p) dos_basename(p)
+
 /* See dos-compat.c: ssh.c (patched) asks for the user name. */
 char *dos_ask_user(const char *);
 

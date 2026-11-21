@@ -758,3 +758,44 @@ dos_gmtime(const time_t *tp)
 
 	return dos_gmtime_r(tp, &tm);
 }
+
+/*
+ * basename() as POSIX (and OpenBSD, whose sftp and scp expect it) has it:
+ * trailing separators don't count ("dir/" is "dir", "/" is "/", "" is ".").
+ * / and \ both separate, and a drive ("C:") is skipped, as in DJGPP's own:
+ * scp's local paths are C:\DIR\FILE.
+ */
+#undef basename
+char *
+dos_basename(const char *path)
+{
+	static char bname[FILENAME_MAX + 1];
+	const char *start, *end;
+	size_t len;
+
+#define IS_SEP(c) ((c) == '/' || (c) == '\\')
+	if (path == NULL || *path == '\0')
+		return strcpy(bname, ".");
+	if (((path[0] >= 'A' && path[0] <= 'Z') ||
+	    (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':')
+		path += 2;
+	if (*path == '\0')
+		return strcpy(bname, ".");
+	end = path + strlen(path) - 1;
+	while (end > path && IS_SEP(*end))
+		end--;
+	if (end == path && IS_SEP(*end))
+		return strcpy(bname, "/");
+	start = end;
+	while (start > path && !IS_SEP(start[-1]))
+		start--;
+	len = end - start + 1;
+	if (len >= sizeof bname) {
+		errno = ENAMETOOLONG;
+		return NULL;
+	}
+	memcpy(bname, start, len);
+	bname[len] = '\0';
+	return bname;
+#undef IS_SEP
+}

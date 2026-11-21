@@ -75,7 +75,10 @@ or scp by pipes in memory, each side running while the other waits.
 Everything else is as usual: the same options and config, passwords and
 host keys asked as ssh asks them, the progress meter. Paths: scp takes
 C:\DIR\FILE; in sftp, backslashes escape, so write C:/DIR/FILE. Files are
-copied as they are (binary). Not there: scp -3 (remote to remote through
+copied as they are (binary). sftp's lls is DOS's DIR and ! runs
+COMMAND.COM (%COMSPEC%; ! alone: a DOS prompt, EXIT returns): DOS has no
+fork(), so they are run as DOS runs one program from another, sftp
+waiting; the connection isn't served meanwhile, so keep them short. Not there: scp -3 (remote to remote through
 here: two ssh at once), sftp -S/-D (other programs), local-to-local scp.
 
 Not there: ssh-agent and agent forwarding to a DOS agent, ControlMaster,
@@ -88,7 +91,9 @@ gives the build its socket headers, and OpenSSH's configure something to
 find; none of its code is in the programs).
 
 Prompts (login as, password, yes/no, sftp>) are edited by the terminal
-too: Backspace, Ctrl-U, Enter (DJGPP's own line editing showed ^H and ^M).
+too (DJGPP's own line editing showed ^H and ^M): Left/Right, Home/End
+(Ctrl-A/E), Ctrl+Left/Right by words, Backspace, Del, Ctrl-K, Ctrl-U or
+Esc, Enter; Up/Down go through the last 32 lines typed (not passwords).
 
 Things found on the way, worked around here: DJGPP's select() and
 gettimeofday() go through mktime(), which sometimes loops for ever in
@@ -97,3 +102,6 @@ froze the guest under vmdos now and then, so ssh leaves the blink bit alone;
 DJGPP's localtime() got dates wrong (sftp's ls), so gmtime/localtime are
 plain arithmetic here (the DOS clock is taken as UTC); DJGPP's file type
 bits aren't POSIX's (S_IFREG is 0), so stat() results are converted.
+DJGPP's basename() gives "" for "dir/" (POSIX: "dir"), and sftp's glob
+marks directories with a /, so get -r and mget -r made a local directory
+named "" (mkdir: ENOENT): basename() here is POSIX's.

@@ -100,10 +100,77 @@ index 54ada85..d298b87 100644
  	if (pid == 0) {
  		if (dup2(fdin, 0) == -1)
 diff --git a/sftp.c b/sftp.c
-index ecbaefd..82f2bee 100644
+index ecbaefd..be4491a 100644
 --- a/sftp.c
 +++ b/sftp.c
-@@ -2452,6 +2452,11 @@ connect_to_server(char *path, char **args, int *in, int *out)
+@@ -310,6 +310,58 @@ help(void)
+ 	    "?                                  Synonym for help\n");
+ }
+ 
++#ifdef __DJGPP__
++/*
++ * DOS has no fork(): COMMAND.COM (%COMSPEC%) runs the command, sftp
++ * waiting meanwhile (spawn, system), as DOS runs a program from another.
++ * The ssh inside (dos-co.c) doesn't run until it's back: keep it short.
++ */
++#include <process.h>
++static void
++local_do_shell(const char *args)
++{
++	const char *shell;
++	int status;
++
++	if ((shell = getenv("COMSPEC")) == NULL || *shell == '\0')
++		shell = "COMMAND.COM";
++	fflush(stdout);
++	if (args == NULL || *args == '\0') {
++		printf("Type EXIT to return to sftp.\n");
++		fflush(stdout);
++		status = spawnlp(P_WAIT, shell, shell, (char *)NULL);
++	} else {
++		debug3("Executing %s /C \"%s\"", shell, args);
++		status = spawnlp(P_WAIT, shell, shell, "/C", args, (char *)NULL);
++	}
++	if (status == -1)
++		error("Couldn't execute \"%s\": %s", shell, strerror(errno));
++	else if (status != 0)
++		debug("Shell exited with status %d", status);
++}
++
++/* lls: DOS's DIR, with / in the arguments made \ (DIR's switches are /X) */
++static void
++local_do_ls(const char *args)
++{
++	char *buf, *p;
++	int quoted = 0;
++
++	if (args == NULL || *args == '\0') {
++		local_do_shell("DIR");
++		return;
++	}
++	xasprintf(&buf, "DIR %s", args);
++	for (p = buf + 4; *p; p++) {
++		if (*p == '"')
++			quoted = !quoted;
++		else if (*p == '/' && (quoted || (p > buf + 4 && p[-1] != ' ')))
++			*p = '\\';	/* a path's /, not a /W switch */
++	}
++	local_do_shell(buf);
++	free(buf);
++}
++#else /* __DJGPP__ */
+ static void
+ local_do_shell(const char *args)
+ {
+@@ -362,6 +414,7 @@ local_do_ls(const char *args)
+ 		free(buf);
+ 	}
+ }
++#endif /* __DJGPP__ */
+ 
+ /* Strip one path (usually the pwd) from the start of another */
+ static char *
+@@ -2452,6 +2505,11 @@ connect_to_server(char *path, char **args, int *in, int *out)
  	FD_CLOSEONEXEC(*in);
  	FD_CLOSEONEXEC(*out);
  
@@ -115,7 +182,7 @@ index ecbaefd..82f2bee 100644
  	if ((sshpid = fork()) == -1)
  		fatal("fork: %s", strerror(errno));
  	else if (sshpid == 0) {
-@@ -2478,6 +2483,7 @@ connect_to_server(char *path, char **args, int *in, int *out)
+@@ -2478,6 +2536,7 @@ connect_to_server(char *path, char **args, int *in, int *out)
  		fprintf(stderr, "exec: %s: %s\n", path, strerror(errno));
  		_exit(1);
  	}

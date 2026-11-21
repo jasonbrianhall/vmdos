@@ -1077,54 +1077,255 @@ wait_key(void)
 }
 
 /*
- * The console in cooked mode (ssh's prompts: login as, the password, yes/no):
- * a line edited here, as a terminal would: Backspace erases, Ctrl-U the
- * whole line, Enter ends it; echoed unless ECHO is off (passwords).
+ * Lines typed at echoed prompts (sftp>), for Up and Down. Not passwords:
+ * ECHO is off for those, and they aren't kept.
+ */
+#define HIST_MAX 32
+static char *hist[HIST_MAX];
+static int hist_n;
+
+static void
+hist_add(const unsigned char *s, int n)
+{
+	char *c;
+
+	if (n == 0 || (hist_n > 0 && (int)strlen(hist[hist_n - 1]) == n &&
+	    memcmp(hist[hist_n - 1], s, n) == 0))
+		return;
+	if ((c = malloc(n + 1)) == NULL)
+		return;
+	memcpy(c, s, n);
+	c[n] = '\0';
+	if (hist_n == HIST_MAX) {
+		free(hist[0]);
+		memmove(hist, hist + 1, (HIST_MAX - 1) * sizeof *hist);
+		hist_n--;
+	}
+	hist[hist_n++] = c;
+}
+
+/*
+ * The line being edited is drawn straight onto the screen: ed_sy, ed_sx
+ * is where it starts (moved up when the screen scrolls under it), ed_len
+ * how many characters of it are on the screen.
+ */
+static int ed_sy, ed_sx, ed_len;
+
+/* The cursor to character p of the line. */
+static void
+ed_goto(int p)
+{
+	int off = ed_sx + p;
+
+	wrap_pending = 0;
+	cy = ed_sy + off / cols;
+	cx = off % cols;
+	if (cy >= rows) {	/* just past the screen's last cell */
+		cy = rows - 1;
+		cx = cols - 1;
+		wrap_pending = 1;
+	}
+	place_cursor();
+}
+
+/* Redraw the line from character from on; the cursor to character cur. */
+static void
+ed_redraw(const unsigned char *b, int from, int n, int cur)
+{
+	int i, end = n > ed_len ? n : ed_len;
+	long want, got;
+
+	ed_goto(from);
+	for (i = from; i < end; i++)
+		put_char(i < n ? b[i] : ' ');
+	/* The screen scrolled if the line went past its last row. */
+	want = (long)ed_sy * cols + ed_sx + end;
+	got = (long)cy * cols + cx + wrap_pending;
+	ed_sy += (int)((got - want) / cols);
+	ed_len = n;
+	ed_goto(cur);
+}
+
+static int
+is_word(int c)
+{
+	return c != ' ' && c != '/' && c != '\\';
+}
+
+/*
+ * The console in cooked mode (ssh's prompts: login as, the password, yes/no;
+ * sftp's sftp>): a line edited here, as a terminal would: Left, Right, Home,
+ * End (Ctrl-A, Ctrl-E), Ctrl+Left/Right by words, Backspace and Del, Ctrl-K
+ * the rest of the line, Ctrl-U or Esc the whole line, Up and Down through the
+ * lines typed before, Enter ends it. Echoed unless ECHO is off (passwords:
+ * then only Backspace, Ctrl-U and Enter mean anything).
  * DJGPP's own line editing showed Backspace and Enter as ^H and ^M.
  */
 static void
 edit_line(void)
 {
-	int n = 0;
+	int n = 0, cur = 0, h = hist_n, i;
 
+	if (echo_on) {
+		int y, x;
+
+		ScreenGetCursor(&y, &x);
+		if (y != out_y || x != out_x) {
+			cx = x;
+			cy = y;
+			wrap_pending = 0;
+			clamp();
+		}
+		ed_sy = cy;
+		ed_sx = cx + wrap_pending;	/* (after the last column: the next row) */
+		if (ed_sx >= cols) {
+			ed_sx = 0;
+			cx = 0;
+			wrap_pending = 0;
+			index_down();
+			ed_sy = cy;
+			place_cursor();
+		}
+		ed_len = 0;
+	}
 	for (;;) {
-		int k = wait_key(), ch = k & 0xff;
+		int k = wait_key(), ch = k & 0xff, scan = (k >> 8) & 0xff;
+		int ncur = cur;
 
-		if (ch == 0xe0 && (k >> 8))
+		if (ch == 0xe0 && scan)
 			ch = 0;
 		if (ch == '\r' || ch == '\n') {
-			lbuf[n++] = '\n';
-			if (echo_on)		/* (ECHO off: no ECHONL either) */
+			if (echo_on) {
+				hist_add(lbuf, n);
+				ed_goto(n);
 				term_out("\r\n", 2);
+			}			/* (ECHO off: no ECHONL either) */
+			lbuf[n++] = '\n';
 			break;
 		}
-		if (ch == 8 || ch == 0x7f) {
-			if (n > 0) {
-				n--;
-				if (echo_on)
-					term_out("\b \b", 3);
-			}
-			continue;
-		}
-		if (ch == 0x15) {		/* Ctrl-U */
-			while (n > 0) {
-				n--;
-				if (echo_on)
-					term_out("\b \b", 3);
-			}
-			continue;
-		}
 		if (ch == 0x03) {		/* Ctrl-C */
+			if (echo_on)
+				ed_goto(n);
 			term_out("^C\r\n", 4);
 			raise(SIGINT);
-			n = 0;
+			n = cur = 0;
+			h = hist_n;
+			if (echo_on) {
+				ed_sy = cy;
+				ed_sx = cx;
+				ed_len = 0;
+			}
+			continue;
+		}
+		if (!echo_on) {			/* a password: nothing shown */
+			if (ch == 8 || ch == 0x7f) {
+				if (n > 0)
+					n--;
+			} else if (ch == 0x15 || ch == 0x1b)
+				n = 0;
+			else if (ch >= 0x20 && n < (int)sizeof lbuf - 2)
+				lbuf[n++] = ch;
+			continue;
+		}
+		if (ch == 0) {
+			switch (scan) {
+			case 0x48:		/* Up */
+			case 0x50:		/* Down */
+				if (scan == 0x48 ? h == 0 : h >= hist_n)
+					continue;
+				h += scan == 0x48 ? -1 : 1;
+				n = 0;
+				if (h < hist_n) {
+					n = (int)strlen(hist[h]);
+					if (n > (int)sizeof lbuf - 2)
+						n = (int)sizeof lbuf - 2;
+					memcpy(lbuf, hist[h], n);
+				}
+				cur = n;
+				ed_redraw(lbuf, 0, n, cur);
+				continue;
+			case 0x4b: ncur = cur - 1; break;	/* Left */
+			case 0x4d: ncur = cur + 1; break;	/* Right */
+			case 0x47: ncur = 0; break;		/* Home */
+			case 0x4f: ncur = n; break;		/* End */
+			case 0x73:				/* Ctrl+Left */
+				ncur = cur;
+				while (ncur > 0 && !is_word(lbuf[ncur - 1]))
+					ncur--;
+				while (ncur > 0 && is_word(lbuf[ncur - 1]))
+					ncur--;
+				break;
+			case 0x74:				/* Ctrl+Right */
+				ncur = cur;
+				while (ncur < n && !is_word(lbuf[ncur]))
+					ncur++;
+				while (ncur < n && is_word(lbuf[ncur]))
+					ncur++;
+				break;
+			case 0x53:				/* Del */
+				if (cur < n) {
+					memmove(lbuf + cur, lbuf + cur + 1, n - cur - 1);
+					n--;
+					ed_redraw(lbuf, cur, n, cur);
+				}
+				continue;
+			default:
+				continue;
+			}
+			if (ncur < 0)
+				ncur = 0;
+			if (ncur > n)
+				ncur = n;
+			if (ncur != cur) {
+				cur = ncur;
+				ed_goto(cur);
+			}
+			continue;
+		}
+		switch (ch) {
+		case 0x01: cur = 0; ed_goto(cur); continue;	/* Ctrl-A */
+		case 0x05: cur = n; ed_goto(cur); continue;	/* Ctrl-E */
+		case 0x02:					/* Ctrl-B */
+			if (cur > 0)
+				ed_goto(--cur);
+			continue;
+		case 0x06:					/* Ctrl-F */
+			if (cur < n)
+				ed_goto(++cur);
+			continue;
+		case 8: case 0x7f:				/* Backspace */
+			if (cur > 0) {
+				memmove(lbuf + cur - 1, lbuf + cur, n - cur);
+				n--;
+				cur--;
+				ed_redraw(lbuf, cur, n, cur);
+			}
+			continue;
+		case 0x04:					/* Ctrl-D: Del */
+			if (cur < n) {
+				memmove(lbuf + cur, lbuf + cur + 1, n - cur - 1);
+				n--;
+				ed_redraw(lbuf, cur, n, cur);
+			}
+			continue;
+		case 0x0b:					/* Ctrl-K */
+			n = cur;
+			ed_redraw(lbuf, cur, n, cur);
+			continue;
+		case 0x15: case 0x1b:				/* Ctrl-U, Esc */
+			n = cur = 0;
+			h = hist_n;
+			ed_redraw(lbuf, 0, n, cur);
 			continue;
 		}
 		if (ch < 0x20 || n >= (int)sizeof lbuf - 2)
 			continue;
-		lbuf[n++] = ch;
-		if (echo_on)
-			term_out((char *)&lbuf[n - 1], 1);
+		for (i = n; i > cur; i--)
+			lbuf[i] = lbuf[i - 1];
+		lbuf[cur] = ch;
+		n++;
+		cur++;
+		ed_redraw(lbuf, cur - 1, n, cur);
 	}
 	lpos = 0;
 	llen = n;
