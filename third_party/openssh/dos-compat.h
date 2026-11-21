@@ -68,7 +68,11 @@
 /* See dos-compat.c: Ctrl-C goes to the remote side in raw mode. */
 #include <termios.h>
 int dos_tcsetattr(int, int, const struct termios *);
+int dos_tcgetattr(int, struct termios *);
 #define tcsetattr dos_tcsetattr
+#define tcgetattr dos_tcgetattr
+void dos_term_own_input(void);			/* dos-term.c */
+void dos_term_set_completer(int (*)(char *, int *, int *, int));
 
 /* See dos-term.c: the console is a terminal emulator. */
 #include <unistd.h>

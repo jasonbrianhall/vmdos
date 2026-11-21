@@ -100,10 +100,35 @@ index 54ada85..d298b87 100644
  	if (pid == 0) {
  		if (dup2(fdin, 0) == -1)
 diff --git a/sftp.c b/sftp.c
-index ecbaefd..be4491a 100644
+index ecbaefd..8f2fea2 100644
 --- a/sftp.c
 +++ b/sftp.c
-@@ -310,6 +310,58 @@ help(void)
+@@ -35,6 +35,24 @@
+ #endif
+ #ifdef USE_LIBEDIT
+ #include <histedit.h>
++#elif defined(__DJGPP__)
++/*
++ * DOS: Tab completion with libedit's completion code below, on the line
++ * dos-term.c edits (dos_term_set_completer): what of libedit it uses.
++ */
++#define SFTP_DOS_COMPLETE
++typedef struct {
++	const char *buffer, *cursor, *lastchar;
++} LineInfo;
++typedef struct dos_el {
++	char *buf;
++	int *len, *cur, max;
++	LineInfo li;
++	void *data;
++} EditLine;
++#define CC_ERROR	6
++#define CC_REDISPLAY	8
++#define EL_CLIENTDATA	0
+ #else
+ typedef void EditLine;
+ #endif
+@@ -310,6 +328,58 @@ help(void)
  	    "?                                  Synonym for help\n");
  }
  
@@ -162,7 +187,7 @@ index ecbaefd..be4491a 100644
  static void
  local_do_shell(const char *args)
  {
-@@ -362,6 +414,7 @@ local_do_ls(const char *args)
+@@ -362,6 +432,7 @@ local_do_ls(const char *args)
  		free(buf);
  	}
  }
@@ -170,7 +195,114 @@ index ecbaefd..be4491a 100644
  
  /* Strip one path (usually the pwd) from the start of another */
  static char *
-@@ -2452,6 +2505,11 @@ connect_to_server(char *path, char **args, int *in, int *out)
+@@ -1871,12 +1942,51 @@ parse_dispatch_command(struct sftp_conn *conn, const char *cmd, char **pwd,
+ 	return (0);
+ }
+ 
++#ifdef SFTP_DOS_COMPLETE
++static const LineInfo *
++el_line(EditLine *el)
++{
++	el->buf[*el->len] = '\0';
++	el->li.buffer = el->buf;
++	el->li.cursor = el->buf + *el->cur;
++	el->li.lastchar = el->buf + *el->len;
++	return &el->li;
++}
++
++/* Inserted at the cursor; one that doesn't fit is left out (not an error). */
++static int
++el_insertstr(EditLine *el, const char *str)
++{
++	int n = (int)strlen(str);
++
++	if (*el->len + n > el->max)
++		return 0;
++	memmove(el->buf + *el->cur + n, el->buf + *el->cur,
++	    *el->len - *el->cur);
++	memcpy(el->buf + *el->cur, str, n);
++	*el->len += n;
++	*el->cur += n;
++	el->buf[*el->len] = '\0';
++	return 0;
++}
++
++static int
++el_get(EditLine *el, int op, void **p)
++{
++	(void)op;
++	*p = el->data;
++	return 0;
++}
++#endif /* SFTP_DOS_COMPLETE */
++
++#if defined(USE_LIBEDIT) || defined(SFTP_DOS_COMPLETE)
+ #ifdef USE_LIBEDIT
+ static char *
+ prompt(EditLine *el)
+ {
+ 	return ("sftp> ");
+ }
++#endif
+ 
+ /* Display entries in 'list' after skipping the first 'len' chars */
+ static void
+@@ -2269,7 +2379,29 @@ complete(EditLine *el, int ch)
+ 	free(line);
+ 	return ret;
+ }
+-#endif /* USE_LIBEDIT */
++
++#ifdef SFTP_DOS_COMPLETE
++static struct complete_ctx dos_complete_ctx;
++
++/* dos-term.c's Tab: complete() on its line buffer. */
++static int
++dos_complete(char *buf, int *len, int *cur, int max)
++{
++	EditLine el;
++	int r;
++
++	memset(&el, 0, sizeof el);
++	el.buf = buf;
++	el.len = len;
++	el.cur = cur;
++	el.max = max;
++	el.data = &dos_complete_ctx;
++	r = complete(&el, '\t');
++	fflush(stdout);
++	return r;
++}
++#endif /* SFTP_DOS_COMPLETE */
++#endif /* USE_LIBEDIT || SFTP_DOS_COMPLETE */
+ 
+ static int
+ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
+@@ -2357,6 +2489,13 @@ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
+ 	setvbuf(infile, NULL, _IOLBF, 0);
+ 
+ 	interactive = !batchmode && isatty(STDIN_FILENO);
++#ifdef SFTP_DOS_COMPLETE
++	if (interactive) {
++		dos_complete_ctx.conn = conn;
++		dos_complete_ctx.remote_pathp = &remote_path;
++		dos_term_set_completer(dos_complete);
++	}
++#endif
+ 	err = 0;
+ 	for (;;) {
+ 		struct sigaction sa;
+@@ -2412,6 +2551,9 @@ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
+ 		if (err != 0)
+ 			break;
+ 	}
++#ifdef SFTP_DOS_COMPLETE
++	dos_term_set_completer(NULL);
++#endif
+ 	ssh_signal(SIGCHLD, SIG_DFL);
+ 	free(remote_path);
+ 	free(startdir);
+@@ -2452,6 +2594,11 @@ connect_to_server(char *path, char **args, int *in, int *out)
  	FD_CLOSEONEXEC(*in);
  	FD_CLOSEONEXEC(*out);
  
@@ -182,7 +314,7 @@ index ecbaefd..be4491a 100644
  	if ((sshpid = fork()) == -1)
  		fatal("fork: %s", strerror(errno));
  	else if (sshpid == 0) {
-@@ -2478,6 +2536,7 @@ connect_to_server(char *path, char **args, int *in, int *out)
+@@ -2478,6 +2625,7 @@ connect_to_server(char *path, char **args, int *in, int *out)
  		fprintf(stderr, "exec: %s: %s\n", path, strerror(errno));
  		_exit(1);
  	}

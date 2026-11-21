@@ -93,7 +93,14 @@ find; none of its code is in the programs).
 Prompts (login as, password, yes/no, sftp>) are edited by the terminal
 too (DJGPP's own line editing showed ^H and ^M): Left/Right, Home/End
 (Ctrl-A/E), Ctrl+Left/Right by words, Backspace, Del, Ctrl-K, Ctrl-U or
-Esc, Enter; Up/Down go through the last 32 lines typed (not passwords).
+Esc, Enter; Up/Down go through the last 32 lines typed (not passwords);
+Tab at sftp> completes commands and remote/local paths as sftp does with
+libedit (its own code, sftp.c). DJGPP's termios puts its own console line
+reader in front of stdio once ssh asks about the terminal; it's taken out
+again (dos-term.c), or sftp> got that one: no arrows, and while it waited
+for a key the ssh inside didn't run, so after a minute at the prompt vmdos
+closed the connection (src/tcp9p.cpp: a DOS program stopped asking about
+it) and the next command said "Transport endpoint is not connected".
 
 Things found on the way, worked around here: DJGPP's select() and
 gettimeofday() go through mktime(), which sometimes loops for ever in

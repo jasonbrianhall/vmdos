@@ -1110,6 +1110,16 @@ hist_add(const unsigned char *s, int n)
  * how many characters of it are on the screen.
  */
 static int ed_sy, ed_sx, ed_len;
+static unsigned short ed_prompt[256];	/* the prompt's cells, to show again */
+
+/* Tab: sftp's completion (sftp.c, patched), on the line and the cursor. */
+static int (*completer)(char *, int *, int *, int);
+
+void
+dos_term_set_completer(int (*fn)(char *, int *, int *, int))
+{
+	completer = fn;
+}
 
 /* The cursor to character p of the line. */
 static void
@@ -1156,6 +1166,7 @@ is_word(int c)
  * The console in cooked mode (ssh's prompts: login as, the password, yes/no;
  * sftp's sftp>): a line edited here, as a terminal would: Left, Right, Home,
  * End (Ctrl-A, Ctrl-E), Ctrl+Left/Right by words, Backspace and Del, Ctrl-K
+ * (Tab: sftp's completion, dos_term_set_completer),
  * the rest of the line, Ctrl-U or Esc the whole line, Up and Down through the
  * lines typed before, Enter ends it. Echoed unless ECHO is off (passwords:
  * then only Backspace, Ctrl-U and Enter mean anything).
@@ -1187,6 +1198,8 @@ edit_line(void)
 			place_cursor();
 		}
 		ed_len = 0;
+		for (i = 0; i < ed_sx && i < (int)(sizeof ed_prompt / 2); i++)
+			ed_prompt[i] = _farpeekw(_dos_ds, cell_addr(ed_sy, i));
 	}
 	for (;;) {
 		int k = wait_key(), ch = k & 0xff, scan = (k >> 8) & 0xff;
@@ -1225,6 +1238,38 @@ edit_line(void)
 				n = 0;
 			else if (ch >= 0x20 && n < (int)sizeof lbuf - 2)
 				lbuf[n++] = ch;
+			continue;
+		}
+		if (ch == '\t') {
+			int y0, x0, y1, x1, p;
+
+			if (completer == NULL)
+				continue;
+			ed_goto(n);	/* a list of matches goes below the line */
+			ScreenGetCursor(&y0, &x0);
+			lbuf[n] = '\0';
+			completer((char *)lbuf, &n, &cur, (int)sizeof lbuf - 2);
+			lbuf[n] = '\0';
+			ScreenGetCursor(&y1, &x1);
+			if (y1 != y0 || x1 != x0) {
+				/* it listed them: the prompt and the line again */
+				cy = y1;
+				cx = x1;
+				wrap_pending = 0;
+				clamp();
+				if (cx != 0) {
+					cx = 0;
+					index_down();
+				}
+				p = ed_sx < (int)(sizeof ed_prompt / 2) ?
+				    ed_sx : (int)(sizeof ed_prompt / 2);
+				for (i = 0; i < p; i++)
+					_farpokew(_dos_ds, cell_addr(cy, i), ed_prompt[i]);
+				ed_sy = cy;
+				ed_len = 0;
+			}
+			h = hist_n;
+			ed_redraw(lbuf, 0, n, cur);
 			continue;
 		}
 		if (ch == 0) {
@@ -1367,9 +1412,30 @@ con_fsext(__FSEXT_Fnumber func, int *rv, va_list args)
 	return 1;
 }
 
+/*
+ * DJGPP's termios (set up at the first tcgetattr or tcsetattr: ssh's
+ * prompts) puts its own console line reader in front of stdio: fgets() on
+ * stdin (sftp>) then never came here, so no arrows or history (it showed
+ * ^M and the like), and it waited for keys without letting the ssh inside
+ * sftp run: after a minute at the prompt vmdos closed the connection
+ * (it closes those a DOS program stops asking about), and the next command
+ * got ENOTCONN. Set termios up now and take the reader out again; called
+ * after each tcgetattr/tcsetattr too (dos-compat.c).
+ */
+extern ssize_t (*__libc_read_termios_hook)(int, void *, size_t, ssize_t *);
+void __libc_termios_init(void);
+
+void
+dos_term_own_input(void)
+{
+	__libc_termios_init();		/* once (DJGPP keeps count) */
+	__libc_read_termios_hook = NULL;
+}
+
 void
 dos_term_hook_stdin(void)
 {
+	dos_term_own_input();
 	int info = _get_dev_info(0);
 
 	if (info != -1 && (info & 0x81) == 0x81 && __FSEXT_get_function(0) == NULL)

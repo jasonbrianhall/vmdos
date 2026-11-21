@@ -387,10 +387,22 @@ is_console(int fd)
 	    (info & 0x80) && (info & 0x03);
 }
 
+#undef tcgetattr
+int
+dos_tcgetattr(int fd, struct termios *t)
+{
+	int r = tcgetattr(fd, t);
+
+	dos_term_own_input();	/* (DJGPP's own console reader out again) */
+	return r;
+}
+
 int
 dos_tcsetattr(int fd, int act, const struct termios *t)
 {
 	int r = tcsetattr(fd, act, t);
+
+	dos_term_own_input();
 
 	if (is_console(fd)) {
 		/* Ctrl-C a character in raw mode (ISIG off), SIGINT otherwise */
