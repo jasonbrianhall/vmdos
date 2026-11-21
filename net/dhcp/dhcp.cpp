@@ -193,6 +193,41 @@ static bool vmLeaseHandOver( void ) {
   return vmLeaseApi( 11, &l, &ax ) && ax == 0;
 }
 
+extern volatile uint8_t CtrlBreakDetected;
+
+// The link on vmdos's card (INT 2Fh AX=564Eh BL=0): 1 up, 0 down, -1 can't
+// tell (not under vmdos, or DOS's packet driver isn't on vmdos's card).
+static int8_t vmLink( void ) {
+  uint8_t mac[6];
+  union REGS r;
+  struct SREGS sr;
+  segread( &sr );
+  r.x.ax = 0x564e; r.x.bx = 0; r.x.cx = 0; r.x.dx = 0;
+  sr.es = FP_SEG( (void __far *)mac ); r.x.di = FP_OFF( (void __far *)mac );
+  vmapi( &r, &sr );
+  if ( r.x.bx != 0x564d || r.x.ax != 1 ) return -1;
+  return r.h.cl ? 1 : 0;
+}
+
+// A card that has just started can take a few seconds to bring its link
+// up: wait that long for it. False: still no link (or [ESC]).
+static const uint16_t LinkWaitSecs = 5;
+static bool waitForLink( void ) {
+  if ( vmLink( ) != 0 ) return true;
+  printf( "No link on the network card yet, waiting up to %u seconds... ", LinkWaitSecs );
+  clockTicks_t startTime = TIMER_GET_CURRENT( );
+  while ( Timer_diff( startTime, TIMER_GET_CURRENT( ) ) < LinkWaitSecs * TIMER_TICKS_PER_SEC ) {
+    if ( CtrlBreakDetected ) break;
+    if ( biosIsKeyReady( ) ) {
+      char c = biosKeyRead( );
+      if ( (c == 27) || (c == 3) ) break;
+    }
+    if ( vmLink( ) != 0 ) { puts( "up" ); return true; }
+  }
+  puts( "none" );
+  return false;
+}
+
 static void printSecs( uint32_t s ) {
   if ( s >= 86400ul ) printf( "%lud %luh %lum", s / 86400ul, (s / 3600ul) % 24, (s / 60) % 60 );
   else if ( s >= 3600ul ) printf( "%luh %lum %lus", s / 3600ul, (s / 60) % 60, s % 60 );
@@ -298,9 +333,6 @@ int main( int argc, char *argv[] ) {
 
   printf( CopyrightMsg );
 
-  // A new lease replaces the one vmdos may be renewing.
-  if ( Want4 ) vmLeaseStop( );
-
   // Random number generator: used for setting up sequence numbers
   srand((unsigned) time( NULL ));
 
@@ -319,6 +351,17 @@ int main( int argc, char *argv[] ) {
 
   // From this point forward you have to call the shutdown( ) routine to
   // exit because we have the timer interrupt hooked.
+
+  // No link: nothing sent would get anywhere, so don't try (and leave any
+  // lease vmdos is renewing alone; it waits for the link too).
+  if ( !waitForLink( ) ) {
+    puts( "\nError: The network card has no link, so no DHCP request was sent.\n"
+          "Check the cable (or the virtual machine's network settings) and run DHCP again." );
+    shutdown( 1 );
+  }
+
+  // A new lease replaces the one vmdos may be renewing.
+  if ( Want4 ) vmLeaseStop( );
 
   // vmdos: IPv6 (link-local only until dhcp6 finds out more)
   if ( Want6 && Ip6::init( ) ) {
@@ -357,6 +400,9 @@ int main( int argc, char *argv[] ) {
 
 
   for ( int i=0; i < Retries; i++ ) {
+
+    // The link can go while we wait for an answer
+    if ( !waitForLink( ) ) { DhcpStatusFlag = Dhcp_NoLink; break; }
 
     DhcpStatus_t rc = makeAttempt( i );
 
@@ -409,6 +455,10 @@ int main( int argc, char *argv[] ) {
     }
 
   }
+  else if ( DhcpStatusFlag == Dhcp_NoLink ) {
+    puts( "\nError: The network card lost its link." );
+    puts( CheckYourCabling_msg );
+  }
   else if ( DhcpStatusFlag == Dhcp_Timeout ) {
 
     // In case of a timeout try to give the user an idea of what happened.
@@ -438,7 +488,7 @@ int main( int argc, char *argv[] ) {
   } // Want4
 
   // vmdos: IPv6
-  if ( Want6 && !CtrlBreakDetected ) {
+  if ( Want6 && !CtrlBreakDetected && DhcpStatusFlag != Dhcp_NoLink ) {
     puts( "" );
     int8_t rc6 = Dhcp6::run( );
     if ( rc6 >= 0 && Dhcp6::writeCfg( ) == 0 ) {

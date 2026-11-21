@@ -460,6 +460,8 @@ bool link(Card& c)
     return speed != 0;
 }
 
+uint8_t speed(Card& c) { return c.x.speed ? link_info(c.x.speed, c.x.full) : 0; }
+
 void poll(Card& c)                              // atl1c_clean_rx_irq
 {
     volatile uint32_t* rrd = (volatile uint32_t*)c.x.rrd;
@@ -515,5 +517,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)   // atl1c_xmit_frame: one TP
 
 const NicDriver net::nic_atl1c = {
     KIND_ATL1C, atl1c::match,
-    atl1c::init, atl1c::link, atl1c::set_mode, atl1c::set_mac, atl1c::poll, atl1c::send, nullptr,
+    atl1c::init, atl1c::link, atl1c::set_mode, atl1c::set_mac, atl1c::poll, atl1c::send, nullptr, atl1c::speed,
 };

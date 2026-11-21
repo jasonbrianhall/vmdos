@@ -70,6 +70,16 @@ bool init(Card& c)
 
 bool link(Card& c) { return !(inb(c.io + MSR) & 4); }   // LINKB: 1 = link down
 
+// MSR bit 3: 10 Mbit/s. Duplex: what autonegotiation settled on (ANAR &
+// ANLPAR, best first, as mii_nway_result), else BMCR's own (bit 8).
+uint8_t speed(Card& c)
+{
+    unsigned mbps = inb(c.io + MSR) & 8 ? 10 : 100;
+    uint16_t bmcr = inw(c.io + 0x62), neg = inw(c.io + 0x66) & inw(c.io + 0x68);
+    bool full = (bmcr & 0x1000) && (neg & 0x3E0) ? (neg & 0x100) || (neg & 0x3C0) == 0x40 : (bmcr & 0x100) != 0;
+    return link_info(mbps, full);
+}
+
 void poll(Card& c)
 {
     for (int n = 0; n < 64 && room() && !(inb(c.io + CR) & 1); n++) {   // BUFE clear: a frame is there
@@ -107,5 +117,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_rtl8139 = {
     KIND_RTL8139, [](uint32_t id, uint32_t) { return id == 0x813910EC; },
-    rtl::init, rtl::link, rtl::set_mode, rtl::set_mac, rtl::poll, rtl::send, nullptr,
+    rtl::init, rtl::link, rtl::set_mode, rtl::set_mac, rtl::poll, rtl::send, nullptr, rtl::speed,
 };

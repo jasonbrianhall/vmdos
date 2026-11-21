@@ -130,6 +130,8 @@ bool init(Card& c)
 
 bool link(Card&) { return true; }               // an 8390 can't tell
 
+uint8_t speed(Card&) { return link_info(10, -1); }   // 10BASE-T/2/5, whichever
+
 void poll(Card& c)
 {
     uint8_t isr = inb(c.io + ISR);
@@ -194,5 +196,5 @@ bool match(uint32_t id, uint32_t)
 
 const NicDriver net::nic_ne2k = {
     KIND_NE2000, ne::match,
-    ne::init, ne::link, ne::set_mode, ne::set_mac, ne::poll, ne::send, nullptr,
+    ne::init, ne::link, ne::set_mode, ne::set_mac, ne::poll, ne::send, nullptr, ne::speed,
 };

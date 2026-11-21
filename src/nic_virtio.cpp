@@ -138,5 +138,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 } // namespace
 
 const NicDriver net::nic_virtio = {
-    KIND_VIRTIO, vio::match, vio::init, vio::link, vio::set_mode, vio::set_mac, vio::poll, vio::send, nullptr,
+    KIND_VIRTIO, vio::match, vio::init, vio::link, vio::set_mode, vio::set_mac, vio::poll, vio::send, nullptr, nullptr,
 };

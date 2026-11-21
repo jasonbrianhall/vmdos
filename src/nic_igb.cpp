@@ -258,6 +258,12 @@ bool init(Card& c)
 
 bool link(Card& c) { return r32(c, STATUS) & 2; }
 
+uint8_t speed(Card& c)                          // STATUS as e1000's
+{
+    uint32_t s = r32(c, STATUS);
+    return link_info(s & 0x80 ? 1000 : s & 0x40 ? 100 : 10, s & 1);
+}
+
 void poll(Card& c)
 {
     volatile uint32_t* rx = (volatile uint32_t*)c.rxd;
@@ -298,5 +304,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_igb = {
     KIND_IGB, [](uint32_t id, uint32_t) { return igb::match(id); },
-    igb::init, igb::link, igb::set_mode, igb::set_mac, igb::poll, igb::send, nullptr,
+    igb::init, igb::link, igb::set_mode, igb::set_mac, igb::poll, igb::send, nullptr, igb::speed,
 };

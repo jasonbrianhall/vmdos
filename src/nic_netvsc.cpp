@@ -41,8 +41,9 @@ const uint32_t nvsp_versions[] = { 0x60001, 0x60000, 0x50000, 0x40000, 0x30002, 
 enum : uint32_t {
     RNDIS_PACKET = 1, RNDIS_INIT = 2, RNDIS_QUERY = 4, RNDIS_SET = 5, RNDIS_INDICATE = 7,
     RNDIS_INIT_C = 0x80000002, RNDIS_QUERY_C = 0x80000004, RNDIS_SET_C = 0x80000005,
-    ST_MEDIA_CONNECT = 0x4001000B, ST_MEDIA_DISCONNECT = 0x4001000C,
+    ST_MEDIA_CONNECT = 0x4001000B, ST_MEDIA_DISCONNECT = 0x4001000C, ST_LINK_SPEED_CHANGE = 0x4001000A,
     OID_PERMANENT_ADDRESS = 0x01010101, OID_PACKET_FILTER = 0x0001010E, OID_MEDIA_CONNECT_STATUS = 0x00010114,
+    OID_GEN_LINK_SPEED = 0x00010107,
     F_DIRECTED = 1, F_ALL_MULTICAST = 4, F_BROADCAST = 8, F_PROMISCUOUS = 0x20,
 };
 
@@ -55,6 +56,7 @@ struct State {
     uint32_t tx_busy;                           // bit n: the host hasn't finished with send buffer n
     uint32_t nvsp_ver, req_id, want_req, filter;
     bool got_comp, got_resp, link, ready;
+    uint32_t speed;                             // the link's speed, 100 bit/s units (0: not said)
     uint64_t want_tid;
     uint8_t comp[NVSP_MSG];                     // the NVSP completion waited for
     uint8_t resp[128];                          // the RNDIS reply waited for
@@ -103,6 +105,10 @@ void rndis_in(State& h, Card& c, const uint8_t* m, uint32_t len)
             uint32_t s = get32(m + 8);
             if (s == ST_MEDIA_CONNECT) h.link = true;
             else if (s == ST_MEDIA_DISCONNECT) h.link = false;
+            else if (s == ST_LINK_SPEED_CHANGE && mlen >= 20) {   // the new speed at status_buf_offset (from the status)
+                uint32_t len = get32(m + 12), off = get32(m + 16);
+                if (len >= 4 && 8 + off + 4 <= mlen) h.speed = get32(m + 8 + off);
+            }
             if (log_on && (s == ST_MEDIA_CONNECT || s == ST_MEDIA_DISCONNECT))
                 kprintf("net: Hyper-V: link %s\n", h.link ? "up" : "down");
         }
@@ -286,6 +292,7 @@ bool init(Card& c)
     memcpy(h.addr, c.mac, 6);
     uint32_t ls = 1;
     if (query(h, c, OID_MEDIA_CONNECT_STATUS, &ls, 4) == 4) h.link = ls == 0;   // 0: connected
+    if (query(h, c, OID_GEN_LINK_SPEED, &h.speed, 4) != 4) h.speed = 0;
     h.mode = 3;
     if (!set_filter(h, c, filter_for(h, c, 3))) { kprintf("net: Hyper-V: packet filter refused\n"); return false; }
     snprintf(c.name, sizeof c.name, "Hyper-V");
@@ -295,6 +302,7 @@ bool init(Card& c)
 }
 
 bool link(Card& c) { return c.h.st && S(c).link; }
+uint8_t speed(Card& c) { return c.h.st && S(c).speed ? link_info(S(c).speed / 10000, -1) : 0; }   // 100 bit/s units
 
 void set_mode(Card& c, int m)
 {
@@ -360,5 +368,5 @@ bool netvsc_card(int i, Card& c)
 }
 
 const NicDriver net::nic_netvsc = {
-    KIND_HYPERV, [](uint32_t, uint32_t) { return false; }, nv::init, nv::link, nv::set_mode, nv::set_mac, nv::poll, nv::send, nullptr,
+    KIND_HYPERV, [](uint32_t, uint32_t) { return false; }, nv::init, nv::link, nv::set_mode, nv::set_mac, nv::poll, nv::send, nullptr, nv::speed,
 };
