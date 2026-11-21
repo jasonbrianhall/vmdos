@@ -43,7 +43,10 @@
 //      bytes out, receive errors, send errors, frames dropped (queue full)
 //   6  the cards into ES:DI, 32 bytes each (at most 8): AX = how many,
 //      CX = the one in use (0-based, FFFFh none), DX bit 0 = auto.
-//      Each: kind, state (0 off/failed, 1 running), link, bus, device,
+//      Each: kind, state (0 off/failed, 1 running), link (bit 0 up; while up,
+//      bits 7-3 the speed: 1 10, 2 100, 3 1000, 4 2500, 5 5000, 6 10000,
+//      7 20000, 8 25000, 9 40000, 10 50000, 11 100000 Mbit/s, 0 can't tell;
+//      bit 2 the duplex is known, bit 1 full duplex), bus, device,
 //      function, vendor (word), device ID (word), its own MAC (6), the
 //      address it sends with (6), name (10 bytes at 22, NUL-terminated).
 //   7  use card CL (0-based; FFh: auto): AX = 0, 1 no such card, 2 it didn't start
@@ -511,7 +514,7 @@ extern "C" void net_api(struct regs* r)
             memset(o, 0, 32);
             o[0] = (uint8_t)c.kind;
             o[1] = c.running;
-            o[2] = card_link(c);
+            o[2] = card_link(c) ? (uint8_t)(1 | (c.drv->speed ? c.drv->speed(c) & ~1 : 0)) : 0;
             o[3] = c.pci.bus; o[4] = c.pci.dev; o[5] = c.pci.fn;
             o[6] = (uint8_t)c.vendor; o[7] = (uint8_t)(c.vendor >> 8);
             o[8] = (uint8_t)c.device; o[9] = (uint8_t)(c.device >> 8);

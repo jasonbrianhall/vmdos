@@ -396,6 +396,17 @@ bool link(Card& c)
     return bmsr >= 0 && bmsr != 0xFFFF && (bmsr & 4);
 }
 
+// The MAC's PHYstatus: bit 0 full duplex, 2 10, 3 100, 4 1000 Mbit/s; the
+// 8125/8126 (16 bits) 10 2500, 12 5000. Its copy not showing a link: can't tell.
+uint8_t speed(Card& c)
+{
+    uint16_t p = c.r.is8125 ? r16(c, PHYstatus) : r8(c, PHYstatus);
+    if (!(p & 2)) return 0;
+    unsigned mbps = c.r.is8125 && (p & 0x1000) ? 5000 : c.r.is8125 && (p & 0x400) ? 2500 :
+                    p & 0x10 ? 1000 : p & 8 ? 100 : p & 4 ? 10 : 0;
+    return mbps ? link_info(mbps, p & 1) : 0;
+}
+
 void dump_phy(Card& c, const char* why)
 {
     phy_write(c, 0x1F, 0);
@@ -453,5 +464,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_r8169 = {
     KIND_R8169, r8169::match,
-    r8169::init, r8169::link, r8169::set_mode, r8169::set_mac, r8169::poll, r8169::send, r8169::dump_phy,
+    r8169::init, r8169::link, r8169::set_mode, r8169::set_mac, r8169::poll, r8169::send, r8169::dump_phy, r8169::speed,
 };

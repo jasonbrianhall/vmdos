@@ -1908,6 +1908,7 @@ static struct {
     volatile Trb* st_mem;
     volatile uint8_t* st_buf;
     int link;                                       // -1 not heard yet, 0 down, 1 up
+    uint32_t mbps;                                  // CONNECTION_SPEED_CHANGE's downstream rate (0: not said)
     uint32_t link_since;                            // ticks when the notifications started
 } un;
 extern "C" volatile uint32_t ticks;
@@ -1938,8 +1939,9 @@ static void un_st_queue()
     ring_push(un.st, (uint32_t)p, (uint32_t)(p >> 32), 64, TRB_NORMAL << 10 | (1 << 5) | (1 << 2));   // IOC, ISP
 }
 
-// A notification: NETWORK_CONNECTION (00h, wValue 1 = connected); others
-// (CONNECTION_SPEED_CHANGE) ignored. Then wait for the next.
+// A notification: NETWORK_CONNECTION (00h, wValue 1 = connected),
+// CONNECTION_SPEED_CHANGE (2Ah: downstream, upstream bit/s after the
+// header); others ignored. Then wait for the next.
 static void un_st_event(Keyboard& k, const Trb& e)
 {
     int cc = e.d2 >> 24;
@@ -1950,7 +1952,8 @@ static void un_st_event(Keyboard& k, const Trb& e)
             int up = (n[2] | n[3] << 8) != 0;
             if (up != un.link) printf("USB: Ethernet on %s: cable %s\n", k.where, up ? "connected" : "unplugged");
             un.link = up;
-        }
+        } else if (got >= 16 && n[0] == 0xA1 && n[1] == 0x2A)
+            un.mbps = (uint32_t)(n[8] | n[9] << 8 | n[10] << 16 | (uint32_t)n[11] << 24) / 1000000;
     } else if (cc == 6) {                               // stalled: reset the endpoint, move on
         command(0, 0, 0, 14u << 10 | (uint32_t)un.st_dci << 16 | (uint32_t)k.slot << 24, nullptr);
         uint64_t dq = phys(&un.st.trb[un.st.enq]) | un.st.cycle;
@@ -1965,6 +1968,7 @@ static void un_st_event(Keyboard& k, const Trb& e)
 static void un_st_start(Keyboard& k)
 {
     un.link = -1;
+    un.mbps = 0;
     un.link_since = ticks;
     un.st_dci = 0;
     if (H->type != HC_XHCI || !un.st_ep) return;
@@ -2275,6 +2279,7 @@ extern "C" int usb_net_link(void)
     if (un.link >= 0) return un.link;
     return !un.st_dci || ticks - un.link_since > 3000;
 }
+extern "C" uint32_t usb_net_mbps(void) { return un_is() ? un.mbps : 0; }
 extern "C" uint32_t usb_net_gen(void) { return un.gen; }
 extern "C" const char* usb_net_name(void) { return un.name; }
 extern "C" void usb_net_mac(uint8_t* m) { memcpy(m, un.mac, 6); }

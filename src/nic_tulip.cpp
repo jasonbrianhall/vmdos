@@ -300,6 +300,22 @@ bool link(Card& c)
     return (b < 0) != ((csr12 & (1u << ((b >> 1) & 7))) != 0);
 }
 
+// MII: what autonegotiation settled on, else BMCR's own (bit 13 100, bit 8
+// full). Otherwise CSR6 as set up: PS (bit 18) and not TTM (bit 22) is
+// 100 Mbit/s, FD (bit 9) full duplex.
+uint8_t speed(Card& c)
+{
+    if (c.tu.mii) {
+        uint16_t lpa = mdio_read(c, c.tu.phy, 5), adv = mdio_read(c, c.tu.phy, 4), bmcr = mdio_read(c, c.tu.phy, 0);
+        if (lpa == 0xFFFF || bmcr == 0xFFFF) return 0;
+        uint16_t neg = lpa & adv;
+        if ((bmcr & 0x1000) && (neg & 0x3E0))
+            return link_info(neg & 0x380 ? 100 : 10, (neg & 0x100) || (neg & 0x3C0) == 0x40);
+        return link_info(bmcr & 0x2000 ? 100 : 10, (bmcr & 0x100) != 0);
+    }
+    return link_info((c.tu.csr6 & (1u << 18)) && !(c.tu.csr6 & (1u << 22)) ? 100 : 10, (c.tu.csr6 & 0x200) != 0);
+}
+
 void set_mode(Card& c, int m)
 {
     uint32_t before = filter_bits(c);
@@ -374,5 +390,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 } // namespace
 
 const NicDriver net::nic_tulip = {
-    KIND_TULIP, tl::match, tl::init, tl::link, tl::set_mode, tl::set_mac, tl::poll, tl::send, nullptr,
+    KIND_TULIP, tl::match, tl::init, tl::link, tl::set_mode, tl::set_mac, tl::poll, tl::send, nullptr, tl::speed,
 };

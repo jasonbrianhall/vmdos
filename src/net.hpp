@@ -112,7 +112,19 @@ struct NicDriver {
     void (*poll)(Card&);                        // 0: frames come by themselves (USB)
     bool (*send)(Card&, const uint8_t* f, unsigned len);
     void (*debug)(Card&, const char* why);      // debug=1: what it says while there's no link (0: nothing)
+    uint8_t (*speed)(Card&);                    // with a link: the speed and duplex, link_info() (0: none / can't tell)
 };
+
+// The speed and duplex as INT 2Fh BL=6 gives them (the link byte, less
+// bit 0): bits 7-3 the speed (link_speeds[n-1] Mbit/s; 0 can't tell),
+// bit 2 the duplex is known, bit 1 full duplex. full: 1, 0, -1 can't tell.
+const unsigned link_speeds[] = { 10, 100, 1000, 2500, 5000, 10000, 20000, 25000, 40000, 50000, 100000 };
+inline uint8_t link_info(unsigned mbps, int full)
+{
+    uint8_t n = 0;
+    for (unsigned i = 0; i < sizeof link_speeds / sizeof link_speeds[0]; i++) if (link_speeds[i] == mbps) n = (uint8_t)(i + 1);
+    return (uint8_t)(n << 3 | (full >= 0 ? 4 : 0) | (full > 0 ? 2 : 0));
+}
 extern const NicDriver nic_e1000, nic_igb, nic_igc, nic_rtl8139, nic_r8169, nic_tg3, nic_alx, nic_atl1c, nic_virtio, nic_netvsc, nic_tulip, nic_ne2k, nic_usb;
 
 inline uint32_t r32(Card& c, int r) { return *(volatile uint32_t*)(c.mm + r); }

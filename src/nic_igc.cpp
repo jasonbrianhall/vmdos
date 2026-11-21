@@ -186,6 +186,12 @@ bool init(Card& c)
 
 bool link(Card& c) { return r32(c, STATUS) & 2; }
 
+uint8_t speed(Card& c)                          // STATUS as e1000's, and bit 22: 2500 (igc_get_speed_and_duplex)
+{
+    uint32_t s = r32(c, STATUS);
+    return link_info(s & 0x80 ? (s & 0x400000 ? 2500 : 1000) : s & 0x40 ? 100 : 10, s & 1);
+}
+
 void poll(Card& c)
 {
     volatile uint32_t* rx = (volatile uint32_t*)c.rxd;
@@ -226,5 +232,5 @@ bool send(Card& c, const uint8_t* f, unsigned len)
 
 const NicDriver net::nic_igc = {
     KIND_IGC, igc::match,
-    igc::init, igc::link, igc::set_mode, igc::set_mac, igc::poll, igc::send, nullptr,
+    igc::init, igc::link, igc::set_mode, igc::set_mac, igc::poll, igc::send, nullptr, igc::speed,
 };
