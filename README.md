@@ -153,7 +153,8 @@ more options are in [TECHNICAL.md → Build and run](TECHNICAL.md#build-and-run)
 
 | Keys | What it does |
 |---|---|
-| `Ctrl+Shift+F6` | Media console: change CDs, floppies and disks while a program runs; `reboot` restarts DOS in half a second without resetting the PC (`REBOOT /S` from DOS) |
+| `Ctrl+Shift+F6` | Media console: change CDs, floppies and disks while a program runs |
+| `Ctrl+Shift+Del` | Restart DOS in half a second without resetting the PC (drives stay); twice: the whole PC. Also `reboot` in the media console, `REBOOT /S` in DOS |
 | `Ctrl+Shift+F8` | Cycle scaling: sharp, smooth, xBRZ, widescreen, none |
 | `Ctrl+Shift+F9` | Screenshot (save it afterwards with `VMSHOT`) |
 | `Ctrl+Shift+F10` | Show vmdos's log over the game (`Ctrl+Shift+S` saves it) |

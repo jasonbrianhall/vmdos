@@ -550,8 +550,8 @@ with no disk or USB transfer under way, as Ctrl+Shift+S's log save does
 framebuffer: GOP, GRUB's mode, Bochs VBE); with `video=vbe` it doesn't
 open (a note says so).
 
-Soft restart: `reboot` in the media console, or `REBOOT /S` in DOS,
-starts DOS again on vmdos as it is, without resetting the PC: no
+Soft restart: Ctrl+Shift+Del, `reboot` in the media console, or
+`REBOOT /S` in DOS, starts DOS again on vmdos as it is, without resetting the PC: no
 firmware, no GRUB, no vmdos start-up, so it takes about half a second,
 and the CDs, floppies, VMHD drives, network and boot options stay as
 they are. The guest's machine goes back to power-on as for `VMFD A:
@@ -570,6 +570,14 @@ DOS's buffers and SMARTDRV's cache out first, as REBOOT does; the
 console's `reboot` is like pressing reset, which at the DOS prompt
 loses nothing. `reboot /hard` (and plain `REBOOT`, Ctrl+Alt+Del)
 still restart the whole PC.
+
+Ctrl+Shift+Del is taken by vmdos before the guest sees it (`src/vdev.c`),
+so Ctrl+Alt+Del stays DOS's and Windows' own, as on any PC (Windows 98's
+task list, SMARTDRV's flush). Pressed once it restarts DOS softly; again
+within 3 s it restarts the whole PC, the way out when real hardware is in
+a bad state. With a DPMI program running, or under VMHV (Windows 3.x or
+98 may be running there), the first press only warns at the top right and
+the second restarts DOS.
 
 CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
 ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on
