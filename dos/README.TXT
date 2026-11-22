@@ -9,7 +9,9 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
   Ctrl+Shift+F5    Mute / unmute
   Ctrl+Shift+F6    Media console over the game, on / off: change CD
                      images, floppies and VMHD drives without leaving it
-                     (type help; Esc closes it; the game keeps running)
+                     (type help; Esc closes it; the game keeps running).
+                     "reboot" there restarts DOS without resetting the PC
+                     (drives stay; "reboot 2": menu choice 2)
   Ctrl+Shift+F8    Scaling: sharp, smooth, xBRZ, widescreen (stretched to
                      fill the screen, no black bars), no scaling
   Ctrl+Shift+F9    Screenshot (kept in memory; save it with VMSHOT)
@@ -26,7 +28,8 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
                      QEMU or virt-manager with the SPICE agent channel)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
-  Ctrl+Alt+Del     Restart
+  Ctrl+Alt+Del     Restart (the whole PC; REBOOT /S or the media
+                     console's "reboot" restart only DOS, in a moment)
 
   Changes show briefly at the top right of the screen.
 
