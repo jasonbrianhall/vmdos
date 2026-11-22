@@ -154,7 +154,16 @@ partition there); changes to it are lost at power-off. FreeDOS boots through vmd
 own boot code; other DOSes through the partition's boot sector (`SYS C:`;
 MS-DOS 6.22 needs FAT12/FAT16 of at most 2 GB); other
 partitions are only touched when you put one in a VMHD drive (below; DOS
-sees a one-partition C: and can't write outside it). No such partition, or a disk vmdos can't drive (NVMe formatted with 4 KiB sectors, say): the RAM
+sees a one-partition C: and can't write outside it). The exception is the
+FAT logical partitions after C: on the same MBR disk: DOS gets those too at
+boot, as D:, E: ... (up to 8), the way it would on a PC. The made-up MBR
+gets an extended partition, and vmdos makes up EBRs that chain only those
+partitions, so the others in the extended partition (Linux, NTFS, an
+unformatted one) stay out of reach. The VMHD letters, and the CD drives, come
+after them. `logical=0` on the kernel command line leaves them out. VMFD and
+VMCD use images on them in place, as on C:. That assumes DOS lettered every
+one of them: MS-DOS before 7.0 skips FAT32 ones, and VMFD then falls back to
+a read-only copy. No such partition, or a disk vmdos can't drive (NVMe formatted with 4 KiB sectors, say): the RAM
 disk if built with `RAMDISK=1`. To use an
 existing ESP on a real machine, copy esp.img's root files (KERNEL.SYS,
 COMMAND.COM, FDCONFIG.SYS, AUTOEXEC.BAT and the VMDOS folder)
@@ -177,7 +186,8 @@ wants `123?` there:
     VMHD D: /E           takes it out
 
 Only a FAT partition (FAT12/16/32; MBR primary or logical, GPT, or a disk
-without a partition table) goes in, never C: and never one that's in
+without a partition table) goes in, never one DOS has at boot (C: and the
+logical ones after it) and never one that's in
 another drive. One with FAT but a partition type that isn't DOS's (an EFI
 system partition, a Linux- or hidden-typed one, a GPT partition other than
 basic data) needs a Y first.
