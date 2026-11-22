@@ -521,6 +521,8 @@ static int int1a(struct regs *r)
 }
 
 extern int bios_restarted;
+extern u8 boot_menu_key;                         /* a soft restart's FDCONFIG.SYS menu choice (below) */
+void soft_boot_request(int drive, int key);
 int bios_service(struct regs *r, int id, int via_stub)
 {
     (void)via_stub;
@@ -563,7 +565,12 @@ int bios_service(struct regs *r, int id, int via_stub)
     case 0x13: return int13(r);
     case 0x14: serial_int14(r); return BIOS_DONEF;     /* serial=dos (serial.c); else time-out */
     case 0x15: return int15(r);
-    case 0x16: return int16(r);
+    case 0x16:
+        if (boot_menu_key && (AH(r) & 0xEE) == 0) {             /* AH 0, 1, 10h, 11h: a soft restart's menu choice */
+            vkbd_inject(boot_menu_key); vkbd_inject(boot_menu_key | 0x80);
+            boot_menu_key = 0;
+        }
+        return int16(r);
     case 0x17: AH(r) = 0x09; return BIOS_DONEF;
     case 0x18: panic("No bootable disk (INT 18h)");
     case 0x19: reboot();
@@ -577,6 +584,11 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
         else if (AX(r) == 0x5657) {                             /* REBOOT.COM: the write caches onto the disks, now */
             int off = BX(r) == 1;                               /* POWEROFF.COM: then off */
+            if (BX(r) == 2) {                                   /* REBOOT /S: soft restart; CL: menu choice ('1'-'9') or 0 */
+                soft_boot_request(-1, CL(r));                   /* done as REBOOT waits (HLT), the disk quiet */
+                BX(r) = 0x564D;
+                return BIOS_DONE;
+            }
             fs9p_flush_all(); disk_flush(); BX(r) = 0x564D;
             if (off) { acpi_poweroff(); BX(r) = 0; }           /* back: it couldn't */
         }
@@ -722,10 +734,13 @@ void sb_out_stop(void);
 void gus_stop(void);
 extern int vif;
 int bios_restarted;                              /* set by bios_restart_floppy: the caller's frame is gone */
-int bios_restart_floppy(struct regs *r, int d)
+
+/* The guest's machine back to power-on, vmdos itself untouched (VMFD /BOOT,
+   a soft restart): the disks' write caches out, sound stopped, the mouse,
+   EMS, XMS, the PIC and timer reset, the BIOS rebuilt. */
+void net_restart(void);
+static void guest_reset(void)
 {
-    static u8 sec[512];
-    if (fd_boot_sector(d, sec)) return -1;
     disk_flush();
     rlock_take(&sound_lock);                     /* the helper CPU's render */
     cdaudio_stop();
@@ -735,13 +750,98 @@ int bios_restart_floppy(struct regs *r, int d)
     mouse_restart();
     ems_restart();
     xms_restart();
+    net_restart();                               /* VMPKT's IRQ and frames: the old DOS's */
     vpic_reset();
     vdev_init();
     bios_init();
+}
+
+int bios_restart_floppy(struct regs *r, int d)
+{
+    static u8 sec[512];
+    if (fd_boot_sector(d, sec)) return -1;
+    guest_reset();
     boot_floppy(r, d);
     r->eflags = EFL_VM | EFL_IF | 2;
     vif = 1;
     bios_restarted = 1;
+    return 0;
+}
+
+/* ---------------- soft restart ----------------
+   DOS starts again on vmdos as it is: the PC isn't reset, so no firmware,
+   no GRUB, no vmdos start-up; its disks, CDs, floppies and settings stay.
+   Asked for by Ctrl+Shift+F6's "reboot" (media.c) or REBOOT /S (INT 2Fh
+   AX=5657h BX=2); done at the next point the guest is interrupted with the
+   disk and USB quiet (v86.c soft_boot_poll; VMHV: hv.c's loop). */
+volatile int soft_boot_req;                      /* pending */
+static int soft_drive = -1;                      /* -1: C:, 0/1: floppy A:/B: */
+u8 boot_menu_key;                                /* FDCONFIG.SYS menu choice to type: scan code, 0 none */
+
+void soft_boot_request(int drive, int key)
+{
+    soft_drive = drive;
+    boot_menu_key = key >= '1' && key <= '9' ? (u8)(key - '1' + 2) : 0;   /* scan codes 02h-0Ah */
+    soft_boot_req = 1;
+}
+
+/* What the guest restarts at, in r (real mode), after reset (0: guest_reset;
+   VMHV passes its own). -1: the floppy drive asked for is empty (nothing
+   changed). */
+int bios_soft_boot(struct regs *r, void (*reset)(void))
+{
+    static u8 sec[512];
+    int d = soft_drive;
+    soft_boot_req = 0;
+    if (d >= 0 && fd_boot_sector(d, sec)) { boot_menu_key = 0; return -1; }
+    kprintf("soft restart: DOS again from %c: (the PC isn't reset)\n", d >= 0 ? 'A' + d : 'C');
+    fs9p_flush_all();
+    (reset ? reset : guest_reset)();
+    memset(r, 0, sizeof *r);
+    if (d >= 0) { boot_floppy(r, d); boot_menu_key = 0; }
+    else { guest_from_floppy = 0; bios_boot(r); }
+    r->eflags = EFL_VM | EFL_IF | 2;
+    vif = 1;
+    return 0;
+}
+
+/* C:\FDCONFIG.SYS's first 4 KB, NUL-ended, in buf (max+1 bytes). Its
+   length, or 0 if there is none. */
+int fdconfig_read(u8 *buf, u32 max)
+{
+    static struct fatvol v;
+    u32 clus, size;
+    struct extent ext1[1];
+    buf[0] = 0;
+    if (disk_volume(&v) || fat_lookup(&v, "\\FDCONFIG.SYS", &clus, &size) || !size) return 0;
+    if (fat_extents(&v, clus, size, ext1, 1) < 1) return 0;
+    u32 n = size < max ? size : max, secs = (n + 511) / 512;
+    if (secs > ext1[0].count) secs = ext1[0].count;
+    if (disk_read(ext1[0].lba, secs, buf)) return 0;
+    if (n > secs * 512) n = secs * 512;
+    buf[n] = 0;
+    return (int)n;
+}
+
+/* FDCONFIG.SYS's "MENU k = ..." line's text (after the '='), or 0 when
+   there's no such choice. */
+const char *fdconfig_choice(int k)
+{
+    static u8 buf[4096 + 1];
+    static char text[64];
+    int n = fdconfig_read(buf, 4096);
+    for (char *l = (char *)buf; n && *l; ) {
+        if ((l[0] | 32) == 'm' && (l[1] | 32) == 'e' && (l[2] | 32) == 'n' && (l[3] | 32) == 'u' && l[4] == ' ' && l[5] == k) {
+            char *p = l + 6;
+            while (*p == ' ' || *p == '=') p++;
+            int i = 0;
+            while (*p && *p != '\r' && *p != '\n' && i < (int)sizeof text - 1) text[i++] = *p++;
+            text[i] = 0;
+            return text;
+        }
+        while (*l && *l != '\n') l++;
+        if (*l) l++;
+    }
     return 0;
 }
 

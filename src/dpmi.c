@@ -596,6 +596,29 @@ static struct regs *terminate(struct ctx *c, u8 code, const char *why)
     return go_real(&rm, rd16(0x21 * 4 + 2), rd16(0x21 * 4), 1);   /* never comes back */
 }
 
+/* ---------------- soft restart (bios.c bios_soft_boot) ----------------
+   dpmi_forget: every client dropped, the ones waiting under it too (before
+   the guest's memory is set up again). dpmi_resume_rm: the guest goes on
+   at rm's real-mode registers; resume builds the V86 frame at the stack's
+   top, wherever the interrupted one was (a client's PM frame too). */
+int dpmi_client_active(void) { return client || nest; }
+void dpmi_forget(void)
+{
+    for (;;) {
+        reset_client();
+        if (!nest) break;
+        nest_pop();
+    }
+    stepping = 0; step_tf = 0; late_armed = 0;
+}
+struct regs *dpmi_resume_rm(struct regs *rm_regs)
+{
+    struct ctx rm;
+    get_ctx(rm_regs, &rm);
+    rm.vif = 1;
+    return resume(&rm);
+}
+
 /* ---------------- INT 31h ---------------- */
 static void ok(struct ctx *c) { c->eflags &= ~EFL_CF; }
 static void err(struct ctx *c, u16 code) { c->eflags |= EFL_CF; c->eax = (c->eax & 0xFFFF0000u) | code; }

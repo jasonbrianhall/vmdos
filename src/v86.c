@@ -675,6 +675,21 @@ static void perf_report(void)
     for (int i = 0; i < PT_N; i++) pt_tsc[i] = 0;
 }
 
+/* A soft restart (bios.c bios_soft_boot), at a point the guest was
+   interrupted (V86 or a DPMI client), never in the middle of vmdos's own
+   work: DPMI's clients dropped, the machine reset, DOS booted again. */
+extern volatile int soft_boot_req;
+int bios_soft_boot(struct regs *r, void (*reset)(void));
+void dpmi_forget(void);
+struct regs *dpmi_resume_rm(struct regs *rm);
+static void soft_boot_now(void)
+{
+    static struct regs n;
+    dpmi_forget();
+    if (bios_soft_boot(&n, 0)) { video_osd("Soft restart: that floppy drive is empty"); return; }
+    dpmi_resume_rm(&n);
+}
+
 struct regs *isr_dispatch(struct regs *r)
 {
     if (!perf_on || smp_on_ap()) return isr_dispatch_inner(r);
@@ -893,6 +908,8 @@ static struct regs *isr_dispatch_inner(struct regs *r)
         dump(r, "exception in the DOS guest");
     }
 out:
+    if ((from_v86 || from_pm) && soft_boot_req && !hv_active && usb_quiet() && !disk_busy() && !hd_busy())
+        soft_boot_now();                              /* Ctrl+Shift+F6 reboot, REBOOT /S: the new frame via dpmi_take_switch */
     {
         struct regs *sw = dpmi_take_switch();
         if (sw) r = sw;

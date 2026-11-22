@@ -455,6 +455,14 @@ extern "C" void net_tick(void)
     if (q_count && irq_line >= 0) vpic_raise(irq_line);
 }
 
+// A restart of DOS without the PC (bios.c guest_reset): the new DOS hasn't
+// asked for an IRQ, and the frames waiting were for the old one.
+extern "C" void net_restart(void)
+{
+    irq_line = -1;
+    q_head = q_count = 0;
+}
+
 extern "C" void net_api(struct regs* r)
 {
     int fn = BL(r);

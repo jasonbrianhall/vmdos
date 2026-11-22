@@ -1,5 +1,9 @@
 ; REBOOT.COM: get everything onto the disk, then restart the machine.
 ; POWEROFF.COM (-DPOWEROFF): the same, then off (vmdos: ACPI S5) instead of 5.
+; REBOOT /S [n]: 1-3, then a soft restart: vmdos starts DOS again from C:
+;   without resetting the PC (no firmware or GRUB; vmdos's CDs, floppies and
+;   settings stay), typing FDCONFIG.SYS's menu choice n if given (INT 2Fh
+;   AX=5657h BX=2 CL=n). Not under vmdos: a full restart as usual.
 ;   1. DOS's buffers out (INT 21h AH=0Dh)
 ;   2. a disk cache's (SMARTDRV and compatibles: INT 2Fh AX=4A10h BX=1)
 ;   3. DOS's buffers again (anything the cache flush left behind)
@@ -10,8 +14,40 @@
         cpu 386
         org 100h
 
-        mov dx, msg
+%ifndef POWEROFF
+        mov si, 81h                     ; /S (or -S) and a menu choice 1-9
+.arg:   lodsb
+        cmp al, 13
+        je .args
+        cmp al, '/'
+        je .sw
+        cmp al, '-'
+        je .sw
+        cmp al, '1'
+        jb .arg
+        cmp al, '9'
+        ja .arg
+        mov [menu], al
+        jmp .arg
+.sw:    lodsb
+        or al, 20h
+        cmp al, 's'
+        jne .usage
+        mov byte [soft], 1
+        jmp .arg
+.usage: mov dx, usage
         mov ah, 09h
+        int 21h
+        mov ax, 4C01h
+        int 21h
+.args:  cmp byte [soft], 0
+        je .hardmsg
+        mov dx, msg_soft
+        jmp .say
+.hardmsg:
+%endif
+        mov dx, msg
+.say:   mov ah, 09h
         int 21h
 
         mov ah, 0Dh                     ; 1. DOS's buffers
@@ -33,6 +69,23 @@
         int 21h
         mov ax, 4C01h
         int 21h
+%else
+        cmp byte [soft], 0
+        je .hard
+        mov ax, 5657h                   ; 4+5 soft: vmdos restarts DOS when we wait
+        mov bx, 2
+        mov cl, [menu]
+        call vmapi
+        cmp bx, 564Dh
+        jne .nosoft
+.idle:  sti                             ; vmdos takes over at the next interrupt
+        hlt
+        jmp .idle
+.nosoft:
+        mov dx, nosoft
+        mov ah, 09h
+        int 21h
+.hard:
 %endif
         mov ax, 5657h                   ; 4. vmdos's write cache, synchronously
         xor bx, bx
@@ -91,5 +144,13 @@ msg:    db 'Turning off...', 13, 10, '$'
 cant:   db 'This machine could not be turned off (not under vmdos, or no ACPI power-off).', 13, 10, '$'
 %else
 msg:    db 'Restarting...', 13, 10, '$'
+msg_soft: db 'Restarting DOS (soft: the PC is not reset)...', 13, 10, '$'
+nosoft: db 'Not under vmdos: restarting the PC.', 13, 10, '$'
+usage:  db 'REBOOT        write the disk caches out, then restart the PC', 13, 10
+        db 'REBOOT /S     ... then restart DOS on vmdos as it is (the PC is not', 13, 10
+        db '              reset; its CDs, floppies and settings stay)', 13, 10
+        db 'REBOOT /S 2   ... choosing 2 at FDCONFIG.SYS', 39, 's menu', 13, 10, '$'
+soft:   db 0
+menu:   db 0
 %endif
 done:   db 'Disk cache written.', 13, 10, '$'

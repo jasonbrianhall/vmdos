@@ -970,19 +970,11 @@ static void vmcb_init(struct regs *r)
 /* The FDCONFIG.SYS menu choice for the VM: the first "MENU n = ..." line
    that mentions VMHV. 0 if none (or no FDCONFIG.SYS). Also notes
    MENUDEFAULT's timeout, so the choice goes in just before it runs out. */
+int fdconfig_read(u8 *buf, u32 max);
 static int menu_choice(void)
 {
-    static struct fatvol v;
     static u8 buf[4096 + 1];
-    u32 clus, size;
-    struct extent ext1[1];
-    if (disk_volume(&v) || fat_lookup(&v, "\\FDCONFIG.SYS", &clus, &size) || !size) return 0;
-    if (fat_extents(&v, clus, size, ext1, 1) < 1) return 0;
-    u32 n = size < 4096 ? size : 4096, secs = (n + 511) / 512;
-    if (secs > ext1[0].count) secs = ext1[0].count;
-    if (disk_read(ext1[0].lba, secs, buf)) return 0;
-    if (n > secs * 512) n = secs * 512;
-    buf[n] = 0;
+    if (!fdconfig_read(buf, 4096)) return 0;
     int choice = 0;
     for (char *l = (char *)buf; *l; ) {
         if (!strncmp(l, "MENUDEFAULT", 11) || !strncmp(l, "menudefault", 11)) {
@@ -1089,6 +1081,26 @@ int hv_restart_floppy(int d)
     return 0;
 }
 
+/* A soft restart in the VM (Ctrl+Shift+F6 reboot, REBOOT /S; bios.c):
+   DOS again from C: (or a floppy) on the VM's machine as at power-on. The
+   menu choice: the one asked for at once, else as hv_start picks it. */
+extern volatile int soft_boot_req;
+extern u8 boot_menu_key;
+int bios_soft_boot(struct regs *r, void (*reset)(void));
+static void hv_soft_boot(void)
+{
+    static struct regs r0;
+    u8 key = boot_menu_key;
+    boot_menu_key = 0;                                            /* VMHV types it itself (menu_key) */
+    if (bios_soft_boot(&r0, vm_reset_machine)) { video_osd("Soft restart: that floppy drive is empty"); return; }
+    menu_t0 = 0;
+    menu_wait = !key;
+    menu_key = key;
+    if (!key) { int c = menu_choice(); if (c >= '1' && c <= '9') menu_key = (u8)(c - '1' + 2); }
+    if ((r0.edx & 0xFF) != 0x80) menu_key = 0;                   /* a floppy: no FDCONFIG menu to answer */
+    vm_go(&r0);
+}
+
 int hv_start(int key)
 {
     int e = hv_setup();
@@ -1108,6 +1120,7 @@ int hv_start(int key)
 
     for (;;) {
         if (hv_force) force_exit();
+        if (soft_boot_req && usb_quiet() && !disk_busy() && !hd_busy()) hv_soft_boot();
         if (debug_level >= 3 && !v3_on) {                         /* debug=3: the text screen to the log, every 20 s */
             static u32 last_dump;
             if (ticks - last_dump >= 20000) {
