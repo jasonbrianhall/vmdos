@@ -77,7 +77,16 @@ menuentry "QuickBASIC clone" {
 }
 ```
 
-On a legacy BIOS (or CSM) boot, the menu's last entry, "FreeDOS from the
+On a legacy BIOS (or CSM) boot, "FreeDOS from C:, booted normally (no
+vmdos)" chainloads C:'s own FreeDOS boot sector, so the machine boots
+straight from C: as a plain DOS PC would; the vmdos drivers in FDCONFIG.SYS
+see there's no vmdos and stay out of memory (menu choices 2 and 3 load
+HIMEMX for XMS). It needs nothing extra, so it's always there. UEFI has
+no way to start a DOS boot sector, so it isn't in the UEFI menu. On the ISO
+built with `RAMDISK=1`, the same entry boots dos.img with memdisk when the
+build finds memdisk.
+
+The menu's last entry, "FreeDOS from the
 built-in floppy, booted normally (no vmdos)", boots floppy.img on the bare
 machine with syslinux's memdisk, as a real floppy would: plain FreeDOS, the
 vmdos drivers on it stay out of memory. It's there when the build finds
