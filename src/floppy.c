@@ -1,7 +1,9 @@
 /* Emulates a virtual floppy */
 
 
-/* Floppy drives A: and B:, backed by disk image files on C: (there is no
+/* Floppy drives A: and B:, backed by disk image files on C: or a VMHD
+   drive, read and written in place; an image on any other drive DOS can
+   read (a CD, a VMDOSNET share, ...) VMFD copies in, read-only (there is no
    floppy controller; nothing here touches one). VMFD.COM puts an image in
    a drive at any time ("VMFD A: C:\DISKS\INSTALL1.IMG", INT 2Fh AX=5646h);
    fda=PATH / fdb=PATH on the kernel command line fill them at boot.
@@ -29,7 +31,8 @@
 static void set_cf(struct regs *r, int c) { if (c) r->eflags |= EFL_CF; else r->eflags &= ~EFL_CF; }
 static struct fd {
     struct extent *ext; int n_ext;
-    u8 *ram;                             /* a RAM disk: the image itself (no file on C:) */
+    u8 *ram;                             /* a RAM disk, or a copy VMFD loaded: the image itself (no file) */
+    int dev;                             /* the file's disk: 0 C:'s, else a VMHD drive's disk + 1 */
     u32 sectors, size, clus;
     u8 cyls, heads, spt, type;           /* type: INT 13h AH=08h BL (1 360K, 2 1.2M, 3 720K, 4 1.44M, 6 2.88M) */
     u8 in, ro, changed;
@@ -44,7 +47,7 @@ static const struct { u32 kb; u8 cyls, heads, spt, type; } shapes[] = {
     { 1680, 80, 2, 21, 4 }, { 1722, 82, 2, 21, 4 }, { 2880, 80, 2, 36, 6 },
 };
 
-/* count sectors from sector s of drive f's image (runs on C:). */
+/* count sectors from sector s of drive f's image (its runs on its disk). */
 static int img_io(struct fd *f, u32 s, u32 count, u8 *buf, int write)
 {
     if (f->ram) {
@@ -59,7 +62,8 @@ static int img_io(struct fd *f, u32 s, u32 count, u8 *buf, int write)
         if (s < base + x->count) {
             u32 off = s - base, k = x->count - off;
             if (k > count) k = count;
-            int st = write ? disk_write(x->lba + off, k, buf) : disk_read(x->lba + off, k, buf);
+            int st = f->dev ? (disk_dev_rw(f->dev - 1, x->lba + off, k, buf, write) ? 0x04 : 0)
+                   : write ? disk_write(x->lba + off, k, buf) : disk_read(x->lba + off, k, buf);
             if (st) return st;
             buf += k * 512; s += k; count -= k;
         }
@@ -114,14 +118,31 @@ static void dos_bpb(struct fd *f, u8 *bs)
 }
 
 static int fd_insert(int d, struct fd *tp, const char *path);
+static void fd_eject(int d);
 
-/* Put the image at path (on C:) in drive d (0 A:, 1 B:). 0, or 2 not
-   found, 3 not a floppy image, 4 not on C:, 6 out of memory, 7 disk error. */
+/* The FAT volume a path is on, as cd.c's: C:, or a VMHD drive (its disk
+   + 1 in *dev). 0, or 4 neither, 7 unreadable. */
+static int vol_disk;
+static int vol_rd(u32 lba, u32 n, void *buf) { return disk_dev_rw(vol_disk, lba, n, buf, 0); }
+static int path_volume(const char *path, struct fatvol *v, int *dev)
+{
+    *dev = 0;
+    if (path[0] == '\\' && path[1] == '\\') return 4;          /* \\SERVER\SHARE: a network drive */
+    if (!(path[0] && path[1] == ':') || (path[0] | 32) == 'c') return disk_volume(v) ? 7 : 0;
+    u32 start;
+    if (hd_drive_part((path[0] | 32) - 'a', &vol_disk, &start)) return 4;
+    *dev = vol_disk + 1;
+    return fat_mount(v, vol_rd, start) ? 7 : 0;
+}
+
+/* Put the image at path (on C: or a VMHD drive) in drive d (0 A:, 1 B:).
+   0, or 2 not found, 3 not a floppy image, 4 a drive vmdos can't read
+   itself (VMFD then loads a copy: fd_copy_*), 6 out of memory, 7 disk error. */
 static int fd_mount(int d, const char *path, int ro)
 {
-    if (path[0] && path[1] == ':' && (path[0] | 32) != 'c') return 4;
     static struct fatvol v;
-    if (disk_volume(&v)) return 7;
+    int dev, r = path_volume(path, &v, &dev);
+    if (r) return r;
     u32 clus, size;
     if (fat_lookup(&v, path, &clus, &size)) return 2;
     if (size < 512 || size % 512 || size > 4u << 20) return 3;
@@ -130,8 +151,46 @@ static int fd_mount(int d, const char *path, int ro)
     struct extent *ext = phys_try_alloc((u32)n * sizeof *ext);
     if (!ext) return 6;
     fat_extents(&v, clus, size, ext, n);
-    struct fd t = { .ext = ext, .n_ext = n, .sectors = size / 512, .size = size, .clus = clus, .ro = (u8)ro };
+    struct fd t = { .ext = ext, .n_ext = n, .dev = dev, .sectors = size / 512, .size = size, .clus = clus, .ro = (u8)ro };
     return fd_insert(d, &t, path);
+}
+
+/* An image VMFD reads through DOS (a drive vmdos can't read itself) and
+   passes in pieces: begin (its size), data..., end. It goes in read-only,
+   since nothing would write it back. One buffer a drive, kept for the
+   next copy (the heap doesn't free). */
+static u8 *copy_buf[FD_DRIVES];
+static u32 copy_cap[FD_DRIVES], copy_size[FD_DRIVES], copy_got[FD_DRIVES];
+static char copy_path[FD_DRIVES][80];
+static int fd_copy_begin(int d, u32 size, const char *path)
+{
+    if (size < 512 || size % 512 || size > 4u << 20) return 3;
+    if (fd[d].in && fd[d].ram == copy_buf[d]) fd_eject(d);   /* the buffer is about to change under it */
+    if (size > copy_cap[d]) {
+        u8 *b = phys_try_alloc(size);
+        if (!b) return 6;
+        copy_buf[d] = b; copy_cap[d] = size;
+    }
+    copy_size[d] = size; copy_got[d] = 0;
+    int j = 0;
+    for (; path[j] && j < 79; j++) copy_path[d][j] = path[j];
+    copy_path[d][j] = 0;
+    return 0;
+}
+static int fd_copy_data(int d, u32 a, u32 len)
+{
+    if (!copy_size[d] || len > copy_size[d] - copy_got[d]) return 5;
+    for (u32 i = 0; i < len; i++) copy_buf[d][copy_got[d] + i] = rd8(a + i);
+    copy_got[d] += len;
+    return 0;
+}
+static int fd_copy_end(int d)
+{
+    u32 size = copy_size[d];
+    if (!size || copy_got[d] != size) { copy_size[d] = 0; return 7; }
+    copy_size[d] = 0;
+    struct fd t = { .ram = copy_buf[d], .sectors = size / 512, .size = size, .ro = 1 };
+    return fd_insert(d, &t, copy_path[d]);
 }
 
 /* Put the image t (its backing, size and ro set) in drive d, named path:
@@ -222,14 +281,15 @@ static void fd_boot(void)
 }
 
 /* Writes only go to the file the image was when it went in: the same
-   name, size and runs of sectors on C:. */
+   name, size and runs of sectors on its disk. */
 static int still_there(struct fd *f)
 {
     if (f->ram) return 1;
     static struct fatvol v;
     static struct extent now[1024];
     u32 clus, size;
-    if (disk_volume(&v) || fat_lookup(&v, f->path, &clus, &size)) return 0;
+    int dev;
+    if (path_volume(f->path, &v, &dev) || dev != f->dev || fat_lookup(&v, f->path, &clus, &size)) return 0;
     if (clus != f->clus || size != f->size) return 0;
     if (f->n_ext > 1024 || fat_extents(&v, clus, size, 0, 1 << 20) != f->n_ext) return 0;
     fat_extents(&v, clus, size, now, f->n_ext);
@@ -340,7 +400,11 @@ static void put(u32 *o, const char *s) { for (; *s; s++) wr8((*o)++, (u8)*s); }
    BX=1: put the image DS:SI (full DOS path) in drive CL (0 A:, 1 B:),
    DL bit 0 = read-only; AX = 0 or an error (see fd_mount). BX=2: empty
    drive CL. BX=3: restart the machine into drive CL's disk (no return;
-   AX = 1 if the drive is empty). */
+   AX = 1 if the drive is empty). When BX=1 says 4 (a drive vmdos can't
+   read itself), VMFD copies the file in: BX=4 begin, DX = its size in
+   512-byte sectors, DS:SI its name; BX=5 the next DX bytes at DS:SI;
+   BX=6 put it in drive CL (read-only). AX = 0 or an error as fd_mount's
+   (5: not begun, or more than the size). */
 void fd_api(struct regs *r)
 {
     fd_boot();
@@ -353,8 +417,9 @@ void fd_api(struct regs *r)
             t[1] = (char)('A' + i);
             put(&o, t);
             if (fd[i].in) {
-                char sz[40];
-                snprintf(sz, sizeof sz, "  (%uK%s%s)", fd[i].size >> 10, fd[i].ro ? ", read-only" : "",
+                char sz[56];
+                snprintf(sz, sizeof sz, "  (%uK%s%s)", fd[i].size >> 10,
+                         fd[i].ram && fd[i].ram == copy_buf[i] ? ", a read-only copy" : fd[i].ro ? ", read-only" : "",
                          fd[i].nodos ? ", not a DOS disk" : "");
                 put(&o, fd[i].path); put(&o, sz);
             } else put(&o, "empty");
@@ -371,6 +436,17 @@ void fd_api(struct regs *r)
         for (; j < 79 && rd8(a + j); j++) path[j] = (char)rd8(a + j);
         path[j] = 0;
         AX(r) = (u16)fd_mount(d, path, DL(r) & 1);
+        return; }
+    case 4: case 5: case 6: {
+        if (d >= FD_DRIVES) { AX(r) = 5; return; }
+        u32 a = LIN(r->v86_ds, SI(r));
+        if (BX(r) == 5) { AX(r) = (u16)fd_copy_data(d, a, DX(r)); return; }
+        if (BX(r) == 6) { AX(r) = (u16)fd_copy_end(d); return; }
+        char path[80];
+        int j = 0;
+        for (; j < 79 && rd8(a + j); j++) path[j] = (char)rd8(a + j);
+        path[j] = 0;
+        AX(r) = (u16)fd_copy_begin(d, (u32)DX(r) * 512, path);
         return; }
     case 2:
         if (d >= FD_DRIVES) { AX(r) = 5; return; }
