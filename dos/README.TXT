@@ -28,8 +28,11 @@ KEYBOARD SHORTCUTS (work in any game or at the DOS prompt)
                      QEMU or virt-manager with the SPICE agent channel)
   Ctrl+Shift+F11   Slower (for games that run too fast)
   Ctrl+Shift+F12   Faster
-  Ctrl+Alt+Del     Restart (the whole PC; REBOOT /S or the media
-                     console's "reboot" restart only DOS, in a moment)
+  Ctrl+Shift+Del   Restart DOS in a moment, without resetting the PC
+                     (drives stay). Twice within 3 s: the whole PC.
+                     With a protected-mode program or Windows running,
+                     press it twice (the first press only warns).
+  Ctrl+Alt+Del     Restart the whole PC (DOS and Windows see it first)
 
   Changes show briefly at the top right of the screen.
 

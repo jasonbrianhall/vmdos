@@ -726,6 +726,11 @@ void vkbd_real_scancode(u8 sc)
         }
         return;
     }
+    if (hot && !alt && k == 0x53) {                           /* Ctrl+Shift+Del: soft restart (bios.c); Ctrl+Alt+Del stays the guest's */
+        void soft_boot_hotkey(void);
+        if (!up) soft_boot_hotkey();
+        return;
+    }
     if (media_on()) {                                         /* every other key is the console's while it's open */
         if (sc != 0xE0) media_key(k, up, lshift || rshift, ctrl);
         return;
