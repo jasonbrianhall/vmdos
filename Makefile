@@ -396,6 +396,9 @@ GRUB_MKIMAGE ?= $(firstword $(shell command -v grub-mkimage grub2-mkimage 2>/dev
 GRUB_LIB ?= $(firstword $(wildcard /usr/lib/grub /usr/share/grub2 /usr/lib64/grub))
 GRUB_OK  := $(and $(GRUB_MKIMAGE),$(wildcard $(GRUB_LIB)/i386-pc/boot.img),$(wildcard $(GRUB_LIB)/x86_64-efi/normal.mod))
 GRUB     ?= $(if $(GRUB_OK),1,0)
+# BIOS/CSM menu: "FreeDOS from C:, booted normally (no vmdos)" chainloads
+# the partition's own FreeDOS boot sector (the one mkdisk.py writes), so C:
+# boots as on a plain PC; the vmdos drivers in FDCONFIG.SYS stay out of memory.
 # syslinux's memdisk (Debian/Ubuntu syslinux-common, Fedora syslinux): the
 # BIOS/CSM menu's last entry boots floppy.img on the bare machine with it
 # (real FreeDOS, no vmdos). Not found: no such entry.
@@ -508,6 +511,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '    multiboot /boot/vmdos.elf $(filter-out video=% vga=% display=%,$(KARGS_ALL)) video=vbe display=ask'; \
 	   echo '    set gfxpayload=text'; \
 	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
+	   echo '  }'; \
+	   echo '  menuentry "FreeDOS from C:, booted normally (no vmdos)" {'; \
+	   echo '    chainloader +1'; \
 	   echo '  }'; \
 	   $(if $(MEMDISK),$(MEMDISK_ENTRY)) \
 	   echo 'fi'; \
