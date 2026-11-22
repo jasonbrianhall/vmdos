@@ -12,7 +12,9 @@
 #   make run-efi-app     QEMU, UEFI (OVMF), booting esp.img (SATA)
 #   make run-usb         QEMU, UEFI (OVMF), booting esp.img as a USB stick
 #   make run-bios        QEMU, legacy BIOS (SeaBIOS), booting esp.img (GRUB in the MBR)
-#   make net             rebuild the TCP/IP tools and VMDOSNET in net/bin (needs Open Watcom)
+#   make net             rebuild the TCP/IP tools and VMDOSNET in net/bin with Open Watcom
+#                        (WATCOM=/path, else fetched into .watcom/ on first use)
+#   make watcom          just fetch Open Watcom into .watcom/
 #
 # FREEDOS=dir with KERNEL.SYS and COMMAND.COM (default: freedos/, fetched)
 # EXTRA=dir whose contents are copied into C:\ too (games, tools)
@@ -617,11 +619,20 @@ run-usb: esp.img
 clean:
 	rm -rf build build-486 .vmdos-cpu vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
 
-# Rebuild net/bin (VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX) with Open Watcom:
-# WATCOM=/path, or tools/fetch-watcom.sh puts a copy in .watcom/.
-net:
-	$(MAKE) -C net install
-.PHONY: net
+# Rebuild net/bin (VMTCP, DHCP, PING, NSLOOKUP, VMIPXBOX, VMDOSNET) with Open
+# Watcom. WATCOM=/path uses an installed copy; otherwise make watcom (run by
+# make net) fetches one into .watcom/ the first time (tools/fetch-watcom.sh).
+WATCOM ?= $(CURDIR)/.watcom
+WATCOM_WPP = $(firstword $(wildcard $(WATCOM)/binl64/wpp $(WATCOM)/binl/wpp))
+watcom:
+ifeq ($(origin WATCOM),file)
+	@[ -n "$(WATCOM_WPP)" ] || sh tools/fetch-watcom.sh "$(WATCOM)"
+else
+	@[ -n "$(WATCOM_WPP)" ] || { echo "WATCOM=$(WATCOM): no binl64/wpp or binl/wpp there" >&2; exit 1; }
+endif
+net: watcom
+	$(MAKE) -C net install WATCOM=$(abspath $(WATCOM))
+.PHONY: watcom net
 
 .PHONY: FORCE all iso efi esp run run-hv run-iso run-efi run-efi-app run-usb run-bios clean
 -include $(OBJS:.o=.d)
