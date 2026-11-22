@@ -6,7 +6,8 @@
  *    when the CPU has them, RDTSC jitter against the 8254 timer, the
  *    BIOS tick count and clock, and a seed file kept between runs; all
  *    condensed with SHA-512. arc4random() (openbsd-compat) keys ChaCha20
- *    from it.
+ *    from it, and libcrypto's RAND seeds from it too.
+ *  - ossl_dos_time() and the rest of libcrypto's clock (dos-time.h).
  *  - poll()/ppoll() for sockets, the console and files together.
  */
 #include "includes.h"
@@ -197,10 +198,10 @@ getentropy(void *s, size_t len)
 	SHA2_CTX c;
 	size_t n;
 
-	if (len > 256) {
-		errno = EIO;
-		return -1;
-	}
+	/*
+	 * Any length: OpenSSL's libcrypto asks for its whole pool at once,
+	 * not POSIX's 256 (blocks of the pool below, as many as asked for).
+	 */
 	if (!pool_ready) {
 		gather();
 		save_seed();
@@ -810,4 +811,34 @@ dos_basename(const char *path)
 	bname[len] = '\0';
 	return bname;
 #undef IS_SEP
+}
+
+/*
+ * libcrypto (tools/build-openssl.sh) was built with dos-time.h, so its
+ * clock is these (OPENSSL.EXE and LYNX.EXE have ossl-dos.c's): ssh's own.
+ */
+time_t
+ossl_dos_time(time_t *tp)
+{
+	return dos_time(tp);
+}
+
+int
+ossl_dos_gettimeofday(struct timeval *tv, void *tz)
+{
+	return dos_gettimeofday(tv, tz);
+}
+
+struct tm *
+ossl_dos_gmtime_r(const time_t *tp, struct tm *tm)
+{
+	return dos_gmtime_r(tp, tm);
+}
+
+struct tm *
+ossl_dos_gmtime(const time_t *tp)
+{
+	static struct tm tm;
+
+	return dos_gmtime_r(tp, &tm);
 }

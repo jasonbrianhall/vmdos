@@ -10,11 +10,15 @@ own), in C:\VMDOS\NET on C: only (the boot floppy has no room).
     SCP C:\NOTES.TXT user@host:      SCP user@host:file.tgz C:\DL
 
   bin/SSH.EXE        github.com/openssh/openssh-portable tag V_10_6_P2, the
-                     clients only (SFTP.EXE and SCP.EXE: below), built --without-openssl
-                     (OpenSSH's own crypto: Ed25519 and ML-KEM/sntrup/Curve25519
-                     key exchange, ChaCha20-Poly1305 and AES-CTR ciphers; no RSA
-                     or ECDSA keys or host keys: those need OpenSSL), on vmdos's
-                     own TCP (below); DJGPP gcc 12, UPX --best
+                     clients only (SFTP.EXE and SCP.EXE: below), with OpenSSL
+                     3.6.5's libcrypto (tools/build-openssl.sh, no-sock and
+                     without what ssh doesn't use): RSA, ECDSA and Ed25519 keys
+                     and host keys (RSA in OpenSSH's format or old PEM, with a
+                     passphrase or not), AES-GCM/CTR/CBC and ChaCha20-Poly1305,
+                     ML-KEM/sntrup/Curve25519, ECDH and Diffie-Hellman key
+                     exchange; on vmdos's own TCP (below); DJGPP gcc 12, UPX
+                     --best. libcrypto's seed is getentropy() and its clock
+                     ossl_dos_time() and the rest, both dos-compat.c's.
   dos-compat.h       forced into every OpenSSH file: what DJGPP lacks or gets
                      in the way (signals, mmap, IXANY, ...), and the renames below
   dos-compat.c       getentropy(), poll()/ppoll(), fcntl(), gettimeofday()/time(),
@@ -48,8 +52,9 @@ port forwarding, -L/-R/-D), reverse DNS, UDP. Kernel option tcplog logs
 the connections and DNS questions (DMESG).
 
 Files. HOME is C:\HOME unless set; ~/.ssh is C:\HOME\.ssh (a long name:
-DOSLFN, which AUTOEXEC.BAT loads, has to be there): known_hosts, id_ed25519,
-config. ssh-keygen isn't built: make the key elsewhere and copy it there.
+DOSLFN, which AUTOEXEC.BAT loads, has to be there): known_hosts, id_rsa,
+id_ecdsa or id_ed25519, config. ssh-keygen isn't built: make the key
+elsewhere and copy it there.
 Its permissions aren't checked: DOS has none, and DJGPP's stat() makes up
 0644 (0444 if read-only), which ssh found "too open" for any key.
 The system-wide ssh_config is C:\VMDOS\SSH\SSH_CONFIG if you make one.
