@@ -538,6 +538,8 @@ backslash; quote names with spaces, except after cd):
     vmhd D: eject              take it out of D:
     rescan                     look at every disk again (formatted since, plugged in since)
     lspci [-v] [-x], lsusb [-v]  what LSPCI.COM and LSUSB.COM show
+    reboot [n] [A:|B:]         soft restart: DOS again on vmdos as it is (menu choice n, or a floppy)
+    reboot /hard               restart the whole PC, as Ctrl+Alt+Del
 
 They do what the DOS commands VMCD, VMFD and VMHD do (`cdrom`, `fd` and
 `hd` work as short names), so DOS and Windows see a disk change as usual. Up/Down bring
@@ -547,6 +549,27 @@ with no disk or USB transfer under way, as Ctrl+Shift+S's log save does
 (`src/media.c`). It is drawn where vmdos draws the screen (the
 framebuffer: GOP, GRUB's mode, Bochs VBE); with `video=vbe` it doesn't
 open (a note says so).
+
+Soft restart: `reboot` in the media console, or `REBOOT /S` in DOS,
+starts DOS again on vmdos as it is, without resetting the PC: no
+firmware, no GRUB, no vmdos start-up, so it takes about half a second,
+and the CDs, floppies, VMHD drives, network and boot options stay as
+they are. The guest's machine goes back to power-on as for `VMFD A:
+/BOOT` (BIOS, interrupt vectors, PIC and timer, mouse, EMS, XMS, sound
+stopped, vmdos's write caches out), then C:'s boot sector runs again.
+`reboot 3` / `REBOOT /S 3` types FDCONFIG.SYS's menu choice 3 for it
+(the console checks that the choice exists); `reboot A:` boots a floppy
+instead. It happens at the next moment DOS is interrupted with the disk
+and USB quiet (`src/v86.c` soft_boot_now, `bios_soft_boot` in
+`src/bios.c`); under VMHV the VM restarts in its own loop, its menu
+choice picked as when VMHV starts (`src/hv.c` hv_soft_boot). A
+protected-mode program (a DPMI client, or anything in VMHV's VM such as
+Windows 3.x) loses its unsaved work, so the console asks for `reboot /Y`
+then; its DPMI state is dropped (`dpmi_forget`). `REBOOT /S` writes
+DOS's buffers and SMARTDRV's cache out first, as REBOOT does; the
+console's `reboot` is like pressing reset, which at the DOS prompt
+loses nothing. `reboot /hard` (and plain `REBOOT`, Ctrl+Alt+Del)
+still restart the whole PC.
 
 CD drives for Windows 9x: the guest also has an IDE channel (the secondary,
 ports 170h-177h and 376h, IRQ 15; `src/atapi.c`) with ATAPI CD-ROM drives on

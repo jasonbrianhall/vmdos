@@ -394,9 +394,52 @@ static void help(void)
     pr("  rescan                    look at every disk again (newly formatted, plugged in)");
     pr("  lspci [-v] [-x]           the PCI devices (as LSPCI.COM)");
     pr("  lsusb [-v]                the USB controllers and devices (as LSUSB.COM)");
+    pr("  reboot [2] [A:]           restart DOS on vmdos as it is (the PC isn't");
+    pr("                            reset; drives stay): menu choice 2, from A:");
+    pr("  reboot /hard              restart the whole PC (as Ctrl+Alt+Del)");
     pr("  cls                       clear; Up/Down: earlier lines; PgUp/PgDn: scroll");
     pr("  Esc or Ctrl+Shift+F6 closes; the program runs on underneath.");
     pr("Short names: cdrom for vmcd, fd for vmfd, hd for vmhd.");
+}
+
+/* reboot: a soft restart (bios.c soft_boot_request): DOS again from C:
+   (or A:/B:), FDCONFIG.SYS's menu choice n typed for it; /hard: the PC.
+   With a protected-mode program running (a DPMI client, or anything in
+   VMHV's VM, Windows 3.x say) its unsaved work is lost: /Y to go ahead. */
+void soft_boot_request(int drive, int key);
+const char *fdconfig_choice(int k);
+int dpmi_client_active(void);
+void reboot(void);
+static void do_reboot(int argc, char **argv)
+{
+    int hard = 0, yes = 0, drive = -1, key = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (is(a, "/hard") || is(a, "-hard") || is(a, "/h") || is(a, "hard")) hard = 1;
+        else if (is(a, "/y") || is(a, "-y")) yes = 1;
+        else if (a[0] >= '1' && a[0] <= '9' && !a[1]) key = a[0];
+        else if (((a[0] | 32) == 'a' || (a[0] | 32) == 'b' || (a[0] | 32) == 'c') && a[1] == ':' && !a[2])
+            drive = (a[0] | 32) == 'c' ? -1 : (a[0] | 32) - 'a';
+        else { pr("reboot: what is %s? (reboot [1-9] [A:|B:|C:] [/hard] [/Y])", a); return; }
+    }
+    if (hard) {
+        pr("Restarting the PC...");
+        reboot();                                                 /* doesn't come back */
+    }
+    if (drive >= 0 && !fd_con_in(drive)) { pr("%c: is empty (vmfd %c: IMAGE puts a floppy image in it).", 'A' + drive, 'A' + drive); return; }
+    if (drive >= 0 && key) { pr("reboot: a menu choice is for C:'s FDCONFIG.SYS, not a floppy."); return; }
+    const char *choice = 0;
+    if (key && !(choice = fdconfig_choice(key))) { pr("C:\\FDCONFIG.SYS has no menu choice %c.", key); return; }
+    if (!yes && (hv_active || dpmi_client_active())) {
+        pr(hv_active ? "DOS is in VMHV's virtual machine: whatever runs there (Windows 3.x ...)"
+                     : "A protected-mode program is running (a DPMI client):");
+        pr("its unsaved work is lost. Exit it first, or type the line again with /Y.");
+        return;
+    }
+    if (choice) pr("Soft restart: DOS again from C:, menu choice %c (%s).", key, choice);
+    else pr("Soft restart: DOS again from %c:.", drive >= 0 ? 'A' + drive : 'C');
+    soft_boot_request(drive, key);
+    on = 0;                                                       /* closed: the boot shows */
 }
 
 static void do_cdrom(int argc, char **argv)
@@ -845,6 +888,7 @@ void media_run(void)
         else if (is(c, "dir") || is(c, "ls")) do_dir(argc, argv);
         else if (letter(c) >= 0 && c[1] == ':' && argc == 1) do_drive(c[0]);
         else if (is(c, "rescan")) do_rescan();
+        else if (is(c, "reboot") || is(c, "softreboot") || is(c, "restart")) do_reboot(argc, argv);
         else if (is(c, "lspci")) do_sys(0, argc, argv);
         else if (is(c, "lsusb")) do_sys(1, argc, argv);
         else if (is(c, "cls") || is(c, "clear")) cls();
