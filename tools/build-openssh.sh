@@ -7,13 +7,16 @@
 #   git, make, autoconf, a host gcc with -m32 (gcc-multilib), libfl2, upx
 #   SSHSRC=dir   an existing checkout of github.com/openssh/openssh-portable
 #   WATTSRC=dir  an existing checkout of github.com/gvanem/Watt-32
+#   SSH_TAG=tag  another OpenSSH release than the one openssh-dos.patch is for
 #   SSH_KEEP=file  also keep the unstripped ssh.exe there (symbols, for debugging)
 #   KEEP_TMP=1     keep the build directory
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 port=$root/third_party/openssh
 [ -n "$DJGPP" ] && PATH="$DJGPP/bin:$PATH"
-ssh_tag=V_10_6_P2
+# OpenSSH's newest release (git tag; SSH_TAG= another): openssh-dos.patch is
+# made against it, so a new one may need the patch brought up to date.
+ssh_tag=${SSH_TAG:-V_10_6_P2}
 watt_rev=3cf6f4e504b46bea2302b8d88b5ff2431396ddc9
 dj=$(dirname "$(command -v i586-pc-msdosdjgpp-gcc)")/..
 tmp=$(mktemp -d)
@@ -31,6 +34,10 @@ else
 fi
 W=$tmp/Watt-32
 export WATT_ROOT=$W
+# lang.c comes with lang.l (made from it with flex): a clone gives files
+# whatever times their checkout did, and if lang.l came out newer make
+# wanted flex to make lang.c again.
+touch "$W/src/lang.c"
 # Its errno list comes from a program built against DJGPP's <errno.h>; run
 # that on the host (as util/dj-errno.mak does with MinGW) with DJGPP's numbers.
 inc=$dj/i586-pc-msdosdjgpp/sys-include
