@@ -12,6 +12,7 @@
 #   WATTSRC=dir     an existing checkout of github.com/gvanem/Watt-32
 #   OPENSSL_PREFIX=dir  also install the headers and libraries there
 #   NO_EXE=1        don't build OPENSSL.EXE (libraries only)
+#   OPENSSL_EXTRA=  more options for its Configure (tools/build-openssh.sh: no-sock)
 #   KEEP_TMP=1      keep the build directory
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -59,7 +60,7 @@ fi
 cd "$tmp/openssl"
 patch -s -p1 < "$port/openssl-dos.patch"
 ./Configure DJGPP --cross-compile-prefix=$P no-shared no-dso no-threads \
-    no-async no-tests no-docs no-engine --with-rand-seed=getrandom \
+    no-async no-tests no-docs no-engine --with-rand-seed=getrandom $OPENSSL_EXTRA \
     --prefix="${OPENSSL_PREFIX:-$tmp/inst}" --openssldir=/dev/c/VMDOS/NET \
     "-I$W/inc" "-include $port/dos-time.h" > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
 make -j"$(nproc)" build_libs > make.log 2>&1 || { grep -E "error|Error" make.log | head -30; exit 1; }
