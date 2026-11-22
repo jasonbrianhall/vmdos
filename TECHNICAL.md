@@ -570,14 +570,17 @@ quarter of a second after the last one (at most 2 s while writes keep
 coming), and before a restart: wait a couple of seconds after saving
 before switching off.
 
-Floppy drives: A: and B: hold disk images from C: (there is no floppy
-controller): `VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
+Floppy drives: A: and B: hold disk images (there is no floppy controller):
+`VMFD A: C:\DISKS\DISK1.IMG`, `VMFD B: GAME2.IMG /R` (read-only),
 `VMFD A: /E` (empty), `VMFD` alone lists them; `fda=/DISKS/BOOT.IMG` (and
 `fdb=`) on the kernel command line fill them at boot. A new image is a disk
 change to DOS, so "insert disk 2" works; an empty drive says "not ready".
-Writes go into the image file on C:, and are refused if that file has been
-replaced, resized or moved since it went in. 160K to 2.88M images, DMF
-included; other sizes are taken from the boot sector.
+An image on C: or a VMHD drive is used in place: writes go into the file,
+and are refused if it has been replaced, resized or moved since it went in.
+One on any other drive DOS can read (a CD, a VMDOSNET share, a RAM disk)
+vmdos can't reach itself, so VMFD reads it in and vmdos holds a read-only
+copy (INT 2Fh AX=5646h BX=4-6). 160K to 2.88M images, DMF included; other
+sizes are taken from the boot sector.
 
 Self-booting floppies (booter games): `VMFD A: C:\DISKS\GAME.IMG /BOOT`
 restarts the PC from that disk, without DOS (`VMFD A: /BOOT` boots what's in
@@ -1190,7 +1193,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `src/es1371.c` | the Ensoniq AudioPCI 97 (`es1371`) on the guest's PCI bus |
 | `src/voodoo/`, `src/vpci.c` | the Voodoo 3 (`voodoo3`): 86Box's Voodoo 3 (vid_*.c as upstream; see src/voodoo/UPSTREAM), what 86Box gives it (v3.c), green threads (v3sched.c), its BIOS (v3rom.S); the guest's PCI bus |
 | `src/xms.c`, `dos/vmxms.asm` | XMS driver; VMXMS.SYS, its DOS-side front |
-| `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images on C:, VMFD.COM |
+| `src/floppy.c`, `dos/vmfd.asm` | Floppy drives A:/B: from disk images (on C:/VMHD in place, else a copy), VMFD.COM |
 | `src/media.c` | the media console (Ctrl+Shift+F6): CD, floppy and VMHD changes from a command line over the game |
 | `src/cd.c`, `dos/vmcd.asm`, `dos/vmcdtool.asm` | CD-ROM: ISO and CUE/BIN images, real SATA/IDE/USB drives, CD audio (monitor side), VMCD.SYS driver, VMCD.COM |
 | `src/atapi.c` | the guest's IDE channel with ATAPI CD drives (cd.c's units), for Windows' own CD driver |
