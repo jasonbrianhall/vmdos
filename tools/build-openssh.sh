@@ -4,10 +4,12 @@
 # The normal build doesn't need this: the binary is committed. Needs:
 #   DJGPP   a cross gcc i586-pc-msdosdjgpp-gcc on PATH, or DJGPP=dir with bin/
 #           (github.com/andrewwutw/build-djgpp releases)
-#   git, make, autoconf, a host gcc with -m32 (gcc-multilib), libfl2, upx
+#   git, make, autoconf, perl, a host gcc with -m32 (gcc-multilib), libfl2, upx
 #   SSHSRC=dir   an existing checkout of github.com/openssh/openssh-portable
 #   WATTSRC=dir  an existing checkout of github.com/gvanem/Watt-32
 #   SSH_TAG=tag  another OpenSSH release than the one openssh-dos.patch is for
+#   OPENSSLSRC=dir  an existing checkout of github.com/openssl/openssl (for
+#                tools/build-openssl.sh, which builds libcrypto: needs perl)
 #   SSH_KEEP=file  also keep the unstripped ssh.exe there (symbols, for debugging)
 #   KEEP_TMP=1     keep the build directory
 set -e
@@ -51,7 +53,36 @@ gcc -m32 -w -DWATT32_DJGPP_MINGW --include "$inc/errno.h" -D_ERRNO_H -D_BITS_ERR
     make -f djgpp.mak -j"$(nproc)" > "$tmp/watt.log" 2>&1) ||
     { tail -30 "$tmp/watt.log"; exit 1; }
 
-# OpenSSH, the client only, with its own crypto (no OpenSSL).
+# OpenSSL's libcrypto (tools/build-openssl.sh): RSA and ECDSA keys and
+# host keys, AES-GCM. It was built with dos-time.h: its clock comes from
+# dos-compat.c (ossl_dos_time() and the rest), its seed from getentropy().
+# no-sock: ssh has its own sockets (dos-sock.c), and OpenSSL's would want
+# Watt-32's. The rest: what ssh doesn't use (its default provider links in
+# every algorithm it has: 1.6 MB a program with them all). Not no-ecx: with
+# OpenSSL's ed25519 there, ssh uses it (ed25519-openssl.c) for ed25519 keys.
+ossl_off="no-sock no-dgram no-ssl no-tls no-dtls no-srtp no-psk no-quic no-http
+    no-cms no-ts no-ocsp no-srp no-ct no-comp no-cmp no-legacy
+    no-rc2 no-rc4 no-rc5 no-idea no-seed no-camellia no-aria no-bf no-cast
+    no-sm2 no-sm3 no-sm4 no-gost no-whirlpool no-mdc2 no-md4 no-rmd160
+    no-blake2 no-siphash no-scrypt no-argon2 no-cmac no-siv no-ocb no-ec2m
+    no-dsa no-ml-dsa no-slh-dsa no-ml-kem no-lms no-chacha no-poly1305"
+OPENSSL_PREFIX=$tmp/ossl NO_EXE=1 OPENSSL_EXTRA=$(echo $ossl_off) WATTSRC=$WATTSRC \
+    OPENSSLSRC=$OPENSSLSRC sh "$root/tools/build-openssl.sh"
+# configure links its tests against libcrypto: these stand in for the clock
+# and the seed there (its tests aren't run; the programs get dos-compat.c's).
+cat > "$tmp/ossl-cfg.c" << 'EOF'
+#include <stddef.h>
+#include <time.h>
+#include <sys/time.h>
+int getentropy(void *b, size_t n) { (void)b; (void)n; return -1; }
+time_t ossl_dos_time(time_t *t) { return time(t); }
+int ossl_dos_gettimeofday(struct timeval *tv, void *z) { return gettimeofday(tv, z); }
+struct tm *ossl_dos_gmtime_r(const time_t *t, struct tm *r) { return gmtime_r(t, r); }
+struct tm *ossl_dos_gmtime(const time_t *t) { return gmtime(t); }
+EOF
+i586-pc-msdosdjgpp-gcc -O2 -c "$tmp/ossl-cfg.c" -o "$tmp/ossl-cfg.o"
+
+# OpenSSH, the client only.
 if [ -n "$SSHSRC" ]; then
     git -C "$SSHSRC" archive --prefix=openssh/ $ssh_tag | tar -x -C "$tmp"
 else
@@ -64,39 +95,42 @@ cd "$tmp/build"
 ac_cv_have_struct_timespec=yes ac_cv_func_ppoll=yes ac_cv_func_poll=yes \
 ac_cv_func_getentropy=yes ac_cv_func_closefrom=yes \
 "$tmp/openssh/configure" --host=i586-pc-msdosdjgpp \
-    --without-openssl --without-zlib --without-pam --without-selinux \
+    --with-ssl-dir="$tmp/ossl" --without-zlib --without-pam --without-selinux \
     --without-security-key-builtin --disable-security-key --disable-pkcs11 \
     --disable-lastlog --disable-utmp --disable-wtmp --disable-utmpx --disable-wtmpx \
     --without-hardening --without-stackprotect --without-retpoline \
     --with-sandbox=no --disable-strip \
     CFLAGS="-O2 -march=i586" CPPFLAGS="-I$W/inc -DWATT32 -DWATT32_NO_OLDIES" \
-    LDFLAGS="-L$W/lib" LIBS="-lwatt" > configure.log 2>&1 ||
+    LDFLAGS="-L$W/lib" LIBS="$tmp/ossl-cfg.o -lwatt" > configure.log 2>&1 ||
     { tail -30 configure.log; exit 1; }
+grep -q '^#define WITH_OPENSSL 1' config.h || {
+    echo "build-openssh: configure didn't take OpenSSL (config.log)" >&2; exit 1; }
 # dos-compat.h goes into every file; dos-compat.c is what DOS lacks,
 # dos-term.c the terminal.
 CC="i586-pc-msdosdjgpp-gcc -include $port/dos-compat.h"
 for f in dos-compat dos-term; do
-    $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+    $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$tmp/ossl/include" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
         -DHAVE_CONFIG_H -c "$port/$f.c" -o $f.o
 done
 for f in dos-co dos-sock dos-res; do
-    $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+    $CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$tmp/ossl/include" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
         -DHAVE_CONFIG_H -c "$port/$f.c" -o $f.o
 done
 i586-pc-msdosdjgpp-ar rcs libdoscompat.a dos-compat.o dos-term.o dos-co.o dos-sock.o dos-res.o
 # The programs use vmdos's own TCP (dos-sock.c); Watt-32 gives configure
 # its headers and functions to find, and nothing to the programs.
-LIBS="-L. -ldoscompat -lopenbsd-compat -ldoscompat"
+LIBS="-L. -ldoscompat -lopenbsd-compat -ldoscompat -L$tmp/ossl/lib -lcrypto -ldoscompat"
 make -j"$(nproc)" ssh.exe sftp.o sftp-usergroup.o progressmeter.o sftp-common.o \
-    sftp-client.o sftp-glob.o ssherr-nolibcrypto.o scp.o CC="$CC" sysconfdir=c:/vmdos/ssh LIBS="$LIBS" \
+    sftp-client.o sftp-glob.o scp.o CC="$CC" sysconfdir=c:/vmdos/ssh LIBS="$LIBS" \
     > make.log 2>&1 || { grep -E -A3 "error:|undefined reference" make.log | head -40; exit 1; }
 # SFTP.EXE and SCP.EXE carry ssh inside (dos-co.c, dos-spawn.c): ssh.c's
 # main and clientloop.c's cleanup_exit get other names, and so does scp's
-# cleanup_exit (dos-spawn.c's picks between them).
+# cleanup_exit (dos-spawn.c's picks between them). With ssh comes libcrypto:
+# libssh's ssherr-libcrypto.o for them, not upstream's ssherr-nolibcrypto.o.
 i586-pc-msdosdjgpp-objcopy --redefine-sym _main=_ssh_main ssh.o ssh-in.o
 i586-pc-msdosdjgpp-objcopy --redefine-sym _cleanup_exit=_ssh_cleanup_exit \
     clientloop.o clientloop-in.o
-$CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
+$CC -O2 -march=i586 -Wall -I. -I"$tmp/openssh" -I"$tmp/ossl/include" -I"$W/inc" -DWATT32 -DWATT32_NO_OLDIES \
     -DHAVE_CONFIG_H -c "$port/dos-spawn.c" -o dos-spawn.o
 SSH_IN="dos-spawn.o ssh-in.o readconf.o clientloop-in.o sshtty.o sshconnect.o
     sshconnect2.o mux.o ssh-pkcs11.o ssh-sk-client.o"
@@ -105,9 +139,9 @@ for p in sftp scp; do
 done
 LINK="-L. -Lopenbsd-compat -lssh -lopenbsd-compat $LIBS"
 i586-pc-msdosdjgpp-gcc -o sftp.exe sftp-prog.o sftp-usergroup.o progressmeter.o \
-    sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o $SSH_IN $LINK
+    sftp-common.o sftp-client.o sftp-glob.o $SSH_IN $LINK
 i586-pc-msdosdjgpp-gcc -o scp.exe scp-prog.o progressmeter.o \
-    sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o $SSH_IN $LINK
+    sftp-common.o sftp-client.o sftp-glob.o $SSH_IN $LINK
 [ -n "$SSH_KEEP" ] && cp ssh.exe "$SSH_KEEP"
 mkdir -p "$port/bin"
 for p in ssh sftp scp; do
