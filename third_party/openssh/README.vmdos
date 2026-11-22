@@ -50,6 +50,8 @@ the connections and DNS questions (DMESG).
 Files. HOME is C:\HOME unless set; ~/.ssh is C:\HOME\.ssh (a long name:
 DOSLFN, which AUTOEXEC.BAT loads, has to be there): known_hosts, id_ed25519,
 config. ssh-keygen isn't built: make the key elsewhere and copy it there.
+Its permissions aren't checked: DOS has none, and DJGPP's stat() makes up
+0644 (0444 if read-only), which ssh found "too open" for any key.
 The system-wide ssh_config is C:\VMDOS\SSH\SSH_CONFIG if you make one.
 C:\HOME\.ssh\SSHSEED.BIN keeps random state between runs.
 

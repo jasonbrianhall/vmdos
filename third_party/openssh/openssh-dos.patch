@@ -1,3 +1,22 @@
+diff --git a/authfile.c b/authfile.c
+index be24105..774c72e 100644
+--- a/authfile.c
++++ b/authfile.c
+@@ -90,6 +90,14 @@ sshkey_perm_ok(int fd, const char *filename)
+ 	 * permissions of the file. if the key owned by a different user,
+ 	 * then we don't care.
+ 	 */
++#ifdef __DJGPP__
++	/*
++	 * DOS: no other users to keep the key from, and no such permission
++	 * bits: DJGPP's stat() makes them up (0644, or 0444 if read-only),
++	 * so this was always "too open" and no private key could be used.
++	 */
++	return 0;
++#endif
+ #ifdef HAVE_CYGWIN
+ 	if (check_ntsec(filename))
+ #endif
 diff --git a/misc.c b/misc.c
 index d49c710..e9a7a98 100644
 --- a/misc.c
