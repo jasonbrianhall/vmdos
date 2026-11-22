@@ -5,7 +5,8 @@
    Nothing is put in a drive by itself, so a disk vmdos finds (another
    OS's) is never touched unless chosen.
 
-   A partition goes in only if it holds a FAT file system, isn't C: and
+   A partition goes in only if it holds a FAT file system, isn't one DOS
+   has at boot (C:, and the logical ones after it on that disk) and
    isn't in another drive already. One whose partition type isn't a DOS
    one (an EFI system partition, a hidden or Linux-typed partition holding
    FAT, a GPT partition other than "basic data") needs a confirmation:
@@ -207,12 +208,9 @@ static void scan(void)
     }
 }
 
-static int is_c(const struct part *p)
-{
-    u32 cs, cz;
-    int cd = disk_c_dev(&cs, &cz);
-    return cd == p->dev && cs == p->start;
-}
+/* DOS has it at boot: C:, or a logical partition on C:'s disk (disk.c).
+   Its drive: 2 C:, 3 D: ..., or 0. */
+static int is_c(const struct part *p) { return disk_boot_part(p->dev, p->start); }
 /* Disk d is plugged in. Unplugged USB disks are left out of the list and
    the BIOS disks, and the disks after them move up. */
 static int present(int d) { return disk_dev_sectors(d) != 0; }
@@ -346,7 +344,7 @@ static void list(u32 o)
             put(&o, b);
             int u = unit_of(p);
             char U = (char)('A' + first_drive + u);
-            if (is_c(p)) put(&o, "      This is drive C:.\r\n");
+            if (is_c(p)) { snprintf(b, sizeof b, "      This is drive %c:.\r\n", 'A' + is_c(p)); put(&o, b); }
             else if (is_ext(p->type)) ;
             else if (u >= 0 && !p->fat)
                 { snprintf(b, sizeof b, "      This is drive %c:. It has no file system yet: type  FORMAT %c:\r\n", U, U); put(&o, b); }
@@ -783,7 +781,7 @@ void hd_con_describe_part(int k, char *b, int n)
     char c[96], w[24] = "";
     contents(c, sizeof c, p);
     int u = unit_of(p);
-    if (is_c(p)) snprintf(w, sizeof w, "  (C:)");
+    if (is_c(p)) snprintf(w, sizeof w, "  (%c:)", 'A' + is_c(p));
     else if (u >= 0) snprintf(w, sizeof w, "  (in %c:)", 'A' + first_drive + u);
     if (p->num) snprintf(b, n, "disk %d, partition %d: %s%s", disk_no(p->dev), p->num, c, w);
     else snprintf(b, n, "disk %d, whole disk: %s%s", disk_no(p->dev), c, w);

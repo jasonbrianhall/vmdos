@@ -230,15 +230,18 @@ static int word_is(const char *p, const char *w)
 static const char *skip_ws(const char *p) { while (*p == ' ' || *p == '\t') p++; return p; }
 static const char *next_word(const char *p) { while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++; return skip_ws(p); }
 
-/* The FAT volume a path is on: C:, or a VMHD drive (its disk + 1 in *dev).
+/* The FAT volume a path is on: C: or a logical partition on its disk (D:
+   ..., disk.c; *dev 0), or a VMHD drive (its disk + 1 in *dev).
    0, or 4 neither (a share's paths go to fs9p), 7 unreadable. */
 static int vol_disk;
 static int vol_rd(u32 lba, u32 n, void *buf) { return disk_dev_rw(vol_disk, lba, n, buf, 0); }
+static int view_rd(u32 lba, u32 n, void *buf) { return disk_read(lba, n, buf) ? -1 : 0; }   /* C:'s disk, as DOS sees it */
 static int path_volume(const char *path, struct fatvol *v, int *dev)
 {
     *dev = 0;
     if (!(path[0] && path[1] == ':') || (path[0] | 32) == 'c') return disk_volume(v) ? 7 : 0;
-    u32 start;
+    u32 start = disk_boot_drive((path[0] | 32) - 'a');   /* a logical partition on C:'s disk (D: ...): through C:'s view */
+    if (start) return fat_mount(v, view_rd, start) ? 7 : 0;
     if (hd_drive_part((path[0] | 32) - 'a', &vol_disk, &start)) return 4;
     *dev = vol_disk + 1;
     return fat_mount(v, vol_rd, start) ? 7 : 0;
