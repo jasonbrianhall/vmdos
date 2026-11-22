@@ -173,7 +173,7 @@ msg_e1   db 'VMHD: that drive letter is not one of VMHD', 39, 's. Type VMHD to s
          db 'and restart).', 13, 10, '$'
 msg_e2   db 'VMHD: there is no partition with that number. Type VMHD to see the', 13, 10
          db 'partitions and their numbers (in [brackets]).', 13, 10, '$'
-msg_e3   db 'VMHD: that partition is drive C: already.', 13, 10, '$'
+msg_e3   db 'VMHD: DOS has that partition already (C:, or a logical drive on its disk).', 13, 10, '$'
 msg_e4   db 'VMHD: that partition is in another VMHD drive already. Type VMHD to', 13, 10
          db 'see which, and take it out there first (VMHD x: /E).', 13, 10, '$'
 msg_e5   db 'VMHD: that partition has no FAT file system and is not a DOS', 13, 10

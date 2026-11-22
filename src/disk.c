@@ -5,7 +5,11 @@
      is C: and changes are kept. DOS sees a virtual disk: sector 0 is a
      made-up MBR with that one partition (GPT disks too), the partition's
      sectors are the real ones, everything else reads as zeros and can't
-     be written, so other partitions are safe.
+     be written, so other partitions are safe. On an MBR disk the FAT
+     logical partitions after C: come too (logical=0 on the command line
+     leaves them out): the made-up MBR gets an extended partition whose
+     EBRs (made up, at the real ones' places) chain just those, so DOS
+     gives them D:, E: ... at boot; their sectors are the real ones.
    - the RAM disk (dos.img as a boot module): with c=ram, or when no disk
      partition qualifies. Changes are lost at power-off. A floppy-sized
      dos.img (a 1.44M image, say) is drive A: instead, and there is no
@@ -34,6 +38,31 @@ static int usb_seen;                  /* hotplug (USB) disks taken into dev[] */
 static const char *dev_kind(int d) { return dev[d].drv->kind; }
 static u32 pstart, psize;
 static u8 vmbr[512];
+/* The logical partitions DOS sees as well (on dev[cdev], after C:), and
+   the made-up EBRs that chain them (ebr_lba[i]: where EBR i reads). */
+#define MAX_LOG 8
+static int n_log;
+static struct { u32 start, size; } lg[MAX_LOG];
+static u32 ebr_lba[MAX_LOG];
+static u8 vebr[MAX_LOG][512];
+
+/* Where sector lba is: 0 the MBR or a sector outside every partition
+   (zeros), 1 a made-up EBR (*i), 2 in C: or a logical partition; *run:
+   how many sectors from lba are the same kind. */
+static int where(u32 lba, u32 *run, int *i)
+{
+    u32 next = ~0u;
+    if (lba >= pstart && lba - pstart < psize) { *run = psize - (lba - pstart); return 2; }
+    if (lba < pstart) next = pstart;
+    for (int k = 0; k < n_log; k++) {
+        if (lba >= lg[k].start && lba - lg[k].start < lg[k].size) { *run = lg[k].size - (lba - lg[k].start); return 2; }
+        if (lba == ebr_lba[k]) { *run = 1; *i = k; return 1; }
+        if (lg[k].start > lba && lg[k].start < next) next = lg[k].start;
+        if (ebr_lba[k] > lba && ebr_lba[k] < next) next = ebr_lba[k];
+    }
+    *run = next - lba;
+    return 0;
+}
 static u8 *bounce;                    /* 64 KiB, identity-mapped, for drivers that DMA */
 #define BOUNCE_SECS 128
 
@@ -378,43 +407,53 @@ int disk_read(u32 lba, u32 n, void *buf)
     if (lba >= disk_sectors || n > disk_sectors - lba) return 0x04;
     if (!on_dev) { memcpy(buf, disk_image + lba * 512, n * 512); return 0; }
     u8 *d = buf;
-    if (lba < pstart) {                                        /* MBR + gap before the partition */
-        u32 k = pstart - lba < n ? pstart - lba : n;
-        for (u32 i = 0; i < k; i++) {
-            if (lba + i == 0) memcpy(d + i * 512, vmbr, 512);
-            else memset(d + i * 512, 0, 512);
+    while (n) {
+        u32 k;
+        int i, w = where(lba, &k, &i);
+        if (k > n) k = n;
+        if (w == 2) {
+            in_io++;
+            int e = part_read(lba, k, d);
+            in_io--;
+            if (e) return 0x20;
+        } else if (w == 1) memcpy(d, vebr[i], 512);
+        else for (u32 j = 0; j < k; j++) {                      /* the MBR, or outside the partitions */
+            if (lba + j == 0) memcpy(d + j * 512, vmbr, 512);
+            else memset(d + j * 512, 0, 512);
         }
         lba += k; n -= k; d += k * 512;
     }
-    if (!n) return 0;
-    in_io++;
-    int e = part_read(lba, n, d);
-    in_io--;
-    return e ? 0x20 : 0;
+    return 0;
 }
 
 int disk_write(u32 lba, u32 n, const void *buf)
 {
     if (lba >= disk_sectors || n > disk_sectors - lba) return 0x04;
     if (!on_dev) { memcpy(disk_image + lba * 512, buf, n * 512); return 0; }
-    /* The made-up MBR and the gap before the partition: a write is taken
-       (Windows 9x Setup writes its MBR code and stops with SU0409, "virus
-       detection", when that fails). The MBR's code lands in vmbr, so reading
-       it back matches; its partition table stays vmdos's. Nothing reaches
-       the real disk, and the gap's sectors still read as zeros. */
+    /* The made-up MBR and EBRs, and sectors outside the partitions: a
+       write is taken (Windows 9x Setup writes its MBR code and stops with
+       SU0409, "virus detection", when that fails). The MBR's code lands
+       in vmbr, so reading it back matches; its partition table stays
+       vmdos's. Nothing reaches the real disk, and the rest still reads as
+       zeros (or the EBRs as vmdos makes them). */
     const u8 *s = buf;
-    if (lba < pstart) {
-        static int logged;
-        u32 k = pstart - lba < n ? pstart - lba : n;
-        if (lba == 0) memcpy(vmbr, s, 446);
-        if (!logged++) kprintf("disk: a write to the MBR or before C:'s partition (LBA %u): kept in memory only\n", lba);
+    while (n) {
+        u32 k;
+        int i, w = where(lba, &k, &i);
+        if (k > n) k = n;
+        if (w == 2) {
+            in_io++;
+            int e = part_write(lba, k, s);
+            in_io--;
+            if (e) return 0x20;
+        } else {
+            static int logged;
+            if (lba == 0) memcpy(vmbr, s, 446);
+            if (!logged++) kprintf("disk: a write outside DOS's partitions (LBA %u): kept in memory only\n", lba);
+        }
         lba += k; n -= k; s += k * 512;
-        if (!n) return 0;
     }
-    in_io++;
-    int e = part_write(lba, n, s);
-    in_io--;
-    return e ? 0x20 : 0;
+    return 0;
 }
 
 /* The FAT partition DOS boots from, through the same view (for cd.c / bios.c). */
@@ -484,6 +523,91 @@ static void chs(u8 *p, u32 lba)
     p[0] = (u8)h; p[1] = (u8)(s | (c >> 2 & 0xC0)); p[2] = (u8)c;
 }
 
+static int is_ext(u8 t) { return t == 0x05 || t == 0x0F || t == 0x85; }
+static int is_fat_type(u8 t) { return t == 0x01 || t == 0x04 || t == 0x06 || t == 0x0B || t == 0x0C || t == 0x0E; }
+
+/* The FAT logical partitions of dev[d]'s extended partition that lie
+   after C: (a DOS type and a FAT boot sector), up to MAX_LOG, into lg[];
+   the made-up MBR's second entry and EBRs that chain only those. */
+static void logicals(int d)
+{
+    n_log = 0;
+    if (strstr(cmdline, "logical=0")) return;
+    static u8 m[512], b[512];
+    probe_disk = d;
+    if (probe_rd(0, 1, m) || m[510] != 0x55 || m[511] != 0xAA || m[446 + 4] == 0xEE) return;   /* (GPT: none) */
+    u32 ext = 0, ext_size = 0;
+    for (int i = 0; i < 4; i++) {
+        u8 *e = m + 446 + i * 16;
+        if (is_ext(e[4])) { ext = *(u32 *)(e + 8); ext_size = *(u32 *)(e + 12); break; }
+    }
+    if (!ext || ext < pstart + psize) return;
+    if ((u64)ext + ext_size > dev[d].sectors) ext_size = (u32)(dev[d].sectors - ext);
+    u32 real_ebr[MAX_LOG];
+    u32 ebr = ext;
+    for (int guard = 0; ebr && guard < 64 && n_log < MAX_LOG; guard++) {
+        if (probe_rd(ebr, 1, b) || b[510] != 0x55 || b[511] != 0xAA) break;
+        u8 *e = b + 446;
+        u32 st = ebr + *(u32 *)(e + 8), sz = *(u32 *)(e + 12), next = *(u32 *)(e + 16 + 8);
+        u8 nt = e[16 + 4];
+        if (is_fat_type(e[4]) && sz && (u64)st + sz <= dev[d].sectors && st > ebr) {
+            static struct fatvol v;
+            if (!fat_mount(&v, probe_rd, st)) {
+                lg[n_log].start = st; lg[n_log].size = sz; real_ebr[n_log] = ebr;
+                vebr[n_log][0] = e[4];                             /* (its type, till the EBR is made) */
+                n_log++;
+            }
+        }
+        ebr = is_ext(nt) && next ? ext + next : 0;
+    }
+    if (!n_log) return;
+    /* EBR 0 at the extended partition's start (where the MBR points), the
+       others where their own real EBRs are: entry 0 the partition (from
+       that EBR), entry 1 the next EBR (from the extended start). */
+    for (int i = 0; i < n_log; i++) {
+        u8 type = vebr[i][0];
+        ebr_lba[i] = i ? real_ebr[i] : ext;
+        memset(vebr[i], 0, 512);
+        u8 *e = vebr[i] + 446;
+        e[4] = type;
+        chs(e + 1, lg[i].start); chs(e + 5, lg[i].start + lg[i].size - 1);
+        *(u32 *)(e + 8) = lg[i].start - ebr_lba[i]; *(u32 *)(e + 12) = lg[i].size;
+        vebr[i][510] = 0x55; vebr[i][511] = 0xAA;
+    }
+    for (int i = 0; i + 1 < n_log; i++) {
+        u8 *e = vebr[i] + 446 + 16;
+        u32 nx = i + 1 < n_log ? (ebr_lba[i + 1]) : 0;
+        e[4] = 0x05;
+        chs(e + 1, nx); chs(e + 5, lg[i + 1].start + lg[i + 1].size - 1);
+        *(u32 *)(e + 8) = nx - ext; *(u32 *)(e + 12) = lg[i + 1].start + lg[i + 1].size - nx;
+    }
+    u32 end = lg[n_log - 1].start + lg[n_log - 1].size;
+    if (end < ext + ext_size) end = ext + ext_size;
+    u8 *e = vmbr + 446 + 16;                                     /* the MBR's 2nd entry: the extended partition */
+    e[4] = (u64)ext + ext_size > 1024u * 255 * 63 ? 0x0F : 0x05;
+    chs(e + 1, ext); chs(e + 5, ext + ext_size - 1);
+    *(u32 *)(e + 8) = ext; *(u32 *)(e + 12) = ext_size;
+    disk_sectors = end;
+    for (int i = 0; i < n_log; i++)
+        kprintf("disk: %c: is logical partition at LBA %u (%u MiB), on C:'s disk\n", 'D' + i, lg[i].start, lg[i].size >> 11);
+}
+
+/* Is the partition at start on dev[d] one DOS has at boot (C:, or a
+   logical partition after it)? 0, or its drive (2 C:, 3 D:, ...). */
+int disk_boot_part(int d, u32 start)
+{
+    if (!on_dev || d != cdev) return 0;
+    if (start == pstart) return 2;
+    for (int i = 0; i < n_log; i++) if (lg[i].start == start) return 3 + i;
+    return 0;
+}
+
+/* The drive DOS gave a boot-disk logical partition (3 D:, ...): its start, or 0. */
+u32 disk_boot_drive(int drive)
+{
+    return on_dev && drive >= 3 && drive - 3 < n_log ? lg[drive - 3].start : 0;
+}
+
 static void use(int d, u32 start, u32 size)
 {
     static struct fatvol v;
@@ -506,6 +630,7 @@ static void use(int d, u32 start, u32 size)
     vmbr[510] = 0x55; vmbr[511] = 0xAA;
     kprintf("disk: C: is FAT%d partition at LBA %u (%u MiB) on %s disk %d (%s)\n",
             v.type, start, size >> 11, dev_kind(d), dev[d].idx, dev[d].name);
+    logicals(d);
     cache_init();
 }
 

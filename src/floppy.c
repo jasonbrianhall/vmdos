@@ -120,16 +120,19 @@ static void dos_bpb(struct fd *f, u8 *bs)
 static int fd_insert(int d, struct fd *tp, const char *path);
 static void fd_eject(int d);
 
-/* The FAT volume a path is on, as cd.c's: C:, or a VMHD drive (its disk
-   + 1 in *dev). 0, or 4 neither, 7 unreadable. */
+/* The FAT volume a path is on, as cd.c's: C: or a logical partition on its
+   disk (D: ..., disk.c; *dev 0), or a VMHD drive (its disk + 1 in *dev).
+   0, or 4 none of those, 7 unreadable. */
 static int vol_disk;
 static int vol_rd(u32 lba, u32 n, void *buf) { return disk_dev_rw(vol_disk, lba, n, buf, 0); }
+static int view_rd(u32 lba, u32 n, void *buf) { return disk_read(lba, n, buf) ? -1 : 0; }   /* C:'s disk, as DOS sees it */
 static int path_volume(const char *path, struct fatvol *v, int *dev)
 {
     *dev = 0;
     if (path[0] == '\\' && path[1] == '\\') return 4;          /* \\SERVER\SHARE: a network drive */
     if (!(path[0] && path[1] == ':') || (path[0] | 32) == 'c') return disk_volume(v) ? 7 : 0;
-    u32 start;
+    u32 start = disk_boot_drive((path[0] | 32) - 'a');   /* a logical partition on C:'s disk (D: ...): through C:'s view */
+    if (start) return fat_mount(v, view_rd, start) ? 7 : 0;
     if (hd_drive_part((path[0] | 32) - 'a', &vol_disk, &start)) return 4;
     *dev = vol_disk + 1;
     return fat_mount(v, vol_rd, start) ? 7 : 0;
@@ -144,7 +147,8 @@ static int fd_mount(int d, const char *path, int ro)
     int dev, r = path_volume(path, &v, &dev);
     if (r) return r;
     u32 clus, size;
-    if (fat_lookup(&v, path, &clus, &size)) return 2;
+    if (fat_lookup(&v, path, &clus, &size))         /* not there: on a D: ... DOS lettered otherwise, VMFD copies it */
+        return path[0] && path[1] == ':' && disk_boot_drive((path[0] | 32) - 'a') ? 4 : 2;
     if (size < 512 || size % 512 || size > 4u << 20) return 3;
     int n = fat_extents(&v, clus, size, 0, 1 << 20);
     if (n <= 0) return 7;

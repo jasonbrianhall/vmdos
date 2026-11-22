@@ -249,6 +249,8 @@ u32 disk_dev_gen(int d);
 int disk_dev_index(int d);
 int disk_dev_rw(int d, u32 lba, u32 n, void *buf, int write);
 int disk_c_dev(u32 *start, u32 *size);
+int disk_boot_part(int d, u32 start);          /* DOS has it at boot: 2 C:, 3 D: ... (a logical one on C:'s disk), or 0 */
+u32 disk_boot_drive(int drive);               /* drive 3 D: ...: that logical partition's start, or 0 */
 extern int disk_on_a;                          /* no C:: the RAM disk is in A: and vmdos boots from it */
 
 /* ---- joy.c: game port, USB gamepads ---- */
