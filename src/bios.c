@@ -785,6 +785,36 @@ void soft_boot_request(int drive, int key)
     soft_boot_req = 1;
 }
 
+/* Ctrl+Shift+Del (vdev.c, before the guest sees it; Ctrl+Alt+Del is left
+   to DOS and Windows as on any PC): a soft restart. Again within 3 s: the
+   whole PC (the way out when real hardware is in a bad state). With a
+   protected-mode program running (a DPMI client, or anything in VMHV's VM:
+   Windows 3.x/98) the first press only warns: its unsaved work would go. */
+int dpmi_client_active(void);
+extern volatile int power_req;
+void soft_boot_hotkey(void)
+{
+    static u32 last;
+    static int presses;
+    if (!last || ticks - last >= 3000) presses = 0;
+    last = ticks | 1;
+    int guarded = hv_active || dpmi_client_active();
+    int n = ++presses - guarded;                 /* presses that count: 1 soft, 2 the PC */
+    if (n <= 0) {
+        video_osd("Again: restart DOS, unsaved work lost");
+        return;
+    }
+    if (n == 1) {
+        kprintf("Ctrl+Shift+Del: soft restart\n");
+        soft_boot_request(-1, 0);
+        video_osd("Restarting DOS. Again: the whole PC");
+        return;
+    }
+    kprintf("Ctrl+Shift+Del twice: restarting the PC\n");
+    video_osd("Restarting the PC");
+    power_req = 2;                               /* v86.c: reboot() at a quiet tick */
+}
+
 /* What the guest restarts at, in r (real mode), after reset (0: guest_reset;
    VMHV passes its own). -1: the floppy drive asked for is empty (nothing
    changed). */
