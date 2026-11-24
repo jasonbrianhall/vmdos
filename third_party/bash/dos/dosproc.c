@@ -256,6 +256,51 @@ dos_init (void)
 	    environ[i] = u;
 	}
   }
+  /* The Unix tools (third_party/sbase) are in X:\BIN, X being bash's own
+     drive: first in the shell's PATH, ahead of DOS's FIND and SORT. */
+  {
+    extern char **environ;
+    char bin[8] = "C:/BIN";
+    struct stat st;
+    int i;
+    if (__dos_argv0 && isalpha ((unsigned char)__dos_argv0[0]) && __dos_argv0[1] == ':')
+      bin[0] = toupper ((unsigned char)__dos_argv0[0]);
+    else
+      bin[0] = 'A' + getdisk ();
+    for (i = 0; environ && environ[i]; i++)
+      if (strncmp (environ[i], "PATH=", 5) == 0)
+	break;
+    if (stat (bin, &st) == 0 && S_ISDIR (st.st_mode))
+      {
+	const char *old = environ && environ[i] ? environ[i] + 5 : "";
+	char *n = malloc (strlen (old) + 16), *q;
+	int j, start = 0, len = strlen (old);
+	if (n)
+	  {
+	    /* PATH=X:/BIN, then the rest without X:/BIN */
+	    q = n + sprintf (n, "PATH=%s", bin);
+	    for (j = 0; j <= len; j++)
+	      if (old[j] == 0 || (old[j] == ':' && !dos_path_drive_colon (old, start, j)))
+		{
+		  int k = j - start;
+		  if (k > 0 && !((k == 6 || (k == 7 && (old[start + 6] == '/' || old[start + 6] == '\\')))
+				 && strncasecmp (old + start, bin, 6) == 0))
+		    {
+		      *q++ = ':';
+		      memcpy (q, old + start, k);
+		      q += k;
+		    }
+		  start = j + 1;
+		}
+	    *q = 0;
+	    if (environ && environ[i])
+	      environ[i] = n;
+	    else
+	      putenv (n);
+	  }
+      }
+  }
+
   if (getenv ("HOME") == 0)
     {
       char h[4] = "C:/";
