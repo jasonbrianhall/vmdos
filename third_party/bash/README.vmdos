@@ -1,0 +1,73 @@
+GNU bash 5.3.20 for DOS (DJGPP, 32-bit, needs DPMI: vmdos's own), on C: only
+(the boot floppy has no room) as C:\VMDOS\BASH.EXE.
+
+  C:\>bash
+  bash-5.3$ for f in /vmdos/vm*.com; do echo "${f##*/}"; done
+  bash-5.3$ mem | find "Free" | while read a b; do echo "[$a]"; done
+  bash-5.3$ v=$(command.com /c ver); echo "${v^^}"
+
+The current release, built from GNU's git (savannah, master at "Bash-5.3
+patch 20"), not the old DJGPP ports (2.05, 4.4): readline 8.3 line editing
+with history, tab completion, Ctrl-R, arrays and associative arrays, [[ =~ ]],
+$(...), functions, traps, here-documents, brace expansion, printf -v, ...
+
+  bin/BASH.EXE            DJGPP gcc 12, -O2 -march=i586, UPX --best
+  bash-5.3-djgpp.patch    the changes to bash's own sources (about 100 lines)
+  dos/dosproc.c           fork, pipes, exec, Ctrl-C and the keyboard for DOS
+  dos/dosfork.S           the register half of fork
+  dos/dosbash.h           included first in every file: SIGCHLD and such
+  COPYING                 bash's license, GPL version 3
+
+tools/build-bash.sh rebuilds bin/BASH.EXE (DJGPP cross gcc, git, make).
+
+How it runs on DOS
+------------------
+DOS runs one program at a time and has no fork(), and bash forks for every
+subshell, pipeline, $(...) and external command. dos/dosproc.c gives it one:
+
+  fork()   saves the shell's memory (data, heap and the live part of the
+           stack: about 300 KB) to a DPMI block and carries on as the child.
+           When the child ends, the memory is copied back, the parent's file
+           handles and current directory are put back, and fork() returns
+           again, in the parent. The child has always finished by then, so
+           wait just collects its status.
+  pipes    a temporary file in %TMPDIR%, %TMP% or %TEMP% (else X:\TMP on the
+           current drive). The writer runs to the end, then the reader reads.
+  execve   spawns the program and ends the child with its exit status.
+           #!/bin/sh and #!/bin/bash scripts are run by the shell itself;
+           other interpreters (#!/usr/bin/perl, #!/usr/bin/env python) are
+           looked for in PATH.
+
+What that means in use:
+
+  - Pipelines run one stage after another, not side by side. Output goes
+    through a file, so a command that never ends (yes | head) never ends.
+  - No job control: & runs the command to the end before the prompt comes
+    back; there's no fg/bg/Ctrl-Z. No coprocesses, no <(...) or >(...), no
+    /dev/tcp.
+  - DOS programs are found with their extension: `mem' runs MEM.EXE, `x'
+    runs X.COM, X.EXE or X.BAT (in that order), and .BAT files run through
+    COMMAND.COM. DOS programs get the DOS command line limit (126 chars);
+    DJGPP programs don't.
+  - Ctrl-C works as on Unix: at the prompt it clears the line, in a loop it
+    stops the loop, and in a program it ends the program (and the loop it is
+    in).
+
+Paths and names
+---------------
+  PATH is kept the Unix way inside the shell (C:/:C:/VMDOS:C:/VMDOS/NET; a
+  drive letter's colon isn't a separator) and handed to programs the DOS way
+  (C:\;C:\VMDOS;C:\VMDOS\NET).
+  C:/DOS and C:\DOS (quoted) are absolute paths; cd C:/VMDOS changes drive.
+  Globs and completion ignore case, as DOS does (shopt nocaseglob is on).
+  HOME is the current drive's root if not set; ~/.bashrc there needs long
+  file names (DOSLFN, loaded by AUTOEXEC.BAT); _bashrc is not looked for.
+
+COMMAND.COM's own commands (DIR, COPY, DEL, TYPE, VER, ...) aren't programs:
+run them as `command.com /c dir' (plain `command' is bash's builtin). For
+example, in ~/.bashrc:  dir () { command.com /c dir "$@"; }
+
+Not included: Unix tools (ls, cat, grep, sed, ...). bash's builtins (echo,
+printf, read, test, [[ ]], mapfile, ...) and DOS's programs (MEM, FIND,
+SORT, MORE, XCOPY, ...) are there; DJGPP ports of coreutils, grep and sed
+run under it as they are.

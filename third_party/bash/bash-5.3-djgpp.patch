@@ -1,0 +1,305 @@
+diff --git a/bashline.c b/bashline.c
+index 2b4da75..c603984 100644
+--- a/bashline.c
++++ b/bashline.c
+@@ -4142,7 +4142,7 @@ vi_advance_point (void)
+ 	}
+     }
+ #else
+-    rl_point++:
++    rl_point++;
+ #endif
+   return point;
+ }
+diff --git a/builtins/printf.def b/builtins/printf.def
+index 7d7f8c2..f7abf53 100644
+--- a/builtins/printf.def
++++ b/builtins/printf.def
+@@ -355,7 +355,9 @@ printf_builtin (WORD_LIST *list)
+ 
+   garglist = orig_arglist = list->next;
+ 
++#if defined (HANDLE_MULTIBYTE)
+   mb_cur_max = MB_CUR_MAX;
++#endif
+ 
+   /* Basic algorithm is to scan the format string for conversion
+      specifications -- once one is found, find out if the field
+diff --git a/findcmd.c b/findcmd.c
+index 73c07bd..6bf7fef 100644
+--- a/findcmd.c
++++ b/findcmd.c
+@@ -521,6 +521,20 @@ find_absolute_program (const char *name, int flags)
+   int st;
+ 
+   st = file_status (name);
++#if defined (__DJGPP__)
++  if ((st & FS_EXISTS) == 0)
++    {
++      char *x = dos_exec_ext (name);
++      if (x)
++	{
++	  st = file_status (x);
++	  if ((flags & FS_EXISTS) || ((flags & FS_EXEC_ONLY) && (st & FS_EXECABLE)))
++	    return (x);
++	  free (x);
++	  return ((char *)NULL);
++	}
++    }
++#endif
+ 
+   /* If the file doesn't exist, quit now. */
+   if ((st & FS_EXISTS) == 0)
+@@ -553,6 +567,19 @@ find_in_path_element (const char *name, char *path, int flags, size_t name_len,
+   full_path = sh_makepath (xpath, name, 0);
+ 
+   status = file_status (full_path);
++#if defined (__DJGPP__)
++  /* DOS programs end in .EXE, .COM or .BAT; `ls' is LS.EXE */
++  if ((status & FS_EXISTS) == 0 || ((status & FS_EXECABLE) == 0 && (flags & (FS_EXEC_ONLY|FS_EXEC_PREFERRED))))
++    {
++      char *x = dos_exec_ext (full_path);
++      if (x)
++	{
++	  free (full_path);
++	  full_path = x;
++	  status = file_status (full_path);
++	}
++    }
++#endif
+ 
+   if (xpath != path)
+     free (xpath);
+diff --git a/general.c b/general.c
+index c8442ef..2385e3b 100644
+--- a/general.c
++++ b/general.c
+@@ -863,7 +863,7 @@ absolute_pathname (const char *string)
+ int
+ absolute_program (const char *string)
+ {
+-#ifndef __MSYS__
++#if !defined (__MSYS__) && !defined (__DJGPP__)
+   return ((char *)mbschr (string, '/') != (char *)NULL);
+ #else
+   return ((char *)mbschr (string, '/') != (char *)NULL ||
+@@ -1077,8 +1077,14 @@ extract_colon_unit (char *string, int *p_index)
+   if (i && string[i] == ':')
+     i++;
+ 
++#if defined (__DJGPP__)
++  /* C:/DOS is one entry, not `C' and `/DOS' */
++  for (start = i; string[i] && (string[i] != ':' || dos_path_drive_colon (string, start, i)); i++)
++    ;
++#else
+   for (start = i; string[i] && string[i] != ':'; i++)
+     ;
++#endif
+ 
+   *p_index = i;
+ 
+diff --git a/general.h b/general.h
+index 8471a34..f0a2bc1 100644
+--- a/general.h
++++ b/general.h
+@@ -262,10 +262,10 @@ typedef int QSFUNC (const void *, const void *);
+ /* Some useful definitions for Unix pathnames.  Argument convention:
+    x == string, c == character */
+ 
+-#if !defined (__CYGWIN__)
++#if !defined (__CYGWIN__) && !defined (__DJGPP__)
+ #  define ABSPATH(x)	((x)[0] == '/')
+ #  define RELPATH(x)	((x)[0] != '/')
+-#else /* __CYGWIN__ */
++#else /* __CYGWIN__ || __DJGPP__: C:/DOS */
+ #  define ABSPATH(x)	(((x)[0] && ISALPHA((unsigned char)(x)[0]) && (x)[1] == ':') || ISDIRSEP((x)[0]))
+ #  define RELPATH(x)	(ABSPATH(x) == 0)
+ #endif /* __CYGWIN__ */
+@@ -273,7 +273,7 @@ typedef int QSFUNC (const void *, const void *);
+ #define ROOTEDPATH(x)	(ABSPATH(x))
+ 
+ #define DIRSEP	'/'
+-#if !defined (__CYGWIN__)
++#if !defined (__CYGWIN__) && !defined (__DJGPP__)
+ #  define ISDIRSEP(c)	((c) == '/')
+ #else
+ #  define ISDIRSEP(c)	((c) == '/' || (c) == '\\')
+diff --git a/lib/glob/glob.c b/lib/glob/glob.c
+index 4681f58..77a8c0f 100644
+--- a/lib/glob/glob.c
++++ b/lib/glob/glob.c
+@@ -90,7 +90,11 @@ int noglob_dot_filenames = 1;
+ 
+ /* Global variable which controls whether or not filename globbing
+    is done without regard to case. */
++#if defined (__DJGPP__)
++int glob_ignore_case = 1;	/* DOS file names: *.TXT is *.txt */
++#else
+ int glob_ignore_case = 0;
++#endif
+ 
+ /* Global variable controlling whether globbing ever returns . or ..
+    regardless of the pattern. If set to 1, no glob pattern will ever
+diff --git a/lib/glob/smatch.c b/lib/glob/smatch.c
+index af3856a..e626c8c 100644
+--- a/lib/glob/smatch.c
++++ b/lib/glob/smatch.c
+@@ -279,6 +279,10 @@ cclass_test (int c, enum char_class char_class)
+   return result;  
+ }
+ 	
++#if !defined (HANDLE_MULTIBYTE)
++extern int locale_utf8locale;
++#endif
++
+ static int
+ is_cclass (int c, const char *name)
+ {
+diff --git a/lib/readline/complete.c b/lib/readline/complete.c
+index 9abdede..ba6795d 100644
+--- a/lib/readline/complete.c
++++ b/lib/readline/complete.c
+@@ -184,7 +184,7 @@ int _rl_complete_mark_symlink_dirs = 0;
+ int _rl_print_completions_horizontally;
+ 
+ /* Non-zero means that case is not significant in filename completion. */
+-#if (defined (__MSDOS__) && !defined (__DJGPP__)) || (defined (_WIN32) && !defined (__CYGWIN__))
++#if defined (__MSDOS__) || (defined (_WIN32) && !defined (__CYGWIN__))
+ int _rl_completion_case_fold = 1;
+ #else
+ int _rl_completion_case_fold = 0;
+diff --git a/lib/readline/input.c b/lib/readline/input.c
+index d0a32f6..ddb363d 100644
+--- a/lib/readline/input.c
++++ b/lib/readline/input.c
+@@ -864,6 +864,21 @@ rl_getc (FILE *stream)
+ #if defined (__MINGW32__)
+       if (isatty (fd))
+ 	return (_getch ());	/* "There is no error return." */
++#endif
++#if defined (__DJGPP__)
++      /* The keyboard, through the BIOS: DOS would end the program on
++	 Ctrl-C.  Arrows and the like come as ANSI sequences. */
++      {
++	extern int dos_rl_getkey (int);
++	int k = dos_rl_getkey (fd);
++	if (k == -2)
++	  {
++	    errno = EINTR;	/* Ctrl-C: SIGINT raised, as if read() */
++	    goto dos_read_error;	/* had been interrupted by it */
++	  }
++	if (k != -3)
++	  return k;
++      }				/* -3: not the console */
+ #endif
+       result = 0;
+ #if defined (HAVE_PSELECT) || defined (HAVE_SELECT)
+@@ -921,6 +936,9 @@ rl_getc (FILE *stream)
+ 
+ /* fprintf(stderr, "rl_getc: result = %d errno = %d\n", result, errno); */
+ 
++#if defined (__DJGPP__)
++dos_read_error:
++#endif
+       /* Handle errors here. */
+       osig = _rl_caught_signal;
+       ostate = rl_readline_state;
+diff --git a/lib/sh/pathcanon.c b/lib/sh/pathcanon.c
+index 2820e31..6d90371 100644
+--- a/lib/sh/pathcanon.c
++++ b/lib/sh/pathcanon.c
+@@ -113,7 +113,7 @@ sh_canonpath (char *path, int flags)
+   if (rooted = ROOTEDPATH(path))
+     {
+       stub_char = DIRSEP;
+-#if defined (__CYGWIN__)
++#if defined (__CYGWIN__) || defined (__DJGPP__)
+       base = (ISALPHA((unsigned char)result[0]) && result[1] == ':') ? result + 3 : result + 1;
+ #else
+       base = result + 1;
+@@ -124,7 +124,7 @@ sh_canonpath (char *path, int flags)
+   else
+     {
+       stub_char = '.';
+-#if defined (__CYGWIN__)
++#if defined (__CYGWIN__) || defined (__DJGPP__)
+       base = (ISALPHA((unsigned char)result[0]) && result[1] == ':') ? result + 2 : result;
+ #else
+       base = result;
+diff --git a/lib/sh/pathphys.c b/lib/sh/pathphys.c
+index 70657bf..61c73b6 100644
+--- a/lib/sh/pathphys.c
++++ b/lib/sh/pathphys.c
+@@ -80,6 +80,14 @@ sh_physpath (char *path, int flags)
+ #ifdef __CYGWIN__
+   return realpath (path, NULL);
+ #endif
++#ifdef __DJGPP__
++  {
++    /* no links on DOS: the full name is the physical one */
++    char fixed[PATH_MAX + 1];
++    _fixpath (path, fixed);
++    return (savestring (fixed));
++  }
++#endif
+ 
+   linklen = strlen (path);
+ 
+diff --git a/pathexp.c b/pathexp.c
+index 80d7bba..0e35d50 100644
+--- a/pathexp.c
++++ b/pathexp.c
+@@ -868,7 +868,11 @@ globsort_buildarray (char **array, size_t len)
+           ret[i].st.mtime = get_stat_mtime (&st);
+           ret[i].st.atime = get_stat_atime (&st);
+           ret[i].st.ctime = get_stat_ctime (&st);
++#if defined (__DJGPP__)
++          ret[i].st.blocks = (st.st_size + 511) / 512;
++#else
+           ret[i].st.blocks = st.st_blocks;
++#endif
+         }
+     }
+ 
+diff --git a/quit.h b/quit.h
+index 318d668..a26ee76 100644
+--- a/quit.h
++++ b/quit.h
+@@ -32,8 +32,17 @@ extern volatile sig_atomic_t terminating_signal;
+    place.  The same scheme is used for terminating signals (e.g., SIGHUP)
+    and the terminating_signal variable.  That calls a function which will
+    end up exiting the shell. */
++#if defined (__DJGPP__)
++/* DOS: Ctrl-C waits in the keyboard buffer; look for it here (dos/dosproc.c) */
++extern void dos_check_break (void);
++#  define DOS_CHECK_BREAK() dos_check_break ()
++#else
++#  define DOS_CHECK_BREAK()
++#endif
++
+ #define QUIT \
+   do { \
++    DOS_CHECK_BREAK (); \
+     if (terminating_signal) termsig_handler (terminating_signal); \
+     if (interrupt_state) throw_to_top_level (); \
+   } while (0)
+diff --git a/shell.c b/shell.c
+index e59029c..67ae203 100644
+--- a/shell.c
++++ b/shell.c
+@@ -1778,6 +1778,15 @@ unset_bash_input (int check_zero)
+ static void
+ set_shell_name (char *argv0)
+ {
++#if defined (__DJGPP__)
++  /* C:/VMDOS/BASH.EXE is bash (and SH.EXE is sh) */
++  if (argv0)
++    {
++      size_t n = strlen (argv0);
++      if (n > 4 && strcasecmp (argv0 + n - 4, ".exe") == 0)
++	argv0[n - 4] = '\0';
++    }
++#endif
+   /* Here's a hack.  If the name of this shell is "sh", then don't do
+      any startup files; just try to be more like /bin/sh. */
+   shell_name = argv0 ? base_pathname (argv0) : PROGRAM;
