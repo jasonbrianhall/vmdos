@@ -250,6 +250,8 @@ C_ONLY_FILES += third_party/fsck/bin/FSCK.EXE
 # Vim (DJGPP) and vi; its _VIMRC and a few runtime files (VIM74\) next to it
 VIM_RT := $(shell cd third_party/vim/RT && find . -type f | sed 's|^./||' | sort)
 C_ONLY_FILES += third_party/vim/bin/VIM.EXE third_party/vim/bin/VI.BAT
+# GNU bash 5.3 (DJGPP, with fork and pipes for DOS): third_party/bash/README.vmdos
+C_ONLY_FILES += third_party/bash/bin/BASH.EXE
 # Felix BASIC (DJGPP) in its own folder, C:\VMDOS\BASIC; BASIC.BAT (C:\VMDOS,
 # on the PATH) starts it: third_party/felixbasic/README.vmdos
 C_ONLY_FILES += third_party/felixbasic/bin/BASIC.BAT
