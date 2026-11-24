@@ -16,3 +16,4 @@ tests/voodoo/emutest
 tests/hvsim/hvsim
 build-486/
 .vmdos-cpu
+deps/
