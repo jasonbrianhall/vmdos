@@ -74,6 +74,7 @@ FreeDOS's kernel and FreeCOM run **unmodified**. So do your games.
 - A **remote DOS prompt** over telnet, if you ask for it.
 
 **🧰 Batteries included**
+- **GNU bash 5.3**: the current release, with readline, pipes, `$(...)` and scripts, ported to DOS's single task.
 - EDIT (vmdos's own, with long names), **Vim**, **Felix BASIC** (a QBasic-style IDE with graphics and sound),
   LESS, ZIP/UNZIP, XCOPY, DELTREE, TREE, MEM, MKEYB keyboard layouts, CuteMouse, DOSLFN long file names,
   and **ZCOPY**, an XCOPY with long names and a progress bar.

@@ -120,7 +120,8 @@ C:\ holds FreeDOS (KERNEL.SYS, COMMAND.COM), FDCONFIG.SYS and AUTOEXEC.BAT;
 vmdos's drivers and tools (VMXMS.SYS, VMCD.SYS, VMCD, VMSPEED, VMSHOT, VMRES, SHSUCDX,
 CTMOUSE, DOSLFN) are in C:\VMDOS, which is on the PATH, with the everyday
 DOS utilities: EDIT (vmdos's own text editor, long names included), VIM
-(Vim 7.4, also as VI; on C: only), BASIC (Felix BASIC, a QBasic-style BASIC with
+(Vim 7.4, also as VI; on C: only), BASH (GNU bash 5.3 with readline: pipes,
+`$(...)`, subshells and scripts on DOS, which has no fork; on C: only), BASIC (Felix BASIC, a QBasic-style BASIC with
 graphics and sound, in C:\VMDOS\BASIC; on C: only), MORE,
 LESS, FIND, SORT, TREE, ATTRIB, XCOPY, MOVE, DELTREE, SUBST, LABEL, MEM, FORMAT, FDISK,
 CHOICE, ZIP and UNZIP, MKEYB (keyboard layouts: `MKEYB GR`) and NANSI.SYS (ANSI escape codes; a line in
@@ -130,7 +131,7 @@ names (quoted, spaces and all, where DOSLFN is loaded; 8.3 names otherwise),
 a progress bar for the whole copy (current file, total, speed, time left;
 `/NP` turns it off), `/EXCLUDE:list.txt` and Ctrl-C that removes the half-written
 file: `ZCOPY "C:\My Games" D:\BACKUP /S /E /I`.
-`third_party/dosutils/README.vmdos`, `third_party/vim/README.vmdos` and `third_party/felixbasic/README.vmdos` say where each comes from.
+`third_party/dosutils/README.vmdos`, `third_party/vim/README.vmdos`, `third_party/bash/README.vmdos` and `third_party/felixbasic/README.vmdos` say where each comes from.
 
 AUTOEXEC.BAT loads DOSLFN, which gives DOS long file names (the INT 21h 71xxh API that FreeCOM's
 `DIR /LFN`, DJGPP programs and file managers use) on FAT drives and CDs; an
@@ -1253,6 +1254,7 @@ with Linux's own structures; not yet on a real Hyper-V host.
 | `third_party/openssh/` | OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's TCP) with their DOS glue, sockets, terminal and OpenSSH patch (prebuilt; licenses, notes in its README.vmdos; `tools/build-openssh.sh`) |
 | `third_party/flt/` | FLT, Felix Terminal DOS Edition (SSH terminal with Sixel, Kitty and VT100; prebuilt; in C:\VMDOS\NET, C: only; notes in its README.vmdos) |
 | `third_party/vim/` | Vim 7.4 (DJGPP) and VI.BAT, with a few runtime files (prebuilt; patch, license, notes in its README.vmdos; `tools/build-vim.sh`) |
+| `third_party/bash/` | GNU bash 5.3.20 (DJGPP, GPL-3.0-or-later) with fork, pipes, exec and Ctrl-C for DOS in `dos/` and a small patch to bash (prebuilt; notes in its README.vmdos; `tools/build-bash.sh`) |
 | `third_party/felixbasic/` | Felix BASIC (DJGPP build of felixterminal's wopr/wopr_basic, MIT; CWSDPMI built in for VMHV) and BASIC.BAT (prebuilt, unmodified; notes in its README.vmdos; `tools/build-felixbasic.sh`) |
 | `third_party/doslfn/` | DOSLFN by Henrik Haftmann and Jason Hood (prebuilt, unmodified, freeware with source): long file names on FAT drives and CDs |
 | `tools/mkdisk.py` | builds dos.img (MBR + FAT16/FAT32 + boot sector + files) |
