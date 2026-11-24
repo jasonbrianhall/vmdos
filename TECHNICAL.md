@@ -24,7 +24,7 @@ sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf \
                  bison libfl2 upx-ucl
 make            # vmdos.elf (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
-                # make esp/iso build bash and the Unix tools for C: into deps/ the first time:
+                # make esp also builds bash and the Unix tools for C: into deps/ the first time:
                 # the DJGPP cross compiler (80 MB) and their sources are fetched; UNIX= skips them
 make efi        # vmdos.efi: a UEFI application, no GRUB needed
 make esp        # esp.img: the EFI disk, also C: (FreeDOS at its root, EFI/BOOT/BOOTX64.EFI); dd it to a disk
