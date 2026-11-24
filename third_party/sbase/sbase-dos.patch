@@ -1,0 +1,297 @@
+diff --git a/bc.y b/bc.y
+index e2692a8..776ac4e 100644
+--- a/bc.y
++++ b/bc.y
+@@ -1,6 +1,10 @@
+ %{
+ #include <libgen.h>
+ #include <unistd.h>
++#ifdef __DJGPP__
++#include <process.h>
++#include <fcntl.h>
++#endif
+ 
+ #include <assert.h>
+ #include <ctype.h>
+@@ -807,6 +811,44 @@ repeat:
+ 	return 0;
+ }
+ 
++#ifdef __DJGPP__
++/* DOS runs one program at a time: bc's dc program goes to a temporary
++   file, and dc runs on it when bc is done. */
++static char dctmp[FILENAME_MAX];
++static int dcout = -1;
++
++static void
++rundc(void)
++{
++	int fd;
++	fflush(stdout);
++	dup2(dcout, 1);
++	close(dcout);
++	if ((fd = open(dctmp, O_RDONLY)) >= 0) {
++		if (fd != 0) {	/* bc may have closed its stdin by now */
++			dup2(fd, 0);
++			close(fd);
++		}
++		if (spawnlp(P_WAIT, dcprog, "dc", sflag ? "-i" : NULL, (char *)NULL) == -1)
++			weprintf("dc:");
++	}
++	remove(dctmp);
++}
++
++static void
++spawn(void)
++{
++	const char *t = getenv("TMP");
++	int fd;
++	snprintf(dctmp, sizeof(dctmp), "%s/bcXXXXXX", t && *t ? t : ".");
++	if ((fd = mkstemp(dctmp)) < 0)
++		eprintf("mkstemp %s:", dctmp);
++	dcout = dup(1);
++	dup2(fd, 1);
++	close(fd);
++	atexit(rundc);
++}
++#else
+ static void
+ spawn(void)
+ {
+@@ -838,6 +880,7 @@ spawn(void)
+ 		_Exit(2);
+ 	}
+ }
++#endif
+ 
+ static void
+ run(void)
+diff --git a/du.c b/du.c
+index 782b09a..307b8b2 100644
+--- a/du.c
++++ b/du.c
+@@ -85,7 +85,7 @@ du(int dirfd, const char *path, struct stat *st, void *data, struct recursor *r)
+ {
+ 	off_t *total = data, subtotal;
+ 
+-	subtotal = nblks(st->st_blocks);
++	subtotal = nblks((st->st_size + 511) / 512);
+ 	if (S_ISDIR(st->st_mode)) {
+ 		recurse(dirfd, path, &subtotal, r);
+ 	} else if (r->follow != 'P' || st->st_nlink > 1) {
+diff --git a/libutil/cp.c b/libutil/cp.c
+index 2ab32a0..c5f9c87 100644
+--- a/libutil/cp.c
++++ b/libutil/cp.c
+@@ -145,8 +145,8 @@ cp(const char *s1, const char *s2, int depth)
+ 
+ 	if (cp_aflag || cp_pflag) {
+ 		/* atime and mtime */
+-		times[0] = st.st_atim;
+-		times[1] = st.st_mtim;
++		times[0] = DOS_TS(st.st_atime);
++		times[1] = DOS_TS(st.st_mtime);
+ 		if (utimensat(AT_FDCWD, s2, times, AT_SYMLINK_NOFOLLOW) < 0) {
+ 			weprintf("utimensat %s:", s2);
+ 			cp_status = 1;
+diff --git a/ls.c b/ls.c
+index f6ff434..97328c5 100644
+--- a/ls.c
++++ b/ls.c
+@@ -76,11 +76,11 @@ mkent(struct entry *ent, char *path, int dostat, int follow)
+ 	ent->gid   = st.st_gid;
+ 	ent->size  = st.st_size;
+ 	if (cflag)
+-		ent->t = st.st_ctim;
++		ent->t = DOS_TS(st.st_ctime);
+ 	else if (uflag)
+-		ent->t = st.st_atim;
++		ent->t = DOS_TS(st.st_atime);
+ 	else
+-		ent->t = st.st_mtim;
++		ent->t = DOS_TS(st.st_mtime);
+ 	ent->dev   = st.st_dev;
+ 	ent->rdev  = st.st_rdev;
+ 	ent->ino   = st.st_ino;
+@@ -365,6 +365,90 @@ usage(void)
+ 	eprintf("usage: %s [-1AacdFfHhiLlnpqRrtUu] [file ...]\n", argv0);
+ }
+ 
++#ifdef __DJGPP__
++/* On the screen, names go in columns (as GNU's and BSD's ls do): the
++   output goes to a temporary file, and at the end it is laid out for the
++   screen's width (the BIOS's). -1 and -l keep one per line. */
++#include <sys/farptr.h>
++#include <go32.h>
++
++static int dos_one, dos_cols, dos_tty = -1;
++static FILE *dos_tmp;
++
++static void
++dos_columns_begin(void)
++{
++	fflush(stdout);
++	if (!(dos_tmp = tmpfile()) || (dos_tty = dup(1)) < 0)
++		return;
++	dup2(fileno(dos_tmp), 1);
++	dos_cols = 1;
++}
++
++static void
++dos_block(char **l, size_t n, size_t width)
++{
++	size_t i, r, c, w = 0, ncols, rows;
++
++	for (i = 0; i < n; i++)
++		if (strlen(l[i]) > w)
++			w = strlen(l[i]);
++	ncols = (width + 2) / (w + 2);
++	if (ncols < 1)
++		ncols = 1;
++	rows = (n + ncols - 1) / ncols;
++	for (r = 0; r < rows; r++) {
++		for (c = 0; c < ncols; c++) {
++			i = c * rows + r;
++			if (i >= n)
++				break;
++			if (c + 1 < ncols && i + rows < n)
++				printf("%-*s", (int)(w + 2), l[i]);
++			else
++				fputs(l[i], stdout);
++		}
++		putchar('\n');
++	}
++}
++
++static void
++dos_columns_end(void)
++{
++	char *line = NULL, **l = NULL;
++	size_t size = 0, n = 0, i, width;
++	ssize_t len;
++
++	fflush(stdout);
++	dup2(dos_tty, 1);
++	close(dos_tty);
++	rewind(dos_tmp);
++	width = _farpeekw(_dos_ds, 0x44A);
++	if (width < 20 || width > 400)
++		width = 80;
++	while ((len = getline(&line, &size, dos_tmp)) > 0) {
++		if (line[len - 1] == '\n')
++			line[--len] = '\0';
++		if (len == 0 || line[len - 1] == ':') {
++			/* a blank line, or `dir:' when there are several */
++			dos_block(l, n, width);
++			for (i = 0; i < n; i++)
++				free(l[i]);
++			n = 0;
++			puts(line);
++			continue;
++		}
++		l = ereallocarray(l, n + 1, sizeof(*l));
++		l[n++] = estrdup(line);
++	}
++	dos_block(l, n, width);
++	for (i = 0; i < n; i++)
++		free(l[i]);
++	free(l);
++	free(line);
++	fclose(dos_tmp);
++}
++#endif
++
+ int
+ main(int argc, char *argv[])
+ {
+@@ -377,6 +461,9 @@ main(int argc, char *argv[])
+ 	case '1':
+ 		/* force output to 1 entry per line */
+ 		qflag = 1;
++#ifdef __DJGPP__
++		dos_one = 1;
++#endif
+ 		break;
+ 	case 'A':
+ 		Aflag = 1;
+@@ -446,6 +533,10 @@ main(int argc, char *argv[])
+ 	default:
+ 		usage();
+ 	} ARGEND
++#ifdef __DJGPP__
++	if (!lflag && !dos_one && isatty(1))
++		dos_columns_begin();
++#endif
+ 
+ 	switch (argc) {
+ 	case 0: /* fallthrough */
+@@ -487,5 +578,9 @@ main(int argc, char *argv[])
+ 		free(dents);
+ 	}
+ 
++#ifdef __DJGPP__
++	if (dos_cols)
++		dos_columns_end();
++#endif
+ 	return (fshut(stdout, "<stdout>") | ret);
+ }
+diff --git a/touch.c b/touch.c
+index 637a7d5..67dc777 100644
+--- a/touch.c
++++ b/touch.c
+@@ -130,8 +130,8 @@ main(int argc, char *argv[])
+ 		ref = EARGF(usage());
+ 		if (stat(ref, &st) < 0)
+ 			eprintf("stat '%s':", ref);
+-		times[0] = st.st_atim;
+-		times[1] = st.st_mtim;
++		times[0] = DOS_TS(st.st_atime);
++		times[1] = DOS_TS(st.st_mtime);
+ 		break;
+ 	case 'T':
+ 		times[0].tv_sec = estrtonum(EARGF(usage()), 0, LLONG_MAX);
+diff --git a/which.c b/which.c
+index abd030e..ac1f267 100644
+--- a/which.c
++++ b/which.c
+@@ -39,6 +39,40 @@ which(const char *path, const char *name)
+ 
+ 	ptr = p = enstrdup(3, path);
+ 	len = strlen(p);
++#ifdef __DJGPP__
++	/* the DOS way: C:\BIN;C:\DOS, and `ls' is LS.EXE (or .COM, .BAT) */
++	for (i = 0; i < len + 1; i++) {
++		static const char *ext[] = { "", ".exe", ".com", ".bat", NULL };
++		char buf[PATH_MAX];
++		int e;
++		if (ptr[i] != ';' && ptr[i] != '\0')
++			continue;
++		ptr[i] = '\0';
++		if (!*p || (dirfd = open(p, O_RDONLY)) < 0) {
++			p = ptr + i + 1;
++			continue;
++		}
++		for (e = 0; ext[e]; e++) {
++			if (*ext[e] == 0 && strchr(name, '.') == NULL)
++				continue;
++			snprintf(buf, sizeof(buf), "%s%s", name, ext[e]);
++			if (canexec(dirfd, buf)) {
++				found = 1;
++				fputs(p, stdout);
++				if (i && ptr[i - 1] != '/' && ptr[i - 1] != '\\')
++					fputc('\\', stdout);
++				puts(buf);
++				break;
++			}
++		}
++		close(dirfd);
++		if (!aflag && found)
++			break;
++		p = ptr + i + 1;
++	}
++	free(ptr);
++	return found;
++#endif
+ 	for (i = 0; i < len + 1; i++) {
+ 		if (ptr[i] != ':' && ptr[i] != '\0')
+ 			continue;
