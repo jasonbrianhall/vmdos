@@ -43,6 +43,9 @@ cp -r "$port/dos" "$S/dos"
 # Configure for DOS: no job control, no coprocesses or process substitution
 # (they need processes running side by side), no /dev/fd, no networking.
 # Every file gets dos/dosbash.h first. A 486 runs it (vmdos's CPU=486 image).
+# The few host programs the build runs (mkbuiltins, ...) share config.h, made
+# for DJGPP's gcc 12 (C17): C17 for them too, or a host gcc 15 (C23: bool is a
+# keyword) fails on bash's typedef of bool.
 cflags="-O2 -march=i486 -mtune=pentium"
 mkdir "$tmp/b"
 cd "$tmp/b"
@@ -51,7 +54,8 @@ cd "$tmp/b"
     --disable-net-redirections --without-bash-malloc --without-curses \
     --disable-nls --disable-mem-scramble --enable-readline --enable-history \
     bash_cv_dev_fd=absent bash_cv_dev_stdin=absent \
-    CPPFLAGS="-include $S/dos/dosbash.h" CFLAGS="$cflags" > configure.log 2>&1 ||
+    CPPFLAGS="-include $S/dos/dosbash.h" CFLAGS="$cflags" \
+    CFLAGS_FOR_BUILD="-O2 -std=gnu17" > configure.log 2>&1 ||
     { tail -30 configure.log; exit 1; }
 
 # The process layer, linked in front of DJGPP's C library with --wrap
