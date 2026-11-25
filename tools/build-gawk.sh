@@ -48,6 +48,10 @@ else
     done
     [ -d "$S" ] || { echo "build-gawk: couldn't get gawk's source" >&2; exit 1; }
 fi
+# One time for every file: a checkout writes them in no particular order, and
+# a generated file (configure, aclocal.m4, the parser) a moment older than what
+# it's made from has make try to remake it (with autotools, bison, ...).
+find "$S" -exec touch -h -d '2000-01-01 00:00:00' {} +
 patch -s -d "$S" -p1 < "$port/gawk-dos.patch"
 
 # Configure for DOS: no extensions (no shared libraries), no MPFR, no NLS.
