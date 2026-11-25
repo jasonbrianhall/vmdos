@@ -19,10 +19,10 @@ changes are kept; a RAM disk (dos.img) is the option and the fallback.
 ```
 # Fedora: sudo dnf install gcc nasm python3 mtools dosfstools gnu-efi-devel glibc-devel.i686 libgcc.i686 \
 #         grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso qemu-system-x86 edk2-ovmf \
-#         bison flex upx
+#         bison upx
 sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf \
-                 bison libfl2 upx-ucl
+                 bison upx-ucl
 make            # vmdos.elf (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
                 # make esp also builds bash and the Unix tools for C: into deps/ the first time:
                 # the DJGPP cross compiler (80 MB) and their sources are fetched; UNIX= skips them

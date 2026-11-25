@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
             mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin syslinux-common \
-            bison libfl2 upx-ucl   # bash and the Unix tools (DJGPP): bc's grammar, DJGPP's ar, compression
+            bison upx-ucl   # bash and the Unix tools (DJGPP): bc's grammar, compression
 
       # bash and the Unix tools are built from source into deps/ (with the DJGPP
       # cross compiler, fetched there too); kept between runs until what they're

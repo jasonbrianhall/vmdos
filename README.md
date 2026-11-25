@@ -143,7 +143,7 @@ qemu-system-x86_64 -M q35 -accel kvm -smp 2 -m 512 -bios /usr/share/ovmf/OVMF.fd
 ```sh
 sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf \
-                 bison libfl2 upx-ucl
+                 bison upx-ucl
 make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: bootable disk with your games and CDs
 make run-efi-app                              # try it in QEMU (UEFI)
 sudo dd if=esp.img of=/dev/sdX bs=4M conv=fsync
