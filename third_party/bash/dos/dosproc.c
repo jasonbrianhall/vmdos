@@ -242,8 +242,26 @@ dos_init (void)
   r.x.bx = MAXFD;
   __dpmi_int (0x21, &r);
 
-  /* In place in environ: main() gets the same array as envp, and a new
-     one from setenv() wouldn't be it. */
+  cur_pid = __real_getpid ();
+  next_pid = cur_pid + 1;
+
+  int23_install ();
+  /* The default action for Ctrl-C: end quietly, as on Unix (DJGPP's
+     prints a register dump).  The shell is told it's SIG_DFL. */
+  __real_signal (SIGINT, child_sig);
+}
+
+/* The environment bash starts with: PATH the Unix way with X:/BIN first,
+   SHELL and HOME.  In a wrapper of main() (ld --wrap=main), since DJGPP
+   gives main() its environment before constructors run. */
+extern int __real_main (int, char **, char **);
+
+int
+__wrap_main (int argc, char **argv, char **envp)
+{
+  extern char **environ;
+  (void)envp;
+  /* PATH the Unix way */
   {
     extern char **environ;
     int i;
@@ -301,19 +319,31 @@ dos_init (void)
       }
   }
 
+  /* SHELL: this bash, unless set.  DJGPP programs run their commands
+     (system(), popen(): awk's "cmd" | getline, print | "sort") through
+     $SHELL when it's a Unix shell, so they get bash and C:/BIN, not
+     COMMAND.COM. */
+  if (getenv ("SHELL") == 0 && __dos_argv0)
+    {
+      char *sh = malloc (strlen (__dos_argv0) + 1), *q;
+      if (sh)
+	{
+	  strcpy (sh, __dos_argv0);
+	  for (q = sh; *q; q++)
+	    if (*q == '\\')
+	      *q = '/';
+	  setenv ("SHELL", sh, 1);
+	  free (sh);
+	}
+    }
+
   if (getenv ("HOME") == 0)
     {
       char h[4] = "C:/";
       h[0] = 'A' + getdisk ();
       setenv ("HOME", h, 1);
     }
-  cur_pid = __real_getpid ();
-  next_pid = cur_pid + 1;
-
-  int23_install ();
-  /* The default action for Ctrl-C: end quietly, as on Unix (DJGPP's
-     prints a register dump).  The shell is told it's SIG_DFL. */
-  __real_signal (SIGINT, child_sig);
+  return __real_main (argc, argv, environ);
 }
 
 /* ------------------------------------------------------------------ */

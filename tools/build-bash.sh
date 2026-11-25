@@ -72,7 +72,7 @@ cd "$tmp/b"
 ${p}gcc $cflags -Wall -c "$S/dos/dosproc.c" -o dosproc.o
 ${p}gcc -c "$S/dos/dosfork.S" -o dosfork.o
 wrap=
-for f in fork pipe waitpid wait kill getpid getppid execve exit _exit close dup dup2 \
+for f in main fork pipe waitpid wait kill getpid getppid execve exit _exit close dup dup2 \
          fcntl signal sigaction sigprocmask; do
     wrap="$wrap,--wrap=$f"
 done
