@@ -75,7 +75,7 @@ FreeDOS's kernel and FreeCOM run **unmodified**. So do your games.
 
 **🧰 Batteries included**
 - **GNU bash 5.3**: the current release, with readline, pipes, `$(...)` and scripts, ported to DOS's single task,
-  and 80 Unix tools in C:\BIN for it: ls, cp, mv, rm, mkdir, cat, grep, sed, find, xargs, sort, tar, ...
+  and 80 Unix tools in C:\BIN for it: ls, cp, mv, rm, mkdir, cat, grep, sed, awk (GNU awk 5.4), find, xargs, sort, tar, ...
 - EDIT (vmdos's own, with long names), **Vim**, **Felix BASIC** (a QBasic-style IDE with graphics and sound),
   LESS, ZIP/UNZIP, XCOPY, DELTREE, TREE, MEM, MKEYB keyboard layouts, CuteMouse, DOSLFN long file names,
   and **ZCOPY**, an XCOPY with long names and a progress bar.

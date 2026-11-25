@@ -62,6 +62,8 @@ Paths and names
   (C:\;C:\VMDOS;C:\VMDOS\NET).
   C:/DOS and C:\DOS (quoted) are absolute paths; cd C:/VMDOS changes drive.
   Globs and completion ignore case, as DOS does (shopt nocaseglob is on).
+  SHELL is this bash if not set (exported), so DJGPP programs run their
+  commands (awk's system() and pipes) in bash rather than COMMAND.COM.
   HOME is the current drive's root if not set; ~/.bashrc there needs long
   file names (DOSLFN, loaded by AUTOEXEC.BAT); _bashrc is not looked for.
 
@@ -70,5 +72,6 @@ run them as `command.com /c dir' (plain `command' is bash's builtin). For
 example, in ~/.bashrc:  dir () { command.com /c dir "$@"; }
 
 The Unix tools (ls, cp, rm, mkdir, cat, grep, sed, find, xargs, sort, ...)
-are in C:\BIN: third_party/sbase/README.vmdos. bash puts C:/BIN first on
+are in C:\BIN: third_party/sbase/README.vmdos; and awk (GNU awk 5.4):
+third_party/gawk/README.vmdos. bash puts C:/BIN first on
 its PATH (C being the drive bash is on), ahead of DOS's FIND and SORT.
