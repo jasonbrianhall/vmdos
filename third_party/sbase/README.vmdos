@@ -1,0 +1,51 @@
+The Unix tools for bash: suckless sbase (git.suckless.org/sbase, master
+2026-04-03, MIT) built with DJGPP, 80 programs in C:\BIN (C: only):
+
+  ls cp mv rm mkdir rmdir touch ln link unlink chmod du find xargs
+  cat head tail wc sort uniq cut paste join comm tr sed grep ed fold nl
+  expand unexpand rev tee sponge split tsort cols strings od
+  basename dirname readlink pathchk mktemp which env printenv
+  date cal sleep time true false yes echo printf test expr seq bc dc
+  tar uuencode uudecode cmp cksum md5sum sha1sum sha224sum sha256sum
+  sha384sum sha512sum dd sync tty uname logname whoami
+
+sbase is POSIX and small: the options POSIX has (ls -l, sort -n, grep -E,
+sed -n, find -name -type -exec), not GNU's long ones (--color, sed -i).
+
+PATH: AUTOEXEC.BAT puts C:\BIN last, so at the DOS prompt `ls' works and FIND,
+SORT and DATE are still DOS's; bash puts C:/BIN first, so in bash they are the
+Unix ones. (An AUTOEXEC.BAT from before this keeps its PATH when esp.img is
+updated; bash adds C:\BIN by itself either way.)
+
+  TOOLS            the tools built, one per line
+  sbase-dos.patch  the changes to sbase:
+                   ls      on the screen, names in columns (the BIOS's width),
+                           as GNU's and BSD's ls do; -1 and -l, and pipes,
+                           one per line
+                   which   DOS's PATH (C:\BIN;C:\DOS) and .EXE/.COM/.BAT
+                   bc      dc runs on bc's output when bc's input ends (DOS
+                           runs one program at a time): echo 2^64 | bc
+                   ls, cp, touch: file times without nanoseconds;
+                   du: sizes from st_size (DJGPP has no st_blocks)
+  dos/sbase-dos.h, sbase-dos.c
+                   what DJGPP lacks: the *at() calls, directories opened as
+                   file descriptors (DOS can't), utimensat (and file times
+                   through INT 21h 5701h when DOSLFN's call fails),
+                   fmemopen, strptime, getline, tsearch, and fork-and-exec
+                   for find -exec, xargs, time and env (the program runs
+                   at once with spawn; waitpid gets its status)
+  LICENSE          sbase's (MIT)
+
+Files are read and written as they are (binary); the screen and keyboard
+stay text, so lines end where they should.
+
+Left out: what DOS has no use for or can't do: chgrp, chown, chroot, cron,
+flock, getconf, hostname, kill (bash has it), logger, mkfifo, mknod, nice,
+nohup, renice, setsid, tftp, install; sha512-224sum and sha512-256sum (long
+names); sbase's make. On DOS, ln copies (no links) and chmod only sets or
+clears read-only.
+
+Nothing prebuilt is kept: make builds deps/sbase/*.EXE with tools/build-sbase.sh
+(DJGPP gcc 12, -O2 -march=i486, UPX --best) from sbase's git at a pinned commit
+(git.suckless.org, or a mirror), with the DJGPP cross compiler from
+tools/get-djgpp.sh (deps/djgpp) unless one is on PATH. CI keeps deps/ in its cache.
