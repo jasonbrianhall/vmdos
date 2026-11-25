@@ -24,6 +24,9 @@ on:
       - '**.yaml'
       - '**.hpp'
       - '**.S'
+      - '**.sh'               # tools/build-*.sh: bash and the Unix tools
+      - '**.patch'
+      - 'third_party/sbase/TOOLS'
   pull_request:
     branches: [ main, dev ]
     paths:
@@ -39,6 +42,9 @@ on:
       - '**.yaml'
       - '**.hpp'
       - '**.S'
+      - '**.sh'               # tools/build-*.sh: bash and the Unix tools
+      - '**.patch'
+      - 'third_party/sbase/TOOLS'
 
 
   workflow_dispatch:
@@ -62,7 +68,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
-            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin syslinux-common
+            mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin syslinux-common \
+            bison upx-ucl   # bash and the Unix tools (DJGPP): bc's grammar, compression
+
+      # bash and the Unix tools are built from source into deps/ (with the DJGPP
+      # cross compiler, fetched there too); kept between runs until what they're
+      # built from changes
+      - name: Cache deps/
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ hashFiles('tools/get-djgpp.sh', 'tools/build-bash.sh', 'tools/build-sbase.sh', 'third_party/bash/**', 'third_party/sbase/**') }}
+          restore-keys: deps-     # an older one: keeps the compiler, make rebuilds the rest
+
+      - name: deps/ is current
+        if: steps.deps.outputs.cache-hit == 'true'
+        run: find deps -exec touch {} +   # newer than the checkout: make keeps it
 
       - name: Build esp.img (no EXTRA, no RAMDISK)
         run: |
@@ -75,6 +97,7 @@ jobs:
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS
           MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos ::/boot ::/boot/grub
           MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/boot/vmdos.elf ::/EFI/vmdos/vmdos.efi   # both boot paths there
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/VMDOS/BASH.EXE ::/BIN/LS.EXE ::/BIN/GREP.EXE   # bash and its tools
           head -c 440 esp.img | grep -aq GRUB || { echo 'no GRUB boot code in the MBR'; exit 1; }
           if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
 

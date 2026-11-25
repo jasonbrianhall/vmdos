@@ -11,14 +11,16 @@ patch 20"), not the old DJGPP ports (2.05, 4.4): readline 8.3 line editing
 with history, tab completion, Ctrl-R, arrays and associative arrays, [[ =~ ]],
 $(...), functions, traps, here-documents, brace expansion, printf -v, ...
 
-  bin/BASH.EXE            DJGPP gcc 12, -O2 -march=i586, UPX --best
   bash-5.3-djgpp.patch    the changes to bash's own sources (about 100 lines)
   dos/dosproc.c           fork, pipes, exec, Ctrl-C and the keyboard for DOS
   dos/dosfork.S           the register half of fork
   dos/dosbash.h           included first in every file: SIGCHLD and such
   COPYING                 bash's license, GPL version 3
 
-tools/build-bash.sh rebuilds bin/BASH.EXE (DJGPP cross gcc, git, make).
+Nothing prebuilt is kept: make builds deps/bash/BASH.EXE with tools/build-bash.sh
+(DJGPP gcc 12, -O2 -march=i486, UPX --best) from bash's git at a pinned commit
+(GNU's savannah, or a mirror), fetching the DJGPP cross compiler into deps/djgpp
+(tools/get-djgpp.sh) unless one is on PATH. CI keeps deps/ in its cache.
 
 How it runs on DOS
 ------------------
@@ -55,7 +57,7 @@ What that means in use:
 
 Paths and names
 ---------------
-  PATH is kept the Unix way inside the shell (C:/:C:/VMDOS:C:/VMDOS/NET; a
+  PATH is kept the Unix way inside the shell (C:/BIN:C:/:C:/VMDOS; a
   drive letter's colon isn't a separator) and handed to programs the DOS way
   (C:\;C:\VMDOS;C:\VMDOS\NET).
   C:/DOS and C:\DOS (quoted) are absolute paths; cd C:/VMDOS changes drive.
@@ -67,7 +69,6 @@ COMMAND.COM's own commands (DIR, COPY, DEL, TYPE, VER, ...) aren't programs:
 run them as `command.com /c dir' (plain `command' is bash's builtin). For
 example, in ~/.bashrc:  dir () { command.com /c dir "$@"; }
 
-Not included: Unix tools (ls, cat, grep, sed, ...). bash's builtins (echo,
-printf, read, test, [[ ]], mapfile, ...) and DOS's programs (MEM, FIND,
-SORT, MORE, XCOPY, ...) are there; DJGPP ports of coreutils, grep and sed
-run under it as they are.
+The Unix tools (ls, cp, rm, mkdir, cat, grep, sed, find, xargs, sort, ...)
+are in C:\BIN: third_party/sbase/README.vmdos. bash puts C:/BIN first on
+its PATH (C being the drive bash is on), ahead of DOS's FIND and SORT.
