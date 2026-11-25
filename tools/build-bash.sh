@@ -23,6 +23,17 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/build-bash.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+# A failure: what failed (the compiler's errors, make's, a missing program)
+# and the end of the log; the whole log stays in deps/bash-build.log.
+fail() {
+    mkdir -p "$root/deps"
+    cp "$1" "$root/deps/bash-build.log"
+    grep -E ': (fatal )?error:|\*\*\*|: command not found|: No such file|cannot execute' "$1" | head -20
+    echo "--- last lines of $root/deps/bash-build.log:"
+    tail -15 "$1"
+    exit 1
+}
+
 # bash 5.3.20, the DOS changes, the DOS process layer
 S=$tmp/bash
 if [ -n "$BASHSRC" ]; then
@@ -55,8 +66,7 @@ cd "$tmp/b"
     --disable-nls --disable-mem-scramble --enable-readline --enable-history \
     bash_cv_dev_fd=absent bash_cv_dev_stdin=absent \
     CPPFLAGS="-include $S/dos/dosbash.h" CFLAGS="$cflags" \
-    CFLAGS_FOR_BUILD="-O2 -std=gnu17" > configure.log 2>&1 ||
-    { tail -30 configure.log; exit 1; }
+    CFLAGS_FOR_BUILD="-O2 -std=gnu17" > configure.log 2>&1 || fail configure.log
 
 # The process layer, linked in front of DJGPP's C library with --wrap
 ${p}gcc $cflags -Wall -c "$S/dos/dosproc.c" -o dosproc.o
@@ -67,7 +77,7 @@ for f in fork pipe waitpid wait kill getpid getppid execve exit _exit close dup 
     wrap="$wrap,--wrap=$f"
 done
 make -j"$(nproc 2>/dev/null || echo 2)" LOCAL_LIBS="$tmp/b/dosproc.o $tmp/b/dosfork.o -Wl$wrap" \
-    bash.exe > build.log 2>&1 || { grep -E 'error|\*\*\*' build.log | head -30; exit 1; }
+    bash.exe > build.log 2>&1 || fail build.log
 ${p}strip bash.exe
 
 mkdir -p "$out"

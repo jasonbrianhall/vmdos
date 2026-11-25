@@ -24,6 +24,17 @@ want=$(grep -v '^#' "$port/TOOLS")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/build-sbase.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+# A failure: what failed and the end of the log; the whole log stays in
+# deps/sbase-build.log.
+fail() {
+    mkdir -p "$root/deps"
+    cp "$1" "$root/deps/sbase-build.log"
+    grep -E ': (fatal )?error:|\*\*\*|: command not found|: No such file|cannot execute' "$1" | head -20
+    echo "--- last lines of $root/deps/sbase-build.log:"
+    tail -15 "$1"
+    exit 1
+}
+
 S=$tmp/sbase
 if [ -n "$SBASESRC" ]; then
     git -C "$SBASESRC" archive --prefix=sbase/ $rev | tar -x -C "$tmp"
@@ -49,8 +60,7 @@ D=$port/dos
 ${p}gcc $cflags -Wall -I"$D/include" -c "$D/sbase-dos.c" -o "$tmp/sbase-dos.o"
 make -C "$S" -j"$(nproc 2>/dev/null || echo 2)" CC=${p}gcc AR=${p}ar RANLIB=${p}ranlib \
     CFLAGS="$cflags -include $D/sbase-dos.h -I$D/include" \
-    LDFLAGS="$tmp/sbase-dos.o" $want > "$tmp/build.log" 2>&1 ||
-    { grep -E 'error|\*\*\*' "$tmp/build.log" | head -30; exit 1; }
+    LDFLAGS="$tmp/sbase-dos.o" $want > "$tmp/build.log" 2>&1 || fail "$tmp/build.log"
 
 rm -rf "$out"
 mkdir -p "$out"
