@@ -250,8 +250,11 @@ C_ONLY_FILES += third_party/fsck/bin/FSCK.EXE
 # Vim (DJGPP) and vi; its _VIMRC and a few runtime files (VIM74\) next to it
 VIM_RT := $(shell cd third_party/vim/RT && find . -type f | sed 's|^./||' | sort)
 C_ONLY_FILES += third_party/vim/bin/VIM.EXE third_party/vim/bin/VI.BAT
-# GNU bash 5.3 (DJGPP, with fork and pipes for DOS): third_party/bash/README.vmdos
-C_ONLY_FILES += third_party/bash/bin/BASH.EXE
+# GNU bash 5.3 (DJGPP, with fork and pipes for DOS): third_party/bash/README.vmdos.
+# Built from source into deps/ (see "bash and the Unix tools" below); UNIX= leaves
+# it and the tools out.
+UNIX ?= 1
+C_ONLY_FILES += $(if $(UNIX),deps/bash/BASH.EXE)
 # Felix BASIC (DJGPP) in its own folder, C:\VMDOS\BASIC; BASIC.BAT (C:\VMDOS,
 # on the PATH) starts it: third_party/felixbasic/README.vmdos
 C_ONLY_FILES += third_party/felixbasic/bin/BASIC.BAT
@@ -260,6 +263,11 @@ C_ONLY_DEPS  := $(C_ONLY_FILES) $(addprefix third_party/vim/RT/,$(VIM_RT)) $(FEL
 C_ONLY_MAP   := $(foreach f,$(VIM_RT),third_party/vim/RT/$(f)=VMDOS/$(f))
 C_ONLY_MAP   += third_party/felixbasic/bin/FELIXBAS.EXE=VMDOS/BASIC/FELIXBAS.EXE \
                 third_party/felixbasic/README.vmdos=VMDOS/BASIC/README.TXT third_party/felixbasic/LICENSE.md=VMDOS/BASIC/LICENSE.TXT
+# The Unix tools for bash (ls, cp, grep, sed, find, ...: suckless sbase, DJGPP)
+# in C:\BIN, last on DOS's PATH and first on bash's: third_party/sbase/README.vmdos
+SBASE_BIN    := $(if $(UNIX),$(addprefix deps/sbase/,$(addsuffix .EXE,$(shell grep -v '^\#' third_party/sbase/TOOLS | tr a-z A-Z))))
+C_ONLY_DEPS  += $(SBASE_BIN)
+C_ONLY_MAP   += $(foreach f,$(SBASE_BIN),$(f)=BIN/$(notdir $(f)))
 # OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's own TCP) in C:\VMDOS\NET:
 # third_party/openssh/README.vmdos
 C_ONLY_DEPS  += $(addprefix third_party/openssh/bin/,SSH.EXE SFTP.EXE SCP.EXE)
@@ -623,6 +631,22 @@ run-bios: esp.img
 run-usb: esp.img
 	qemu-system-x86_64 -bios $(OVMF) -device qemu-xhci,id=xhci \
 	    -drive if=none,id=stick,format=raw,file=esp.img -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 $(QEMU_ARGS)
+
+# bash and the Unix tools are built from pinned sources (GNU's and suckless's
+# git), with the DJGPP cross compiler: one on PATH or in $(DJGPP), else
+# tools/get-djgpp.sh fetches one into deps/djgpp. deps/ is kept by make clean
+# (rm -rf deps rebuilds it all).
+DJGPP_GCC := $(if $(DJGPP)$(shell command -v i586-pc-msdosdjgpp-gcc 2>/dev/null),,deps/djgpp/bin/i586-pc-msdosdjgpp-gcc)
+deps/djgpp/bin/i586-pc-msdosdjgpp-gcc: tools/get-djgpp.sh
+	sh tools/get-djgpp.sh deps/djgpp
+deps/bash/BASH.EXE: tools/build-bash.sh third_party/bash/bash-5.3-djgpp.patch $(wildcard third_party/bash/dos/*) | $(DJGPP_GCC)
+	sh tools/build-bash.sh
+deps/sbase/.built: tools/build-sbase.sh third_party/sbase/sbase-dos.patch third_party/sbase/TOOLS \
+		$(wildcard third_party/sbase/dos/* third_party/sbase/dos/include/*) | $(DJGPP_GCC)
+	sh tools/build-sbase.sh && touch $@
+ifneq ($(UNIX),)
+$(SBASE_BIN): deps/sbase/.built ;
+endif
 
 clean:
 	rm -rf build build-486 .vmdos-cpu vmdos.elf vmdos.iso vmdos.efi dos.img esp.img
