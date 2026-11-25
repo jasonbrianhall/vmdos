@@ -1,0 +1,35 @@
+diff --git a/builtin.c b/builtin.c
+index b7a47e2..ba09ee4 100644
+--- a/builtin.c
++++ b/builtin.c
+@@ -3407,7 +3407,7 @@ do_mkbool(int nargs)
+ int
+ gawk_system(const char *command)
+ {
+-#if defined(VMS) || defined(__MINGW32__)
++#if defined(VMS) || defined(__MINGW32__) || defined(__DJGPP__)
+ 	return system(command);
+ #else /* ! (defined(VMS) || defined(__MINGW32__)) */
+ 	pid_t childpid;
+diff --git a/io.c b/io.c
+index b48f14e..7f2e9b2 100644
+--- a/io.c
++++ b/io.c
+@@ -4702,7 +4702,7 @@ save_pipe(int fd, FILE *fp, pid_t pid)
+ static FILE *
+ gawk_popen_write(const char *cmd)
+ {
+-#if defined(VMS) || defined(__MINGW32__)
++#if defined(VMS) || defined(__MINGW32__) || defined(__DJGPP__)
+ 	return popen(cmd, binmode("w"));
+ #else
+ 	pid_t childpid;
+@@ -4763,7 +4763,7 @@ gawk_popen_write(const char *cmd)
+ static int
+ gawk_popen_write_close(FILE *fp)
+ {
+-#if defined(VMS) || defined(__MINGW32__)
++#if defined(VMS) || defined(__MINGW32__) || defined(__DJGPP__)
+ 	return pclose(fp);
+ #else
+ 	write_pipe *wp;

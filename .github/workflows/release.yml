@@ -79,7 +79,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: deps
-          key: deps-${{ hashFiles('tools/get-djgpp.sh', 'tools/build-bash.sh', 'tools/build-sbase.sh', 'third_party/bash/**', 'third_party/sbase/**') }}
+          key: deps-${{ hashFiles('tools/get-djgpp.sh', 'tools/build-bash.sh', 'tools/build-sbase.sh', 'tools/build-gawk.sh', 'third_party/bash/**', 'third_party/sbase/**', 'third_party/gawk/**') }}
           restore-keys: deps-     # an older one: keeps the compiler, make rebuilds the rest
 
       - name: deps/ is current
@@ -97,7 +97,7 @@ jobs:
           MTOOLS_SKIP_CHECK=1 mdir -i esp.img@@1M ::/VMDOS
           MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos ::/boot ::/boot/grub
           MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/boot/vmdos.elf ::/EFI/vmdos/vmdos.efi   # both boot paths there
-          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/VMDOS/BASH.EXE ::/BIN/LS.EXE ::/BIN/GREP.EXE   # bash and its tools
+          MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/VMDOS/BASH.EXE ::/BIN/LS.EXE ::/BIN/GREP.EXE ::/BIN/AWK.EXE   # bash and its tools
           head -c 440 esp.img | grep -aq GRUB || { echo 'no GRUB boot code in the MBR'; exit 1; }
           if MTOOLS_SKIP_CHECK=1 mdir -b -i esp.img@@1M ::/EFI/BOOT ::/EFI/vmdos | grep -qi dos.img; then echo 'dos.img on the image'; exit 1; fi
 

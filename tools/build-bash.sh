@@ -48,6 +48,10 @@ else
     done
     [ -d "$S" ] || { echo "build-bash: couldn't get bash's source" >&2; exit 1; }
 fi
+# One time for every file: a checkout writes them in no particular order, and
+# a generated file (configure, aclocal.m4, the parser) a moment older than what
+# it's made from has make try to remake it (with autotools, bison, ...).
+find "$S" -exec touch -h -d '2000-01-01 00:00:00' {} +
 patch -s -d "$S" -p1 < "$port/bash-5.3-djgpp.patch"
 cp -r "$port/dos" "$S/dos"
 
@@ -72,7 +76,7 @@ cd "$tmp/b"
 ${p}gcc $cflags -Wall -c "$S/dos/dosproc.c" -o dosproc.o
 ${p}gcc -c "$S/dos/dosfork.S" -o dosfork.o
 wrap=
-for f in fork pipe waitpid wait kill getpid getppid execve exit _exit close dup dup2 \
+for f in main fork pipe waitpid wait kill getpid getppid execve exit _exit close dup dup2 \
          fcntl signal sigaction sigprocmask; do
     wrap="$wrap,--wrap=$f"
 done

@@ -268,6 +268,10 @@ C_ONLY_MAP   += third_party/felixbasic/bin/FELIXBAS.EXE=VMDOS/BASIC/FELIXBAS.EXE
 SBASE_BIN    := $(if $(UNIX),$(addprefix deps/sbase/,$(addsuffix .EXE,$(shell grep -v '^\#' third_party/sbase/TOOLS | tr a-z A-Z))))
 C_ONLY_DEPS  += $(SBASE_BIN)
 C_ONLY_MAP   += $(foreach f,$(SBASE_BIN),$(f)=BIN/$(notdir $(f)))
+# GNU awk (DJGPP), as GAWK and AWK, in C:\BIN too: third_party/gawk/README.vmdos
+GAWK_BIN     := $(if $(UNIX),deps/gawk/GAWK.EXE deps/gawk/AWK.EXE)
+C_ONLY_DEPS  += $(GAWK_BIN)
+C_ONLY_MAP   += $(foreach f,$(GAWK_BIN),$(f)=BIN/$(notdir $(f)))
 # OpenSSH's ssh, sftp and scp (DJGPP, on vmdos's own TCP) in C:\VMDOS\NET:
 # third_party/openssh/README.vmdos
 C_ONLY_DEPS  += $(addprefix third_party/openssh/bin/,SSH.EXE SFTP.EXE SCP.EXE)
@@ -633,7 +637,7 @@ run-usb: esp.img
 	    -drive if=none,id=stick,format=raw,file=esp.img -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 $(QEMU_ARGS)
 
 # bash and the Unix tools are built from pinned sources (GNU's and suckless's
-# git), with the DJGPP cross compiler: one on PATH or in $(DJGPP), else
+# git; gawk from GNU's), with the DJGPP cross compiler: one on PATH or in $(DJGPP), else
 # tools/get-djgpp.sh fetches one into deps/djgpp. deps/ is kept by make clean
 # (rm -rf deps rebuilds it all).
 DJGPP_GCC := $(if $(DJGPP)$(shell command -v i586-pc-msdosdjgpp-gcc 2>/dev/null),,deps/djgpp/bin/i586-pc-msdosdjgpp-gcc)
@@ -644,8 +648,12 @@ deps/bash/BASH.EXE: tools/build-bash.sh third_party/bash/bash-5.3-djgpp.patch $(
 deps/sbase/.built: tools/build-sbase.sh third_party/sbase/sbase-dos.patch third_party/sbase/TOOLS \
 		$(wildcard third_party/sbase/dos/* third_party/sbase/dos/include/*) | $(DJGPP_GCC)
 	sh tools/build-sbase.sh && touch $@
+deps/gawk/.built: tools/build-gawk.sh third_party/gawk/gawk-dos.patch \
+		$(wildcard third_party/gawk/dos/* third_party/gawk/dos/include/*) | $(DJGPP_GCC)
+	sh tools/build-gawk.sh && touch $@
 ifneq ($(UNIX),)
 $(SBASE_BIN): deps/sbase/.built ;
+$(GAWK_BIN): deps/gawk/.built ;
 endif
 
 clean:
