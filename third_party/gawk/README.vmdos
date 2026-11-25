@@ -1,0 +1,32 @@
+GNU awk 5.4.2 (gawk) for DOS (DJGPP), in C:\BIN as GAWK.EXE and AWK.EXE (the
+same program; C: only). All of gawk's language: gensub, asort and asorti,
+strftime and systime, arrays of arrays, switch, @include, BEGINFILE/ENDFILE,
+IGNORECASE, FPAT, --csv, ...
+
+  bash-5.3$ awk '{ s[$1] += $2 } END { for (k in s) print k, s[k] }' sales.txt
+  bash-5.3$ ls -l | awk '$5 > 100000 { print $NF }'
+  bash-5.3$ gawk 'BEGIN { print gensub(/(o+)/, "[\\1]", "g", "foo boo") }'
+
+Commands from awk ("cmd" | getline, print | "cmd", system()) work: DOS runs
+one program at a time, so they go through DJGPP's popen() and system(), which
+pass the output through a temporary file (a command that never ends never
+does). They run in $SHELL, which bash sets to itself, so `sort -n' is C:\BIN's;
+started from COMMAND.COM (no SHELL), they run in COMMAND.COM.
+
+Not in this build: |& (two-way pipes to a coprocess), /inet networking,
+dynamic extensions (@load), MPFR (-M), and multibyte locales (a DOS code page
+is one byte per character).
+
+  gawk-dos.patch   the change to gawk: system() and print | "cmd" through
+                   DJGPP's system() and popen() (as gawk's MinGW port does)
+  dos/gawk-dos.h, gawk-dos.c, include/langinfo.h
+                   PIPES_SIMULATED (gawk's own popen-based pipes), SIGCHLD,
+                   nl_langinfo, and the wide-character calls for a
+                   single-byte code page, which DJGPP doesn't have
+  COPYING          gawk's license, GPL version 3
+
+Nothing prebuilt is kept: make builds deps/gawk/GAWK.EXE and AWK.EXE with
+tools/build-gawk.sh (DJGPP gcc 12, -O2 -march=i486, UPX --best) from gawk's git
+at the gawk-5.4.2 tag (GNU's savannah, or a mirror; the commit is checked),
+with the DJGPP cross compiler from tools/get-djgpp.sh unless one is on PATH.
+gawk dropped its DJGPP support in 5.x; what's here is the few pieces it needs.
