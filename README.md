@@ -141,7 +141,7 @@ qemu-system-x86_64 -M q35 -accel kvm -smp 2 -m 512 -bios /usr/share/ovmf/OVMF.fd
 ### Build it yourself
 
 ```sh
-sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
+sudo apt install build-essential gcc-multilib g++-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf \
                  bison upx-ucl
 make esp FRESH=1 EXTRA=games ISO="war2.iso"   # esp.img: bootable disk with your games and CDs

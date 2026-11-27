@@ -67,7 +67,7 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential gcc-multilib nasm python3 \
+          sudo apt-get install -y --no-install-recommends build-essential gcc-multilib g++-multilib nasm python3 \
             mtools dosfstools gnu-efi xz-utils grub-common grub-pc-bin grub-efi-amd64-bin syslinux-common \
             bison upx-ucl   # bash and the Unix tools (DJGPP): bc's grammar, compression
 

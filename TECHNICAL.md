@@ -17,10 +17,11 @@ changes are kept; a RAM disk (dos.img) is the option and the fallback.
 ## Build and run
 
 ```
-# Fedora: sudo dnf install gcc nasm python3 mtools dosfstools gnu-efi-devel glibc-devel.i686 libgcc.i686 \
+# Fedora: sudo dnf install gcc gcc-c++ nasm python3 mtools dosfstools gnu-efi-devel glibc-devel.i686 libgcc.i686 \
+#         libstdc++-devel.i686 libstdc++-static.i686 \
 #         grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso qemu-system-x86 edk2-ovmf \
 #         bison upx
-sudo apt install build-essential gcc-multilib nasm python3 mtools dosfstools gnu-efi \
+sudo apt install build-essential gcc-multilib g++-multilib nasm python3 mtools dosfstools gnu-efi \
                  grub-pc-bin grub-efi-amd64-bin grub-common xorriso qemu-system-x86 ovmf \
                  bison upx-ucl
 make            # vmdos.elf (first run fetches KERNEL.SYS/COMMAND.COM into freedos/)
