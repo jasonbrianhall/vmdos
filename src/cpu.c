@@ -715,6 +715,14 @@ void kmain(u32 magic, struct mb_info *mb)
     int nex = 0;
 #define EXCL(a, b) do { if (nex < 16 && (b) > (a)) { ex[nex].lo = (a) & ~4095u; ex[nex].hi = ((b) + 4095) & ~4095u; nex++; } } while (0)
     EXCL((u32)(uintptr_t)__kernel_start, (u32)(uintptr_t)__kernel_end);
+    {   /* kdos (DOSBox-X's DOS and shell) is linked after the kernel: its pages
+           are the heap's unless shell=kernel will run it (kdos_host.c) */
+        extern u8 __kdos_start[], __kdos_end[];
+        extern int kdos_wanted(void);
+        if (kdos_wanted()) EXCL((u32)(uintptr_t)__kdos_start, (u32)(uintptr_t)__kdos_end);
+        else kprintf("kdos: %u KiB given back to the heap (no shell=kernel)\n",
+                     (u32)((uintptr_t)__kdos_end - (uintptr_t)__kdos_start) >> 10);
+    }
     EXCL((u32)(uintptr_t)mb, (u32)(uintptr_t)mb + sizeof *mb);
     if (mb->flags & 64) EXCL(mb->mmap_addr, mb->mmap_addr + mb->mmap_length);
     u32 mod_start = 0, mod_end = 0;

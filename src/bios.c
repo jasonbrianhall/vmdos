@@ -581,7 +581,7 @@ int bios_service(struct regs *r, int id, int via_stub)
         else if (AX(r) == 0x5644) cd_api(r);                    /* VMCD.SYS / VMCD.COM: likewise */
         else if (AX(r) == 0x564E) net_api(r);                   /* VMPKT.COM: likewise */
         else if (AX(r) == 0x5649) info_api(r);                  /* LSPCI.COM / LSUSB.COM: likewise */
-        else if (AX(r) == 0x5652) fs9p_api(r);                  /* VMDOSNET.COM: likewise */
+        else if (AX(r) == 0x5652) { void kdos_fs9p_api(struct regs *r); kdos_fs9p_api(r); }   /* VMDOSNET.COM: likewise (kdos_host.c) */
         else if (AX(r) == 0x5657) {                             /* REBOOT.COM: the write caches onto the disks, now */
             int off = BX(r) == 1;                               /* POWEROFF.COM: then off */
             if (BX(r) == 2) {                                   /* REBOOT /S: soft restart; CL: menu choice ('1'-'9') or 0 */

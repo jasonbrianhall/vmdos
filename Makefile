@@ -70,6 +70,35 @@ VOODOO_OBJS := $(addprefix voodoo/,vid_voodoo.o vid_voodoo_banshee_blitter.o vid
 OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios.o video.o biosblob.o bootblob.o disk.o fat.o blk_ahci.o blk_ide.o blk_virtio.o balloon_virtio.o acpi.o pvpanic.o agent.o clip.o remote.o blk_nvme.o blk_storvsc.o blk_usb.o virtio.o vmbus.o hd.o joy.o serial.o ems.o usb.o pci.o xms.o mouse.o dpmi.o mememu.o cd.o atapi.o net.o ipxnet.o dhcpc.o nic_e1000.o nic_igb.o nic_igc.o nic_rtl8139.o nic_r8169.o nic_tg3.o nic_alx.o nic_atl1c.o nic_virtio.o nic_netvsc.o nic_tulip.o nic_ne2k.o fs9p.o nic_usb.o tcp9p.o ne2k.o sysinfo.o floppy.o hv.o hvvmx.o hvasm.o smp.o xbrz.o \
               audio.o sound.o gus.o sb/dsp.o sb/sbout.o sb/mpu.o sb/gmsynth.o sb/gmtables.o sb/fpmath.o \
               sb/opl.o sb/dbopl.o vpci.o es1371.o vgabios.o media.o $(VOODOO_OBJS))
+# kdos (shell=kernel): DOSBox-X's DOS kernel and shell in the monitor
+# (src/kdos, C++ with its own small libc; src/kdos_host.c is the monitor's
+# side). It uses std::string/map/vector with libstdc++'s headers: string's
+# templates are instantiated here (_GLIBCXX_ASSERTIONS turns off its extern
+# templates), and the few library objects it needs (red-black trees, lists,
+# dynamic_cast) come out of GCC's 32-bit libstdc++.a / libsupc++.a.
+KDOS_SRCS := $(wildcard src/kdos/*.cpp)
+KDOS_OBJS := $(patsubst src/kdos/%.cpp,$(BUILD)/kdos/%.o,$(KDOS_SRCS))
+KDOS_RT   := $(addprefix $(BUILD)/kdos/rt/,tree.o list.o class_type_info.o dyncast.o si_class_type_info.o tinfo.o vmi_class_type_info.o)
+KDOS_CXXFLAGS := -m32 $(ARCH) -O2 -fno-exceptions -frtti -fno-pic -fno-pie -fno-stack-protector -fcf-protection=none \
+              -mno-sse -mno-mmx -mfpmath=387 -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17 \
+              -fno-asynchronous-unwind-tables -fno-delete-null-pointer-checks -fno-strict-aliasing \
+              -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -D_GLIBCXX_ASSERTIONS -w -I$(BUILD) -Isrc/kdos/compat -Isrc/kdos -MMD
+LIBCXX_DIR := $(dir $(shell g++ -m32 -print-file-name=libstdc++.a))
+$(KDOS_OBJS): $(BUILD)/version.h
+$(BUILD)/kdos/%.o: src/kdos/%.cpp | $(BUILD)
+	@mkdir -p $(BUILD)/kdos
+	g++ $(KDOS_CXXFLAGS) -c $< -o $@
+$(KDOS_RT): | $(BUILD)
+	@mkdir -p $(BUILD)/kdos/rt
+	cd $(BUILD)/kdos/rt && ar x $(LIBCXX_DIR)libstdc++.a tree.o list.o && \
+	  ar x $(LIBCXX_DIR)libsupc++.a class_type_info.o dyncast.o si_class_type_info.o tinfo.o vmi_class_type_info.o
+# one object, with the few names its libc shares with the monitor's renamed
+$(BUILD)/kdos.o: $(KDOS_OBJS) $(KDOS_RT)
+	ld -m elf_i386 -r -o $@ $^
+	objcopy --redefine-sym vsnprintf=kdos_vsnprintf --redefine-sym snprintf=kdos_snprintf \
+	        --redefine-sym labs=kdos_labs --redefine-sym machine=kdos_machine $@
+OBJS += $(BUILD)/kdos_host.o $(BUILD)/kdos.o
+
 # SBPRO's FM synth: dbopl's one-time table setup uses the x87 (opl_init saves
 # and restores the FPU around it); everything that runs later is integer.
 FPFLAGS  := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mfpmath=387 -mno-sse -mno-mmx
@@ -374,7 +403,7 @@ $(BUILD)/efi/kernel.bin $(BUILD)/efi/kernel_layout.h: vmdos.elf
 	mkdir -p $(BUILD)/efi
 	objcopy -O binary vmdos.elf $(BUILD)/efi/kernel.bin
 	@nm vmdos.elf | awk '/ __kernel_start$$/ {print "#define KERNEL_BASE 0x" $$1} \
-	                     / __kernel_end$$/   {print "#define KERNEL_END 0x" $$1} \
+	                     / __image_end$$/    {print "#define KERNEL_END 0x" $$1} \
 	                     / _start$$/         {print "#define KERNEL_ENTRY 0x" $$1}' > $(BUILD)/efi/kernel_layout.h
 	@test $$(grep -c define $(BUILD)/efi/kernel_layout.h) = 3 || { echo "kernel layout symbols missing"; exit 1; }
 

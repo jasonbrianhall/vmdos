@@ -1,0 +1,18 @@
+src/kdos: the vmdos command shell (boot option shell=kernel)
+
+DOSBox-X's DOS kernel and command shell, run inside the vmdos monitor in
+place of FreeDOS. Taken from DOSBox-X (https://github.com/joncampbell123/dosbox-x,
+commit 576d8be), GPL-2.0-or-later, with its copyright headers kept; changes
+are marked "kdos:". Left out: the GUI, emulated hardware, host folders,
+save states, PC-98/DOS/V, and DOSBox-X's Z: utilities.
+
+From DOSBox-X: shell*.cpp, dos*.cpp, drive_fat.cpp, drive_virtual.cpp,
+drive_cache.cpp, drives.cpp/.h, dev_con.h, callback.cpp, programs.cpp,
+support.cpp, cmdline.cpp (from setup.cpp), bios_disk_kdos.cpp (from
+bios_disk.cpp), compat/ (some of its headers; the others are stand-ins).
+
+vmdos's own: glue.cpp (callbacks as V86 #UD traps, coroutines for
+DOSBox-X's nested guest runs, configuration, INT 10h), start.cpp (boot,
+C:), redir_drive.cpp (VMDOSNET 9P drives, long names), klibc.cpp,
+stubs.cpp, compat/dosbox.h, setup.h, control.h, kdos_stubs.h, and
+../kdos_host.c (the monitor's side).
