@@ -229,8 +229,8 @@ static const struct { const char *name, *value; } cfg_table[] = {
     { "startnopause", "false" }, { "starttranspath", "false" }, { "cpm compatibility mode", "auto" },
     { "command shell flush keyboard buffer", "true" }, { "shell configuration as commands", "false" },
     { "turn off a20 gate on load if loadfix needed", "true" }, { "unmask timer on disk io", "false" },
-    { "int15 wait force unmask irq", "true" }, { "floppy drive data rate limit", "-1" },
-    { "hard drive data rate limit", "-1" }, { "break on int3", "false" }, { "badcommandhandler", "" },
+    { "int15 wait force unmask irq", "true" }, { "floppy drive data rate limit", "0" },
+    { "hard drive data rate limit", "0" },   /* 0: no emulated disk speed (vmdos disks are real) */ { "break on int3", "false" }, { "badcommandhandler", "" },
     { "shell", "" }, { "dos", "true" }, { "output", "surface" }, { "font", "" }, { "colors", "" },
     { "ansi.sys", "true" }, { "bannercolortheme", "default" }, { "numlock", "" }, { "cols", "0" }, { "lins", "0" },
 };

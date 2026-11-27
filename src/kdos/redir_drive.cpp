@@ -130,7 +130,7 @@ public:
         attr = mem_readb(t + 4);
         time = mem_readw(t + 0x0D);
         date = mem_readw(t + 0x0F);
-        refCtr = 1;
+        /* refCtr: DOS_OpenFile/CreateFile add the first reference */
     }
     bool Read(uint8_t *data, uint16_t *size) override
     {
