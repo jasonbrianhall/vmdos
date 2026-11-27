@@ -153,6 +153,15 @@ int ispunct(int c) { return isgraph(c) && !isalnum(c); }
 int isblank(int c) { return c == ' ' || c == '\t'; }
 int tolower(int c) { return isupper(c) ? c + 32 : c; }
 int toupper(int c) { return islower(c) ? c - 32 : c; }
+/* glibc's <ctype.h> inlines toupper/tolower through these tables */
+static int32_t up_tab[384], lo_tab[384];
+static const int32_t *up_p, *lo_p;
+static void case_tabs(void) {
+    for (int c = -128; c < 256; c++) { up_tab[c + 128] = c >= 0 ? toupper(c) : c; lo_tab[c + 128] = c >= 0 ? tolower(c) : c; }
+    up_p = up_tab + 128; lo_p = lo_tab + 128;
+}
+extern "C" const int32_t **__ctype_toupper_loc(void) { if (!up_p) case_tabs(); return &up_p; }
+extern "C" const int32_t **__ctype_tolower_loc(void) { if (!lo_p) case_tabs(); return &lo_p; }
 
 /* ---------------- strings ---------------- */
 int strcmp(const char *a, const char *b) { while (*a && *a == *b) a++, b++; return (unsigned char)*a - (unsigned char)*b; }

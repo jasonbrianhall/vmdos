@@ -181,6 +181,7 @@ static void finish(kco *c)
 
 extern CallBack_Handler CallBack_Handlers[];
 extern "C" void kdos_floppy_check(void);
+void kdos_cd_check(void);
 static uint8_t fpu_guest[108];
 
 extern "C" kregs *kdos_trap(kregs *r)
@@ -195,6 +196,7 @@ extern "C" kregs *kdos_trap(kregs *r)
         kh_panic(b);
     }
     kdos_floppy_check();                  /* VMFD changed a floppy: its drive again (start.cpp) */
+    kdos_cd_check();                      /* VMCD changed a disc (cdrom_vmdos.cpp) */
     kco *c = co_new(CallBack_Handlers[nr], nullptr);
     co_resume(c);
     finish(c);
@@ -205,6 +207,7 @@ extern "C" kregs *kdos_trap(kregs *r)
 
 /* ---------------- configuration: [dos], [dosbox], [config] ---------------- */
 static const struct { const char *name, *value; } cfg_table[] = {
+    { "mscdex device name", "MSCD001" },
     { "ver", "7.10" }, { "lfn", "true" }, { "xms", "false" }, { "ems", "false" }, { "umb", "false" },
     { "files", "127" }, { "fcbs", "100" }, { "lastdrive", "z" }, { "break", "off" },
     { "hma free space", "34560" }, { "dos sda size", "0" }, { "kernel allocation in umb", "false" },

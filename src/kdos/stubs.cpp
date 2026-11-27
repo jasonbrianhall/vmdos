@@ -115,7 +115,6 @@ bool systemmessagebox(char const *, char const *, char const *, char const *, in
 void updateDPT(void) {}
 std::string localDrive::GetHostName(const char *) { return ""; }
 std::string Overlay_Drive::GetHostName(const char *) { return ""; }
-bool isoDrive::loadImage() { return false; }
 ShiftJISDecoder::ShiftJISDecoder() {}
 
 /* DOSBox-X's dynamic_casts name these drive and disk classes, which kdos
@@ -125,7 +124,6 @@ ShiftJISDecoder::ShiftJISDecoder() {}
     extern "C" { __cxxabiv1::__class_type_info kdos_ti_##tag __asm__(mangled)("kdos_none_" #tag); }
 KDOS_TYPEINFO("_ZTI10localDrive", localDrive)
 KDOS_TYPEINFO("_ZTI13Overlay_Drive", Overlay_Drive)
-KDOS_TYPEINFO("_ZTI8isoDrive", isoDrive)
 KDOS_TYPEINFO("_ZTI15imageDiskMemory", imageDiskMemory)
 KDOS_TYPEINFO("_ZTI12imageDiskVHD", imageDiskVHD)
 
@@ -138,3 +136,7 @@ void DOS_SetupPrograms(void)
 {
     PROGRAMS_MakeFile("COMMAND.COM", SHELL_ProgramStart);
 }
+
+/* for DOSBox-X's MSCDEX and ISO drive (dos_mscdex.cpp, drive_iso.cpp) */
+bool getSwapRequest(void) { return false; }                 /* DOSBox-X's disc-swap hotkey */
+void IDE_ATAPI_MediaChangeNotify(unsigned char, bool) {}   /* no emulated IDE CD drives here */

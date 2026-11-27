@@ -126,6 +126,9 @@ static void mount_floppy(int d)
 
 /* A floppy changed (VMFD, the media console): its drive again. From the
    trap, before each INT 21h. */
+void MSCDEX_Startup(Section *);
+void kdos_mount_cds(void);
+
 extern "C" void kdos_floppy_check(void)
 {
     if (dos_kernel_disabled) return;
@@ -201,6 +204,8 @@ static void kdos_main(void)
     mount_floppy(0);
     mount_floppy(1);
     mount_c();
+    MSCDEX_Startup(nullptr);              /* DOSBox-X's MSCDEX, for vmdos's CD drives */
+    kdos_mount_cds();
     SHELL_MessagesInit();
     brand_messages();
     make_autoexec();

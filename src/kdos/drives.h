@@ -1130,6 +1130,7 @@ public:
 	bool FileStat(const char *name, FileStat_Block *const stat_block) override;
 	uint8_t GetMediaByte(void) override;
 	void EmptyCache(void) override;
+	void kdosRefresh(void);                 /* kdos: the disc changed (cdrom_vmdos.cpp) */
 	void MediaChange(void) override;
 	void MediaChangeImmediate(void);
 	bool isRemote(void) override;

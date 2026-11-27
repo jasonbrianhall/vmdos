@@ -86,7 +86,7 @@ static inline uint16_t DOSV_GetFontHandlerOffset(int) { return 0; }
 static inline bool CheckAnotherDisplayDriver(void) { return false; }
 static inline void ttf_reset(void) {}
 void PIC_SetIRQMask(Bitu irq, bool masked);
-static inline void mem_unalignedwrited(LinearPt a, uint32_t v) { mem_writed(a, v); }
+#define mem_unalignedwrited(a, v) mem_writed((a), (v))
 /* DOSBox-X's modules */
 class Module_base {
 protected:
