@@ -18,7 +18,7 @@ changes are kept; a RAM disk (dos.img) is the option and the fallback.
 
 ```
 # Fedora: sudo dnf install gcc gcc-c++ nasm python3 mtools dosfstools gnu-efi-devel glibc-devel.i686 libgcc.i686 \
-#         libstdc++-devel.i686 libstdc++-static.i686 \
+#         libstdc++-devel.i686 \
 #         grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso qemu-system-x86 edk2-ovmf \
 #         bison upx
 sudo apt install build-essential gcc-multilib g++-multilib nasm python3 mtools dosfstools gnu-efi \
