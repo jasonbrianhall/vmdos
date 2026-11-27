@@ -49,10 +49,55 @@ int kdos_wanted(void)
 /* ---- what glue.cpp needs from the monitor, as plain C ---- */
 void kh_log(const char *s) { kprintf("%s", s); }
 void kh_panic(const char *s) { panic("kdos: %s", s); }
-void *kh_alloc(u32 bytes) { return phys_alloc(bytes); }
+
+/* kdos started again (VMHV's VM, a restart there): its memory as at its
+   first start, with no more taken from the monitor. Its initialized data
+   as loaded; the memory it had (2 MB heap pieces, stacks), handed out
+   again in the order it asks, which is the same each start. */
+static struct { void *p; u32 n; } kh_mem[64];
+static int kh_nmem, kh_reuse;
+static u8 *kh_data0;
+void kh_restart(char *data, char *data_end)
+{
+    u32 n = (u32)(data_end - data);
+    if (!kh_data0) { kh_data0 = phys_alloc(n ? n : 1); memcpy(kh_data0, data, n); return; }
+    memcpy(data, kh_data0, n);
+    kh_reuse = 0;
+}
+void *kh_alloc(u32 bytes)
+{
+    while (kh_reuse < kh_nmem)
+        if (kh_mem[kh_reuse].n >= bytes) return kh_mem[kh_reuse++].p;
+        else kh_reuse++;
+    void *p = phys_alloc(bytes);
+    if (kh_nmem < 64) { kh_mem[kh_nmem].p = p; kh_mem[kh_nmem++].n = bytes; kh_reuse = kh_nmem; }
+    return p;
+}
 u32 kh_ticks(void) { return ticks; }
-int kh_vif_get(void) { extern int vif; return vif; }
-void kh_vif_set(int v) { extern int vif; vif = v; }
+
+/* The guest's interrupt flag: in V86 mode the monitor's virtual one (vif);
+   in VMHV's VM (real mode) the guest's own, in the trap's registers */
+static struct regs *hv_trap_r;
+int kh_vif_get(void) { extern int vif; return hv_trap_r ? (hv_trap_r->eflags & EFL_IF) != 0 : vif; }
+void kh_vif_set(int v)
+{
+    extern int vif;
+    if (!hv_trap_r) { vif = v; return; }
+    if (v) hv_trap_r->eflags |= EFL_IF; else hv_trap_r->eflags &= ~EFL_IF;
+}
+
+/* #UD in VMHV's VM, in real or virtual-8086 mode (hv.c): one of kdos's
+   callbacks? (1: handled, r updated) */
+int kdos_hv_ud(struct regs *r)
+{
+    if (!kdos_on) return 0;
+    u32 a = LIN(r->cs, IP(r));
+    if (rd8(a) != 0xFE || rd8(a + 1) != 0x38) return 0;
+    hv_trap_r = r;
+    kdos_trap(r);
+    hv_trap_r = 0;
+    return 1;
+}
 int kh_a20(void) { return a20_on; }
 void kh_set_a20(int on) { guest_a20(on); }
 const char *kh_cmdline(void) { return cmdline; }
