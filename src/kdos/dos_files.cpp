@@ -538,6 +538,7 @@ bool DOS_ChangeDir(char const * const dir) {
 	
 	if (Drives[drive]->TestDir(fulldir)) {
 		strcpy(Drives[drive]->curdir,fulldir);
+		kdos_cds_sync(drive);       /* kdos: a 9P drive's CDS gets the folder too (redir_drive.cpp) */
 		return true;
 	} else {
 		DOS_SetError(DOSERR_PATH_NOT_FOUND);

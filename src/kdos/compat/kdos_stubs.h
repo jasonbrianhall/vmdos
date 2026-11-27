@@ -144,3 +144,4 @@ static inline bool DOSV_CheckCJKVideoMode(void) { return false; }
 static inline int GetTrueVideoMode(void) { return 3; }
 void SDL_Delay(uint32_t ms);
 void DOSBOX_RunMachine(void);
+void kdos_cds_sync(uint8_t drive);

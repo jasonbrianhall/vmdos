@@ -2571,6 +2571,14 @@ int fs9p_redir(struct regs* r)
 // kdos (shell=kernel): the short path for the long path at guest address
 // lin ("V:\\long dir\\new file.txt"), as 716Ch would give DOS. 0, a DOS
 // error, or -1: not a 9P drive with long names (use the name as it is).
+// kdos: drive dr's CDS entry (0: not a 9P drive), whose current folder
+// fs9p reads for relative names; kdos's DOS keeps it up to date
+extern "C" u32 fs9p_cds(int dr)
+{
+    Mount* m = mount_of(dr);
+    return m ? m->cds : 0;
+}
+
 extern "C" int fs9p_short_path(u32 lin, char* out)
 {
     char p[300];

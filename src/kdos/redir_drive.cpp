@@ -440,6 +440,29 @@ public:
     char const *GetLabel(void) override { return "9P"; }
 };
 
+/* A program's relative names on a 9P drive ("doom2.wad", "." ...) are
+   resolved by fs9p from the current folder in the drive's CDS entry, as
+   MS-DOS and FreeDOS keep it. DOSBox-X keeps it in Drives[]->curdir: copy
+   it over, as the 8.3 path (a CDS path has 67 characters), after each CD. */
+extern "C" uint32_t fs9p_cds(int dr);
+void kdos_cds_sync(uint8_t drive)
+{
+    Redir_Drive *d = drive < DOS_DRIVES ? dynamic_cast<Redir_Drive *>(Drives[drive]) : nullptr;
+    if (!d) return;
+    uint32_t cds = fs9p_cds(drive);
+    if (!cds) return;
+    char path[DOS_PATHLENGTH + 8];
+    snprintf(path, sizeof path, "%c:\\%s", 'A' + drive, d->curdir);
+    if (d->curdir[0]) {
+        MEM_BlockWrite(lp1(), path, strlen(path) + 1);
+        char full[160];
+        if (fs9p_short_path(lp1(), full) == 0) snprintf(path, sizeof path, "%s", full);
+    }
+    for (char *p = path; *p; p++) *p = (char)toupper((unsigned char)*p);
+    if (strlen(path) > 66) return;                             /* doesn't fit: leave it */
+    MEM_BlockWrite(cds, path, strlen(path) + 1);
+}
+
 /* vmdos's monitor: VMDOSNET put a share in drive dr (fs9p_api), or took it out */
 extern "C" void kdos_net_mounted(int dr)
 {
@@ -447,6 +470,7 @@ extern "C" void kdos_net_mounted(int dr)
     scratch_init();
     if (Drives[dr] && !dynamic_cast<Redir_Drive *>(Drives[dr])) return;   /* a drive of DOS's own: leave it */
     if (!Drives[dr]) Drives[dr] = new Redir_Drive((uint8_t)dr);
+    kdos_cds_sync((uint8_t)dr);
     mem_writeb(Real2Phys(dos.tables.mediaid) + dr * 9, 0xF8);
     LOG_MSG("%c: is a 9P share (VMDOSNET)", 'A' + dr);
 }
