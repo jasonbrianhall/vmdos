@@ -75,23 +75,22 @@ OBJS     := $(addprefix $(BUILD)/,boot.o cpu.o bootcon.o lib.o v86.o vdev.o bios
 # side). It uses std::string/map/vector with libstdc++'s headers: string's
 # templates are instantiated here (_GLIBCXX_ASSERTIONS turns off its extern
 # templates), and the few library objects it needs (red-black trees, lists,
-# dynamic_cast) come out of GCC's 32-bit libstdc++.a / libsupc++.a.
+# dynamic_cast) are built from GCC's own sources in src/kdos/rt, with the
+# CPU flags of the rest (GCC's 32-bit libstdc++.a is built for the i686).
 KDOS_SRCS := $(wildcard src/kdos/*.cpp)
 KDOS_OBJS := $(patsubst src/kdos/%.cpp,$(BUILD)/kdos/%.o,$(KDOS_SRCS))
-KDOS_RT   := $(addprefix $(BUILD)/kdos/rt/,tree.o list.o class_type_info.o dyncast.o si_class_type_info.o tinfo.o vmi_class_type_info.o)
+KDOS_RT   := $(patsubst src/kdos/rt/%.cc,$(BUILD)/kdos/rt/%.o,$(wildcard src/kdos/rt/*.cc))
 KDOS_CXXFLAGS := -m32 $(ARCH) -O2 -fno-exceptions -frtti -fno-pic -fno-pie -fno-stack-protector -fcf-protection=none \
               -mno-sse -mno-mmx -mfpmath=387 -fno-threadsafe-statics -fno-use-cxa-atexit -std=gnu++17 \
               -fno-asynchronous-unwind-tables -fno-delete-null-pointer-checks -fno-strict-aliasing \
               -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -D_GLIBCXX_ASSERTIONS -w -I$(BUILD) -Isrc/kdos/compat -Isrc/kdos -MMD
-LIBCXX_DIR := $(dir $(shell g++ -m32 -print-file-name=libstdc++.a))
 $(KDOS_OBJS): $(BUILD)/version.h
 $(BUILD)/kdos/%.o: src/kdos/%.cpp | $(BUILD)
 	@mkdir -p $(BUILD)/kdos
 	g++ $(KDOS_CXXFLAGS) -c $< -o $@
-$(KDOS_RT): | $(BUILD)
+$(BUILD)/kdos/rt/%.o: src/kdos/rt/%.cc | $(BUILD)
 	@mkdir -p $(BUILD)/kdos/rt
-	cd $(BUILD)/kdos/rt && ar x $(LIBCXX_DIR)libstdc++.a tree.o list.o && \
-	  ar x $(LIBCXX_DIR)libsupc++.a class_type_info.o dyncast.o si_class_type_info.o tinfo.o vmi_class_type_info.o
+	g++ $(KDOS_CXXFLAGS) -Isrc/kdos/rt -c $< -o $@
 # one object, with the few names its libc shares with the monitor's renamed
 $(BUILD)/kdos.o: $(KDOS_OBJS) $(KDOS_RT)
 	ld -m elf_i386 -r -o $@ $^

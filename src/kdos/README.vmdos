@@ -16,3 +16,9 @@ DOSBox-X's nested guest runs, configuration, INT 10h), start.cpp (boot,
 C:), redir_drive.cpp (VMDOSNET 9P drives, long names), klibc.cpp,
 stubs.cpp, compat/dosbox.h, setup.h, control.h, kdos_stubs.h, and
 ../kdos_host.c (the monitor's side).
+
+rt/: the few pieces of GCC's C++ runtime the shell uses (red-black trees,
+lists, type_info and dynamic_cast), from GCC 13.2.0's libstdc++-v3
+(GPLv3+ with the GCC Runtime Library Exception). They're built here with
+the rest of the shell's flags, so the 486 build gets no P6 instructions
+(GCC's prebuilt 32-bit libstdc++.a is for the i686).
