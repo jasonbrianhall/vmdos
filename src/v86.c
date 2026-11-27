@@ -4,6 +4,14 @@
 
 extern u8 v86_stack_top[];
 
+/* kdos_host.c: shell=kernel, DOSBox-X's DOS in the monitor */
+int kdos_ud(struct regs *r);
+void kdos_fs9p_api(struct regs *r);
+int kdos_wanted(void);
+extern int kdos_on;
+void kdos_boot(u32 *cs, u32 *eip, u32 *ss, u32 *esp);
+
+
 int vif;                    /* guest's IF */
 /* Guest's NT bit as it last set it (CPU detection) plus IOPL, which reads
    as 3 whatever the guest writes: in virtual-8086 mode POPF/IRET can't
@@ -305,7 +313,7 @@ static void do_int(struct regs *r, int n, u16 ip0)
     if (n == 0x2F && AX(r) == 0x5644) { cd_api(r); return; }            /* VMCD.SYS / VMCD.COM */
     if (n == 0x2F && AH(r) == 0x11 && fs9p_redir(r)) return;           /* DOS's redirector call for a 9p drive */
     if (n == 0x21 && AH(r) == 0x71 && fs9p_lfn(r)) return;             /* long names on a 9p drive */
-    if (n == 0x2F && AX(r) == 0x5652) { fs9p_api(r); return; }         /* VMDOSNET.COM */
+    if (n == 0x2F && AX(r) == 0x5652) { kdos_fs9p_api(r); return; }    /* VMDOSNET.COM (kdos_host.c: fs9p_api) */
     if (n == 0x2F && AX(r) == 0x5645) { ems_query(r); return; }         /* VMEMS.SYS */
     if (n == 0x2F && AX(r) == 0x5646) { fd_api(r); return; }            /* VMFD.COM */
     if (n == 0x2F && AX(r) == 0x5647) { hd_api(r); return; }            /* VMHD.SYS / VMHD.COM */
@@ -882,6 +890,7 @@ static struct regs *isr_dispatch_inner(struct regs *r)
         if (!vga16_fault(&e, cr2)) dump(r, "page fault in the DOS guest");
         break; }
     case 6:                                           /* invalid opcode: the guest's INT 6, and the log says what it was */
+        if (from_v86 && kdos_ud(r)) break;            /* shell=kernel: a DOSBox-X callback (kdos_host.c) */
         if (from_v86) {
             static int told;
             if (told++ < 8) {
@@ -930,7 +939,10 @@ void guest_start(void)
         int e = hv_start(hv[4] == '=' ? hv[5] : 0);
         kprintf("vmhv: %d; booting DOS as usual\n", e);
     }
-    bios_boot(r);
+    if (kdos_wanted()) {                                 /* shell=kernel: DOSBox-X's DOS in the monitor (kdos_host.c) */
+        kdos_on = 1;
+        kdos_boot(&r->cs, &r->eip, &r->ss, &r->esp);
+    } else bios_boot(r);
     kprintf("starting guest at %04x:%04x\n", r->cs, IP(r));
     v86_enter(r);
 }

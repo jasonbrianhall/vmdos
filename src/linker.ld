@@ -8,17 +8,38 @@ SECTIONS
     __kernel_start = .;
     .text : ALIGN(4K) {
         KEEP(*(.multiboot))
-        *(.text .text.*)
+        EXCLUDE_FILE(*kdos.o) *(.text .text.*)
     }
     __text_end = .;
-    .rodata : ALIGN(4K) { *(.rodata .rodata.*) }
-    .data : ALIGN(4K) { *(.data .data.*) }
+    .rodata : ALIGN(4K) { EXCLUDE_FILE(*kdos.o) *(.rodata .rodata.*) }
+    .init_array : ALIGN(4) {                  /* C++ constructors (kdos): run by kdos_boot */
+        __init_array_start = .;
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array .ctors))
+        __init_array_end = .;
+    }
+    .data : ALIGN(4K) { EXCLUDE_FILE(*kdos.o) *(.data .data.*) }
     .bss : ALIGN(4K) {
         __bss_start = .;
-        *(COMMON)
-        *(.bss .bss.*)
+        EXCLUDE_FILE(*kdos.o) *(COMMON)
+        EXCLUDE_FILE(*kdos.o) *(.bss .bss.*)
         __bss_end = .;
     }
     __kernel_end = .;
+    /* kdos (shell=kernel: src/kdos, DOSBox-X's DOS and shell), all of it
+       after the kernel: the heap leaves these pages alone only when
+       shell=kernel is given (cpu.c), and uses them like any other free
+       memory otherwise. Its zeroed data is cleared by kdos_boot. */
+    .kdos : ALIGN(4K) {
+        __kdos_start = .;
+        *kdos.o(.text .text.* .rodata .rodata.* .data .data.* .gcc_except_table .gcc_except_table.*)
+    }
+    .kdos_bss (NOLOAD) : ALIGN(16) {
+        __kdos_bss_start = .;
+        *kdos.o(.bss .bss.* COMMON)
+        . = ALIGN(4K);
+        __kdos_end = .;
+    }
+    __image_end = .;                          /* what a loader must load and zero (vmdos.efi) */
     /DISCARD/ : { *(.eh_frame) *(.note*) *(.comment) }
 }

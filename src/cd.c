@@ -1103,6 +1103,7 @@ int cd_con_unit_of(char letter)
     for (int u = 0; u < cd_con_units(); u++) if (unit_letter[u] == letter) return u;
     return -1;
 }
+void cd_unit_letter(int u, char l) { if (u >= 0 && u < MAX_UNITS + MAX_PHYS) unit_letter[u] = l; }   /* kdos: its letter */
 char cd_con_letter(int u) { return u >= 0 && u < MAX_UNITS + MAX_PHYS ? unit_letter[u] : 0; }
 int cd_con_modules(void) { return n_mod; }
 const char *cd_con_module_name(int i) { return i >= 0 && i < n_mod ? img[i].name : ""; }

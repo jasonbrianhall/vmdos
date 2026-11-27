@@ -40,6 +40,7 @@ static struct fd {
     char path[80];
 } fd[FD_DRIVES] = { { .changed = 1 }, { .changed = 1 } };
 static u8 fd_status;
+static u32 fd_gen[FD_DRIVES];            /* counts disk changes (kdos: its FAT driver remounts) */
 
 static const struct { u32 kb; u8 cyls, heads, spt, type; } shapes[] = {
     { 160, 40, 1, 8, 1 }, { 180, 40, 1, 9, 1 }, { 320, 40, 2, 8, 1 }, { 360, 40, 2, 9, 1 },
@@ -236,6 +237,7 @@ static int fd_insert(int d, struct fd *tp, const char *path)
     t.in = 1;
     t.changed = 1;
     fd[d] = t;
+    fd_gen[d]++;
     kprintf("floppy: %c: now holds %s (%u KiB, %u/%u/%u%s)\n", 'A' + d, t.path, size >> 10,
             t.cyls, t.heads, t.spt, ro ? ", read-only" : "");
     return 0;
@@ -246,6 +248,7 @@ static void fd_eject(int d)
     if (fd[d].in) kprintf("floppy: %c: empty\n", 'A' + d);
     fd[d].in = 0;
     fd[d].changed = 1;
+    fd_gen[d]++;
 }
 
 /* The RAM disk image (size bytes) in drive d, if it is a floppy image:
@@ -489,6 +492,18 @@ int fd_con_read(int d, u32 lba, u32 n, void *buf)
     return img_io(&fd[d], lba, n, buf, 0) ? -1 : 0;
 }
 int fd_con_in(int d) { fd_boot(); return d >= 0 && d < FD_DRIVES && fd[d].in; }
+/* kdos (shell=kernel): drive d's image for DOSBox-X's FAT driver. Its
+   size in sectors (0: empty, or not a DOS disk); sectors read/written
+   (0, or an INT 13h status); a count that moves when the disk changes. */
+u32 fd_kdos_sectors(int d) { fd_boot(); return d >= 0 && d < FD_DRIVES && fd[d].in && !fd[d].nodos ? fd[d].sectors : 0; }
+int fd_kdos_rw(int d, u32 lba, u32 n, void *buf, int write)
+{
+    if (d < 0 || d >= FD_DRIVES || !fd[d].in) return 0x80;
+    if (write && fd[d].ro) return 0x03;
+    if (write && !still_there(&fd[d])) return 0x03;
+    return img_io(&fd[d], lba, n, buf, write);
+}
+u32 fd_kdos_gen(int d) { return d >= 0 && d < FD_DRIVES ? fd_gen[d] : 0; }
 void fd_con_describe(int d, char *b, int n)
 {
     fd_boot();

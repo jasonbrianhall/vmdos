@@ -1915,6 +1915,52 @@ u32 lfn_ptr(struct regs* r, int es, u32 off32)
 #define DS_DX lfn_ptr(r, 0, r->edx)
 #define ES_DI lfn_ptr(r, 1, r->edi)
 
+// The short path DOS knows long path p (on drive dr) by, as "D:\\SHORT\\PATH";
+// for a name that isn't there yet, the short name it will be made under,
+// its long name noted (pending) for do_open to give the host file.
+int short_for(Mount& m, int dr, const char* p, char* full)
+{
+    Res R;
+    int e;
+    char par[300];
+    memcpy(par, p, 300);
+    last_comp(par);
+    Res P;
+    e = resolve(m, p, R);
+    if (e == E_PNF) return E_PNF;
+    char sp[300];
+    if (!e) {
+        if (short_path(m, R.hp, sp, 120) < 0) return E_PNF;
+    } else {
+        if (has_wild(R.last)) return E_PNF;
+        if (resolve(m, par, P)) return E_PNF;
+        if (short_path(m, P.hp, sp, 100) < 0) return E_PNF;
+        // the short name the new file will have
+        char sn[11];
+        int ln = (int)strlen(R.last);
+        if (!valid83(R.last, ln, sn)) {
+            int err = 0;
+            Dir* D = dir_get(m, P.hp, false, &err);
+            for (u32 salt = 0; ; salt++) {
+                mangle(R.last, ln, salt, sn);
+                bool taken = false;
+                for (u32 i = 0; D && i < D->n; i++) if (!memcmp(D->ents[i].sn, sn, 11)) { taken = true; break; }
+                if (!taken) break;
+            }
+        }
+        pending.on = true;
+        pending.drive = (u8)dr;
+        memcpy(pending.parent, P.hp, HPMAX);
+        memcpy(pending.sn, sn, 11);
+        host_name(pending.name, R.last);
+        size_t l = strlen(sp);
+        if (l > 1) sp[l++] = '\\';
+        fcb_to_str(sn, sp + l);
+    }
+    snprintf(full, 140, "%c:%s", 'A' + dr, sp);
+    return 0;
+}
+
 int lfn(struct regs* r)
 {
     u8 fn = AL(r);
@@ -2148,43 +2194,8 @@ int lfn(struct regs* r)
         return 0;
     }
     case 0x6C: {                               // extended open / create: DOS's 6C00h with the short name
-        char par[300];
-        memcpy(par, p, 300);
-        last_comp(par);
-        Res P;
-        e = resolve(m, p, R);
-        if (e == E_PNF) return E_PNF;
-        char sp[300];
-        if (!e) {
-            if (short_path(m, R.hp, sp, 120) < 0) return E_PNF;
-        } else {
-            if (has_wild(R.last)) return E_PNF;
-            if (resolve(m, par, P)) return E_PNF;
-            if (short_path(m, P.hp, sp, 100) < 0) return E_PNF;
-            // the short name the new file will have
-            char sn[11];
-            int ln = (int)strlen(R.last);
-            if (!valid83(R.last, ln, sn)) {
-                int err = 0;
-                Dir* D = dir_get(m, P.hp, false, &err);
-                for (u32 salt = 0; ; salt++) {
-                    mangle(R.last, ln, salt, sn);
-                    bool taken = false;
-                    for (u32 i = 0; D && i < D->n; i++) if (!memcmp(D->ents[i].sn, sn, 11)) { taken = true; break; }
-                    if (!taken) break;
-                }
-            }
-            pending.on = true;
-            pending.drive = (u8)dr;
-            memcpy(pending.parent, P.hp, HPMAX);
-            memcpy(pending.sn, sn, 11);
-            host_name(pending.name, R.last);
-            size_t l = strlen(sp);
-            if (l > 1) sp[l++] = '\\';
-            fcb_to_str(sn, sp + l);
-        }
         char full[140];
-        snprintf(full, sizeof full, "%c:%s", 'A' + dr, sp);
+        if ((e = short_for(m, dr, p, full))) return e;
         u32 sda = m.sda;
         pstr(sda + 0x11E, full);
         // through DOS from vmdos's BIOS: INT 21h AX=6C00h there, then the
@@ -2557,6 +2568,25 @@ int fs9p_redir(struct regs* r)
 }
 
 // INT 21h AH=71h: 1 handled, 0 not ours (to DOS)
+// kdos (shell=kernel): the short path for the long path at guest address
+// lin ("V:\\long dir\\new file.txt"), as 716Ch would give DOS. 0, a DOS
+// error, or -1: not a 9P drive with long names (use the name as it is).
+// kdos: drive dr's CDS entry (0: not a 9P drive), whose current folder
+// fs9p reads for relative names; kdos's DOS keeps it up to date
+extern "C" u32 fs9p_cds(int dr)
+{
+    Mount* m = mount_of(dr);
+    return m ? m->cds : 0;
+}
+
+extern "C" int fs9p_short_path(u32 lin, char* out)
+{
+    char p[300];
+    int dr = lfn_path(lin, p);
+    if (dr < 0) return dr == -2 ? E_PNF : -1;
+    return short_for(mnts[dr], dr, p, out);
+}
+
 int fs9p_lfn(struct regs* r)
 {
     if (!nmnt) return 0;
