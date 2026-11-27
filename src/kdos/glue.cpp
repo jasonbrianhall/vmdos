@@ -180,6 +180,7 @@ static void finish(kco *c)
 }
 
 extern CallBack_Handler CallBack_Handlers[];
+extern "C" void kdos_floppy_check(void);
 static uint8_t fpu_guest[108];
 
 extern "C" kregs *kdos_trap(kregs *r)
@@ -193,6 +194,7 @@ extern "C" kregs *kdos_trap(kregs *r)
         char b[80]; snprintf(b, sizeof b, "callback %u at %04x:%04x has no handler", nr, (unsigned)r->cs, (unsigned)(r->eip & 0xFFFF));
         kh_panic(b);
     }
+    kdos_floppy_check();                  /* VMFD changed a floppy: its drive again (start.cpp) */
     kco *c = co_new(CallBack_Handlers[nr], nullptr);
     co_resume(c);
     finish(c);
@@ -426,3 +428,12 @@ uint16_t guest_msdos_mcb_chain;
 uint32_t guest_msdos_LoL, guest_msdos_dev_chain;
 int boothax;
 Bitu CPU_ArchitectureType = CPU_ARCHTYPE_486;
+
+/* DOSBox-X waits by calling CALLBACK_Idle a number of times, each a few
+   emulated instructions there; here each waits for an interrupt (up to a
+   55 ms timer tick). A wait in time instead. */
+void kdos_idle_ms(uint32_t ms)
+{
+    uint32_t t = kh_ticks();
+    while (kh_ticks() - t < ms) CALLBACK_Idle();
+}

@@ -517,6 +517,9 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '  menuentry "FreeDOS (vmdos), video card'"'"'s own BIOS (VBE, if its ROM has one), pick the card" {'; \
 	   echo '    chainloader /EFI/vmdos/vmdos.efi $(filter-out video=% display=%,$(KARGS_ALL)) video=vbe display=ask'; \
 	   echo '  }'; \
+	   echo '  menuentry "VMDOS Command Shell (vmdos, no FreeDOS)" {'; \
+	   echo '    chainloader /EFI/vmdos/vmdos.efi $(KARGS_ALL) shell=kernel'; \
+	   echo '  }'; \
 	   echo 'else'; \
 	   echo '  menuentry "FreeDOS (vmdos)" {'; \
 	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL)'; \
@@ -559,6 +562,11 @@ $(BUILD)/grub/grub.cfg: FORCE | $(BUILD)
 	   echo '    chainloader +1'; \
 	   echo '  }'; \
 	   $(if $(MEMDISK),$(MEMDISK_ENTRY)) \
+	   echo '  menuentry "VMDOS Command Shell (vmdos, no FreeDOS)" {'; \
+	   echo '    multiboot /boot/vmdos.elf $(KARGS_ALL) shell=kernel'; \
+	   $(bios_video) \
+	   echo '    module /EFI/vmdos/$(if $(USE_RAM),dos.img dos.img,floppy.img floppy.img)'; \
+	   echo '  }'; \
 	   echo 'fi'; \
 	   echo 'if [ -f $$prefix/custom.cfg ]; then source $$prefix/custom.cfg; fi'; } > $@.new
 	@cmp -s $@.new $@ && rm $@.new || mv $@.new $@

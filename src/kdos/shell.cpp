@@ -1356,7 +1356,7 @@ void DOS_Shell::Prepare(void) {
 		runRescan("-A -Q");
 		internal_program = true;
 		VFILE_Register("AUTOEXEC.BAT",(uint8_t *)autoexec_data,(uint32_t)strlen(autoexec_data));
-#if !defined(OSFREE)
+#if 0 /* kdos: no CONFIG.SYS on Z: (DOSBox-X's [config] section; vmdos has none) */
 		VFILE_Register("CONFIG.SYS",(uint8_t *)config_data,(uint32_t)strlen(config_data));
 #endif
 		internal_program = false;
@@ -1382,9 +1382,11 @@ void DOS_Shell::Prepare(void) {
 				}
 			}
 		}
+#if 0 /* kdos: no 4DOS.INI on Z: */
 		internal_program = true;
 		VFILE_Register("4DOS.INI",(uint8_t *)i4dos_data,(uint32_t)strlen(i4dos_data), "/4DOS/");
 		internal_program = false;
+#endif
 		//unsigned int cp=dos.loaded_codepage;
 		//if (!dos.loaded_codepage) InitCodePage();
 		//initcodepagefont();

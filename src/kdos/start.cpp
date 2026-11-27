@@ -11,6 +11,7 @@
 #include "drives.h"
 #include "bios_disk.h"
 #include "shell.h"
+#include <time.h>
 #include "bios.h"
 
 extern "C" {
@@ -72,20 +73,99 @@ static void mount_c(void)
     LOG_MSG("C: is vmdos's disk, FAT partition at sector %u (%u sectors)", (unsigned)base, (unsigned)count);
 }
 
+/* vmdos's floppy drive d (A: 0, B: 1): its image, whatever VMFD or the
+   boot put in it (floppy.c) */
+extern "C" {
+uint32_t kh_fd_sectors(int d);
+int kh_fd_rw(int d, uint32_t lba, uint32_t n, void *buf, int write);
+uint32_t kh_fd_gen(int d);
+}
+class vmdosFloppy : public imageDisk {
+public:
+    int d;
+    vmdosFloppy(int drive, uint32_t n) : imageDisk(ID_BASE), d(drive)
+    {
+        uint8_t bs[512];
+        sector_size = 512;
+        hardDrive = false;
+        active = true;
+        diskSizeK = n / 2;
+        image_length = (uint64_t)n * 512;
+        heads = 2; sectors = 18;
+        if (!kh_fd_rw(d, 0, 1, bs, 0)) {                         /* the boot sector's geometry */
+            uint16_t spt = (uint16_t)(bs[0x18] | bs[0x19] << 8), hd = (uint16_t)(bs[0x1A] | bs[0x1B] << 8);
+            if (spt && spt <= 63 && hd && hd <= 255) { sectors = spt; heads = hd; }
+        }
+        cylinders = n / (heads * sectors);
+        diskname = d ? "vmdos B:" : "vmdos A:";
+    }
+    Int13Status Read_AbsoluteSector(uint32_t s, void *data) override
+    { return kh_fd_rw(d, s, 1, data, 0) ? Int13Status::SectorNotFound : Int13Status::NoError; }
+    Int13Status Write_AbsoluteSector(uint32_t s, const void *data) override
+    { return kh_fd_rw(d, s, 1, (void *)data, 1) ? Int13Status::WriteProtected : Int13Status::NoError; }
+};
+static uint32_t fd_gen_seen[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+
+/* A: or B: as the floppy now in it (empty, or not a DOS disk: no letter).
+   The drive it replaces isn't freed: files may still be open on it. */
+static void mount_floppy(int d)
+{
+    fd_gen_seen[d] = kh_fd_gen(d);
+    Drives[d] = nullptr;
+    uint32_t n = kh_fd_sectors(d);
+    if (!n) return;
+    imageDisk *disk = new vmdosFloppy(d, n);
+    disk->Addref();
+    std::vector<std::string> opts;
+    fatDrive *f = new fatDrive(disk, opts);
+    if (!f->created_successfully) { LOG_MSG("%c: holds no FAT file system DOSBox-X can mount", 'A' + d); return; }
+    Drives[d] = f;
+    mem_writeb(Real2Phys(dos.tables.mediaid) + d * 9, f->GetMediaByte());
+    LOG_MSG("%c: is vmdos's floppy (%u KiB)", 'A' + d, (unsigned)(n / 2));
+}
+
+/* A floppy changed (VMFD, the media console): its drive again. From the
+   trap, before each INT 21h. */
+extern "C" void kdos_floppy_check(void)
+{
+    if (dos_kernel_disabled) return;
+    for (int d = 0; d < 2; d++)
+        if (kh_fd_gen(d) != fd_gen_seen[d]) mount_floppy(d);
+}
+
 /* Z:\AUTOEXEC.BAT: the shell starts on Z: and runs this, not FreeDOS's
-   C:\AUTOEXEC.BAT (whose DOSLFN and SHSUCDX are FreeDOS's: this DOS has long
-   names itself). C:\KDOSEXEC.BAT, when there is one, is the user's own. */
-static char autoexec[] =
-    "@ECHO OFF\r\n"
-    "PROMPT $P$G\r\n"
-    "PATH Z:\\;C:\\;C:\\VMDOS;C:\\VMDOS\\NET;C:\\BIN\r\n"
-    "SET MTCPCFG=C:\\VMDOS\\NET\\VMTCP.CFG\r\n"
-    "SET BLASTER=A220 I5 D1 T4 P330\r\n"
-    "IF EXIST C:\\KDOSEXEC.BAT CALL C:\\KDOSEXEC.BAT\r\n"
-    "ECHO.\r\n"
-    "ECHO Welcome to the VMDOS Command Shell\r\n"
-    "ECHO.\r\n"
-    "C:\r\n";
+   C:\AUTOEXEC.BAT (whose DOSLFN and SHSUCDX are FreeDOS's: this DOS has
+   long names itself). Written for the drives there are: vmdos's tools are
+   in C:\VMDOS, or on the boot floppy in A:\VMDOS when there's no C:.
+   KDOSEXEC.BAT in the root of that drive, when there is one, is the user's. */
+static char autoexec[1536];
+static int autoexec_n;
+static void add(const char *f, ...)
+{
+    va_list a;
+    va_start(a, f);
+    autoexec_n += vsnprintf(autoexec + autoexec_n, sizeof autoexec - (size_t)autoexec_n, f, a);
+    va_end(a);
+}
+static void make_autoexec(void)
+{
+    char h = Drives[2] ? 'C' : Drives[0] ? 'A' : 0;     /* where vmdos's tools are */
+    add("@ECHO OFF\r\nPROMPT $P$G\r\n");
+    if (h) {
+        add("PATH Z:\\;%c:\\;%c:\\VMDOS;%c:\\VMDOS\\NET%s\r\n", h, h, h, h == 'C' ? ";C:\\BIN" : "");
+        add("SET MTCPCFG=%c:\\VMDOS\\NET\\VMTCP.CFG\r\n", h);
+    } else add("PATH Z:\\\r\n");
+    add("SET BLASTER=A220 I5 D1 T4 P330\r\n");
+    if (h) add("IF EXIST %c:\\KDOSEXEC.BAT CALL %c:\\KDOSEXEC.BAT\r\n", h, h);
+    add("ECHO.\r\nECHO Welcome to the VMDOS Command Shell\r\nECHO.\r\n");
+    if (h == 'A')
+        add("ECHO No C: drive: vmdos found no FAT disk.\r\n"
+            "ECHO A: is the boot floppy, with vmdos's tools in A:\\VMDOS.\r\nECHO.\r\n");
+    if (!h)
+        add("ECHO No C: drive: vmdos found no FAT disk, and no boot floppy is in A:,\r\n"
+            "ECHO so vmdos's tools (VMDOSNET, VMFD, ...) aren't here.\r\nECHO.\r\n");
+    if (h) add("%c:\r\n", h);
+}
 
 void MSG_Replace(const char *name, const char *text);
 void MSG_Rename(const char *from, const char *to);
@@ -99,7 +179,7 @@ static void brand_messages(void)
     MSG_Replace("SHELL_CMD_VER_HELP", "Displays or sets the DOS version the shell reports.\n");
     MSG_Replace("SHELL_CMD_HELP_HELP", "Shows the vmdos command shell's commands.\n");
     MSG_Replace("SHELL_EXECUTE_DRIVE_NOT_FOUND",
-                "Drive %c does not exist!\nVMHD gives other disks' partitions a letter, VMCD changes CDs, VMFD floppies.\n");
+                "Drive %c does not exist!\nVMDOSNET gives a host folder a drive letter; VMFD changes floppies in A: and B:.\n");
     MSG_Rename("DOSBox-X command shell", "vmdos command shell");
     MSG_Rename("DOSBox-X's", "vmdos's");
     MSG_Rename("DOSBox-X", "vmdos");
@@ -107,13 +187,23 @@ static void brand_messages(void)
 
 static void kdos_main(void)
 {
+    {   /* Z:'s files are dated now, not DOSBox-X's 2002-10-01 */
+        extern uint16_t fztime, fzdate;
+        time_t t = time(nullptr);
+        struct tm *tm = localtime(&t);
+        fzdate = DOS_PackDate((uint16_t)(tm->tm_year + 1900), (uint16_t)(tm->tm_mon + 1), (uint16_t)tm->tm_mday);
+        fztime = DOS_PackTime((uint16_t)tm->tm_hour, (uint16_t)tm->tm_min, (uint16_t)tm->tm_sec);
+    }
     dos_kernel_disabled = false;
     DOS_Startup(nullptr);
     DRIVES_Startup(nullptr);
     DOS_InitClock();
+    mount_floppy(0);
+    mount_floppy(1);
     mount_c();
     SHELL_MessagesInit();
     brand_messages();
+    make_autoexec();
     VFILE_Register("AUTOEXEC.BAT", (uint8_t *)autoexec, (uint32_t)strlen(autoexec));
     SHELL_Init();
     SHELL_Run();

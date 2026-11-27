@@ -82,6 +82,14 @@ void kh_int10(u32 *eax, u32 *ebx, u32 *ecx, u32 *edx, u16 es, u32 *ebp)
     *eax = t.eax; *ebx = t.ebx; *ecx = t.ecx; *edx = t.edx; *ebp = t.ebp;
 }
 
+/* floppies (floppy.c): A: and B: for DOSBox-X's FAT driver */
+u32 fd_kdos_sectors(int d);
+int fd_kdos_rw(int d, u32 lba, u32 n, void *buf, int write);
+u32 fd_kdos_gen(int d);
+u32 kh_fd_sectors(int d) { return fd_kdos_sectors(d); }
+int kh_fd_rw(int d, u32 lba, u32 n, void *buf, int write) { return fd_kdos_rw(d, lba, n, buf, write); }
+u32 kh_fd_gen(int d) { return fd_kdos_gen(d); }
+
 /* the CMOS clock, for DOS's date and time */
 static u8 cmos(u8 reg) { outb(0x70, reg); return inb(0x71); }
 static int bcd(u8 v, int is_bcd) { return is_bcd ? (v >> 4) * 10 + (v & 15) : v; }

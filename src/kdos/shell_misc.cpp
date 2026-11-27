@@ -217,7 +217,7 @@ bool DOS_Shell::BuildCompletions(char * line, uint16_t str_len) {
             IO_Write(0x42,1750&0xff);
             IO_Write(0x42,1750>>8);
             IO_Write(0x61,IO_Read(0x61)|0x3);
-            for(Bitu i=0; i < 333; i++) CALLBACK_Idle();
+            kdos_idle_ms(150);  /* kdos: a CALLBACK_Idle here waits a timer tick, not a few instructions */
             IO_Write(0x61,IO_Read(0x61)&~0x3);
         }
         return false;
@@ -259,7 +259,7 @@ bool DOS_Shell::BuildCompletions(char * line, uint16_t str_len) {
             IO_Write(0x42,1750&0xff);
             IO_Write(0x42,1750>>8);
             IO_Write(0x61,IO_Read(0x61)|0x3);
-            for(Bitu i=0; i < 300; i++) CALLBACK_Idle();
+            kdos_idle_ms(150);  /* kdos: a CALLBACK_Idle here waits a timer tick, not a few instructions */
             IO_Write(0x61,IO_Read(0x61)&~0x3);
         }
         return false;
