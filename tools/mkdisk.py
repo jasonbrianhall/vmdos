@@ -23,7 +23,7 @@ stay), CORE.img into the sectors between the MBR and the partition, as
 grub-bios-setup would put them (with --update too).
 
 --update: OUT.img exists (made by this script) and is kept: files are copied
-in, but AUTOEXEC.BAT, FDCONFIG.SYS and anything from --contents / folders
+in, but AUTOEXEC.BAT, KDOSEXEC.BAT, FDCONFIG.SYS and anything from --contents / folders
 that is already there is left alone (it may have been changed in DOS)."""
 import os, struct, subprocess, sys
 
@@ -135,7 +135,7 @@ def bios_boot(out, boot_img, core_img):
         f.seek(512); f.write(core)
 
 
-KEEP = {"AUTOEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG", "VMTCP.CFG", "_VIMRC"}
+KEEP = {"AUTOEXEC.BAT", "KDOSEXEC.BAT", "FDCONFIG.SYS", "CUSTOM.CFG", "VMTCP.CFG", "_VIMRC"}
 
 
 def copy_files(out, files, update):
