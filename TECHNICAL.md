@@ -1134,6 +1134,13 @@ before this keeps its FDCONFIG.SYS (`make esp` doesn't overwrite it):
 `FRESH=1`, or copy the menu over. With it, a program gets about 618 KB
 of conventional memory in the VM.
 
+With `shell=kernel` the VM runs the vmdos command shell instead of
+FreeDOS (`shell=kernel vmhv`, or `VMHV` typed in the shell): it starts
+again in the VM, with no FDCONFIG menu, its callbacks' invalid opcodes
+exiting to vmdos as they fault to it in V86 mode. DOS extenders run raw
+there (DOS/4GW tested); there is no XMS, as the shell can't load HIMEM.
+Ctrl+Alt+End restarts the shell.
+
 The VM keeps the machine until it reboots, which restarts vmdos.
 Ctrl+Alt+End sends Ctrl+Alt+Del into it (DOS and SMARTDRV write their
 buffers first; Windows shows its own restart screen); pressed twice

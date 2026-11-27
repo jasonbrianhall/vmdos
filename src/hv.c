@@ -297,6 +297,23 @@ static void put_regs(struct regs *r)
 
 static int real_or_v86(void) { return !(V32(S_CR0) & 1) || (V32(S_RFLAGS) & EFL_VM); }
 
+/* shell=kernel (kdos): DOSBox-X's DOS and shell in the monitor, in the VM
+   as in V86 mode. Its callbacks in guest code (FE 38 nn nn) are invalid
+   opcodes, which exit here (C_EXC/EXC_BITMAP bit 6) before the guest's
+   own handler. 1: one of them, run. */
+extern int kdos_on;
+int kdos_wanted(void);
+int kdos_hv_ud(struct regs *r);
+void kdos_boot(u32 *cs, u32 *eip, u32 *ss, u32 *esp);
+static int kdos_vm_ud(void)
+{
+    struct regs r;
+    get_regs(&r);
+    if (!kdos_hv_ud(&r)) return 0;
+    put_regs(&r);
+    return 1;
+}
+
 /* The VM's exits, counted: Ctrl+Shift+F10 (v86.c, hv_debug) says where the
    guest is and what it last left the VM for, to see where a frozen game is. */
 static struct { u32 n, nio, nhlt, ngp, nintr, npf, code, info1, info2; } hx;
@@ -934,6 +951,7 @@ static void vmcb_init(struct regs *r)
     V32(C_EXC) = 1u << 13;                                        /* #GP: HLT in v86 mode (BIOS stubs) */
     if (strstr(cmdline, "vgalog")) V32(C_EXC) |= 1u << 0 | 1u << 6 | 1u << 14;   /* vgalog: the guest's ring-0 faults, logged */
     faultlog = strstr(cmdline, "faultlog") != 0;
+    if (kdos_on) V32(C_EXC) |= 1u << 6;                           /* shell=kernel: its callbacks are #UD (kdos_host.c) */
     if (faultlog) V32(C_EXC) |= 1u << 6;                          /* faultlog: #UD and #GP in protected mode, logged */
     V32(C_MISC1) = I1_INTR | I1_HLT | I1_IOIO | I1_MSR | I1_SHUTDOWN;
     V32(C_MISC2) = I2_SVM;
@@ -1092,6 +1110,14 @@ static void hv_soft_boot(void)
     static struct regs r0;
     u8 key = boot_menu_key;
     boot_menu_key = 0;                                            /* VMHV types it itself (menu_key) */
+    if (kdos_on && !key) {                                        /* shell=kernel: it starts again (no FreeDOS menu) */
+        vm_reset_machine();
+        memset(&r0, 0, sizeof r0);
+        kdos_boot(&r0.cs, &r0.eip, &r0.ss, &r0.esp);
+        menu_key = 0;
+        vm_go(&r0);
+        return;
+    }
     if (bios_soft_boot(&r0, vm_reset_machine)) { video_osd("Soft restart: that floppy drive is empty"); return; }
     menu_t0 = 0;
     menu_wait = !key;
@@ -1103,6 +1129,7 @@ static void hv_soft_boot(void)
 
 int hv_start(int key)
 {
+    if (kdos_wanted()) kdos_on = 1;                               /* shell=kernel: it, not FreeDOS, in the VM */
     int e = hv_setup();
     if (e) { kprintf("VMHV: %s\n", hv_err[e]); return e; }
     kprintf("VMHV: restarting DOS in a virtual machine (%s, 640 KB + %u KB)\n", vmx ? "Intel VT-x" : "AMD-V", (VM_TOP >> 10) - 1024);
@@ -1110,12 +1137,15 @@ int hv_start(int key)
     vm_reset_machine();
     menu_wait = !key;
     menu_t0 = 0;
-    if (!key) key = menu_choice();
+    if (!key && !kdos_on) key = menu_choice();                   /* shell=kernel: no FreeDOS menu to answer */
     dbg(1, "VMHV: menu choice %c, after %u ms\n", key ? key : '-', menu_ms);
     if (key >= '1' && key <= '9') menu_key = (u8)(key - '1' + 2); /* scan codes 02h-0Ah */
     static struct regs r0;
     memset(&r0, 0, sizeof r0);
-    bios_boot(&r0);
+    if (kdos_on) {                                                /* shell=kernel: started again, in the VM */
+        menu_key = 0;
+        kdos_boot(&r0.cs, &r0.eip, &r0.ss, &r0.esp);
+    } else bios_boot(&r0);
     vm_go(&r0);
 
     for (;;) {
@@ -1210,6 +1240,7 @@ int hv_start(int key)
             break;
         case X_NPF: npf_exit(); break;
         case X_EXC(0): case X_EXC(6):                             /* vgalog: logged, then the guest's own */
+            if (code == X_EXC(6) && real_or_v86() && kdos_vm_ud()) break;   /* shell=kernel: a callback */
             if (!real_or_v86() && V8(S_CPL) == 0 && !faultlog) guest_fault_log(code == X_EXC(0) ? "#DE" : "#UD", 0, 0);
             else if (code == X_EXC(6)) prog_fault_log("#UD", 0);
             V64(C_EVENT) = (u32)(code - X_EXC(0)) | EV_EXC | EV_VALID;

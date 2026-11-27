@@ -32,7 +32,10 @@ SECTIONS
        memory otherwise. Its zeroed data is cleared by kdos_boot. */
     .kdos : ALIGN(4K) {
         __kdos_start = .;
-        *kdos.o(.text .text.* .rodata .rodata.* .data .data.* .gcc_except_table .gcc_except_table.*)
+        *kdos.o(.text .text.* .rodata .rodata.* .gcc_except_table .gcc_except_table.*)
+        __kdos_data_start = .;                /* as loaded: kept for a restart (kdos_boot) */
+        *kdos.o(.data .data.*)
+        __kdos_data_end = .;
     }
     .kdos_bss (NOLOAD) : ALIGN(16) {
         __kdos_bss_start = .;

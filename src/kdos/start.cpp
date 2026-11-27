@@ -219,10 +219,12 @@ static Bitu boot_handler(void) { kdos_main(); return CBRET_NONE; }
 /* from guest_start (v86.c), in place of booting FreeDOS: the guest starts
    at a callback that runs the DOS kernel's start and then the shell */
 struct kregs_s;
+extern "C" void kh_restart(char *data, char *data_end);
 extern "C" void kdos_boot(uint32_t *cs, uint32_t *eip, uint32_t *ss, uint32_t *esp)
 {
     /* kdos's zeroed data is after the kernel, not in its .bss (linker.ld) */
-    extern char __kdos_bss_start[], __kdos_end[];
+    extern char __kdos_bss_start[], __kdos_end[], __kdos_data_start[], __kdos_data_end[];
+    kh_restart(__kdos_data_start, __kdos_data_end);   /* started before (VMHV): data as loaded */
     memset(__kdos_bss_start, 0, (size_t)(__kdos_end - __kdos_bss_start));
     /* the C++ constructors of kdos's globals (the monitor runs none) */
     extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
